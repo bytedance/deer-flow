@@ -69,7 +69,8 @@ subagents, events) and event types that appeared or disappeared. Both runs are
 owner-checked; a comparison over someone else's run answers `404`.
 
 The Markdown form is the document to attach when asking "what changed between
-the last two scheduled runs?".
+the last two scheduled runs?". Comparing a run with itself reads it once and
+returns a zero-delta report.
 
 ## Install and configure
 

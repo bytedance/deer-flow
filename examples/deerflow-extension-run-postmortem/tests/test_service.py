@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 from deerflow_extension_api import CompletedRunEvent, CompletedRunEventPage, CompletedRunSnapshot, EvidenceLimits, ExtensionRuntimeDeps
@@ -151,3 +152,29 @@ async def test_comparison_reads_both_runs():
     assert comparison.head.status == "error"
     assert comparison.status_changed is True
     assert [metric.name for metric in comparison.metrics][:2] == ["events", "user_messages"]
+
+
+class ChangingEvidence(TwoRunEvidence):
+    """Completes the run between reads, as a real seal can."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.snapshots["base"] = replace(self.snapshots["base"], status="running")
+        self.reads = 0
+
+    async def get_snapshot(self, *, thread_id: str, run_id: str, limits: EvidenceLimits = EvidenceLimits()) -> CompletedRunSnapshot:
+        self.reads += 1
+        snapshot = self.snapshots[run_id]
+        return snapshot if self.reads == 1 else replace(snapshot, status="success")
+
+
+async def test_comparison_of_the_same_run_reads_it_once():
+    evidence = ChangingEvidence()
+    service = PostmortemService()
+    await service.start(ExtensionRuntimeDeps(completed_run_evidence=evidence))
+
+    comparison = await service.comparison(thread_id="t1", base_run_id="base", head_run_id="base")
+
+    assert evidence.reads == 1
+    assert comparison.status_changed is False
+    assert all(metric.delta == 0 for metric in comparison.metrics)

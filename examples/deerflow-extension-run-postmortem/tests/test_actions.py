@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from deerflow_extension_api import CompletedRunEvent, CompletedRunEventPage, CompletedRunSnapshot, EvidenceLimits, ExtensionPrincipal, ExtensionRuntimeDeps
+from deerflow_extension_api import CompletedRunEvent, CompletedRunEventPage, CompletedRunSnapshot, EvidenceLimits, ExtensionPrincipal, ExtensionRuntimeDeps, HostCapabilityError
 from deerflow_extension_api.plugins import ActionContext
 from deerflow_extension_api.run_evidence import RunPage, RunStatusView
 
@@ -30,7 +30,10 @@ class FakeEvidence:
         return RunPage(items=self.runs, next_cursor=None, has_more=False)
 
     async def get_snapshot(self, *, thread_id: str, run_id: str, limits: EvidenceLimits = EvidenceLimits()) -> CompletedRunSnapshot:
-        return self.snapshots[run_id]
+        snapshot = self.snapshots.get(run_id)
+        if snapshot is None:
+            raise HostCapabilityError("NOT_FOUND", f"run {run_id} is unavailable")
+        return snapshot
 
     async def read_events(self, *, snapshot_ref: str, cursor: str | None = None, limits: EvidenceLimits = EvidenceLimits()) -> CompletedRunEventPage:
         if cursor is not None:
@@ -187,3 +190,11 @@ async def test_compare_action_requires_both_run_ids():
 
     with pytest.raises(ValueError):
         await actions_by_name(actions)["compare"]({"thread_id": "t1", "base_run_id": "r1"}, user("alice"))
+
+
+async def test_compare_action_maps_a_missing_run_to_not_found():
+    _, actions = await service_with(FakeEvidence())
+
+    result = await actions_by_name(actions)["compare"]({"thread_id": "t1", "base_run_id": "missing", "head_run_id": "r1"}, user("alice"))
+
+    assert result == {"not_found": True}

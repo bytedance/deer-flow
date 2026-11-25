@@ -88,9 +88,14 @@ class PostmortemService:
         return build_postmortem(snapshot, await self._read_events(evidence, snapshot, limits), max_events=max_events)
 
     async def comparison(self, *, thread_id: str, base_run_id: str, head_run_id: str, max_events: int = DEFAULT_MAX_EVENTS) -> RunComparison:
-        """Compare two runs of one thread from their own reports."""
+        """Compare two runs of one thread from their own reports.
+
+        The same run id on both sides reuses one report: evidence revisions move
+        as a run completes, so reading it twice can report a status change for a
+        run that did not change.
+        """
         base = await self.postmortem(thread_id=thread_id, run_id=base_run_id, max_events=max_events)
-        head = await self.postmortem(thread_id=thread_id, run_id=head_run_id, max_events=max_events)
+        head = base if head_run_id == base_run_id else await self.postmortem(thread_id=thread_id, run_id=head_run_id, max_events=max_events)
         return compare_postmortems(base, head)
 
     async def latest_run(self, *, thread_id: str, user_id: str, candidate_limit: int = 20, page_limit: int = 3) -> dict[str, Any]:
@@ -286,12 +291,17 @@ def build_actions(service: PostmortemService) -> tuple[BackendAction, ...]:
         return {"markdown": render_markdown(postmortem), "filename": f"postmortem-{postmortem.run_id}.md"}
 
     async def compare(payload: Mapping[str, Any], context: ActionContext) -> dict[str, Any]:
-        comparison = await service.comparison(
-            thread_id=_text_field(payload, "thread_id"),
-            base_run_id=_text_field(payload, "base_run_id"),
-            head_run_id=_text_field(payload, "head_run_id"),
-            max_events=_max_events_field(payload),
-        )
+        try:
+            comparison = await service.comparison(
+                thread_id=_text_field(payload, "thread_id"),
+                base_run_id=_text_field(payload, "base_run_id"),
+                head_run_id=_text_field(payload, "head_run_id"),
+                max_events=_max_events_field(payload),
+            )
+        except HostCapabilityError as exc:
+            if exc.code in {"NOT_FOUND", "NOT_FOUND_OR_FORBIDDEN"}:
+                return {"not_found": True}
+            raise
         if comparison.base.owner_id != context.principal.user_id or comparison.head.owner_id != context.principal.user_id:
             return {"not_found": True}
         return comparison_to_dict(comparison)

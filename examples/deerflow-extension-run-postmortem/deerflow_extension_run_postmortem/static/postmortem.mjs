@@ -31,6 +31,7 @@ const WORDS = {
     added: "added",
     resolved: "resolved",
     counter: "Counter",
+    evidenceCaveats: "Evidence caveats",
     delta: "Δ",
     metrics: {
       events: "Events",
@@ -88,6 +89,7 @@ const WORDS = {
     added: "新增",
     resolved: "已解决",
     counter: "计数",
+    evidenceCaveats: "证据覆盖说明",
     delta: "变化",
     metrics: {
       events: "事件数",
@@ -252,6 +254,7 @@ export function mount(root, context) {
   const compareVerdict = el("p", { class: "pm-verdict" });
   const compareAnomalies = el("ul", { class: "pm-list" });
   const compareBody = el("tbody");
+  const compareCaveats = el("ul", { class: "pm-list" });
 
   const form = el("form", { class: "pm-form" }, [
     el("label", { class: "pm-field" }, [el("span", { text: t.thread }), threadInput]),
@@ -297,6 +300,8 @@ export function mount(root, context) {
       ]),
       compareBody,
     ]),
+    el("h3", { text: t.evidenceCaveats }),
+    compareCaveats,
   );
   root.replaceChildren(style, page);
 
@@ -447,6 +452,11 @@ export function mount(root, context) {
     if (!compareAnomalies.childElementCount) {
       compareAnomalies.append(el("li", { text: t.none }));
     }
+    compareCaveats.replaceChildren(
+      ...(Array.isArray(data.caveats) ? data.caveats : []).map((caveat) =>
+        el("li", { text: caveat }),
+      ),
+    );
     compareBody.replaceChildren();
     for (const metric of data.metrics || []) {
       compareBody.append(
