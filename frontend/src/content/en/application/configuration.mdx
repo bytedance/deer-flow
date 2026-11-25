@@ -210,14 +210,14 @@ sandbox:
 
 ### Tools
 
-Configure which tools the agent has access to. The defaults use DuckDuckGo (no API key) and Jina AI for web operations:
+New local and Docker setups use Parallel Search for web search and Jina AI for web fetch by default. Parallel.ai receives search queries and offers rate-limited access without a search key.
 
 ```yaml
 tools:
   # Web search (choose one)
   - name: web_search
     group: web
-    use: deerflow.community.ddg_search.tools:web_search_tool # default, no key required
+    use: deerflow.community.parallel_search.tools:web_search_tool # default, no key required
   # - name: web_search
   #   group: web
   #   use: deerflow.community.tavily.tools:web_search_tool
