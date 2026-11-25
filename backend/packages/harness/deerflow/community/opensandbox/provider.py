@@ -154,6 +154,9 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         self._thread_sandboxes: dict[tuple[str, str], str] = {}
         self._warm_pool: dict[str, tuple[OpenSandboxSandbox, float]] = {}
         self._reserved_creates: set[str] = set()
+        # Remotes out of the pool whose deletion is not confirmed yet: id -> monotonic release time,
+        # or None while the deletion runs or when the remote has no server-side lifetime.
+        self._retiring: dict[str, float | None] = {}
         self._acquire_serializer: AcquireSerializer[str] = AcquireSerializer(thread_name_prefix="opensandbox-acquire-wait")
         self._idle_checker_stop = threading.Event()
         self._idle_checker_thread: threading.Thread | None = None
@@ -295,7 +298,35 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         return len(self._sandboxes)
 
     def _destroy_warm_entry(self, sandbox_id: str, entry: OpenSandboxSandbox, *, reason: str) -> None:
-        self._destroy_quietly(entry, context=f"warm pool, reason={reason}")
+        self._retire(sandbox_id, entry, reason=reason)
+
+    def _warm_entries_retiring_locked(self, sandbox_ids: list[str]) -> None:
+        for sandbox_id in sandbox_ids:
+            self._retiring[sandbox_id] = None
+
+    def _retire(self, sandbox_id: str, sandbox: OpenSandboxSandbox, *, reason: str) -> bool:
+        """Destroy a remote that left the warm pool; it stays counted until deletion is confirmed."""
+        try:
+            sandbox.destroy()
+        except Exception as exc:
+            lifetime = self._config["sandbox_timeout"]
+            with self._lock:
+                if sandbox_id in self._retiring:
+                    self._retiring[sandbox_id] = None if lifetime is None else time.monotonic() + lifetime
+            if lifetime is None:
+                logger.warning("Error destroying OpenSandbox %s (warm pool, reason=%s): %s; its slot stays occupied until the Gateway restarts", sandbox.id, reason, exc)
+            else:
+                logger.warning("Error destroying OpenSandbox %s (warm pool, reason=%s): %s; its slot stays occupied until its server-side lifetime ends", sandbox.id, reason, exc)
+            return False
+        with self._lock:
+            self._retiring.pop(sandbox_id, None)
+        return True
+
+    def _retiring_count_locked(self) -> int:
+        now = time.monotonic()
+        for sandbox_id in [key for key, until in self._retiring.items() if until is not None and until <= now]:
+            del self._retiring[sandbox_id]
+        return len(self._retiring)
 
     @staticmethod
     def _destroy_quietly(sandbox: OpenSandboxSandbox, *, context: str) -> None:
@@ -433,26 +464,34 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         try:
             with self._lock:
                 replicas = int(self._config["replicas"])
-                total = len(self._sandboxes) + len(self._warm_pool) + len(self._reserved_creates)
+                retiring = self._retiring_count_locked()
+                total = len(self._sandboxes) + len(self._warm_pool) + len(self._reserved_creates) + retiring
                 if total >= replicas:
                     if not self._warm_pool:
-                        raise SandboxCapacityExceededError(
-                            f"All {replicas} OpenSandbox capacity slots are in use and overflow_policy is 'reject'",
-                            active=len(self._sandboxes),
-                            warm=len(self._warm_pool),
-                            reserved=len(self._reserved_creates),
-                            replicas=replicas,
-                            retry_after_seconds=self.CAPACITY_RETRY_AFTER_SECONDS,
-                        )
+                        raise self._capacity_error_locked(replicas, retiring)
                     warm_id, (warm, _) = min(self._warm_pool.items(), key=lambda item: item[1][1])
                     self._warm_pool.pop(warm_id)
+                    self._retiring[warm_id] = None
                     evicted = (warm_id, warm)
                 self._reserved_creates.add(sandbox_id)
-            if evicted is not None:
-                self._destroy_warm_entry(evicted[0], evicted[1], reason="replica_enforcement")
+            if evicted is not None and not self._retire(evicted[0], evicted[1], reason="replica_enforcement"):
+                # The evicted remote may still hold its slot: never create a replacement beside it.
+                with self._lock:
+                    raise self._capacity_error_locked(replicas, self._retiring_count_locked())
             yield
         finally:
             self._release_reservation(sandbox_id)
+
+    def _capacity_error_locked(self, replicas: int, retiring: int) -> SandboxCapacityExceededError:
+        return SandboxCapacityExceededError(
+            f"All {replicas} OpenSandbox capacity slots are in use and overflow_policy is 'reject'",
+            active=len(self._sandboxes),
+            warm=len(self._warm_pool),
+            reserved=len(self._reserved_creates),
+            transitioning=retiring,
+            replicas=replicas,
+            retry_after_seconds=self.CAPACITY_RETRY_AFTER_SECONDS,
+        )
 
     def _release_reservation(self, sandbox_id: str) -> None:
         with self._lock:
@@ -522,6 +561,8 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         if not sandbox.ping():
             with self._lock:
                 removed = self._warm_pool.pop(sandbox_id, None)
+                if removed is not None:
+                    self._retiring[sandbox_id] = None
             if removed is not None:
                 self._destroy_warm_entry(sandbox_id, removed[0], reason="health_check_failed")
             return None
@@ -567,6 +608,8 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                     self._thread_sandboxes.pop(key)
             if not self._shutdown_called:
                 self._warm_pool[sandbox_id] = (sandbox, time.monotonic())
+                # A reclaimed remote's slot moves back from its reservation to the pool in one step.
+                self._reserved_creates.discard(sandbox_id)
                 return
         self._destroy_quietly(sandbox, context="skill upload failed during shutdown")
 

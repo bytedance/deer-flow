@@ -32,7 +32,7 @@ import httpx
 import pytest
 from langgraph.runtime import Runtime
 
-from deerflow.community.opensandbox.provider import OpenSandboxProvider, _import_sdk
+from deerflow.community.opensandbox.provider import OpenSandboxProvider, _import_sdk, _SkillUploadError
 from deerflow.community.opensandbox.sandbox import OpenSandboxSandbox
 from deerflow.config import ExtensionsConfig, SkillsConfig
 from deerflow.config.extensions_config import SkillStateConfig
@@ -431,6 +431,82 @@ def test_reject_policy_keeps_a_reclaimed_warm_slot_counted_until_registration(mo
         assert competing[0].details["reserved"] == 1
         assert len(sdk.create_calls) == 1
         assert provider._reserved_creates == set()
+    finally:
+        provider.shutdown()
+
+
+def test_reject_policy_counts_an_idle_sandbox_until_its_deletion_finishes(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, sdk = _install(monkeypatch, config={"replicas": 1, "overflow_policy": "reject"})
+    deleting, finish = threading.Event(), threading.Event()
+    try:
+        provider.release(provider.acquire("thread-1"))
+        remote = sdk.remotes[0]
+
+        def slow_destroy() -> None:
+            deleting.set()
+            assert finish.wait(timeout=5)
+            remote.destroy_calls += 1
+
+        remote.destroy = slow_destroy
+        reaper = threading.Thread(target=provider._reap_expired_warm, args=(1e-9,))
+        reaper.start()
+        assert deleting.wait(timeout=5)
+        with pytest.raises(SandboxCapacityExceededError) as caught:
+            provider.acquire("thread-2")
+        assert caught.value.details["transitioning"] == 1
+        assert len(sdk.create_calls) == 1
+        finish.set()
+        reaper.join(timeout=5)
+        assert provider.acquire("thread-2")
+        assert len(sdk.create_calls) == 2
+    finally:
+        finish.set()
+        provider.shutdown()
+
+
+def test_reject_policy_refuses_a_replacement_when_eviction_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, sdk = _install(monkeypatch, config={"replicas": 1, "overflow_policy": "reject"})
+    try:
+        provider.release(provider.acquire("thread-1"))
+
+        def failing_destroy() -> None:
+            raise RuntimeError("synthetic deletion timeout")
+
+        sdk.remotes[0].destroy = failing_destroy
+        for thread_id in ("thread-2", "thread-3"):
+            with pytest.raises(SandboxCapacityExceededError) as caught:
+                provider.acquire(thread_id)
+            assert caught.value.details["transitioning"] == 1
+        assert len(sdk.create_calls) == 1
+        assert provider._reserved_creates == set()
+    finally:
+        provider.shutdown()
+
+
+def test_reject_policy_hands_a_failed_reclaim_back_to_the_pool_atomically(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, sdk = _install(monkeypatch, config={"replicas": 2, "overflow_policy": "reject"})
+    try:
+        provider.release(provider.acquire("thread-1"))
+
+        def failing_upload(sandbox, *, thread_id, user_id):
+            raise _SkillUploadError("synthetic skill upload failure")
+
+        counted_twice: list[bool] = []
+        release = provider._release_reservation
+
+        def observe_release(sandbox_id: str) -> None:
+            with provider._lock:
+                counted_twice.append(sandbox_id in provider._reserved_creates and sandbox_id in provider._warm_pool)
+            release(sandbox_id)
+
+        monkeypatch.setattr(provider, "_prepare_new_skill_view", failing_upload)
+        monkeypatch.setattr(provider, "_release_reservation", observe_release)
+        with pytest.raises(_SkillUploadError):
+            provider.acquire("thread-1")
+        assert counted_twice == [False]
+        assert len(provider._warm_pool) == 1
+        assert provider._reserved_creates == set()
+        assert sdk.remotes[0].destroy_calls == 0
     finally:
         provider.shutdown()
 
