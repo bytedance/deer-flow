@@ -235,7 +235,7 @@ and other runs.
 
 `SKILL.md` YAML frontmatter must open and close with `---` on its own line (trailing spaces or tabs are allowed). A line such as `---suffix` is not a closing delimiter.
 
-Custom skill history preserves Unicode line separators inside saved content and metadata, keeping those revisions readable for history inspection and rollback. Malformed JSON history records are still rejected.
+Custom skill history preserves Unicode line separators inside saved content and metadata, keeping those revisions readable for history inspection and rollback. Malformed JSON history records are still rejected. Each record is appended whole under the history file's lock, so concurrent edits from the agent, the skill API or several Gateway workers cannot join two records on one line. History reads take the same lock, so they never see a record that is still being written.
 
 The bundled `github-deep-research` API client also works without `requests`, using
 Python's standard-library HTTP client. Its fallback preserves spaces, Unicode, and
