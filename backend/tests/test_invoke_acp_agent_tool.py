@@ -948,11 +948,8 @@ class _TestAgent:
 
     async def new_session(self, cwd, additional_directories=None, mcp_servers=None, **kwargs):
         await self._enter_phase("new_session")
-        if model_api == "config":
-            return NewSessionResponse(session_id="test-session", config_options=[{
-                "id": "llm-model", "name": "Model", "category": "model", "type": "select",
-                "currentValue": self._model, "options": [{"value": value, "name": value} for value in ("default", "chosen")],
-            }])
+        if model_api.startswith("config"):
+            return NewSessionResponse(session_id="test-session", config_options=self._model_options())
         if model_api == "legacy":
             return NewSessionResponse(session_id="test-session", models={
                 "currentModelId": self._model,
@@ -960,10 +957,29 @@ class _TestAgent:
             })
         return NewSessionResponse(session_id="test-session")
 
+    def _model_options(self):
+        choices = [{"value": value, "name": value} for value in ("default", "chosen")]
+        option = {
+            "id": "llm-model", "name": "Model", "category": "model", "type": "select",
+            "currentValue": self._model, "options": choices,
+        }
+        if model_api == "config-no-category":
+            option["id"] = "model"
+            del option["category"]
+        if model_api == "config-grouped":
+            option["options"] = [
+                {"group": choice["value"], "name": choice["name"], "options": [choice]}
+                for choice in choices
+            ]
+        return [option]
+
     async def set_config_option(self, config_id, session_id, value, **kwargs):
-        assert model_api == "config" and config_id == "llm-model"
-        await self._select_model(value)
-        return {"configOptions": []}
+        assert config_id == self._model_options()[0]["id"]
+        if model_api == "config-no-change":
+            await self._enter_phase("select_model")
+        else:
+            await self._select_model(value)
+        return {"configOptions": [] if model_api == "config-no-confirmation" else self._model_options()}
 
     async def set_session_model(self, model_id, session_id, **kwargs):
         assert model_api == "legacy"
@@ -1041,14 +1057,32 @@ def acp_subprocess_tool(monkeypatch, tmp_path):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("model_api", ["config", "legacy"])
-@pytest.mark.parametrize("model", [None, "chosen", "missing"])
-async def test_invoke_acp_agent_selects_model_before_prompt(acp_subprocess_tool, model_api, model):
+@pytest.mark.parametrize(
+    ("model_api", "model", "rejected_phase"),
+    [
+        ("config", None, None),
+        ("config", "chosen", None),
+        ("config", "missing", "new_session"),
+        ("config-no-category", "chosen", None),
+        ("config-grouped", "chosen", None),
+        ("config-grouped", "missing", "new_session"),
+        ("config-no-change", "chosen", "select_model"),
+        ("config-no-confirmation", "chosen", "select_model"),
+        ("legacy", None, None),
+        ("legacy", "chosen", None),
+        ("legacy", "missing", "select_model"),
+    ],
+)
+async def test_invoke_acp_agent_selects_model_before_prompt(acp_subprocess_tool, model_api, model, rejected_phase):
     tool = acp_subprocess_tool.build_tool(model=model, model_api=model_api)
     result = await asyncio.wait_for(tool.ainvoke({"agent": "test", "prompt": "do work"}), timeout=15)
-    if model == "missing":
+    if rejected_phase:
         assert result.startswith("Error invoking ACP agent")
-        assert acp_subprocess_tool.phase_path.read_text(encoding="utf-8") == "select_model"
+        assert acp_subprocess_tool.phase_path.read_text(encoding="utf-8") == rejected_phase
+        if rejected_phase == "new_session":
+            assert "not an advertised choice" in result
+        elif model_api.startswith("config"):
+            assert "did not confirm the configured model" in result
     else:
         assert result == (model or "default")
     assert acp_subprocess_tool.captured["proc"].returncode is not None
