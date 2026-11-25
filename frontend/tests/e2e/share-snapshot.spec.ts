@@ -20,7 +20,7 @@ const snapshot = {
       id: "answer",
       type: "ai",
       content:
-        "Revenue rose. [Report](sandbox:/mnt/user-data/outputs/report.html#summary) ![detail](sandbox:/mnt/user-data/outputs/charts.svg?v=2#detail) ![tracking](https://tracker.invalid/pixel) [private](/workspace/chats/secret)",
+        "Revenue rose. [Report](sandbox:/mnt/user-data/outputs/report.html?download=summary#summary) ![detail](sandbox:/mnt/user-data/outputs/charts.svg?v=2&download=1#detail) ![tracking](https://tracker.invalid/pixel) [private](/workspace/chats/secret)",
     },
     { id: "tool", type: "tool", name: "python", content: "Revenue: 42" },
   ],

@@ -25,7 +25,7 @@ describe("share boundaries", () => {
         token,
         artifacts: [artifact],
         content:
-          "![detail](sandbox:/mnt/user-data/outputs/charts/a%20b.svg?v=2#detail) ![tracking](https://tracker.example/pixel.svg) ![private](/api/threads/private/artifacts/a.svg) ![missing](missing.svg)",
+          "![detail](sandbox:/mnt/user-data/outputs/charts/a%20b.svg?v=2&download=summary#detail) ![tracking](https://tracker.example/pixel.svg) ![private](/api/threads/private/artifacts/a.svg) ![missing](missing.svg)",
       }),
     );
     expect((await screen.findByAltText("detail")).getAttribute("src")).toBe(
@@ -33,6 +33,23 @@ describe("share boundaries", () => {
     );
     expect(screen.queryAllByRole("img")).toHaveLength(1);
   });
+
+  it.each([
+    ["?download=summary#detail", "#detail"],
+    ["?download=1", ""],
+    [
+      "?v=a%20b&%64ownload=1&download=false&v=%2f#detail?download=1",
+      "?v=a%20b&v=%2f#detail?download=1",
+    ],
+    ["?label=download%3D1#detail", "?label=download%3D1#detail"],
+  ])(
+    "keeps copied link queries separate from download controls (%s)",
+    (query, suffix) => {
+      expect(sharedLink(`charts/a%20b.svg${query}`, token, [artifact])).toBe(
+        shareArtifactURL(token, artifact.path) + suffix,
+      );
+    },
+  );
 
   it("resolves URL suffixes separately from encoded filename punctuation", () => {
     const punctuated = { ...artifact, path: "charts/a#b?.svg" };

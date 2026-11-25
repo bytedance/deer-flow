@@ -24,11 +24,11 @@ for download. Text previews show at most 512 KiB. HTML scripts, forms and networ
 requests are blocked. The page rechecks availability on return and every
 30 seconds while visible.
 
-Links to copied output files may include a query or fragment, such as
-`report.pdf#page=3`. These suffixes are retained on the shared file URL;
-the file itself must still appear in the snapshot's artifact manifest. Inline
-images retain these suffixes too, including SVG view fragments such as
-`charts.svg#detail`; external images remain blocked.
+Links and inline images for copied output files retain queries and fragments
+such as `report.pdf#page=3` or `charts.svg#detail`. The file must appear in the
+snapshot's artifact manifest. DeerFlow drops the reserved `download` parameter
+from copied links and images so they can open inline. Use the snapshot's
+download action to save the file. External images remain blocked.
 
 ![A public read-only conversation snapshot](assets/sharing/share-preview.png)
 

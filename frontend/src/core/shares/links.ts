@@ -32,7 +32,7 @@ export function resolveShareArtifact(
   return artifacts.find((artifact) => artifact.path === normalized.join("/"));
 }
 
-/** Only copied snapshot files may become image resources. */
+/** Build an inline URL only for a file in the snapshot manifest. */
 export function sharedArtifactLink(
   href: string,
   token: string,
@@ -40,11 +40,22 @@ export function sharedArtifactLink(
   basePath = "",
 ) {
   const artifact = resolveShareArtifact(href, artifacts, basePath);
-  if (artifact)
-    return (
-      shareArtifactURL(token, artifact.path) + (/[?#].*$/.exec(href)?.[0] ?? "")
-    );
-  return undefined;
+  if (!artifact) return undefined;
+
+  const [, query = "", fragment = ""] =
+    /^[^?#]*(\?[^#]*)?(#[\s\S]*)?$/.exec(href) ?? [];
+  // The Gateway reserves `download` for its explicit download action. Keep
+  // other query entries in their original encoding and leave fragments intact.
+  const inlineQuery = query
+    .slice(1)
+    .split("&")
+    .filter((part) => !new URLSearchParams(`?${part}`).has("download"))
+    .join("&");
+  return (
+    shareArtifactURL(token, artifact.path) +
+    (inlineQuery ? `?${inlineQuery}` : "") +
+    fragment
+  );
 }
 
 export function sharedLink(
