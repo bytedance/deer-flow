@@ -93,7 +93,7 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
 
         messages = state.get("messages") or []
         existing = state.get("tool_artifacts") or []
-        existing_handles = {entry.get("handle") for entry in existing if isinstance(entry, dict)}
+        existing_handles = {handle for entry in existing if isinstance(entry, dict) and isinstance(handle := entry.get("handle"), str) and handle}
         processed = set(state.get("tool_artifact_processed") or [])
         newly_processed: list[str] = []
         occurrences: dict[str, int] = {}
@@ -140,7 +140,11 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
         # registration rides along in the same update, and settling the scan as
         # "quiet" on a transient miss would lose the consumption mark forever.
         registry_items: list[Any] = [*(state.get("tool_artifacts") or []), *(pending_entries or [])]
-        handle_map: dict[str, ArtifactEntry] = {entry["handle"]: cast(ArtifactEntry, entry) for entry in registry_items if isinstance(entry, dict)}
+        # A checkpoint can carry a row the reducer skipped: written by an
+        # integration, restored from an older version, or edited through the
+        # state route. Key only usable handles, as merge_tool_artifacts does,
+        # so one bad row cannot abort every later model call.
+        handle_map: dict[str, ArtifactEntry] = {entry["handle"]: cast(ArtifactEntry, entry) for entry in registry_items if isinstance(entry, dict) and isinstance(entry.get("handle"), str) and entry["handle"]}
 
         messages = state.get("messages") or []
         consumed_updates: list[ArtifactEntry] = []
@@ -169,7 +173,10 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
                     if entry is None:
                         had_unresolved = True
                         continue
-                    consumed = list(entry.get("consumed_by") or [])
+                    raw_consumed = entry.get("consumed_by")
+                    # The field is a list; a caller-written string must not
+                    # become a character list, and a non-iterable would raise.
+                    consumed = raw_consumed if isinstance(raw_consumed, list) else []
                     if tool_call_id in consumed:
                         continue
                     updated: dict[str, Any] = {**entry, "consumed_by": [*consumed, tool_call_id]}

@@ -9,7 +9,6 @@ import pytest
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
-from support.shell import require_script_bash
 
 from deerflow.agents.middlewares.read_before_write_middleware import READ_MARK_KEY, ReadBeforeWriteMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
@@ -24,7 +23,7 @@ _LONG_ORIGINAL = "user_setting=old\n" + "".join(f"row_{index}=original value\n" 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invocation", ["sync", "async"])
-@pytest.mark.parametrize("update_between_read_and_mark", [False, True], ids=["unchanged-control", "parallel-bash-update"])
+@pytest.mark.parametrize("update_between_read_and_mark", [False, True], ids=["unchanged-control", "external-update"])
 @pytest.mark.parametrize(
     "original,read_args,expected_view,max_chars",
     [
@@ -46,8 +45,6 @@ async def test_default_gate_cannot_authorize_a_version_the_read_did_not_return(t
     target.write_bytes(original.encode())
     virtual_path = "/mnt/user-data/workspace/settings.txt"
     sandbox = LocalSandbox("local:read-mark", path_mappings=[PathMapping("/mnt/user-data/workspace", str(workspace))])
-    shell = require_script_bash()
-    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: shell))
     runtime = SimpleNamespace(
         state={"sandbox": {"sandbox_id": sandbox.id}, "thread_data": {"workspace_path": workspace.as_posix()}, "messages": []},
         context={"thread_id": "read-mark-race", "user_id": "test-user"},
@@ -59,8 +56,7 @@ async def test_default_gate_cannot_authorize_a_version_the_read_did_not_return(t
 
     monkeypatch.setattr(tools, "ensure_sandbox_initialized", lambda runtime: sandbox)
     monkeypatch.setattr(tools, "ensure_sandbox_initialized_async", initialize_async)
-    monkeypatch.setattr(tools, "is_host_bash_allowed", lambda: True)
-    config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider", "allow_host_bash": True, "read_file_output_max_chars": max_chars}})
+    config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider", "read_file_output_max_chars": max_chars}})
     monkeypatch.setattr(tools, "get_app_config", lambda: config)
     middlewares = build_lead_runtime_middlewares(app_config=config)
     assert config.read_before_write.enabled is True
@@ -70,11 +66,11 @@ async def test_default_gate_cannot_authorize_a_version_the_read_did_not_return(t
         return ToolMessage(content=content, name=tool.name, tool_call_id=request.tool_call["id"], status="error" if content.startswith("Error:") else "success")
 
     def execute_sync(request):
-        tool = {"read_file": tools.read_file_tool, "write_file": tools.write_file_tool, "bash": tools.bash_tool}[request.tool_call["name"]]
+        tool = {"read_file": tools.read_file_tool, "write_file": tools.write_file_tool}[request.tool_call["name"]]
         return wrap_result(request, tool, tool.func(runtime=request.runtime, **request.tool_call["args"]))
 
     async def execute_async(request):
-        tool = {"read_file": tools.read_file_tool, "write_file": tools.write_file_tool, "bash": tools.bash_tool}[request.tool_call["name"]]
+        tool = {"read_file": tools.read_file_tool, "write_file": tools.write_file_tool}[request.tool_call["name"]]
         content = await tool.coroutine(runtime=request.runtime, **request.tool_call["args"])
         return wrap_result(request, tool, content)
 
@@ -123,8 +119,9 @@ async def test_default_gate_cannot_authorize_a_version_the_read_did_not_return(t
     try:
         await asyncio.wait_for(captured.wait(), 5)
         if update_between_read_and_mark:
-            bash_result = await invoke("bash", {"command": f"printf 'user_setting=external-update\\n' > {virtual_path}"}, "external-update")
-            assert bash_result.status == "success", bash_result.content
+            # LocalSandbox handles workspace files only. A separate writer
+            # still changes the file while the real read is paused.
+            assert await asyncio.to_thread(target.write_bytes, external.encode()) == len(external)
             assert target.read_bytes() == external.encode()
         release_read.set()
         read_result = await asyncio.wait_for(pending_read, 5)
@@ -144,7 +141,7 @@ async def test_default_gate_cannot_authorize_a_version_the_read_did_not_return(t
 
     observed = (read_result.additional_kwargs.get(READ_MARK_KEY), write_result.status, target.read_bytes())
     if update_between_read_and_mark:
-        assert write_result.status == "error", f"A read of the old content authorized overwriting a newer bash edit: {observed!r}"
+        assert write_result.status == "error", f"A read of the old content authorized overwriting a newer external edit: {observed!r}"
         assert target.read_bytes() == external.encode()
     else:
         assert write_result.status == "success"

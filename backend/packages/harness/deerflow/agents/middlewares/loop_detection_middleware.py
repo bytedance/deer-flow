@@ -90,9 +90,11 @@ from deerflow.agents.middlewares.audit_context import (
     LOOP_DETECTION_RECORDER_CONTEXT_KEY,
     resolve_audit_recorder,
 )
+from deerflow.agents.middlewares.model_response import is_empty_stop_response
 from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
+from deerflow.agents.middlewares.tool_transform_meta import tool_content_fingerprint, tool_result_source_digest
 from deerflow.runtime.events.catalog import MIDDLEWARE_LOOP_DETECTION_TAG
 
 if TYPE_CHECKING:
@@ -290,8 +292,13 @@ def _tool_result_hash(result: ToolMessage) -> str | None:
         path, digest = read_mark.get("path"), read_mark.get("hash")
         if isinstance(path, str) and path and isinstance(digest, str) and len(digest) == 64 and all(char in "0123456789abcdefABCDEF" for char in digest):
             version = (path, digest.lower())
+    # Compare the data the tool returned, not per-call bytes around it: a budget
+    # replacement names a per-call externalized file, and converted content
+    # blocks (every MCP result) carry a fresh random block id.
+    source_digest = tool_result_source_digest(result)
     try:
-        blob = json.dumps((result.content, version), sort_keys=True, allow_nan=False)
+        data = source_digest if source_digest is not None else tool_content_fingerprint(result.content)
+        blob = json.dumps((data, version), sort_keys=True, allow_nan=False)
     except (TypeError, ValueError, RecursionError):
         return None
     return hashlib.sha256(blob.encode()).hexdigest()
@@ -984,11 +991,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         return warnings
 
     def _restore_pending_warnings(self, runtime: Runtime, warnings: list[str]) -> None:
-        """Requeue warnings taken for a model call that raised.
+        """Requeue warnings taken for a model call that raised or came back empty.
 
         LLMErrorHandlingMiddleware sits outside this middleware and retries a
-        failed call by running this wrap again, so the retry must still find
-        the warning. It would not be queued again: it is already marked warned.
+        failed call, or an empty stop response, by running this wrap again, so
+        the retry must still find the warning. It would not be queued again: it
+        is already marked warned.
         """
         if not warnings:
             return
@@ -1027,10 +1035,13 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     ) -> ModelCallResult:
         warnings = self._drain_pending_warnings(request.runtime)
         try:
-            return handler(self._inject_warnings(request, warnings))
+            response = handler(self._inject_warnings(request, warnings))
         except Exception:
             self._restore_pending_warnings(request.runtime, warnings)
             raise
+        if is_empty_stop_response(response):
+            self._restore_pending_warnings(request.runtime, warnings)
+        return response
 
     @override
     async def awrap_model_call(
@@ -1040,10 +1051,13 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     ) -> ModelCallResult:
         warnings = self._drain_pending_warnings(request.runtime)
         try:
-            return await handler(self._inject_warnings(request, warnings))
+            response = await handler(self._inject_warnings(request, warnings))
         except Exception:
             self._restore_pending_warnings(request.runtime, warnings)
             raise
+        if is_empty_stop_response(response):
+            self._restore_pending_warnings(request.runtime, warnings)
+        return response
 
     def reset(self, thread_id: str | None = None) -> None:
         """Clear tracking state. If thread_id given, clear only that thread."""

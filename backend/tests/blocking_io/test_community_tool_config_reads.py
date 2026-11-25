@@ -49,6 +49,7 @@ pytestmark = pytest.mark.asyncio
 # A private literal target needs no DNS lookup; the backends point at the
 # discard port and never receive a request because ``send`` is stubbed.
 _URL = "http://127.0.0.1:9/page"
+_HOSTED_URL = "https://reader.example/page"
 _EXTRAS = {
     "allow_private_addresses": True,
     "network_isolation_confirmed": True,
@@ -127,17 +128,17 @@ def _with_runtime(tool: Any, **kwargs: Any) -> Callable[[Path], Any]:
 # (module, entry point, config reads per call). Browser navigation also screens
 # the URL through ``validate_browser_url`` in a worker, which reads its policy.
 _CASES = [
-    pytest.param(jina_tools, _call(jina_tools.web_fetch_tool, url=_URL), 1, id="jina_ai-web_fetch"),
+    pytest.param(jina_tools, _call(jina_tools.web_fetch_tool, url=_HOSTED_URL), 1, id="jina_ai-web_fetch"),
     pytest.param(crawl4ai_tools, _call(crawl4ai_tools.web_fetch_tool, url=_URL), 1, id="crawl4ai-web_fetch"),
     pytest.param(browserless_tools, _call(browserless_tools.web_fetch_tool, url=_URL), 1, id="browserless-web_fetch"),
     pytest.param(browserless_tools, _with_runtime(browserless_tools.web_capture_tool, url=_URL), 1, id="browserless-web_capture"),
     pytest.param(tavily_tools, _call(tavily_tools.web_search_tool, query="q"), 1, id="tavily-web_search"),
-    pytest.param(tavily_tools, _call(tavily_tools.web_fetch_tool, url=_URL), 1, id="tavily-web_fetch"),
+    pytest.param(tavily_tools, _call(tavily_tools.web_fetch_tool, url=_HOSTED_URL), 1, id="tavily-web_fetch"),
     pytest.param(searxng_tools, _call(searxng_tools.web_search_tool, query="q"), 1, id="searxng-web_search"),
     pytest.param(firecrawl_tools, _call(firecrawl_tools.web_search_tool, query="q"), 1, id="firecrawl-web_search"),
     pytest.param(firecrawl_tools, _call(firecrawl_tools.web_fetch_tool, url=_URL), 1, id="firecrawl-web_fetch"),
     pytest.param(infoquest_tools, _call(infoquest_tools.web_search_tool, query="q"), 1, id="infoquest-web_search"),
-    pytest.param(infoquest_tools, _call(infoquest_tools.web_fetch_tool, url=_URL), 1, id="infoquest-web_fetch"),
+    pytest.param(infoquest_tools, _call(infoquest_tools.web_fetch_tool, url=_HOSTED_URL), 1, id="infoquest-web_fetch"),
     pytest.param(infoquest_tools, _call(infoquest_tools.image_search_tool, query="q"), 1, id="infoquest-image_search"),
     pytest.param(jsonify_tools, _call(jsonify_tools.dataset_rows_tool, dataset="d"), 1, id="jsonify-dataset_rows"),
     pytest.param(ragflow_tools, lambda _tmp_path: ragflow_tools.knowledge_search_tool.coroutine("q", runtime=None), 1, id="ragflow-knowledge_search"),

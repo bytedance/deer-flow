@@ -963,24 +963,13 @@ def check_sandbox(config_path: Path) -> list[CheckResult]:
 
         if "LocalSandboxProvider" in sandbox_use:
             results.append(CheckResult("sandbox configured", "ok", "Local sandbox"))
-            has_bash_tool = "bash" in tool_names
-            allow_host_bash = bool(sandbox.get("allow_host_bash", False))
-            if has_bash_tool and not allow_host_bash:
+            if "bash" in tool_names or sandbox.get("allow_host_bash"):
                 results.append(
                     CheckResult(
                         "bash compatibility",
                         "warn",
-                        "bash tool configured but host bash is disabled",
-                        fix="Enable host bash only in a fully trusted environment, or switch to container sandbox",
-                    )
-                )
-            elif allow_host_bash:
-                results.append(
-                    CheckResult(
-                        "bash compatibility",
-                        "warn",
-                        "host bash enabled on LocalSandboxProvider",
-                        fix="Use container sandbox for stronger isolation when bash is required",
+                        "local sandbox supports workspace file tools",
+                        fix="Select an isolated sandbox provider to use Bash",
                     )
                 )
         elif "AioSandboxProvider" in sandbox_use:

@@ -414,8 +414,9 @@ DeerFlow 的内置自定义事件同时通过两种 LangGraph 流式接口提供
 ### 进阶配置
 #### Sandbox 模式
 
-DeerFlow 支持多种 sandbox 执行方式：
-- **本地执行**（直接在宿主机上运行 sandbox 代码）
+DeerFlow 支持多种沙箱模式。
+
+- **本地工作区**（通过工作区文件工具访问已配置的挂载）
 - **Docker 执行**（在隔离的 Docker 容器里运行 sandbox 代码）
 - **Docker + Kubernetes 执行**（通过 provisioner 服务在 Kubernetes Pod 中运行 sandbox 代码）
 
@@ -880,12 +881,12 @@ lead agent 只会在委派具有明确净收益时动态拉起 sub-agents，例�
 
 DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电脑”。
 
-每个任务都运行在隔离的 Docker 容器里，里面有完整的文件系统，包括 skills、workspace、uploads、outputs。agent 可以读写和编辑文件，可以执行 bash 命令和代码，也可以查看图片。整个过程都在 sandbox 内完成，可审计、会隔离，不会在不同 session 之间互相污染。
+沙箱的运行方式取决于配置。本地工作区使用专用文件工具，Docker 模式在隔离的容器中运行，Kubernetes 模式通过 provisioner 服务在 Pod 中运行。Agent 可以在沙箱中访问 skills、workspace、uploads、outputs，读写和编辑文件，也可以查看图片。需要执行 Bash 命令或通过 Shell 运行代码时，请选择提供 Shell 的隔离沙箱。各模式的配置方式见[沙箱指南](docs/guide/sandbox.md#sandbox-mode)。
 
 这就是“带工具的聊天机器人”和“真正有执行环境的 agent”之间的差别。
 
 ```text
-# sandbox 容器内的路径
+# 沙箱中的虚拟路径
 /mnt/user-data/
 ├── uploads/          ← 你的文件
 ├── workspace/        ← agents 的工作目录

@@ -49,6 +49,7 @@ from app.gateway.history_seed import reserve_history_seed, write_history_seed
 from app.gateway.hitl_approval import find_pending_interrupts
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.services import (
+    _THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
     abuild_checkpoint_state_accessor,
     build_checkpoint_state_mutation_accessor,
     build_thread_checkpoint_state_accessor,
@@ -57,6 +58,7 @@ from app.gateway.services import (
     reserve_checkpoint_write,
     strip_server_owned_state_metadata,
 )
+from app.gateway.share_fork import SHARE_IMPORT_COMPLETE_KEY, SHARE_IMPORT_HISTORY_MARKED_KEY, branch_share_provenance, mark_imported, prepare_share_copy_compaction
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.human_input import extract_unanswered_human_input_request
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
@@ -101,6 +103,7 @@ from deerflow.runtime.serialization import serialize_lc_object
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.uploads.companions import register_companion, resolve_companion
 from deerflow.utils.file_io import await_drained, run_file_io
+from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
 from deerflow.utils.thread_id import ThreadId, resolve_thread_id, validate_thread_id
 from deerflow.utils.time import coerce_iso, now_iso
 
@@ -127,7 +130,8 @@ def _optional_run_event_store(request: Request) -> Any:
 # the auth contextvar; this list closes the metadata-blob echo gap.
 # ``deerflow_origin`` marks a thread the server created for a schedule or an
 # extension; only the server sets it (``create_thread`` below, run admission).
-_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY})
+# The share-import keys decide whether run admission rewrites a copy's history.
+_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY, SHARE_IMPORT_COMPLETE_KEY, SHARE_IMPORT_HISTORY_MARKED_KEY})
 # Checkpoint metadata the server writes and later reads back as trusted:
 # LangGraph's lineage keys and delta counters (``step`` drives the next turn,
 # ``parents`` the history walk, and ``counters_since_delta_snapshot`` is read
@@ -662,7 +666,15 @@ class ThreadHistoryRequest(BaseModel):
     """Request body for checkpoint history."""
 
     limit: int = Field(default=10, ge=1, le=100, description="Maximum entries")
-    before: str | None = Field(default=None, description="Cursor for pagination")
+    before: str | None = Field(
+        default=None,
+        description=(
+            "Inclusive checkpoint ID cursor. The page starts with the cursor checkpoint if it still exists, "
+            "followed by older checkpoints up to `limit` entries. If retention removed the cursor, the page starts "
+            "with the first surviving older checkpoint, if any. When continuing, skip the first entry only if "
+            "its `checkpoint_id` equals `before`."
+        ),
+    )
 
 
 class ThreadBranchRequest(BaseModel):
@@ -1169,6 +1181,9 @@ async def _branch_thread_with_reservation(
         snapshot,
         target_human_id,
     )
+    # A copy imported before share provenance moved into state has nothing for
+    # the branch to inherit, so the branch gets it from the source's import.
+    branch_provenance = await branch_share_provenance(request, source_metadata, snapshot.values, source_accessor, source_config)
 
     # Workspace files are not checkpointed, so they only reflect the *current* thread
     # state. Cloning them onto a branch from an older turn would leak files created
@@ -1233,10 +1248,14 @@ async def _branch_thread_with_reservation(
         for key, value in source_values.items():
             if key in _BRANCH_EXCLUDED_CHANNELS:
                 continue
+            if key == "messages" and isinstance(value, list) and branch_provenance is not None:
+                value = mark_imported(value, branch_provenance[1])
             if key in branch_reducer_fields:
                 values[key] = Overwrite(list(value) if key == "messages" and isinstance(value, list) else value)
             else:
                 values[key] = value
+        if branch_provenance is not None:
+            values[IMPORTED_HISTORY_CHANNEL] = branch_provenance[0]
         if replaces is not None:
             # The head write lands on the replay base, so goal state the head
             # lacks (write_thread_goal pops goal and goal_outcome) would keep
@@ -1790,6 +1809,9 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
     keep = body.keep.to_tuple() if body.keep is not None else None
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
+            # Migrate an older share copy under this reservation before its
+            # copied turns can reach the memory flush.
+            memory_flush = await prepare_share_copy_compaction(request, thread_id, accessor, read_config, as_node="manual_compaction", metadata_timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS)
             result = await compact_thread_context(
                 accessor,
                 thread_id,
@@ -1798,6 +1820,7 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
                 user_id=get_effective_user_id(),
                 agent_name=body.agent_name,
                 model_name=body.model_name,
+                memory_flush=memory_flush,
             )
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Compact after the run finishes.") from None
@@ -2130,8 +2153,9 @@ async def get_thread_history(
 
     Only the latest (first) checkpoint carries the ``messages`` key to
     avoid duplicating the complete conversation across every entry. It also
-    carries an active ``goal`` and an achieved ``goal_outcome``, because
-    ``useStream`` rebuilds thread values from this head after every run.
+    carries the persisted ``todos`` list, an active ``goal`` and an achieved
+    ``goal_outcome``, because ``useStream`` rebuilds thread values from this
+    head after every run.
     """
     checkpointer = get_checkpointer(request)
     try:
@@ -2163,6 +2187,8 @@ async def get_thread_history(
                 values["thread_data"] = thread_data
 
             if is_latest_checkpoint:
+                if isinstance(todos := materialized_values.get("todos"), list):
+                    values["todos"] = [todo for todo in todos if isinstance(todo, dict) and isinstance(todo.get("content"), str)]
                 if is_active_goal(goal := materialized_values.get("goal")):
                     values["goal"] = goal
                 outcome = materialized_values.get(GOAL_OUTCOME_CHANNEL)
