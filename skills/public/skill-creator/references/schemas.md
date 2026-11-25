@@ -219,6 +219,7 @@ Wall clock timing for a run. Located at `<run-dir>/timing.json`.
 ## benchmark.json
 
 Output from Benchmark mode. Located at `benchmarks/<timestamp>/benchmark.json`.
+The example below shows uniform run counts.
 
 ```json
 {
@@ -290,7 +291,8 @@ Output from Benchmark mode. Located at `benchmarks/<timestamp>/benchmark.json`.
   - `skill_name`: Name of the skill
   - `timestamp`: When the benchmark was run
   - `evals_run`: List of eval names or IDs
-  - `runs_per_configuration`: Number of runs per config (e.g. 3)
+  - `runs_per_configuration`: Number of accepted runs per eval and configuration when all counts are equal, or `null` when they differ.
+  - `run_counts_by_eval`: Present only when counts differ. Maps eval IDs to accepted run counts by configuration, including zero for a configuration with no accepted runs in that eval.
 - `runs[]`: Individual run results
   - `eval_id`: Numeric eval identifier
   - `eval_name`: Human-readable eval name (used as section header in the viewer)
