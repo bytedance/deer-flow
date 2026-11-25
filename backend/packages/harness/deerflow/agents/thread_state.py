@@ -462,7 +462,11 @@ def merge_tool_artifacts(existing: list[ArtifactEntry] | None, new: list[Artifac
     return merged
 
 
-class ThreadState(AgentState):
+class BatchReceiptState(AgentState):
+    compacted_batch_receipt_ids: Annotated[NotRequired[list[str]], PrivateStateAttr]
+
+
+class ThreadState(BatchReceiptState):
     sandbox: SandboxStateField
     thread_data: NotRequired[ThreadDataState | None]
     title: NotRequired[str | None]
@@ -481,7 +485,6 @@ class ThreadState(AgentState):
     task_notes: Annotated[dict | None, TaskNotesChannel(dict | None, merge_task_notes)]
     task_history: NotRequired[dict | None]
     summary_text: NotRequired[str | None]
-    compacted_batch_receipt_ids: Annotated[NotRequired[list[str]], PrivateStateAttr]
     background_tasks: NotRequired[list[BackgroundTaskState]]
     # Server-owned: see ``deerflow.utils.messages.IMPORTED_HISTORY_CHANNEL``.
     imported_history: NotRequired[str | None]

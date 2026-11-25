@@ -30,6 +30,7 @@ from deerflow.agents.middlewares.message_utils import is_genuine_user_message
 from deerflow.agents.middlewares.model_length_termination_detectors import OllamaLengthDetector, default_detectors
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
 from deerflow.agents.middlewares.todo_middleware import TODO_REMINDER_MESSAGE_NAME
+from deerflow.agents.thread_state import BatchReceiptState
 from deerflow.config.app_config import get_app_config
 from deerflow.config.summarization_config import DEFAULT_KEEP
 from deerflow.config.task_continuity_config import TaskContinuityConfig
@@ -187,6 +188,8 @@ def _resolve_agent_name(runtime: Runtime) -> str | None:
 
 class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     """Summarization middleware with pre-compression hook dispatch."""
+
+    state_schema = BatchReceiptState
 
     def __init__(
         self,

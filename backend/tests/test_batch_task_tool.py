@@ -3,11 +3,12 @@ import importlib
 import re
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import NotRequired
 from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
-from langchain.agents import create_agent
+from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import wrap_tool_call
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -19,7 +20,6 @@ from langgraph.types import Command
 from deerflow.agents.factory import create_deerflow_agent
 from deerflow.agents.features import RuntimeFeatures
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
-from deerflow.agents.thread_state import ThreadState
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
@@ -78,6 +78,10 @@ def _message(command: Command) -> ToolMessage:
 class _ScriptedModel(GenericFakeChatModel):
     def bind_tools(self, tools, **kwargs):
         return self
+
+
+class _CompactionState(AgentState):
+    summary_text: NotRequired[str]
 
 
 def _dispatch(job: int, *, call_id: str = "call_0") -> AIMessage:
@@ -219,7 +223,7 @@ async def test_upgrade_recovers_legacy_checkpoint_without_duplicate_batches(batc
             )
         )
     async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
-        graph = create_agent(model=_ScriptedModel(messages=iter(responses)), tools=tool_module.bind_batch_tools(service), checkpointer=saver, middleware=middlewares, state_schema=ThreadState)
+        graph = create_agent(model=_ScriptedModel(messages=iter(responses)), tools=tool_module.bind_batch_tools(service), checkpointer=saver, middleware=middlewares, state_schema=_CompactionState)
         if lost_receipt:
             state = await graph.ainvoke(None, config, context={**context, "run_id": "resumed-run"})
             [receipt] = [message for message in state["messages"] if isinstance(message, ToolMessage)]
