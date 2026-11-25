@@ -30,6 +30,16 @@ class SandboxProvider(ABC):
 
     _signal_handlers_deferred = False
 
+    def holds_active_thread_sandbox(self, thread_id: str, *, user_id: str | None) -> bool:
+        """Whether a lazy acquire for this thread would reuse an already active remote.
+
+        A provider whose acquire installs the prepared skill view only on new
+        or warm remotes returns True here, so a policy-scoped run that starts
+        while another operation (an upload) holds the thread's remote keeps the
+        eager acquire and strict ``sync_agent_skills``.
+        """
+        return False
+
     def _register_signal_handlers(self) -> None:
         """Install process signal handlers for providers that own sandbox resources."""
 

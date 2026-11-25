@@ -674,6 +674,25 @@ def test_opensandbox_policy_run_without_sandbox_tool_creates_no_remote(opensandb
     assert {p.name for p in remote.skill_root.iterdir()} == {"public", "custom", "legacy", "integrations"}
 
 
+def test_opensandbox_policy_run_syncs_a_remote_an_upload_holds(opensandbox_skill_view):
+    env = opensandbox_skill_view
+    env.skill("alpha")
+    # An upload acquired the thread's remote before the run started.
+    sandbox_id = env.provider.acquire("thread", user_id="alice")
+    remote = env.sdk.remotes[0]
+    assert _remote_skills(remote) == {"alpha"}
+    env.skill("beta")
+    runtime = Runtime(context={"thread_id": "thread", "user_id": "alice"})
+
+    # The active remote would be reused without the run's view: stay eager.
+    update = SandboxMiddleware(lazy_init=True, available_skills={"alpha", "beta"}).before_agent({}, runtime)
+    assert update == {"sandbox": {"sandbox_id": sandbox_id}}
+    assert env.sdk.remotes == [remote]
+    assert _remote_skills(remote) == {"alpha", "beta"}
+    assert env.provider.acquire("thread", user_id="alice") == sandbox_id
+    assert _remote_skills(remote) == {"alpha", "beta"}
+
+
 @pytest.mark.parametrize("restricted", [False, True])
 def test_opensandbox_skill_partial_upload_preserves_warm_workspace(opensandbox_skill_view, monkeypatch, restricted):
     env = opensandbox_skill_view
