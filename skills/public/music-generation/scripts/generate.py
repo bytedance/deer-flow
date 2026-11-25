@@ -41,7 +41,9 @@ def generate_music(prompt_file: str, output_file: str) -> str:
     if not prompt:
         raise ValueError("`prompt` is required in the music spec")
     lyrics = spec.get("lyrics") or None  # treat empty string the same as absent
-    is_instrumental = bool(spec.get("is_instrumental", False))
+    is_instrumental = spec.get("is_instrumental", False)
+    if not isinstance(is_instrumental, bool):
+        raise TypeError("`is_instrumental` must be a JSON boolean (true or false)")
 
     body = {
         "model": os.getenv("MINIMAX_MUSIC_MODEL", "music-2.6-free"),

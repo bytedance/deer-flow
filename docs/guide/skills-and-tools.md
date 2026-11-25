@@ -189,6 +189,7 @@ preserving an existing image when decoding fails. With the legacy MiniMax
 output image. Use a fresh `--output-file` path to keep the previous image.
 
 The [music-generation skill](../../skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
+Its optional `is_instrumental` field accepts the JSON booleans `true` and `false`. Other values are rejected before the request reaches MiniMax.
 
 The bundled skill-creator trigger evaluator drains CLI output through EOF, so a completed subprocess does not turn a recorded skill trigger into a false negative.
 The bundled skill-creator description optimizer reads YAML frontmatter consistently with skill validation, preserving quoted strings and multiline descriptions. Its scripts require PyYAML, as does the skill package validator. Invalid skill metadata is reported on stderr with a nonzero exit status rather than a traceback.

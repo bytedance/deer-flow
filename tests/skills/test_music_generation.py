@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -65,12 +66,13 @@ def test_instrumental_sets_flag(monkeypatch, tmp_path):
     assert "lyrics_optimizer" not in captured["json"]
 
 
-def test_no_lyrics_uses_optimizer(monkeypatch, tmp_path):
+@pytest.mark.parametrize("fields", [{}, {"is_instrumental": False}])
+def test_no_lyrics_uses_optimizer(monkeypatch, tmp_path, fields):
     monkeypatch.setenv("MINIMAX_API_KEY", "m")
     captured = {}
     monkeypatch.setattr(mus.requests, "post", _post_ok(captured))
     spec = tmp_path / "s.json"
-    spec.write_text('{"prompt":"sad ballad"}', encoding="utf-8")
+    spec.write_text(json.dumps({"prompt": "sad ballad", **fields}), encoding="utf-8")
     mus.generate_music(str(spec), str(tmp_path / "o.mp3"))
     assert captured["json"]["lyrics_optimizer"] is True
     assert "lyrics" not in captured["json"]
@@ -123,18 +125,31 @@ def test_raises_on_missing_audio_data(monkeypatch, tmp_path):
         mus.generate_music(str(spec), str(tmp_path / "o.mp3"))
 
 
-def test_empty_prompt_raises(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("fields", "error_type", "field"),
+    [
+        ({"title": "X", "lyrics": "la la"}, ValueError, "prompt"),
+        (
+            {"prompt": "ballad", "is_instrumental": "false"},
+            TypeError,
+            "is_instrumental",
+        ),
+        ({"prompt": "ballad", "is_instrumental": 1}, TypeError, "is_instrumental"),
+        ({"prompt": "ballad", "is_instrumental": None}, TypeError, "is_instrumental"),
+    ],
+)
+def test_invalid_spec_raises_before_request(
+    monkeypatch, tmp_path, fields, error_type, field
+):
     monkeypatch.setenv("MINIMAX_API_KEY", "m")
 
     def fake_post(url, headers=None, json=None, **kw):  # pragma: no cover
-        raise AssertionError("must not call the API when prompt is missing")
+        raise AssertionError("must not call the API for an invalid spec")
 
     monkeypatch.setattr(mus.requests, "post", fake_post)
     spec = tmp_path / "s.json"
-    spec.write_text(
-        '{"title":"X","lyrics":"[verse]\\nhi"}', encoding="utf-8"
-    )  # no prompt
-    with pytest.raises(ValueError, match="prompt"):
+    spec.write_text(json.dumps(fields), encoding="utf-8")
+    with pytest.raises(error_type, match=field):
         mus.generate_music(str(spec), str(tmp_path / "o.mp3"))
 
 
