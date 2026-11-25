@@ -122,6 +122,116 @@ test.describe("Workspace changes", () => {
     await expect(page.getByText("-Draft")).toBeVisible();
   });
 
+  test("collapses long file lists independently of the diff panel", async ({
+    page,
+  }) => {
+    const runs = [3, 4, 40].map((count) => ({
+      count,
+      runId: `${RUN_ID}-${count}`,
+    }));
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: THREAD_ID,
+          title: "Workspace changes",
+          messages: runs.flatMap(({ count, runId }) => [
+            {
+              type: "human",
+              id: `request-${count}`,
+              content: `Update ${count} files`,
+              run_id: runId,
+            },
+            {
+              type: "ai",
+              id: `answer-${count}`,
+              content: `Updated the ${count} requested files.`,
+              run_id: runId,
+            },
+          ]),
+        },
+      ],
+    });
+    const fileName = (count: number, index: number) =>
+      `report-${count}-${String(index).padStart(2, "0")}.md`;
+    for (const { count, runId } of runs) {
+      await page.route(
+        `**/api/threads/${THREAD_ID}/runs/${runId}/workspace-changes?*`,
+        async (route) => {
+          const { searchParams } = new URL(route.request().url());
+          await route.fulfill({
+            json: {
+              available: true,
+              version: 1,
+              summary: {
+                created: count,
+                modified: 0,
+                deleted: 0,
+                symlink_created: 0,
+                additions: count,
+                deletions: 0,
+                truncated: false,
+              },
+              files: Array.from({ length: count }, (_, i) => ({
+                path: `/mnt/user-data/workspace/${fileName(count, i + 1)}`,
+                root: "workspace",
+                status: "created",
+                binary: false,
+                sensitive: false,
+                additions: 1,
+                deletions: 0,
+                diff:
+                  searchParams.get("include_diff") === "true"
+                    ? `@@ -0,0 +1 @@\n+Report ${i + 1}`
+                    : "",
+                diff_truncated: false,
+                diff_unavailable_reason: null,
+              })),
+              limits: {},
+            },
+          });
+        },
+      );
+    }
+    await page.goto(`/workspace/chats/${THREAD_ID}`);
+
+    const longTitle = page.getByText("Edited 40 files", { exact: true });
+    await expect(longTitle).toBeVisible();
+    const toggle = (count: number) =>
+      page.getByRole("button", { name: `Edited ${count} files`, exact: true });
+    const lastFile = (count: number) =>
+      page.getByText(fileName(count, count), { exact: true });
+
+    await expect(lastFile(3)).toBeVisible();
+    await expect(toggle(3)).toHaveCount(0);
+    await expect(lastFile(40)).toBeHidden();
+    await expect(toggle(4)).toHaveAttribute("aria-expanded", "false");
+    await expect(toggle(40)).toHaveAttribute("aria-expanded", "false");
+    await toggle(40).press("Enter");
+    await expect(toggle(40)).toHaveAttribute("aria-expanded", "true");
+    await expect(lastFile(40)).toBeVisible();
+    await expect(toggle(4)).toHaveAttribute("aria-expanded", "false");
+    await toggle(40).press("Space");
+    await expect(lastFile(40)).toBeHidden();
+    await toggle(4).click();
+    await expect(lastFile(4)).toBeVisible();
+    await expect(toggle(40)).toHaveAttribute("aria-expanded", "false");
+
+    const longTurn = page
+      .locator("[data-assistant-turn]")
+      .filter({ has: longTitle });
+    await longTurn.getByRole("button", { name: "View changes" }).click();
+    const panel = page.getByRole("dialog", { name: "Workspace changes" });
+    await expect(panel.getByText("+Report 1", { exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(panel).toBeHidden();
+    await expect(toggle(40)).toHaveAttribute("aria-expanded", "false");
+    await expect(toggle(4)).toHaveAttribute("aria-expanded", "true");
+
+    await page.reload();
+    await expect(toggle(4)).toHaveAttribute("aria-expanded", "false");
+    await expect(toggle(40)).toHaveAttribute("aria-expanded", "false");
+  });
+
   test("renders one badge for a run that ends in two assistant bubbles", async ({
     page,
   }) => {
