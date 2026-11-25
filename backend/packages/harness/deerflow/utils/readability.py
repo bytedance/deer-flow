@@ -231,9 +231,10 @@ class ReadabilityExtractor:
         # strips <body> and <title> from the content. Their presence means the
         # subprocess returned the raw document (e.g. on Windows where the node
         # bridge may not produce real output). When detected, use the resolved
-        # HTML's <body> content so that <a> destinations survive.
-        if url and html and _UNEXTRACTED_DOC_RE.search(html_content):
-            logger.info("Readability.js returned the unextracted document; using resolved HTML body")
+        # HTML's <body> content so that <a> destinations survive. Apply the
+        # same fallback without a source URL, preserving relative destinations.
+        if html and _UNEXTRACTED_DOC_RE.search(html_content):
+            logger.info("Readability extraction returned the unextracted document; using HTML body")
             body_match = _BODY_INNER_RE.search(html)
             html_content = body_match.group(1) if body_match else html
 
