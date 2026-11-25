@@ -1544,6 +1544,7 @@ export function InputBox({
               getSessionComposerDraftStorage(),
               draftKey,
               sentDraftTexts,
+              activeConversations,
             );
             retireProjectAttachments(threadId, projectAttachments);
             return;
