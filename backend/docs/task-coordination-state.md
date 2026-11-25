@@ -71,6 +71,10 @@ tie-breaker. The JSON array contains summaries with the task ID, objective,
 project, status, saved run settings and timestamps. Use the task detail
 endpoint for its assignment, execution and authorization state.
 
+Top-level tasks have a partial index on owner, creation time and ID, restricted
+to `parent_id IS NULL`. Both databases can scan it backward for newest-first
+traversal. Offset pagination still scans the skipped entries.
+
 Add a follow-up with `POST /api/coordination/tasks/{task_id}/inputs` and a
 JSON object containing `request_id` and `content`. The owner can replay an
 accepted input with the same ID and content to get its original receipt
