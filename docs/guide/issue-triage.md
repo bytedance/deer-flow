@@ -51,9 +51,10 @@ characters and containing non-whitespace text. JSON preserves those
 quotes unchanged; Markdown escapes markup and displays line breaks.
 
 Priorities are `P0` through `P3`, `Needs-Info` (impact cannot be assessed), and
-`Not-Applicable` (a finding confined to an unmerged PR). Numeric priorities sort
-first, followed by the two nonnumeric states; issue number breaks ties. There
-is no additive score or implementation-ease bonus.
+`Not-Applicable` (a finding confined to an unmerged PR). Valid assessments rank
+by numeric priority first, followed by the two nonnumeric states. Issue number
+breaks ties. Entries awaiting manual review appear after the ranked entries
+and have no rank.
 
 Routes are `fix`, `investigate`, `assign`, `design`, `needs_info`, `extension`,
 `governance`, `discussion` and `pr_review`. Governance and general questions
@@ -74,6 +75,8 @@ the reports.
 
 Each JSON record must be an object with a positive integer issue number.
 Invalid records are reported by their input position before evaluation starts.
+Repeated records for the same host, repository, and issue number are rejected
+before evaluation starts.
 With `--input-json`, `--issue NUMBER` scores only the matching record and
 requires that number to appear exactly once in the export.
 
@@ -95,6 +98,9 @@ in `.github/labels.yml` are eligible. Entries requiring manual review, offline
 previews, `Needs-Info`, and `Not-Applicable` receive no labels. Existing live
 priority labels are preserved. JSON input requires `--repo`, and every issue's
 URL and number must match the target before any labels are written.
+Before each write, the script reads the current title and body and compares
+them with the text used for scoring. A change skips that issue, reports the
+reason on stderr, and makes the command exit nonzero after the batch.
 
 Compared with the earlier weighted scorer, JSON reports no longer contain
 `stage0`, `total_score`, `breakdown`, `fast_track_ready`, `scene_zh` or `scope_zh`.

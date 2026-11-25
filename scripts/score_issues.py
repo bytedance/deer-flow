@@ -452,11 +452,13 @@ def render_markdown_report(results: list[dict[str, Any]]) -> str:
         "# DeerFlow Issue 优先级与分流建议",
         "",
         "供维护者最终判断；引用校验仅证明原文来源，不证明判断正确。需人工复核的条目跳过标签写入。",
-        "",
+    ]
+    table_header = [
         "| 排名 | Issue | 类型 | 优先级 | 分流处理 | 模块 | 触发前提原文 | 后果/诉求原文 | 扩展接口 | 简要说明 | 校验状态 |",
         "| :--- | :--- | :--- | :---: | :--- | :--- | :--- | :--- | :--- | :--- | :--- |",
     ]
-    for idx, item in enumerate(results, 1):
+    ranked, needs_review = [], []
+    for item in results:
         sc = item["scoring"]
         facts = item["llm"] if isinstance(item["llm"], dict) else {}
         number = item.get("number")
@@ -481,7 +483,7 @@ def render_markdown_report(results: list[dict[str, Any]]) -> str:
             else "通过"
         )
         cells = [
-            str(idx),
+            "—" if sc["needs_review"] else str(len(ranked) + 1),
             f"{link} {_table_text(item['title'])}",
             _table_text(sc["kind"]),
             _table_text(sc["priority"]),
@@ -492,7 +494,11 @@ def render_markdown_report(results: list[dict[str, Any]]) -> str:
             _table_text(facts.get("reason_zh", "")),
             _table_text(status),
         ]
-        lines.append("| " + " | ".join(cells) + " |")
+        group = needs_review if sc["needs_review"] else ranked
+        group.append("| " + " | ".join(cells) + " |")
+    for heading, group in (("已通过校验", ranked), ("待人工复核", needs_review)):
+        if group:
+            lines.extend(["", f"## {heading}", "", *table_header, *group])
     return "\n".join(lines) + "\n"
 
 
@@ -555,6 +561,29 @@ def validate_issue_records(issues: list[Any]) -> None:
             raise ValueError(f"Issue record {index} labels must be a list of names")
 
 
+def validate_unique_imports(issues: list[dict[str, Any]], repo: str | None) -> None:
+    target = REPO_RE.fullmatch(repo) if repo else None
+    fallback = (
+        (
+            (target["host"] or os.environ.get("GH_HOST") or "github.com").lower(),
+            target["repo"].lower(),
+        )
+        if target
+        else ("", "")
+    )
+    positions: dict[tuple[str, str, int], int] = {}
+    for index, issue in enumerate(issues, start=1):
+        match = ISSUE_URL_RE.fullmatch(issue.get("url") or "")
+        scope = (match["host"].lower(), match["repo"].lower()) if match else fallback
+        number = issue["number"]
+        identity = (*scope, number)
+        if identity in positions:
+            raise ValueError(
+                f"Issue #{number} appears more than once in the JSON export (records {positions[identity]} and {index})"
+            )
+        positions[identity] = index
+
+
 def validate_label_targets(issues: list[dict[str, Any]], repo: str | None) -> None:
     target = REPO_RE.fullmatch(repo) if repo else None
     if repo and not target:
@@ -574,29 +603,51 @@ def validate_label_targets(issues: list[dict[str, Any]], repo: str | None) -> No
 
 
 def apply_issue_labels(
-    issue_url: str,
+    issue: dict[str, Any],
     labels: list[str],
     existing_labels: list[str],
     dry_run: bool,
 ) -> bool:
     if not labels:
         return True
-    if any(label.lower() in PRIORITY_LABELS for label in labels):
-        if not dry_run:
-            current = subprocess.run(
-                ["gh", "issue", "view", issue_url, "--json", "labels"],
-                capture_output=True,
-                encoding="utf-8",
-                errors="replace",
+    issue_url = issue["url"]
+    if not dry_run:
+        current = subprocess.run(
+            ["gh", "issue", "view", issue_url, "--json", "title,body,labels"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if current.returncode != 0:
+            print(f"  ✗ {issue_url}: {current.stderr.strip()}", file=sys.stderr)
+            return False
+        try:
+            live = json.loads(current.stdout)
+            live_text = (live["title"], live["body"])
+            if any(
+                value is not None and not isinstance(value, str) for value in live_text
+            ):
+                raise ValueError("Invalid live issue text")
+            if not isinstance(live["labels"], list):
+                raise ValueError("Invalid live issue labels")
+            existing_labels = [label["name"] for label in live["labels"]]
+            if not all(isinstance(label, str) for label in existing_labels):
+                raise ValueError("Invalid live issue labels")
+        except (KeyError, TypeError, ValueError):
+            print(
+                f"  ✗ {issue_url}: 无法确认在线 Issue 内容，跳过标签写入。",
+                file=sys.stderr,
             )
-            if current.returncode != 0:
-                print(f"  ✗ {issue_url}: {current.stderr.strip()}", file=sys.stderr)
-                return False
-            existing_labels = [
-                label["name"] for label in json.loads(current.stdout)["labels"]
-            ]
-        if any(label.lower() in PRIORITY_LABELS for label in existing_labels):
-            labels = [label for label in labels if label.lower() not in PRIORITY_LABELS]
+            return False
+        expected_text = (issue.get("title") or "", issue.get("body") or "")
+        if tuple(value or "" for value in live_text) != expected_text:
+            print(
+                f"  ✗ {issue_url}: 在线标题或正文与评分时使用的内容不一致，跳过标签写入。",
+                file=sys.stderr,
+            )
+            return False
+    if any(label.lower() in PRIORITY_LABELS for label in existing_labels):
+        labels = [label for label in labels if label.lower() not in PRIORITY_LABELS]
     if not labels:
         return True
     cmd = ["gh", "issue", "edit", issue_url, "--add-label", ",".join(labels)]
@@ -722,13 +773,15 @@ def main(argv: list[str] | None = None) -> int:
         validate_issue_records(issues)
         if label_issues:
             validate_label_targets(issues, args.repo)
-        if args.input_json and args.issue is not None:
-            issues = [issue for issue in issues if issue["number"] == args.issue]
-            if not issues:
-                raise ValueError(
-                    f"Issue #{args.issue} was not found in the JSON export"
-                )
-            if len(issues) > 1:
+        if args.input_json:
+            if args.issue is not None:
+                issues = [issue for issue in issues if issue["number"] == args.issue]
+                if not issues:
+                    raise ValueError(
+                        f"Issue #{args.issue} was not found in the JSON export"
+                    )
+            validate_unique_imports(issues, args.repo)
+            if args.issue is not None and len(issues) > 1:
                 raise ValueError(
                     f"Issue #{args.issue} appears more than once in the JSON export"
                 )
@@ -779,7 +832,10 @@ def main(argv: list[str] | None = None) -> int:
     }
     results.sort(
         key=lambda r: (
-            prio_rank.get(r["scoring"]["priority"], 9),
+            r["scoring"]["needs_review"],
+            prio_rank.get(r["scoring"]["priority"], 9)
+            if not r["scoring"]["needs_review"]
+            else 0,
             r.get("number") or 0,
         )
     )
@@ -809,13 +865,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if label_issues:
         failures = 0
+        source_by_url = {issue["url"]: issue for issue in issues}
         for item in results:
             if item["scoring"]["needs_review"]:
                 print(f"#{item['number']}: 需人工复核，跳过标签写入。", file=sys.stderr)
                 continue
             labels = item["scoring"].get("suggested_labels", [])
             if not apply_issue_labels(
-                item["url"], labels, item["existing_labels"], args.dry_run
+                source_by_url[item["url"]],
+                labels,
+                item["existing_labels"],
+                args.dry_run,
             ):
                 failures += 1
         if failures:

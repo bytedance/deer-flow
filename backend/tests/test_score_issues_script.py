@@ -303,18 +303,39 @@ def test_cli_apply_preserves_live_priority_and_skips_invalid_evidence(scorer, tr
 
     def gh(cmd, **kwargs):
         gh_calls.append(cmd)
-        return subprocess.CompletedProcess(cmd, 0, json.dumps({"labels": [{"name": label} for label in live_labels]}), "")
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"title": issue["title"], "body": issue["body"], "labels": [{"name": label} for label in live_labels]}), "")
 
     monkeypatch.setattr(scorer.subprocess, "run", gh)
     assert scorer.main(["--repo", "bytedance/deer-flow", "--input-json", str(input_file), "--api-key", "test-key", "--output-json", str(output_file), "--apply-labels"]) == (0 if valid else 1)
     assert len(calls) == 1
     if valid:
-        assert gh_calls == [["gh", "issue", "view", issue["url"], "--json", "labels"], ["gh", "issue", "edit", issue["url"], "--add-label", "bug,area:backend" + ("" if live_labels else ",P2")]]
+        assert gh_calls == [["gh", "issue", "view", issue["url"], "--json", "title,body,labels"], ["gh", "issue", "edit", issue["url"], "--add-label", "bug,area:backend" + ("" if live_labels else ",P2")]]
     else:
         assert gh_calls == []
     scoring = json.loads(output_file.read_text())[0]["scoring"]
     assert scoring["needs_review"] is not valid
     assert scoring["evaluation_failed"] is not valid
+
+
+@pytest.mark.parametrize(("edited_field", "priority"), [("title", "P1"), ("body", "P3")])
+def test_label_apply_skips_stale_text_and_continues_batch(scorer, transport, monkeypatch, tmp_path, issue, facts, capsys, edited_field, priority):
+    source = tmp_path / "issues.json"
+    other = {**issue, "number": 43, "url": issue["url"].removesuffix("42") + "43"}
+    source.write_text(json.dumps([issue, other]), encoding="utf-8")
+    transport(response({**facts, "priority": priority}))
+    gh_calls = []
+
+    def gh_fixture(cmd, **kwargs):
+        gh_calls.append(cmd)
+        live = {"title": issue["title"], "body": issue["body"], "labels": []}
+        if cmd[3] == issue["url"]:
+            live[edited_field] = "Changed on GitHub"
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(live), "")
+
+    monkeypatch.setattr(scorer.subprocess, "run", gh_fixture)
+    assert scorer.main(["--repo", "bytedance/deer-flow", "--input-json", str(source), "--api-key", "test-key", "--apply-labels"]) == 1
+    assert [(cmd[2], cmd[3]) for cmd in gh_calls] == [("view", issue["url"]), ("view", other["url"]), ("edit", other["url"])]
+    assert "在线标题或正文与评分时使用的内容不一致" in capsys.readouterr().err
 
 
 def test_empty_label_catalog_never_invents_labels(scorer, transport, issue, facts):
@@ -340,7 +361,7 @@ def test_export_single_issue_limits_assessments_and_labels(scorer, transport, mo
 
     def fake_gh(cmd, **kwargs):
         gh_calls.append(cmd)
-        return subprocess.CompletedProcess(cmd, 0, '{"labels": []}', "")
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"title": issue["title"], "body": issue["body"], "labels": []}), "")
 
     monkeypatch.setattr(scorer.subprocess, "run", fake_gh)
     assert scorer.main(["--input-json", str(source), "--issue", "42", "--repo", "bytedance/deer-flow", "--api-key", "test-key", "--output-json", str(output), label_mode]) == 0
@@ -351,7 +372,7 @@ def test_export_single_issue_limits_assessments_and_labels(scorer, transport, mo
         assert len(commands) == 1 and issue["url"] in commands[0]
         assert gh_calls == []
     else:
-        assert gh_calls == [["gh", "issue", "view", issue["url"], "--json", "labels"], ["gh", "issue", "edit", issue["url"], "--add-label", "bug,area:backend,P2"]]
+        assert gh_calls == [["gh", "issue", "view", issue["url"], "--json", "title,body,labels"], ["gh", "issue", "edit", issue["url"], "--add-label", "bug,area:backend,P2"]]
 
 
 @pytest.mark.parametrize(("numbers", "error"), [([43], "was not found"), ([42, 42], "appears more than once")])
@@ -363,6 +384,38 @@ def test_export_single_issue_requires_one_matching_record(scorer, transport, tmp
     assert "Issue #42" in (stderr := capsys.readouterr().err)
     assert error in stderr
     assert calls == []
+
+
+@pytest.mark.parametrize("same_repository", [True, False])
+def test_export_detects_duplicates_by_repository_before_scoring(scorer, transport, tmp_path, issue, facts, capsys, same_repository):
+    source = tmp_path / "issues.json"
+    scope = "GITHUB.COM/ByteDance/Deer-Flow" if same_repository else "github.com/other/deer-flow"
+    other = {**issue, "url": f"https://{scope}/issues/42"}
+    source.write_text(json.dumps([issue, other]), encoding="utf-8")
+    calls = transport(response(facts))
+    assert scorer.main(["--input-json", str(source), "--api-key", "test-key"]) == (1 if same_repository else 0)
+    assert len(calls) == (0 if same_repository else 2)
+    if same_repository:
+        assert "appears more than once" in capsys.readouterr().err
+
+
+def test_only_valid_assessments_are_ranked(scorer, monkeypatch, tmp_path, issue, facts):
+    source, output, report = [tmp_path / name for name in ("issues.json", "results.json", "report.md")]
+    verified = {**issue, "title": "Verified", "number": 43, "url": issue["url"].removesuffix("42") + "43"}
+    source.write_text(json.dumps([issue, verified]), encoding="utf-8")
+
+    def urlopen(request, **kwargs):
+        title = json.loads(json.loads(request.data)["input"][1]["content"])["title"]
+        assessment = {**facts, "priority": "P1"} if title == "Verified" else {**facts, "priority": "P0", "impact_quote": ["Invented evidence"]}
+        return io.BytesIO(json.dumps(response(assessment)).encode("utf-8"))
+
+    monkeypatch.setattr(scorer.urllib.request, "urlopen", urlopen)
+    assert scorer.main(["--input-json", str(source), "--api-key", "test-key", "--output-json", str(output), "--output-md", str(report)]) == 0
+    rows = json.loads(output.read_text(encoding="utf-8"))
+    assert [(row["number"], row["scoring"]["needs_review"]) for row in rows] == [(43, False), (42, True)]
+    ranked, review = report.read_text(encoding="utf-8").split("## 待人工复核")
+    assert "| 1 | [#43]" in ranked and "[#42]" not in ranked
+    assert "| — | [#42]" in review and "[#43]" not in review
 
 
 @pytest.mark.parametrize("all_invalid", [True, False])
