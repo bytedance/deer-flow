@@ -681,6 +681,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
 
         free_providers = {
             "web_search": {
+                "parallel_search": "Parallel Search (no key needed)",
                 "ddg_search": "DuckDuckGo (no key needed)",
                 "youcom": "You.com (works with no key; YDC_API_KEY enables the full Search API)",
             },

@@ -259,6 +259,8 @@ def merge(target, source, path=''):
         elif isinstance(value, dict) and isinstance(target[key], dict):
             merge(target[key], value, key_path)
 
+# The runtime treats an omitted tools list as empty. Preserve it on upgrade.
+example.pop('tools', None)
 merge(user, example)
 
 # Always update config_version

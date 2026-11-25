@@ -145,6 +145,9 @@ tools. With DeerFlow's default tool-name prefix, the agent sees
 `parallel-search_web_search` and `parallel-search_web_fetch`. Existing search
 providers and defaults stay unchanged.
 
+The optional entry connects to the standalone Search MCP server. For built-in
+`web_search` setup, see the [configuration guide](../../docs/guide/configuration.md).
+
 This is a third-party service operated by Parallel.ai. Search calls send
 objectives and queries to Parallel; fetch calls send requested page URLs and
 any extraction objective. These inputs can contain information from your

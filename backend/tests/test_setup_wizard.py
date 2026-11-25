@@ -849,12 +849,45 @@ class TestWriteConfigYaml:
 
 
 class TestSearchStep:
+    @pytest.mark.parametrize(("selected", "expected"), [("", "parallel"), ("ddg", "ddg"), ("skip", None)])
+    def test_first_run_saves_selected_web_search(self, tmp_path, monkeypatch, selected, expected):
+        choices = {provider.name: str(index) for index, provider in enumerate(SEARCH_PROVIDERS, start=1)}
+        choices.update({"": "", "skip": str(len(SEARCH_PROVIDERS) + 1)})
+        answers = iter([choices[selected], str(len(WEB_FETCH_PROVIDERS) + 1)])
+        monkeypatch.setattr(wizard_ui, "_supports_arrow_menu", lambda: False)
+        monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+
+        result = search_step.run_search_step()
+        search = result.search_provider
+        assert result.search_api_key is None
+        assert result.fetch_provider is None
+        assert (search.name if search else None) == expected
+
+        path = tmp_path / "config.yaml"
+        write_config_yaml(
+            path,
+            provider_use="langchain_openai:ChatOpenAI",
+            model_name="test-model",
+            display_name="Test",
+            api_key_field="api_key",
+            env_var=None,
+            search_use=search.use if search else None,
+            search_extra_config=search.extra_config if search else None,
+        )
+        configured = {tool["name"]: tool for tool in yaml.safe_load(path.read_text(encoding="utf-8"))["tools"]}
+        assert "web_fetch" not in configured
+        if expected is None:
+            assert "web_search" not in configured
+        else:
+            assert configured["web_search"]["use"] == search.use
+            assert configured["web_search"]["max_results"] == 5
+
     def test_reuses_api_key_for_same_provider(self, monkeypatch):
         monkeypatch.setattr(search_step, "print_header", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(search_step, "print_success", lambda *_args, **_kwargs: None)
         monkeypatch.setattr(search_step, "print_info", lambda *_args, **_kwargs: None)
 
-        choices = iter([3, 1])
+        choices = iter(next(index for index, provider in enumerate(providers) if provider.name == "exa") for providers in (SEARCH_PROVIDERS, WEB_FETCH_PROVIDERS))
         prompts: list[str] = []
 
         def fake_choice(_prompt, _options, default=0):

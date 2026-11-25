@@ -566,6 +566,13 @@ class TestCheckLLMAuth:
 
 
 class TestCheckWebSearch:
+    def test_parallel_needs_no_key(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("tools:\n  - name: web_search\n    use: deerflow.community.parallel_search.tools:web_search_tool\n", encoding="utf-8")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "Parallel Search" in result.detail
+
     def test_ddg_always_ok(self, tmp_path):
         cfg = tmp_path / "config.yaml"
         cfg.write_text(

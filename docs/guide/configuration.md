@@ -117,7 +117,7 @@ fences, including unclosed fences, in complete and streamed replies.
 
    This launches an interactive wizard that guides you through choosing an LLM provider, optional web search, and execution/safety preferences such as sandbox mode, bash access, and file-write tools. It generates a minimal `config.yaml` and writes your keys to `.env`. Takes about 2 minutes.
 
-   The wizard also lets you configure an optional web search provider, or skip it for now.
+   New local and Docker setups default to Parallel Search for `web_search`. Each search sends its query to Parallel.ai over HTTPS through the [Parallel MCP server](https://docs.parallel.ai/integrations/mcp/quickstart). The built-in tool needs no search key or MCP setup. Anonymous access is rate-limited, and a failed request returns a search error. The optional `time_range` is a recency preference. Use the wizard to choose DuckDuckGo, another provider, or **Skip for now**. For manual configuration, replace or remove the `web_search` entry in `config.yaml`. Saved tool selections remain in `config.yaml`.
 
    [DeepSeek web search](../../backend/docs/CONFIGURATION.md#deepseek-web-search) uses `deerflow.community.deepseek.tools:web_search_tool`. Configure `DEEPSEEK_API_KEY` in the Gateway environment and replace the active `web_search` entry with the example in `config.example.yaml`. Set `thinking: true` for multi-step thinking search, independently of the main DeerFlow model. The default is `false`. Results include a generated answer and screened, deduplicated source links.
 
