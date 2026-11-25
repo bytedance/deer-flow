@@ -8,9 +8,10 @@ server, destination and OAuth client the binding had when it was approved; if
 ``config.yaml`` later changes one of them, the grant admits nobody (``approval:
 stale``) until an administrator replaces it. A grant whose binding was removed
 from ``config.yaml`` is listed as ``approval: retired``. Stale and retired
-grants keep their owners reserved for the agent and server they were approved
-for, because a configuration rollback can make them current again; deleting
-the grant releases them.
+grants, and grants of disabled bindings, keep their owners reserved for the
+agent and server they were approved for, because a configuration rollback or
+re-enabling the binding can make them current again; deleting the grant
+releases them.
 """
 
 from __future__ import annotations
@@ -124,17 +125,18 @@ def _overlapping_binding(config: AppConfig, binding_id: str, binding: McpAgentCr
     approved for even while it is stale or its binding is gone from
     ``config.yaml``: a configuration rollback can make it current again, and
     two matching grants would then reject the agent at admission. Deleting the
-    grant releases the owners. Disabled bindings reserve nothing.
+    grant releases the owners. A disabled binding reserves its owners too, and
+    writing a grant to a disabled binding is checked the same way: enabling it
+    again must not make admission reject both bindings.
     """
     owners = set(grant.owners)
     for other_id, other in config.mcp_agent_auth.items():
-        if other_id == binding_id or not other.enabled or other.grants != "config":
+        if other_id == binding_id or other.grants != "config":
             continue
         if other.server == binding.server and other.agent == binding.agent and owners & set(other.owners):
             return other_id
     for other_id, other_grant in make_mcp_agent_grant_store(config).list().items():
-        configured = config.mcp_agent_auth.get(other_id)
-        if other_id == binding_id or (configured is not None and not configured.enabled):
+        if other_id == binding_id:
             continue
         subject = other_grant.approved_for
         if subject.server == binding.server and subject.agent == binding.agent and owners & set(other_grant.owners):
@@ -184,10 +186,9 @@ async def put_grant(binding_id: BindingId, grant: McpAgentGrant, request: Reques
     if subject is None:
         raise HTTPException(status_code=409, detail=f"MCP server '{binding.server}' of binding '{binding_id}' is not configured")
     stored = StoredMcpAgentGrant(**grant.model_dump(), approved_for=subject)
-    if binding.enabled:
-        overlap = await asyncio.to_thread(_overlapping_binding, config, binding_id, binding, grant)
-        if overlap is not None:
-            raise HTTPException(status_code=409, detail=f"Owners overlap with MCP agent binding '{overlap}' for the same server and agent")
+    overlap = await asyncio.to_thread(_overlapping_binding, config, binding_id, binding, grant)
+    if overlap is not None:
+        raise HTTPException(status_code=409, detail=f"Owners overlap with MCP agent binding '{overlap}' for the same server and agent")
     try:
         await run_drained_write("Replace MCP agent grant", lambda: make_mcp_agent_grant_store(config).put(binding_id, stored), (ValueError,))
     except ValueError as exc:

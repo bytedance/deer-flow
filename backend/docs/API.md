@@ -1091,8 +1091,11 @@ when it was written; after `config.yaml` changes one of them, responses show
 `"approval": "stale"` and the grant admits nobody until it is written again.
 A grant whose binding was removed from `config.yaml` is listed with
 `"approval": "retired"` and can still be read and deleted by its binding ID.
-Stale and retired grants keep their owners reserved for the agent and server
-they were approved for until they are replaced or deleted.
+Stale and retired grants, and grants of disabled bindings, keep their owners
+reserved for the agent and server they were approved for until they are
+replaced or deleted; owners listed by a disabled `grants: config` binding stay
+reserved too. A write to a disabled binding is checked for overlaps like any
+other, so enabling it again cannot make admission reject both bindings.
 
 #### Reset MCP Tools Cache
 

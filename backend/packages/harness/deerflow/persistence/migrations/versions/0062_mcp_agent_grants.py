@@ -3,8 +3,8 @@
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0061_mcp_agent_grants"
-down_revision = "0060_coordination_run_settings"
+revision = "0062_mcp_agent_grants"
+down_revision = "0061_coordination_coordinator"
 branch_labels = None
 depends_on = None
 

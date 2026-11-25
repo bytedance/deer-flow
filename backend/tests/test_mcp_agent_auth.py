@@ -908,11 +908,11 @@ async def test_migration_creates_and_drops_the_table(tmp_path):
             return await conn.run_sync(lambda sync: set(sa.inspect(sync).get_table_names()))
 
     try:
-        await asyncio.to_thread(command.upgrade, cfg, "0060_coordination_run_settings")
+        await asyncio.to_thread(command.upgrade, cfg, "0061_coordination_coordinator")
         assert "mcp_agent_grants" not in await tables()
-        await asyncio.to_thread(command.upgrade, cfg, "0061_mcp_agent_grants")
+        await asyncio.to_thread(command.upgrade, cfg, "0062_mcp_agent_grants")
         assert "mcp_agent_grants" in await tables()
-        await asyncio.to_thread(command.downgrade, cfg, "0060_coordination_run_settings")
+        await asyncio.to_thread(command.downgrade, cfg, "0061_coordination_coordinator")
         assert "mcp_agent_grants" not in await tables()
     finally:
         await engine.dispose()
@@ -1070,6 +1070,43 @@ async def test_admin_api_rejects_owners_granted_by_another_binding(api_env):
             await router.put_grant(binding_id, _grant(owners=owners), admin)
         assert exc.value.status_code == 409 and "overlap" in exc.value.detail
     await router.put_grant("research-tickets-2", _grant(owners=["bob"]), admin)
+
+
+@pytest.mark.asyncio
+async def test_admin_api_keeps_owners_reserved_while_a_binding_is_disabled(api_env):
+    router, env = api_env.router, api_env.env
+    data = api_env.config.model_dump()
+    data["mcp_agent_auth"]["research-tickets-2"] = {**data["mcp_agent_auth"]["research-tickets"]}
+    data["mcp_agent_auth"]["config-grant"]["agent"] = env.agent.name
+    set_app_config(AppConfig.model_validate(data))
+    admin = _request("admin")
+    await router.put_grant("research-tickets", _grant(owners=["alice"], digests=[env.digest]), admin)
+
+    def disable(*binding_ids):
+        changed = AppConfig.model_validate(data).model_dump()
+        for binding_id in binding_ids:
+            changed["mcp_agent_auth"][binding_id]["enabled"] = False
+        set_app_config(AppConfig.model_validate(changed))
+
+    # Disabling the binding that holds the grant keeps its owner reserved.
+    disable("research-tickets")
+    with pytest.raises(HTTPException) as exc:
+        await router.put_grant("research-tickets-2", _grant(owners=["alice"]), admin)
+    assert exc.value.status_code == 409 and "research-tickets'" in exc.value.detail
+    # A grant written to a disabled binding is checked too, against stored and configured owners.
+    disable("research-tickets-2")
+    for owners, holder in ((["alice"], "research-tickets'"), (["carol"], "config-grant'")):
+        with pytest.raises(HTTPException) as exc:
+            await router.put_grant("research-tickets-2", _grant(owners=owners), admin)
+        assert exc.value.status_code == 409 and holder in exc.value.detail
+    # A disabled config binding keeps its owners reserved as well.
+    disable("config-grant")
+    with pytest.raises(HTTPException) as exc:
+        await router.put_grant("research-tickets-2", _grant(owners=["carol"]), admin)
+    assert exc.value.status_code == 409 and "config-grant'" in exc.value.detail
+    # Deleting the grant releases its owner.
+    assert (await router.delete_grant("research-tickets", admin)).status_code == 204
+    assert (await router.put_grant("research-tickets-2", _grant(owners=["alice"]), admin)).owners == ["alice"]
 
 
 def test_admin_api_routes_validate_over_http(api_env):
