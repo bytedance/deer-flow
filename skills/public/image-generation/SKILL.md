@@ -39,7 +39,7 @@ Call the Python script:
 python /mnt/skills/public/image-generation/scripts/generate.py \
   --prompt-file /mnt/user-data/workspace/prompt-file.json \
   --reference-images /path/to/ref1.jpg /path/to/ref2.png \
-  --output-file /mnt/user-data/outputs/generated-image.jpg
+  --output-file /mnt/user-data/outputs/generated-image.jpg \
   --aspect-ratio 16:9
 ```
 
