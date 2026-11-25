@@ -38,6 +38,7 @@ import re
 import secrets
 import time
 from contextlib import asynccontextmanager
+from decimal import Decimal, DecimalException, localcontext
 from pathlib import PurePosixPath, PureWindowsPath
 
 import urllib3
@@ -45,6 +46,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
 from kubernetes.client.rest import ApiException
+from kubernetes.utils.quantity import parse_quantity
 from pydantic import BaseModel, Field, field_validator
 
 # Suppress only the InsecureRequestWarning from urllib3
@@ -158,6 +160,46 @@ PROVISIONER_API_KEY = os.environ.get("PROVISIONER_API_KEY", "")
 # Desktop for macOS this is ``host.docker.internal``; on Linux it may be the
 # host's LAN IP. Ignored when SANDBOX_SERVICE_TYPE=ClusterIP.
 NODE_HOST = os.environ.get("NODE_HOST", "host.docker.internal")
+
+
+# The client's parse_quantity also accepts Decimal spellings (NaN, underscores,
+# exponents combined with SI suffixes) that the Kubernetes API rejects.
+_RESOURCE_QUANTITY = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+|[numkMGTPE]|[KMGTPE]i)?")
+
+
+def _read_resource_quantity(name: str, default: str) -> tuple[str, Decimal]:
+    value = os.environ.get(name, default)
+    if not _RESOURCE_QUANTITY.fullmatch(value):
+        raise RuntimeError(f"Invalid {name}={value!r}: expected a Kubernetes resource quantity")
+    try:
+        with localcontext() as context:
+            # Keep comparisons exact even when multiplying by Ei (2**60).
+            context.prec = max(context.prec, len(value) + 19)
+            amount = parse_quantity(value)
+    except (DecimalException, ValueError) as exc:
+        raise RuntimeError(f"Invalid {name}={value!r}: {exc}") from exc
+    if amount < 0:
+        raise RuntimeError(f"Invalid {name}={value!r}: resource quantities must be nonnegative")
+    return value, amount
+
+
+def _load_sandbox_resources() -> k8s_client.V1ResourceRequirements:
+    requests = {}
+    limits = {}
+    for resource, default_request, default_limit in (
+        ("cpu", "100m", "1000m"),
+        ("memory", "256Mi", "1Gi"),
+        ("ephemeral-storage", "500Mi", "500Mi"),
+    ):
+        prefix = "SANDBOX_" + resource.upper().replace("-", "_")
+        requests[resource], request = _read_resource_quantity(f"{prefix}_REQUEST", default_request)
+        limits[resource], limit = _read_resource_quantity(f"{prefix}_LIMIT", default_limit)
+        if request > limit:
+            raise RuntimeError(f"{prefix}_REQUEST={requests[resource]!r} exceeds {prefix}_LIMIT={limits[resource]!r}")
+    return k8s_client.V1ResourceRequirements(requests=requests, limits=limits)
+
+
+SANDBOX_RESOURCES = _load_sandbox_resources()
 
 
 def join_host_path(base: str, *parts: str) -> str:
@@ -1153,18 +1195,7 @@ def _build_pod(
                         timeout_seconds=3,
                         failure_threshold=3,
                     ),
-                    resources=k8s_client.V1ResourceRequirements(
-                        requests={
-                            "cpu": "100m",
-                            "memory": "256Mi",
-                            "ephemeral-storage": "500Mi",
-                        },
-                        limits={
-                            "cpu": "1000m",
-                            "memory": "1Gi",
-                            "ephemeral-storage": "500Mi",
-                        },
-                    ),
+                    resources=SANDBOX_RESOURCES,
                     volume_mounts=_build_volume_mounts(
                         thread_id,
                         user_id=user_id,

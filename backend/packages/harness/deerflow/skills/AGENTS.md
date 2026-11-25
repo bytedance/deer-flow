@@ -50,6 +50,9 @@ their credentials and enabled state stay per user.
 - **Projection readers and mutation writers share the owner lock.** Export also
   captures its bytes under that lock and re-checks them. A read-only export does
   not rebuild projections.
+- **Custom-skill read → write → history runs under `custom_skill_mutation`.** The
+  skill routes and `skill_manage` share it across processes. It is per owner, so
+  take it after the scans and re-read under it what a scan assumed.
 - **A skill name is a directory name on every host.** Creation and archive install
   reject Windows reserved device names on all platforms. Reads and deletes stay
   permissive, so that skills stored by an older release can still be removed.

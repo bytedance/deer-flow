@@ -13,7 +13,7 @@ import hmac
 import json
 import logging
 import threading
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -40,6 +40,30 @@ _NOT_FOUND_ERROR_CODES = frozenset(
         "ResourceNotFound.Instance",
     }
 )
+_SNAPSHOT_NOT_FOUND_ERROR_CODES = frozenset(
+    {
+        "SnapshotNotFound",
+        "SandboxSnapshotNotFound",
+        "InvalidSnapshotId.NotFound",
+        "ResourceNotFound.Snapshot",
+        "ResourceNotFound.SandboxSnapshot",
+    }
+)
+_TRANSITIONING_SANDBOX_STATUSES = frozenset(
+    {
+        "pending",
+        "creating",
+        "starting",
+        "pausing",
+        "resuming",
+        "snapshotting",
+    }
+)
+_TERMINAL_SANDBOX_STATUSES = frozenset({"failed", "error", "terminated", "deleted", "stopped"})
+_READY_SNAPSHOT_STATUSES = frozenset({"ready", "available", "succeeded", "completed"})
+_TERMINAL_SNAPSHOT_STATUSES = frozenset({"failed", "error", "deleted", "expired", "deleting"})
+_SUCCEEDED_PRECACHE_STATUSES = frozenset({"success", "succeeded", "completed", "ready"})
+_TERMINAL_PRECACHE_STATUSES = frozenset({"failed", "error", "canceled", "cancelled", "timeout"})
 
 
 class VeFaaSApiError(RuntimeError):
@@ -63,6 +87,10 @@ class VeFaaSSandboxNotFoundError(VeFaaSApiError):
     """Authoritative response proving a remote veFaaS sandbox does not exist."""
 
 
+class VeFaaSSnapshotNotFoundError(VeFaaSApiError):
+    """Authoritative response proving a remote veFaaS sandbox snapshot does not exist."""
+
+
 @dataclass(frozen=True)
 class VeFaaSSandboxRecord:
     """Normalized veFaaS cloud sandbox instance metadata."""
@@ -75,14 +103,65 @@ class VeFaaSSandboxRecord:
     error_code: str = ""
     error_message: str = ""
     expire_at: str = ""
+    paused_at: str = ""
 
     @property
     def is_running(self) -> bool:
         return self.status.strip().lower() == "running" and not self.pending
 
     @property
+    def is_paused(self) -> bool:
+        return self.status.strip().lower() == "paused" and not self.pending
+
+    @property
+    def is_transitioning(self) -> bool:
+        return self.pending or self.status.strip().lower() in _TRANSITIONING_SANDBOX_STATUSES
+
+    @property
     def is_terminal_failure(self) -> bool:
-        return self.status.strip().lower() in {"failed", "error", "terminated", "deleted", "stopped"}
+        return self.status.strip().lower() in _TERMINAL_SANDBOX_STATUSES
+
+
+@dataclass(frozen=True)
+class VeFaaSSnapshotRecord:
+    """Normalized veFaaS cloud sandbox snapshot metadata."""
+
+    id: str
+    sandbox_id: str
+    function_id: str
+    status: str
+    snapshot_type: str = ""
+    source: str = ""
+    created_at: str = ""
+    retention_days: int | None = None
+    retention_expires_at: str = ""
+    metadata: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def is_ready(self) -> bool:
+        return self.status.strip().lower() in _READY_SNAPSHOT_STATUSES
+
+    @property
+    def is_terminal_failure(self) -> bool:
+        return self.status.strip().lower() in _TERMINAL_SNAPSHOT_STATUSES
+
+
+@dataclass(frozen=True)
+class VeFaaSPrecacheTicket:
+    """Normalized veFaaS sandbox image precache ticket status."""
+
+    ticket_id: str
+    status: str
+    duration: int | None = None
+    progress: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_succeeded(self) -> bool:
+        return self.status.strip().lower() in _SUCCEEDED_PRECACHE_STATUSES
+
+    @property
+    def is_terminal_failure(self) -> bool:
+        return self.status.strip().lower() in _TERMINAL_PRECACHE_STATUSES
 
 
 def validate_endpoint_url(url: str, *, allow_insecure_http: bool = False) -> str:
@@ -225,6 +304,46 @@ def _parse_record(payload: Mapping[str, Any], *, fallback_function_id: str) -> V
         error_code=str(payload.get("ErrorCode") or ""),
         error_message=str(payload.get("ErrorMessage") or ""),
         expire_at=str(payload.get("ExpireAt") or ""),
+        paused_at=str(payload.get("PausedAt") or ""),
+    )
+
+
+def _parse_snapshot_record(payload: Mapping[str, Any], *, fallback_function_id: str) -> VeFaaSSnapshotRecord | None:
+    snapshot_id = payload.get("SnapshotId") or payload.get("Id")
+    if not isinstance(snapshot_id, str) or not snapshot_id.strip():
+        return None
+    raw_retention = payload.get("RetentionDays")
+    retention_days = raw_retention if isinstance(raw_retention, int) and not isinstance(raw_retention, bool) else None
+    return VeFaaSSnapshotRecord(
+        id=snapshot_id.strip(),
+        sandbox_id=str(payload.get("SandboxId") or ""),
+        function_id=str(payload.get("FunctionId") or fallback_function_id),
+        status=str(payload.get("Status") or ""),
+        snapshot_type=str(payload.get("SnapshotType") or payload.get("Type") or ""),
+        source=str(payload.get("Source") or ""),
+        created_at=str(payload.get("CreatedAt") or ""),
+        retention_days=retention_days,
+        retention_expires_at=str(payload.get("RetentionExpiresAt") or ""),
+        metadata=_parse_metadata(payload.get("Metadata")),
+    )
+
+
+def _parse_precache_ticket(payload: Mapping[str, Any], *, fallback_ticket_id: str) -> VeFaaSPrecacheTicket | None:
+    raw_status = payload.get("Status")
+    if not isinstance(raw_status, str) or not raw_status.strip():
+        return None
+    raw_ticket_id = payload.get("TicketId") or fallback_ticket_id
+    if not isinstance(raw_ticket_id, str) or not raw_ticket_id.strip():
+        return None
+    raw_duration = payload.get("Duration")
+    duration = raw_duration if isinstance(raw_duration, int) and not isinstance(raw_duration, bool) else None
+    raw_progress = payload.get("Progress")
+    progress = dict(raw_progress) if isinstance(raw_progress, Mapping) else {}
+    return VeFaaSPrecacheTicket(
+        ticket_id=raw_ticket_id.strip(),
+        status=raw_status.strip(),
+        duration=duration,
+        progress=progress,
     )
 
 
@@ -336,7 +455,13 @@ class VeFaaSClient:
         if isinstance(error_obj, dict) and (error_obj.get("Code") or error_obj.get("Message")):
             error_code = str(error_obj.get("Code") or "")
             error_msg = self._redact(error_obj.get("Message") or error_code)
-            err_cls: type[VeFaaSApiError] = VeFaaSSandboxNotFoundError if error_code in _NOT_FOUND_ERROR_CODES else VeFaaSApiError
+            err_cls: type[VeFaaSApiError]
+            if error_code in _NOT_FOUND_ERROR_CODES:
+                err_cls = VeFaaSSandboxNotFoundError
+            elif error_code in _SNAPSHOT_NOT_FOUND_ERROR_CODES:
+                err_cls = VeFaaSSnapshotNotFoundError
+            else:
+                err_cls = VeFaaSApiError
             raise err_cls(
                 f"veFaaS {action} failed ({error_code}): {error_msg}",
                 status_code=response.status_code,
@@ -374,6 +499,8 @@ class VeFaaSClient:
         instance_image_info: Mapping[str, Any] | None = None,
         instance_tos_mount_config: Mapping[str, Any] | None = None,
         session_id: str | None = None,
+        snapshot_id: str | None = None,
+        auto_pause_config: Mapping[str, Any] | None = None,
     ) -> str:
         """Create a veFaaS cloud sandbox instance and return its remote ``SandboxId``."""
         payload: dict[str, Any] = {"FunctionId": function_id}
@@ -394,6 +521,10 @@ class VeFaaSClient:
             payload["InstanceTosMountConfig"] = dict(instance_tos_mount_config)
         if session_id:
             payload["SessionId"] = session_id
+        if snapshot_id:
+            payload["SnapshotId"] = snapshot_id
+        if auto_pause_config:
+            payload["AutoPauseConfig"] = dict(auto_pause_config)
 
         result = self._request("CreateSandbox", payload)
         sandbox_id = result.get("SandboxId") or result.get("Id")
@@ -505,6 +636,192 @@ class VeFaaSClient:
         except VeFaaSSandboxNotFoundError:
             logger.debug("veFaaS sandbox %s already absent during KillSandbox", sandbox_id)
 
+    def pause_sandbox(self, function_id: str, sandbox_id: str) -> None:
+        """Pause a running veFaaS sandbox instance so its state can be resumed later."""
+        self._request(
+            "PauseSandbox",
+            {"FunctionId": function_id, "SandboxId": sandbox_id},
+        )
+
+    def resume_sandbox(
+        self,
+        function_id: str,
+        sandbox_id: str,
+        *,
+        snapshot_id: str | None = None,
+        timeout_minutes: int | None = None,
+        async_resume: bool | None = None,
+    ) -> str:
+        """Resume a paused veFaaS sandbox instance (or restore from ``snapshot_id``)."""
+        payload: dict[str, Any] = {"FunctionId": function_id, "SandboxId": sandbox_id}
+        if snapshot_id:
+            payload["SnapshotId"] = snapshot_id
+        if timeout_minutes is not None:
+            payload["Timeout"] = timeout_minutes
+            payload["TimeoutUnit"] = "minute"
+        if async_resume is not None:
+            payload["Async"] = bool(async_resume)
+        result = self._request("ResumeSandbox", payload)
+        return str(result.get("Status") or "")
+
+    def create_sandbox_snapshot(
+        self,
+        function_id: str,
+        sandbox_id: str,
+        *,
+        snapshot_type: str | None = None,
+        retention_days: int | None = None,
+        metadata: Mapping[str, str] | None = None,
+    ) -> str:
+        """Create a snapshot of a running veFaaS sandbox instance and return its ``SnapshotId``."""
+        payload: dict[str, Any] = {"FunctionId": function_id, "SandboxId": sandbox_id}
+        if snapshot_type:
+            payload["Type"] = snapshot_type
+        if retention_days is not None:
+            payload["RetentionDays"] = retention_days
+        if metadata:
+            payload["Metadata"] = {str(k): str(v) for k, v in metadata.items()}
+        result = self._request("CreateSandboxSnapshot", payload)
+        snapshot_id = result.get("SnapshotId") or result.get("Id")
+        if not isinstance(snapshot_id, str) or not snapshot_id.strip():
+            raise VeFaaSApiError("veFaaS CreateSandboxSnapshot response did not include a SnapshotId")
+        return snapshot_id.strip()
+
+    def describe_sandbox_snapshot(self, function_id: str, snapshot_id: str) -> VeFaaSSnapshotRecord | None:
+        """Describe one sandbox snapshot; return ``None`` only on authoritative not-found."""
+        try:
+            result = self._request(
+                "DescribeSandboxSnapshot",
+                {"FunctionId": function_id, "SnapshotId": snapshot_id},
+            )
+        except VeFaaSSnapshotNotFoundError:
+            return None
+        raw_snapshot = result.get("Snapshot") if isinstance(result.get("Snapshot"), Mapping) else result
+        record = _parse_snapshot_record(raw_snapshot, fallback_function_id=function_id)
+        if record is None:
+            raise VeFaaSApiError(f"veFaaS DescribeSandboxSnapshot response for {snapshot_id} did not include a valid snapshot record")
+        return record
+
+    def list_sandbox_snapshots(
+        self,
+        function_id: str,
+        *,
+        sandbox_id: str | None = None,
+        filters: Sequence[Mapping[str, Any]] | None = None,
+        page_number: int | None = None,
+        page_size: int = 50,
+        max_pages: int = 100,
+    ) -> list[VeFaaSSnapshotRecord]:
+        """List snapshots belonging to ``function_id`` with optional sandbox/filter criteria."""
+        records: list[VeFaaSSnapshotRecord] = []
+        seen_ids: set[str] = set()
+        current_page = 1 if page_number is None else page_number
+        single_page = page_number is not None
+        pages_fetched = 0
+        raw_seen = 0
+
+        while True:
+            payload: dict[str, Any] = {
+                "FunctionId": function_id,
+                "PageNumber": current_page,
+                "PageSize": page_size,
+            }
+            if sandbox_id:
+                payload["SandboxId"] = sandbox_id
+            if filters:
+                payload["Filters"] = [dict(item) for item in filters]
+
+            result = self._request("ListSandboxSnapshots", payload)
+            raw_items = result.get("Snapshots")
+            if raw_items is None:
+                raw_items = result.get("Items")
+            if raw_items is None:
+                break
+            if not isinstance(raw_items, list):
+                raise VeFaaSApiError(f"veFaaS ListSandboxSnapshots returned malformed Snapshots of type {type(raw_items).__name__}")
+
+            for item in raw_items:
+                if not isinstance(item, Mapping):
+                    continue
+                record = _parse_snapshot_record(item, fallback_function_id=function_id)
+                if record is not None and record.id not in seen_ids:
+                    seen_ids.add(record.id)
+                    records.append(record)
+
+            pages_fetched += 1
+            raw_seen += len(raw_items)
+            if single_page or len(raw_items) < page_size:
+                break
+            total = result.get("Total")
+            if isinstance(total, int) and not isinstance(total, bool) and raw_seen >= total:
+                break
+            if pages_fetched >= max_pages:
+                logger.warning(
+                    "veFaaS ListSandboxSnapshots stopped after max_pages=%d (%d snapshots fetched for function %s)",
+                    max_pages,
+                    len(records),
+                    function_id,
+                )
+                break
+            current_page += 1
+        return records
+
+    def delete_sandbox_snapshot(self, function_id: str, snapshot_id: str) -> None:
+        """Delete a veFaaS sandbox snapshot; treat authoritative not-found as idempotent."""
+        try:
+            self._request(
+                "DeleteSandboxSnapshot",
+                {"FunctionId": function_id, "SnapshotId": snapshot_id},
+            )
+        except VeFaaSSnapshotNotFoundError:
+            logger.debug("veFaaS snapshot %s already absent during DeleteSandboxSnapshot", snapshot_id)
+
+    def precache_sandbox_images(
+        self,
+        image_urls: Sequence[str],
+        *,
+        client_token: str | None = None,
+        registry_type: str | None = None,
+        network_config: Mapping[str, Any] | None = None,
+        registry_auth_config: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Submit a sandbox image precache job and return its ``TicketId``."""
+        if isinstance(image_urls, (str, bytes)):
+            raise ValueError("image_urls must be a sequence of non-empty image URLs")
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in image_urls:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError("image_urls must contain only non-empty strings")
+            url = item.strip()
+            if url not in seen:
+                seen.add(url)
+                cleaned.append(url)
+        if not cleaned:
+            raise ValueError("image_urls must contain at least one non-empty image URL")
+        payload: dict[str, Any] = {"ImageUrls": cleaned}
+        if client_token:
+            payload["ClientToken"] = client_token
+        if registry_type:
+            payload["RegistryType"] = registry_type
+        if network_config:
+            payload["NetworkConfig"] = dict(network_config)
+        if registry_auth_config:
+            payload["RegistryAuthConfig"] = dict(registry_auth_config)
+        result = self._request("PrecacheSandboxImages", payload)
+        ticket_id = result.get("TicketId")
+        if not isinstance(ticket_id, str) or not ticket_id.strip():
+            raise VeFaaSApiError("veFaaS PrecacheSandboxImages response did not include a TicketId")
+        return ticket_id.strip()
+
+    def get_sandbox_image_precache_ticket(self, ticket_id: str) -> VeFaaSPrecacheTicket:
+        """Query the status and progress of a sandbox image precache ticket."""
+        result = self._request("GetSandboxImagePrecacheTicket", {"TicketId": ticket_id})
+        ticket = _parse_precache_ticket(result, fallback_ticket_id=ticket_id)
+        if ticket is None:
+            raise VeFaaSApiError(f"veFaaS GetSandboxImagePrecacheTicket response for {ticket_id} did not include a valid status")
+        return ticket
+
 
 __all__ = [
     "DEFAULT_REQUEST_TIMEOUT",
@@ -513,8 +830,11 @@ __all__ = [
     "VEFAAS_SERVICE",
     "VeFaaSApiError",
     "VeFaaSClient",
+    "VeFaaSPrecacheTicket",
     "VeFaaSSandboxNotFoundError",
     "VeFaaSSandboxRecord",
+    "VeFaaSSnapshotNotFoundError",
+    "VeFaaSSnapshotRecord",
     "sign_v4_headers",
     "validate_endpoint_url",
 ]

@@ -197,7 +197,8 @@ Skills are loaded progressively — only when the task needs them, not all at on
 
 The bundled video-generation command reports failures on stderr and exits with
 status 1, including when the selected provider has no API key. Callers can check
-the exit status before presenting an output file.
+the exit status before presenting an output file. A zero-byte video download
+fails before the command opens the output file, preserving any previous video.
 
 The bundled podcast-generation command returns a nonzero exit status and writes
 diagnostics to stderr when generation fails. Callers can check the status before

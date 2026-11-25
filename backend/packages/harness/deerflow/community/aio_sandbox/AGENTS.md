@@ -63,6 +63,9 @@ make test-blocking-io
   state or a missing cleanup receipt quarantines the sandbox.
 - **Cleanup markers support cooperative cleanup.** They do not isolate hostile
   code.
+- **Cleanup interrupts the marked process groups before it terminates them.**
+  The shell exported the marker itself, so its own environ lacks it; killing
+  only the children first lets it run the rest of the command.
 - **Broker logs carry argument count, exit code and duration**, never argument
   values.
 - **`read_file` returns content or an `Error: ...` string and never raises.** A

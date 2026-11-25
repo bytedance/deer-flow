@@ -129,7 +129,7 @@ test("artifact quotes retain the selected source line in the conversation", asyn
     return handleRunStream(route);
   });
   await composer.fill("Explain this figure");
-  await form.getByRole("button", { name: "Submit", exact: true }).click();
+  await form.getByRole("button", { name: "Send", exact: true }).click();
   await expect
     .poll(() => JSON.stringify(submitted))
     .toContain(`${filepath}:L5-L5`);

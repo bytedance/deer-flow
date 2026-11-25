@@ -209,7 +209,7 @@ def test_real_client_stream_renders_the_streamed_answer_verbatim():
     agent.stream.side_effect = stream_turn
 
     state = initial_state()
-    with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+    with patch.object(client, "_ensure_agent", return_value=(agent, None)):
         for action in stream_actions(client, "q", thread_id="t-1"):
             state = reduce(state, action)
 

@@ -124,6 +124,11 @@ class AcquireSerializer[KeyT: Hashable]:
         """
         return self._executor
 
+    def has_pending(self, key: KeyT) -> bool:
+        """Report a holder or waiter for this key without taking its scope lock."""
+        with self._table_lock:
+            return key in self._table
+
     async def run_on_executor[**P, T](self, func: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
         """Run a blocking callable on the serializer's dedicated executor.
 
