@@ -1,5 +1,10 @@
 # MCP Server
 
+When pasting a wrapped `mcpServers` definition, every server entry must be an
+object. An invalid entry rejects the definition and identifies the server.
+A bare server named `mcpServers` is supported when it identifies its transport
+with a string `command`, `url`, or `type` field.
+
 Tool steps mark explicit execution failures. Scheduled-task steps show completed
 operations only after a valid response, rather than when the request is issued.
 

@@ -33,8 +33,13 @@ function isWrappedServerMap(value: Record<string, unknown>): value is Record<
   if (!Object.hasOwn(value, "mcpServers") || !isPlainObject(value.mcpServers)) {
     return false;
   }
-  const candidates = Object.values(value.mcpServers);
-  return candidates.length === 0 || candidates.every(isPlainObject);
+  const config = value.mcpServers;
+  // A bare server named mcpServers identifies its transport. Otherwise this
+  // is a wrapper whose entries must be validated individually, even if one
+  // or all of them are malformed.
+  return !["command", "url", "type"].some(
+    (key) => typeof config[key] === "string",
+  );
 }
 
 /** Serialize one existing server into the same copy-paste format the parser accepts. */
@@ -76,7 +81,7 @@ export function parseMCPServerDefinition(
   }
 
   // A bare server is allowed to be named `mcpServers`. Treat that key as the
-  // wrapper only when its value itself looks like a name-to-config map.
+  // wrapper unless its value identifies a server transport.
   const servers = isWrappedServerMap(parsed) ? parsed.mcpServers : parsed;
 
   const entries = Object.entries(servers);

@@ -148,6 +148,34 @@ describe("parseMCPServerDefinition", () => {
     expectDefinitionError(`{"a": "npx"}`, "serverConfigNotObject");
   });
 
+  it.each([null, [], "npx", 1, false].map((bad) => ({ bad })))(
+    "rejects malformed wrapped entries ($bad)",
+    ({ bad }) => {
+      for (const servers of [{ good: { command: "npx" }, bad }, { bad }]) {
+        expect(() =>
+          parseMCPServerDefinition(JSON.stringify({ mcpServers: servers })),
+        ).toThrow(
+          expect.objectContaining({
+            code: "serverConfigNotObject",
+            serverName: "bad",
+          }),
+        );
+      }
+    },
+  );
+
+  it("keeps a remote bare server named mcpServers", () => {
+    expect(
+      parseMCPServerDefinition(
+        '{"mcpServers":{"type":"http","url":"https://example.test/mcp","headers":{"X-Test":"yes"}}}',
+      ).mcpServers,
+    ).toMatchObject({
+      type: "http",
+      url: "https://example.test/mcp",
+      headers: { "X-Test": "yes" },
+    });
+  });
+
   it("rejects a non-object mcpServers value", () => {
     expectDefinitionError(`{"mcpServers": []}`, "serverConfigNotObject");
   });
