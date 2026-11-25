@@ -154,7 +154,11 @@ class SubagentBatchRepository:
                 # The old key could have emitted the same receipt for two dispatches.
                 if batch.id not in receipts.previous and batch.execution_spec.get(THREAD_INCARNATION_CONTEXT_KEY) == incarnation and await self._matches_legacy_request(session, batch, request, title):
                     return await self._with_counts(session, batch)
-            raise BatchSubmissionConflictError("Batch submission conflict: a legacy batch may already contain this work. Inspect the existing batches before requesting a new submission.")
+        # Reading the graph history can take several checkpoint reads. Release
+        # the repository session before consulting that independent store.
+        if not confirmed and receipts.confirm_previous is not None and await receipts.confirm_previous(frozenset(batch.id for batch in candidates)):
+            return None
+        raise BatchSubmissionConflictError("Batch submission conflict: a legacy batch may already contain this work. Inspect the existing batches before requesting a new submission.")
 
     async def _resolve_submission(self, session: AsyncSession, batch: SubagentBatchRow, request: BatchSubmitRequest, *, title: str, submission_digest: str | None) -> dict[str, Any]:
         if not (_can_recover_digestless_submission(batch, request) and await self._matches_legacy_request(session, batch, request, title)):

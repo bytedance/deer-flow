@@ -5,15 +5,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import asdict, replace
+from functools import partial
 from typing import Annotated, Any, cast
 
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
+from langgraph.runtime import ExecutionInfo
 from langgraph.types import Command
 from pydantic import BaseModel, Field, StrictInt
 
@@ -25,6 +29,7 @@ from deerflow.mcp_scope import (
     THREAD_INCARNATION_METADATA_GUARD_KEY,
     runtime_thread_incarnation,
 )
+from deerflow.runtime.checkpoint_history import task_checkpoint_ancestors
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.subagents.batch_runtime import (
     BATCH_RECEIPT_ID_KEY,
@@ -41,6 +46,9 @@ from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import find_tool_call_message
+
+logger = logging.getLogger(__name__)
+_RECEIPT_HISTORY_TIMEOUT_SECONDS = 30
 
 
 class BatchTaskItem(BaseModel):
@@ -161,13 +169,35 @@ def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -
     return [name for name in child if name in allowed]
 
 
-def _dispatch_receipts(state: object, dispatch: AIMessage, tool_call_id: str) -> BatchDispatchReceipts:
+async def _confirm_previous_receipts(config: RunnableConfig, execution: ExecutionInfo, thread_id: str, dispatch_id: str | None, tool_call_id: str, candidates: frozenset[str]) -> bool:
+    previous = set()
+    try:
+        async with asyncio.timeout(_RECEIPT_HISTORY_TIMEOUT_SECONDS):
+            async for snapshot in task_checkpoint_ancestors(config, execution, thread_id=thread_id):
+                for issuer, receipt, batch_id in iter_batch_dispatch_receipts(snapshot.values.get("messages", ())):
+                    if batch_id not in candidates or receipt.tool_call_id != tool_call_id:
+                        continue
+                    if issuer.id == dispatch_id:
+                        return False
+                    if isinstance(issuer.id, str) and issuer.id.strip():
+                        previous.add(batch_id)
+                if previous == candidates:
+                    return True
+    except Exception:
+        logger.warning("Could not verify legacy batch receipts in checkpoint history", exc_info=True)
+    return False
+
+
+def _dispatch_receipts(runtime: Runtime, thread_id: str, dispatch: AIMessage, tool_call_id: str) -> BatchDispatchReceipts:
+    state = runtime.state
     messages = state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
     previous, current = compacted_batch_receipt_ids(state), set()
     for issuer, receipt, batch_id in iter_batch_dispatch_receipts(messages or ()):
         if receipt.tool_call_id == tool_call_id:
             (current if issuer is dispatch else previous).add(batch_id)
-    return BatchDispatchReceipts(current=frozenset(current), previous=frozenset(previous))
+    execution = getattr(runtime, "execution_info", None)
+    confirm_previous = partial(_confirm_previous_receipts, runtime.config, execution, thread_id, dispatch.id, tool_call_id) if execution is not None else None
+    return BatchDispatchReceipts(current=frozenset(current), previous=frozenset(previous), confirm_previous=confirm_previous)
 
 
 @tool("batch_task", parse_docstring=True)
@@ -312,7 +342,7 @@ async def batch_task(
                 continuation=continuation,
                 continuation_authority=context.get(AGENT_RUNS_CONTEXT_KEY) if continuation else None,
                 continuation_context=continuation_context if continuation else None,
-                dispatch_receipts=_dispatch_receipts(state, dispatch, tool_call_id),
+                dispatch_receipts=_dispatch_receipts(runtime, str(thread_id), dispatch, tool_call_id),
             )
         )
     except Exception as exc:

@@ -11,7 +11,7 @@ import pytest_asyncio
 from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import wrap_tool_call
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.errors import NodeCancelledError
@@ -20,6 +20,7 @@ from langgraph.types import Command
 from deerflow.agents.factory import create_deerflow_agent
 from deerflow.agents.features import RuntimeFeatures
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+from deerflow.agents.thread_state import adapt_state_schema_for_mode, normalize_middleware_state_schemas
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
@@ -30,7 +31,8 @@ from deerflow.mcp_scope import (
 )
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.subagent_batches import SubagentBatchRepository
-from deerflow.subagents.batch_runtime import BATCH_SUBMISSION_DIGEST_KEY
+from deerflow.runtime.checkpoint_mode import inject_checkpoint_mode
+from deerflow.subagents.batch_runtime import BATCH_SUBMISSION_DIGEST_KEY, COMPACTED_BATCH_RECEIPTS_CHANNEL
 from deerflow.subagents.batch_service import SubagentBatchService
 from deerflow.subagents.config import SubagentConfig
 from deerflow.subagents.runtime import SubagentRuntime
@@ -170,62 +172,112 @@ async def test_checkpoint_replay_under_new_run_returns_original_batch(batch_serv
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", ["unconfirmed-replay", "later-response", "compacted-response"])
+@pytest.mark.parametrize(
+    ("scenario", "checkpoint_mode"),
+    [
+        pytest.param("unconfirmed-replay", "full", id="unconfirmed-replay"),
+        pytest.param("unconfirmed-replay-with-sibling", "full", id="unconfirmed-replay-with-sibling"),
+        pytest.param("later-response", "full", id="later-response"),
+        pytest.param("compacted-response", "full", id="compacted-response"),
+        pytest.param("compacted-before-upgrade", "full", id="compacted-before-upgrade"),
+        pytest.param("compacted-before-upgrade", "delta", id="compacted-before-upgrade-delta"),
+    ],
+)
 @pytest.mark.parametrize("run_id", ["original-run", None], ids=["gateway-key", "sdk-key"])
-async def test_upgrade_recovers_legacy_checkpoint_without_duplicate_batches(batch_service, monkeypatch, tmp_path, scenario, run_id):
+async def test_upgrade_recovers_legacy_checkpoint_without_duplicate_batches(batch_service, monkeypatch, tmp_path, scenario, checkpoint_mode, run_id):
     service, repository = batch_service
-    lost_receipt = scenario == "unconfirmed-replay"
+    confirm_in_sibling = scenario == "unconfirmed-replay-with-sibling"
+    lost_receipt = scenario == "unconfirmed-replay" or confirm_in_sibling
+    drop_receipt = lost_receipt
     compact_history = scenario == "compacted-response"
+    compact_before_upgrade = scenario == "compacted-before-upgrade"
     config = {"configurable": {"thread_id": "thread-1"}}
+    inject_checkpoint_mode(config, checkpoint_mode)
+    resume_config = config
+    schema = adapt_state_schema_for_mode(_CompactionState, checkpoint_mode)
     context = {"user_id": "user-1", "run_id": run_id}
     checkpoint_path = str(tmp_path / "legacy-checkpoints.sqlite")
     create_batch = repository.create_batch
 
+    def summarization():
+        return DeerFlowSummarizationMiddleware(
+            model=_ScriptedModel(messages=iter([AIMessage(content="Earlier work summarized")])),
+            trigger=("messages", 5),
+            keep=("messages", 1),
+            token_counter=len,
+        )
+
     async def write_legacy_batch(**kwargs):
-        kwargs.pop("submission_digest", None)
-        kwargs["execution_spec"].pop(BATCH_SUBMISSION_DIGEST_KEY, None)
+        # Keep a digest only for the sibling fixture so SQL can return the same
+        # row for that identical request under the old key.
+        if not confirm_in_sibling:
+            kwargs.pop("submission_digest", None)
+            kwargs["execution_spec"].pop(BATCH_SUBMISSION_DIGEST_KEY, None)
         kwargs["submission_key"] = f"{kwargs['run_id'] or kwargs['thread_id']}:{kwargs['tool_call_id']}"
         return await create_batch(**kwargs)
 
     @wrap_tool_call
     async def legacy_tool_call(request, handler):
+        nonlocal drop_receipt
         receipt = _message(await handler(request))
         assert receipt.status == "success"
-        if lost_receipt:
+        if drop_receipt:
+            drop_receipt = False
             raise RuntimeError("Lost legacy receipt before checkpoint")
         return Command(update={"messages": [receipt]})
 
     with monkeypatch.context() as legacy:
         legacy.setattr(repository, "create_batch", write_legacy_batch)
+        legacy.setattr(repository, "find_submission", None)
+        legacy_responses = [_dispatch(1), AIMessage(content="Done")]
+        legacy_middleware = [legacy_tool_call]
+        if compact_before_upgrade:
+            legacy.setattr("deerflow.agents.middlewares.summarization_middleware.compacted_batch_receipt_update", lambda *_: {})
+            legacy_middleware.append(summarization())
+            legacy_responses.append(AIMessage(content="Acknowledged"))
         async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
             graph = create_agent(
-                model=_ScriptedModel(messages=iter([_dispatch(1), AIMessage(content="Done")])),
+                model=_ScriptedModel(messages=iter(legacy_responses)),
                 tools=tool_module.bind_batch_tools(service),
                 checkpointer=saver,
-                middleware=[legacy_tool_call],
+                middleware=normalize_middleware_state_schemas(legacy_middleware, checkpoint_mode),
+                state_schema=schema,
             )
             if lost_receipt:
                 with pytest.raises(RuntimeError, match="Lost legacy receipt before checkpoint"):
                     await graph.ainvoke({"messages": [HumanMessage("Submit first job")]}, config, context=context)
+                if confirm_in_sibling:
+                    resume_config = (await graph.aget_state(config)).config
+                    sibling_config = await graph.aupdate_state(
+                        resume_config,
+                        {"messages": [RemoveMessage(id="ai-1"), _dispatch(1).model_copy(update={"id": "ai-sibling"})]},
+                        as_node="model",
+                    )
+                    sibling = await graph.ainvoke(None, sibling_config, context=context)
+                    [sibling_receipt] = [message for message in sibling["messages"] if isinstance(message, ToolMessage)]
+                    assert sibling_receipt.status == "success"
             else:
                 await graph.ainvoke({"messages": [HumanMessage("Submit first job")]}, config, context=context)
+                if compact_before_upgrade:
+                    await graph.ainvoke({"messages": [HumanMessage("Acknowledge the earlier work")]}, config, context=context)
+                    compacted = (await graph.aget_state(config)).values
+                    assert compacted["summary_text"] == "Earlier work summarized"
+                    assert COMPACTED_BATCH_RECEIPTS_CHANNEL not in compacted
+                    assert not any(isinstance(message, ToolMessage) for message in compacted["messages"])
 
     [original] = await repository.list_by_thread("thread-1", user_id="user-1")
     responses = [AIMessage(content="Done")] if lost_receipt else [_dispatch(2), AIMessage(content="Done")]
-    middlewares = []
-    if compact_history:
-        middlewares.append(
-            DeerFlowSummarizationMiddleware(
-                model=_ScriptedModel(messages=iter([AIMessage(content="Earlier work summarized")])),
-                trigger=("messages", 5),
-                keep=("messages", 1),
-                token_counter=len,
-            )
-        )
+    middlewares = [summarization()] if compact_history else []
     async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
-        graph = create_agent(model=_ScriptedModel(messages=iter(responses)), tools=tool_module.bind_batch_tools(service), checkpointer=saver, middleware=middlewares, state_schema=_CompactionState)
+        graph = create_agent(
+            model=_ScriptedModel(messages=iter(responses)),
+            tools=tool_module.bind_batch_tools(service),
+            checkpointer=saver,
+            middleware=normalize_middleware_state_schemas(middlewares, checkpoint_mode),
+            state_schema=schema,
+        )
         if lost_receipt:
-            state = await graph.ainvoke(None, config, context={**context, "run_id": "resumed-run"})
+            state = await graph.ainvoke(None, resume_config, context={**context, "run_id": "resumed-run"})
             [receipt] = [message for message in state["messages"] if isinstance(message, ToolMessage)]
             assert receipt.status == "error"
             assert "Batch submission conflict" in receipt.content
@@ -233,17 +285,18 @@ async def test_upgrade_recovers_legacy_checkpoint_without_duplicate_batches(batc
             claimed = await repository.claim_items(now=datetime.now(UTC), lease_owner="worker", lease_seconds=60, limit=10)
             assert [item["batch_id"] for item in claimed] == [original["id"]]
         else:
-            checkpoint_state = (await graph.aget_state(config)).values
-            runtime = SimpleNamespace(state=checkpoint_state, context=context, config=config)
-            tools = {tool.name: tool for tool in tool_module.bind_batch_tools(service)}
-            arguments = dict(title="Job 1", items=[BatchTaskItem(key="job-1", prompt="Do job 1")], subagent_type="general-purpose", runtime=runtime, tool_call_id="call_0")
-            replayed = _message(await tools["batch_task"].coroutine(**arguments))
-            assert replayed.additional_kwargs["subagent_batch_id"] == original["id"]
-            changed = _message(await tools["batch_task"].coroutine(**(arguments | {"title": "Changed"})))
-            assert changed.status == "error"
-            assert "Batch submission conflict" in changed.content
+            if not compact_before_upgrade:
+                checkpoint_state = (await graph.aget_state(config)).values
+                runtime = SimpleNamespace(state=checkpoint_state, context=context, config=config)
+                tools = {tool.name: tool for tool in tool_module.bind_batch_tools(service)}
+                arguments = dict(title="Job 1", items=[BatchTaskItem(key="job-1", prompt="Do job 1")], subagent_type="general-purpose", runtime=runtime, tool_call_id="call_0")
+                replayed = _message(await tools["batch_task"].coroutine(**arguments))
+                assert replayed.additional_kwargs["subagent_batch_id"] == original["id"]
+                changed = _message(await tools["batch_task"].coroutine(**(arguments | {"title": "Changed"})))
+                assert changed.status == "error"
+                assert "Batch submission conflict" in changed.content
             state = await graph.ainvoke({"messages": [HumanMessage("Submit another job")]}, config, context={**context, "run_id": "new-run"})
-            if compact_history:
+            if compact_history or compact_before_upgrade:
                 assert state["summary_text"] == "Earlier work summarized"
                 [second] = [message for message in state["messages"] if isinstance(message, ToolMessage)]
             else:

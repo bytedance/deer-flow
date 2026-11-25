@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, NotRequired, Protocol, TypedDict
 
@@ -63,6 +63,7 @@ class BatchDispatchReceipts:
 
     current: frozenset[str]
     previous: frozenset[str]
+    confirm_previous: Callable[[frozenset[str]], Awaitable[bool]] | None = None
 
 
 @dataclass(frozen=True)

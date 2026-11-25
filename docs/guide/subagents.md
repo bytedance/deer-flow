@@ -345,6 +345,9 @@ same tool-call ID when the checkpoint attributes the old batch to an earlier
 dispatch. When automatic or manual context compaction removes a dispatch and
 its successful receipt, the checkpoint retains the batch ID. Later turns can
 then reuse the tool-call ID after the earlier receipt leaves the conversation.
+For threads compacted before batch IDs were retained, DeerFlow checks the
+current checkpoint's ancestors for the original dispatch and successful
+receipt. If the evidence is unavailable, the submission returns a conflict.
 
 Queued requests finish removing their queue entry and returning any transferred
 slot before cancellation propagates. The cleanup waits for the capacity lock
