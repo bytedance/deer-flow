@@ -20,6 +20,10 @@ unanswerable approval cannot block the chat.
 See [HITL Tool Approval](../../backend/docs/CONFIGURATION.md#hitl-tool-approval) for
 configuration and safety semantics.
 
+When a sandbox provider rejects a tool call because capacity is unavailable,
+the tool tells the agent how long to wait before retrying. If capacity remains
+unavailable, the result asks the agent to tell the user to try again later.
+
 Agents can call the read-only `inspect_run_status` tool to inspect visible run
 token usage, message and tool-call counts, an approximate context-window fill,
 and whether a summary or unfinished to-dos exist. It returns counts only, not
