@@ -312,6 +312,17 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             else:
                 logger.warning("Error closing BoxLite box %s (reason=%s): %s", sandbox_id, reason, e)
 
+    def _wrap_box(self, sandbox_id: str, box: SimpleBox | _AsyncBoxAdapter) -> BoxliteBox:
+        """Bind the terminal-failure callback to this adapter instance."""
+        wrapped = BoxliteBox(
+            sandbox_id,
+            box,
+            self._loop.run,
+            default_env=self._config["environment"],
+            on_terminal_failure=lambda failed_id, reason: self._invalidate_box(failed_id, reason, expected_box=wrapped),
+        )
+        return wrapped
+
     def _invalidate_box(self, sandbox_id: str, reason: str, *, expected_box: BoxliteBox | None = None) -> None:
         """Destroy and deregister a box after a terminal command-path failure."""
         box_to_close: BoxliteBox | None = None
@@ -382,13 +393,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
                     continue
                 if box is None:
                     continue
-                wrapped = BoxliteBox(
-                    sandbox_id,
-                    _AsyncBoxAdapter(box),
-                    self._loop.run,
-                    default_env=self._config["environment"],
-                    on_terminal_failure=lambda failed_id, reason: self._invalidate_box(failed_id, reason, expected_box=wrapped),
-                )
+                wrapped = self._wrap_box(sandbox_id, _AsyncBoxAdapter(box))
                 with self._lock:
                     if sandbox_id in self._boxes or sandbox_id in self._warm_pool:
                         continue
@@ -518,14 +523,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
 
         box = self._loop.run(_make())
         logger.info("Created BoxLite box %s (name=%s, image=%s)", sandbox_id, self._box_name(sandbox_id), self._config["image"])
-        wrapped = BoxliteBox(
-            sandbox_id,
-            box,
-            self._loop.run,
-            default_env=self._config["environment"],
-            on_terminal_failure=lambda failed_id, reason: self._invalidate_box(failed_id, reason, expected_box=wrapped),
-        )
-        return wrapped
+        return self._wrap_box(sandbox_id, box)
 
     def get(self, sandbox_id: str) -> Sandbox | None:
         with self._lock:

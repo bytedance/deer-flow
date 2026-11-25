@@ -431,18 +431,25 @@ def test_create_box_passes_prefixed_sandbox_id_as_name(monkeypatch):
 
 
 def test_startup_reconciliation_adopts_prefixed_existing_boxes(monkeypatch):
-    """Existing DeerFlow-named BoxLite boxes are adopted into the warm pool."""
+    """Recovered boxes keep independent failure callbacks after warm-pool adoption."""
     monkeypatch.setattr(
         "deerflow.community.boxlite.provider.get_app_config",
         lambda: _stub_config(),
     )
     stopped: list[str] = []
     commands = []
+    first_id = BoxliteProvider._sandbox_id("thread", "user")
+    second_id = BoxliteProvider._sandbox_id("other-thread", "user")
     monkeypatch.setitem(sys.modules, "boxlite", types.SimpleNamespace(ExecResult=types.SimpleNamespace))
 
     class _NativeBox:
+        def __init__(self, sandbox_id):
+            self.sandbox_id = sandbox_id
+
         async def exec(self, command, args=None, env=None, tty=False, user=None, timeout_secs=None, cwd=None):
             commands.append((command, args, env, timeout_secs, threading.get_ident()))
+            if args[-1] == "echo disconnected":
+                raise RuntimeError("vsock disconnected")
 
             async def stream(*values):
                 for value in values:
@@ -454,20 +461,16 @@ def test_startup_reconciliation_adopts_prefixed_existing_boxes(monkeypatch):
             return types.SimpleNamespace(stdout=lambda: stream("ok\n" if args[-1] == "echo ok" else "restored\n"), stderr=lambda: stream(), wait=wait)
 
         async def stop(self):
-            stopped.append("adopted")
+            stopped.append(self.sandbox_id)
+
+    recovered = {f"deer-flow-boxlite-{sandbox_id}": _NativeBox(sandbox_id) for sandbox_id in (first_id, second_id)}
 
     class _Runtime:
         async def list_info(self):
-            return [
-                types.SimpleNamespace(name="deer-flow-boxlite-adopted"),
-                types.SimpleNamespace(name="unrelated-box"),
-                types.SimpleNamespace(name=None),
-            ]
+            return [types.SimpleNamespace(name=name) for name in [*recovered, "unrelated-box", None]]
 
         async def get(self, name):
-            if name == "deer-flow-boxlite-adopted":
-                return _NativeBox()
-            raise AssertionError(f"unexpected box lookup: {name}")
+            return recovered[name]
 
     class _Boxlite:
         @staticmethod
@@ -478,18 +481,26 @@ def test_startup_reconciliation_adopts_prefixed_existing_boxes(monkeypatch):
 
     provider = BoxliteProvider()
 
-    assert list(provider._warm_pool) == ["adopted"]
-    adopted_box = provider._warm_pool["adopted"][0]
-    assert adopted_box.id == "adopted"
-    assert provider._reclaim_warm_pool("adopted", ("user", "thread")) == "adopted"
-    assert adopted_box.execute_command("echo restored", env={"KEY": "value"}, timeout=2) == "restored\n"
-    assert commands == [
-        ("sh", ["-lc", "echo ok"], None, 5, provider._loop._thread.ident),
-        ("sh", ["-lc", "echo restored"], [("KEY", "value")], 2, provider._loop._thread.ident),
-    ]
+    try:
+        assert list(provider._warm_pool) == [first_id, second_id]
+        first_box = provider._warm_pool[first_id][0]
+        second_box = provider._warm_pool[second_id][0]
+        assert provider.acquire("thread", user_id="user") == first_id
+        assert provider.get(first_id) is first_box
+        assert first_box.execute_command("echo restored", env={"KEY": "value"}, timeout=2) == "restored\n"
+        assert commands == [
+            ("sh", ["-lc", "echo ok"], None, 5, provider._loop._thread.ident),
+            ("sh", ["-lc", "echo restored"], [("KEY", "value")], 2, provider._loop._thread.ident),
+        ]
 
-    provider.shutdown()
-    assert stopped == ["adopted"]
+        assert first_box.execute_command("echo disconnected") == "Error: vsock disconnected"
+        assert provider.get(first_id) is None
+        assert stopped == [first_id]
+        assert provider._warm_pool[second_id][0] is second_box
+    finally:
+        provider.shutdown()
+
+    assert stopped == [first_id, second_id]
 
 
 def test_release_parks_in_warm_pool(monkeypatch):
