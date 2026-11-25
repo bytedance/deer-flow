@@ -33,17 +33,22 @@ def _matches_task_model(query: str, model: Any) -> bool:
     """Require a complete catalog spelling in the broad English task form."""
     normalized = " ".join(query.casefold().split())
     spellings = {" ".join(value.casefold().split()) for value in _spellings(model)}
-    if normalized in spellings:
-        return True
+    candidates = {normalized}
     # A determiner in front of a spelling still names that model: the rest must
     # match the catalog verbatim, so a catalog name ending in "model" matches
     # here while "regression model" or "data model" do not.
-    if _LEADING_DETERMINER.sub("", normalized) in spellings:
-        return True
+    if det_stripped := _LEADING_DETERMINER.sub("", normalized):
+        candidates.add(det_stripped)
     # Grammatical wrappers never establish intent: the entire remaining name
-    # must be in the catalog. In particular, "data" must not match "data-chat".
-    wrapped = re.fullmatch(rf"(?:(?:{_DETERMINERS})\s+)?(.+?)\s+model", normalized)
-    return wrapped is not None and wrapped.group(1) in spellings
+    # must be in the catalog. Check the suffix-only form before removing a
+    # leading determiner so literal names like "my model" stay candidates.
+    if normalized.endswith(" model"):
+        without_suffix = normalized.removesuffix(" model")
+        if without_suffix:
+            candidates.add(without_suffix)
+            if det_without_suffix := _LEADING_DETERMINER.sub("", without_suffix):
+                candidates.add(det_without_suffix)
+    return bool(candidates & spellings)
 
 
 def _tokens(value: str) -> list[str]:

@@ -233,9 +233,25 @@ def test_generic_use_preserves_literal_catalog_names_before_unwrapping(name):
     result = resolve_model_control(f"Use {name} to summarize this report", [configured])
     assert result["status"] == "ambiguous"
     assert result["candidates"][0]["name"] == name
+    suffix_wrapped = resolve_model_control(f"Use {name} model to summarize this report", [configured])
+    assert suffix_wrapped["status"] == "ambiguous"
+    assert suffix_wrapped["candidates"][0]["name"] == name
     wrapped = resolve_model_control(f"Use the {name} model to summarize this report", [configured])
     assert wrapped["status"] == "ambiguous"
     assert wrapped["candidates"][0]["name"] == name
+
+
+@pytest.mark.parametrize("name", ["my model", "a model"])
+def test_generic_use_suffix_wrapper_keeps_literal_determiner_name_in_collisions(name):
+    models = [model(name, name), model("model", "Plain Model")]
+    text = f"Use {name} model to summarize this report"
+    initial = resolve_model_control(text, models, scope="turn")
+    assert initial["status"] == "ambiguous"
+    assert {candidate["name"] for candidate in initial["candidates"]} == {name, "model"}
+    chosen = resolve_model_control(text, models, model_name=name, scope="turn")
+    assert chosen["status"] == "resolved"
+    assert chosen["model_name"] == name
+    assert text[chosen["task_offset"] :] == "summarize this report"
 
 
 def test_generic_use_allows_case_and_whitespace_but_not_version_or_token_prefixes():
