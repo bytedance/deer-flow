@@ -1038,6 +1038,31 @@ async def test_admin_api_lists_reserves_and_deletes_a_retired_grant(api_env):
 
 
 @pytest.mark.asyncio
+async def test_admin_api_shows_a_stored_grant_after_a_switch_to_config_grants(api_env):
+    router, env = api_env.router, api_env.env
+    admin = _request("admin")
+    await router.put_grant("research-tickets", _grant(owners=["alice"], digests=[env.digest]), admin)
+    # GitOps moves the binding to config grants; the runtime grant stays stored and keeps alice reserved.
+    data = api_env.config.model_dump()
+    data["mcp_agent_auth"]["research-tickets"] |= {"grants": "config", "owners": ["bob"], "definition_digests": [env.digest]}
+    data["mcp_agent_auth"]["research-tickets-2"] = {**api_env.config.model_dump()["mcp_agent_auth"]["research-tickets"]}
+    set_app_config(AppConfig.model_validate(data))
+    expected = {"server": "tickets", "agent": env.agent.name, "owners": ["alice"], "definition_digests": [env.digest]}
+    shown = (await router.get_binding("research-tickets", admin)).model_dump()
+    assert (shown["approval"], shown["owners"], shown["stored_grant"]) == ("config", ["bob"], expected)
+    listed = {b["binding"]: b for b in (await router.list_bindings(admin)).model_dump()["bindings"]}
+    assert listed["research-tickets"]["stored_grant"] == expected
+    assert listed["config-grant"]["stored_grant"] is None and listed["research-tickets-2"]["stored_grant"] is None
+    # The 409 names a binding whose details now show the reserved owner.
+    with pytest.raises(HTTPException) as exc:
+        await router.put_grant("research-tickets-2", _grant(owners=["alice"]), admin)
+    assert exc.value.status_code == 409 and "research-tickets'" in exc.value.detail
+    assert (await router.delete_grant("research-tickets", admin)).status_code == 204
+    assert (await router.get_binding("research-tickets", admin)).stored_grant is None
+    assert (await router.put_grant("research-tickets-2", _grant(owners=["alice"]), admin)).owners == ["alice"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("call", "status"),
     [

@@ -38,6 +38,15 @@ class _InvalidOwner(ValueError):
     """An owner id that file-backed agent storage cannot hold."""
 
 
+class McpAgentStoredGrantResponse(BaseModel):
+    """A runtime grant still stored for a binding that now keeps its grants in config.yaml."""
+
+    server: str
+    agent: str
+    owners: list[str]
+    definition_digests: list[str]
+
+
 class McpAgentBindingResponse(BaseModel):
     binding: str
     server: str
@@ -52,6 +61,10 @@ class McpAgentBindingResponse(BaseModel):
     approval: Literal["config", "current", "stale", "none", "retired"]
     owners: list[str]
     definition_digests: list[str]
+    # A grants: config binding whose earlier runtime grant is still stored: it
+    # admits nobody but keeps its owners reserved for the server and agent it was
+    # approved for until it is deleted. None otherwise.
+    stored_grant: McpAgentStoredGrantResponse | None = None
 
 
 class McpAgentBindingsResponse(BaseModel):
@@ -85,6 +98,14 @@ def _runtime_binding(config: AppConfig, binding_id: str) -> McpAgentCredentialBi
 
 def _response(config: AppConfig, binding_id: str, binding: McpAgentCredentialBinding, grant: StoredMcpAgentGrant | None) -> McpAgentBindingResponse:
     """Owners and digests as configured or stored; ``approval`` says whether a stored grant is in force."""
+    stored_grant = None
+    if binding.grants == "config" and grant is not None:
+        stored_grant = McpAgentStoredGrantResponse(
+            server=grant.approved_for.server,
+            agent=grant.approved_for.agent,
+            owners=list(grant.owners),
+            definition_digests=list(grant.definition_digests),
+        )
     if binding.grants == "config":
         owners, digests, approval = binding.owners, binding.definition_digests, "config"
     elif grant is None:
@@ -101,6 +122,7 @@ def _response(config: AppConfig, binding_id: str, binding: McpAgentCredentialBin
         approval=approval,
         owners=list(owners),
         definition_digests=list(digests),
+        stored_grant=stored_grant,
     )
 
 
@@ -165,7 +187,7 @@ async def get_binding(binding_id: BindingId, request: Request) -> McpAgentBindin
         if retired is None:
             raise HTTPException(status_code=404, detail=f"MCP agent binding '{binding_id}' is not configured")
         return _retired_response(binding_id, retired)
-    grant = await asyncio.to_thread(lambda: make_mcp_agent_grant_store(config).get(binding_id)) if binding.grants == "runtime" else None
+    grant = await asyncio.to_thread(lambda: make_mcp_agent_grant_store(config).get(binding_id))
     return _response(config, binding_id, binding, grant)
 
 

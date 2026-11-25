@@ -1094,7 +1094,9 @@ A grant whose binding was removed from `config.yaml` is listed with
 Stale and retired grants, and grants of disabled bindings, keep their owners
 reserved for the agent and server they were approved for until they are
 replaced or deleted; owners listed by a disabled `grants: config` binding stay
-reserved too. A write to a disabled binding is checked for overlaps like any
+reserved too. A binding moved to `grants: config` whose runtime grant is
+still stored returns it as `stored_grant`, so the owners it reserves are visible
+until the grant is deleted. A write to a disabled binding is checked for overlaps like any
 other, so enabling it again cannot make admission reject both bindings.
 
 #### Reset MCP Tools Cache

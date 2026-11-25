@@ -668,6 +668,10 @@ secret of the same account keeps the grant. `approval` is otherwise `current`
 (the grant is in force), `none` (no grant), `config` (`grants: config`) or
 `retired`: the binding was removed from `config.yaml` and the grant is still
 stored, shown with the agent and server it was approved for.
+A binding moved to `grants: config` while its runtime grant is still stored
+also returns that grant as `stored_grant` (the server and agent it was
+approved for, its owners and digests): it admits nobody but keeps those
+owners reserved until it is deleted.
 
 A deploy pipeline adds the new digest right after it deploys (read it from the
 deploy account's copy with `definition-digest`, after reviewing that copy),
