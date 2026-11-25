@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Any, NotRequired, Protocol, TypedDict
+from typing import Any, Literal, NotRequired, Protocol, TypedDict, get_args
 
 BATCH_CONTINUATION_NAMESPACE = "native-subagent-batches"
+BatchItemStatus = Literal["pending", "queued", "leased", "running", "succeeded", "failed", "cancelled"]
+BATCH_ITEM_STATUSES = get_args(BatchItemStatus)
 
 
 def batch_continuation_key(batch_id: str) -> str:
@@ -18,6 +20,12 @@ class BatchItemInput(TypedDict):
     prompt: str
     acceptance_criteria: NotRequired[list[str] | None]
     depends_on: NotRequired[list[str]]
+
+
+class BatchItemSummary(TypedDict):
+    position: int
+    item_key: str
+    status: str
 
 
 @dataclass(frozen=True)
@@ -42,6 +50,8 @@ class SubagentBatchSubmitter(Protocol):
     async def submit(self, request: BatchSubmitRequest) -> dict[str, Any]: ...
 
     async def get_batch(self, *, batch_id: str, user_id: str) -> dict[str, Any] | None: ...
+
+    async def list_batch_items(self, *, batch_id: str, user_id: str, thread_id: str, after_position: int, limit: int, status: BatchItemStatus | None) -> list[BatchItemSummary] | None: ...
 
     async def read_batch_item(self, *, batch_id: str, user_id: str, thread_id: str, position: int) -> dict[str, Any] | None: ...
 

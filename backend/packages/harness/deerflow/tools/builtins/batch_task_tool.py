@@ -27,7 +27,10 @@ from deerflow.mcp_scope import (
 )
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.subagents.batch_runtime import (
+    BATCH_ITEM_STATUSES,
     BatchItemInput,
+    BatchItemStatus,
+    BatchItemSummary,
     BatchSubmitRequest,
     SubagentBatchSubmitter,
     get_subagent_batch_submitter,
@@ -36,6 +39,10 @@ from deerflow.subagents.registry import get_available_subagent_names, get_subage
 from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 from deerflow.utils.assembly_io import run_assembly
+
+# Match the configuration schema ceiling so lowering the submission limit
+# does not hide stored positions in previously submitted batches.
+_BATCH_ITEM_POSITION_LIMIT = 100_000
 
 
 class BatchTaskItem(BaseModel):
@@ -117,7 +124,7 @@ def bind_batch_tools(
         raise ValueError("Provide exactly one of submitter or submitter_provider")
     provider = submitter_provider if submitter_provider is not None else lambda: submitter
 
-    return tuple(_bind_batch_tool(tool, provider, app_config) for tool in (batch_task, batch_status, cancel_batch, read_batch_result))
+    return tuple(_bind_batch_tool(tool, provider, app_config) for tool in (batch_task, batch_status, cancel_batch, list_batch_items, read_batch_result))
 
 
 def _result(tool_call_id: str, *, content: str, batch: dict[str, Any] | None = None, error: bool = False) -> Command:
@@ -392,17 +399,69 @@ def _batch_result_window(item: dict[str, Any], offset: int, max_chars: int, expe
     return response
 
 
-def _batch_result_response_limit(runtime: Runtime) -> int:
+def _batch_read_response_limit(runtime: Runtime, tool_name: str) -> int:
     # Keep this inline cap aligned with tool_output_budget_middleware's
     # _effective_trigger / _budget_content, consumed by _patch_tool_message.
     # Changes there must also update this cap and the reader budget regressions.
     config = getattr(_batch_app_config(runtime), "tool_output", None)
     if not isinstance(config, ToolOutputConfig):
         config = ToolOutputConfig()
-    if not config.enabled or "read_batch_result" in config.exempt_tools:
+    if not config.enabled or tool_name in config.exempt_tools:
         return 10_000
-    limits = [limit for limit in (config.tool_overrides.get("read_batch_result", config.externalize_min_chars), config.fallback_max_chars) if limit > 0]
+    limits = [limit for limit in (config.tool_overrides.get(tool_name, config.externalize_min_chars), config.fallback_max_chars) if limit > 0]
     return min(10_000, *limits) if limits else 10_000
+
+
+def _batch_read_thread_id(runtime: Runtime) -> str | None:
+    context = runtime.context if isinstance(runtime.context, dict) else {}
+    configurable = (runtime.config or {}).get("configurable", {})
+    thread_id = context.get("thread_id") or configurable.get("thread_id")
+    return thread_id if isinstance(thread_id, str) and thread_id else None
+
+
+def _batch_items_page(items: list[BatchItemSummary], limit: int, response_limit: int) -> str:
+    page = items[:limit]
+    while True:
+        next_position = page[-1]["position"] if page and len(page) < len(items) else None
+        response = json.dumps({"status": "ok", "items": page, "next_after_position": next_position}, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
+        if len(response) <= response_limit:
+            return response
+        if len(page) <= 1:
+            return json.dumps({"status": "budget_too_small"})
+        page.pop()
+
+
+@tool("list_batch_items", parse_docstring=True)
+async def list_batch_items(runtime: Runtime, batch_id: str, status: BatchItemStatus | None = None, after_position: StrictInt = -1, limit: StrictInt = 10) -> str:
+    """Find item positions for requested result inspection in this thread.
+
+    Returns only positions, item keys (untrusted labels), and execution statuses.
+    Pass a selected position to read_batch_result for its report and acceptance
+    verdict. To continue a page, pass next_after_position with the same status
+    filter. A null cursor means the page has no more matches at the time of read.
+    Items that start matching behind the cursor require a fresh listing. Never
+    poll for completion or use this tool to ingest an entire batch automatically.
+
+    Args:
+        batch_id: Server identifier returned by batch_task.
+        status: Optional execution status to match exactly.
+        after_position: Exclusive item position, or -1 to start from the beginning.
+        limit: Maximum number of items, between 1 and 20 (default 10).
+    """
+    if type(after_position) is not int or not -1 <= after_position < _BATCH_ITEM_POSITION_LIMIT or type(limit) is not int or not 1 <= limit <= 20:
+        return json.dumps({"status": "invalid_request"})
+    if status is not None and status not in BATCH_ITEM_STATUSES:
+        return json.dumps({"status": "invalid_request"})
+    thread_id = _batch_read_thread_id(runtime)
+    if thread_id is None:
+        return json.dumps({"status": "invalid_request"})
+    submitter = _batch_submitter()
+    if submitter is None or not callable(getattr(submitter, "list_batch_items", None)):
+        return json.dumps({"status": "unavailable"})
+    items = await submitter.list_batch_items(batch_id=batch_id, user_id=resolve_runtime_user_id(runtime), thread_id=thread_id, after_position=after_position, limit=limit + 1, status=status)
+    if items is None:
+        return json.dumps({"status": "not_found"})
+    return _batch_items_page(items, limit, _batch_read_response_limit(runtime, "list_batch_items"))
 
 
 @tool("read_batch_result", parse_docstring=True)
@@ -430,19 +489,14 @@ async def read_batch_result(runtime: Runtime, batch_id: str, position: StrictInt
         max_chars: Window character limit, between 1 and 8192 (default 4000).
         expected_revision: Previous revision required when offset is nonzero.
     """
-    # 100_000 is SubagentBatchesConfig.max_items_per_batch's schema ceiling.
-    # Keep these bounds in lockstep; use the ceiling rather than today's configured
-    # cap so lowering the submission limit does not hide existing batch items.
-    if any(type(value) is not int for value in (position, offset, max_chars)) or not 0 <= position < 100_000 or offset < 0 or not 1 <= max_chars <= 8192:
+    if any(type(value) is not int for value in (position, offset, max_chars)) or not 0 <= position < _BATCH_ITEM_POSITION_LIMIT or offset < 0 or not 1 <= max_chars <= 8192:
         return json.dumps({"status": "invalid_request"})
     if expected_revision is not None and (not isinstance(expected_revision, str) or re.fullmatch(r"[a-f0-9]{64}", expected_revision) is None):
         return json.dumps({"status": "invalid_request"})
     if offset and expected_revision is None:
         return json.dumps({"status": "invalid_request"})
-    context = runtime.context if isinstance(runtime.context, dict) else {}
-    configurable = (runtime.config or {}).get("configurable", {})
-    thread_id = context.get("thread_id") or configurable.get("thread_id")
-    if not isinstance(thread_id, str) or not thread_id:
+    thread_id = _batch_read_thread_id(runtime)
+    if thread_id is None:
         return json.dumps({"status": "invalid_request"})
     submitter = _batch_submitter()
     if submitter is None or not callable(getattr(submitter, "read_batch_item", None)):
@@ -452,4 +506,4 @@ async def read_batch_result(runtime: Runtime, batch_id: str, position: StrictInt
         return json.dumps({"status": "not_found"})
     # Reports can reach the configured million-character cap; serializing and
     # hashing the snapshot must not run on the streaming event loop.
-    return await asyncio.to_thread(_batch_result_window, item, offset, max_chars, expected_revision, _batch_result_response_limit(runtime))
+    return await asyncio.to_thread(_batch_result_window, item, offset, max_chars, expected_revision, _batch_read_response_limit(runtime, "read_batch_result"))

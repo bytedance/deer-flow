@@ -156,7 +156,7 @@ async def test_read_browser_batch_item_projects_report_and_captured_evidence() -
     repository.list_items.assert_awaited_once_with(
         "batch-1",
         user_id="user-1",
-        offset=0,
+        position=0,
         limit=1,
         include_result=True,
     )

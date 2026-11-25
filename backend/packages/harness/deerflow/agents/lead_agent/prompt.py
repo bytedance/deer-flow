@@ -602,9 +602,10 @@ count and never emulate it by repeatedly calling `task`.
 - Use `batch_status` for compact progress and `cancel_batch` for cancellation.
 - Do not wait for or paste all item results into this run. The Web UI and results
   export API own bulk inspection. When the owner explicitly asks to inspect or
-  synthesize stored results, use `read_batch_result` for selected items in this
-  thread. Follow its bounded continuation/revision contract; never poll for
-  completion or equate execution success with acceptance.
+  synthesize stored results, use `list_batch_items` to find positions by execution
+  status and `read_batch_result` to read selected items in this thread. Follow
+  their pagination instructions. Check the acceptance verdict separately from
+  execution status, and finish the turn without polling for completion.
 """
     return f"""<subagent_system>
 ## Subagent Routing: Delegate Only for Clear Net Benefit

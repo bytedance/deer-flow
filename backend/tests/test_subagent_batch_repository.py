@@ -563,6 +563,7 @@ async def test_item_list_selects_only_the_heavy_columns_it_returns(tmp_path) -> 
     try:
         public_items = await repo.list_items("batch-1", user_id="user-1")
         full_items = await repo.list_items("batch-1", user_id="user-1", include_result=True, include_prompt=True)
+        summaries = await repo.list_item_summaries("batch-1", user_id="user-1", thread_id="thread-1", after_position=-1, limit=2, status="pending")
     finally:
         event.remove(sync_engine, "before_cursor_execute", listener)
 
@@ -574,6 +575,10 @@ async def test_item_list_selects_only_the_heavy_columns_it_returns(tmp_path) -> 
     assert "result_preview" in public_items[0]
     assert full_items[0]["prompt"] == "Process 0"
     assert full_items[0]["result"] is None
+    summary_statement = next(statement for statement in statements if "LEFT OUTER JOIN subagent_batch_items" in statement)
+    selected = summary_statement.split("FROM", 1)[0]
+    assert re.findall(r"subagent_batch_items\.(\w+)", selected) == ["position", "item_key", "status"]
+    assert summaries == [{"position": 0, "item_key": "item-0", "status": "pending"}]
 
 
 @pytest.mark.asyncio

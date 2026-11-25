@@ -1,7 +1,7 @@
 from deerflow.tools.artifact_handoff import present_shared_artifact
 
 from .background_tasks_tool import cancel_background_task, list_background_tasks
-from .batch_task_tool import batch_status, batch_task, cancel_batch, read_batch_result
+from .batch_task_tool import batch_status, batch_task, cancel_batch, list_batch_items, read_batch_result
 from .clarification_tool import ask_clarification_tool
 from .inspect_run_status_tool import build_inspect_run_status_tool
 from .list_uploaded_files_tool import list_uploaded_files
@@ -25,6 +25,7 @@ __all__ = [
     "batch_task",
     "batch_status",
     "cancel_batch",
+    "list_batch_items",
     "read_batch_result",
     "list_uploaded_files",
     "list_background_tasks",

@@ -18,7 +18,7 @@ from deerflow.extensions import LoadedExtensions, get_loaded_extensions
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.subagents.batch_acceptance import check_batch_acceptance
 from deerflow.subagents.batch_lease import BatchItemLease
-from deerflow.subagents.batch_runtime import BatchSubmitRequest
+from deerflow.subagents.batch_runtime import BatchItemStatus, BatchItemSummary, BatchSubmitRequest
 from deerflow.subagents.capacity import SubagentExecutionCapacity
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 from deerflow.subagents.executor import (
@@ -367,23 +367,25 @@ class SubagentBatchService:
     ) -> dict[str, Any] | None:
         return await self._repository.get_batch(batch_id, user_id=user_id)
 
-    async def read_batch_item(self, *, batch_id: str, user_id: str, thread_id: str, position: int) -> dict[str, Any] | None:
-        """Read one current-thread result; never expose worker execution context."""
+    async def list_batch_items(self, *, batch_id: str, user_id: str, thread_id: str, after_position: int, limit: int, status: BatchItemStatus | None) -> list[BatchItemSummary] | None:
+        return await self._repository.list_item_summaries(batch_id, user_id=user_id, thread_id=thread_id, after_position=after_position, limit=limit, status=status)
+
+    async def _read_owned_batch_item(self, *, batch_id: str, user_id: str, thread_id: str, position: int) -> dict[str, Any] | None:
         if position < 0:
             return None
         batch = await self._repository.get_batch(batch_id, user_id=user_id)
         if batch is None or batch["thread_id"] != thread_id:
             return None
-        items = await self._repository.list_items(batch_id, user_id=user_id, offset=position, limit=1, include_result=True)
-        # ``list_items(offset=position)`` only lands on ``position`` while item
-        # rows are dense; after any retention gap it returns the next surviving
-        # row. Serving it would attribute one item's report to another item key
-        # (``next_position`` advances from the wrong base too). Verify the row's
-        # position, same as the browser projection below.
-        if not items or items[0].get("position") != position:
+        items = await self._repository.list_items(batch_id, user_id=user_id, position=position, limit=1, include_result=True)
+        return items[0] if items else None
+
+    async def read_batch_item(self, *, batch_id: str, user_id: str, thread_id: str, position: int) -> dict[str, Any] | None:
+        """Read one current-thread result; never expose worker execution context."""
+        item = await self._read_owned_batch_item(batch_id=batch_id, user_id=user_id, thread_id=thread_id, position=position)
+        if item is None:
             return None
         fields = ("id", "item_key", "position", "status", "attempt", "result", "result_truncated", "error", "stop_reason", "acceptance_criteria", "acceptance_verdict")
-        return {key: items[0].get(key) for key in fields}
+        return {key: item.get(key) for key in fields}
 
     async def read_browser_batch_item(
         self,
@@ -399,21 +401,9 @@ class SubagentBatchService:
         only. It never invokes a provider, exposes the original prompt or
         execution specification, or depends on the batch worker being alive.
         """
-        if position < 0:
+        item = await self._read_owned_batch_item(batch_id=batch_id, user_id=user_id, thread_id=thread_id, position=position)
+        if item is None:
             return None
-        batch = await self._repository.get_batch(batch_id, user_id=user_id)
-        if batch is None or batch["thread_id"] != thread_id:
-            return None
-        items = await self._repository.list_items(
-            batch_id,
-            user_id=user_id,
-            offset=position,
-            limit=1,
-            include_result=True,
-        )
-        if not items or items[0].get("position") != position:
-            return None
-        item = items[0]
         return {
             "id": item.get("id"),
             "item_key": item.get("item_key"),

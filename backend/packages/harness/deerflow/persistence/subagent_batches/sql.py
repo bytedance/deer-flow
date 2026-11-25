@@ -5,7 +5,7 @@ from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased, defer
@@ -15,7 +15,7 @@ from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.subagent_batches.model import SubagentBatchDependencyRow, SubagentBatchItemRow, SubagentBatchRow
 from deerflow.subagents.acceptance_checks import AcceptanceVerdict, validate_acceptance_verdict
 from deerflow.subagents.batch_dependencies import batch_dependencies
-from deerflow.subagents.batch_runtime import BATCH_CONTINUATION_NAMESPACE, BatchItemInput, batch_continuation_key
+from deerflow.subagents.batch_runtime import BATCH_CONTINUATION_NAMESPACE, BATCH_ITEM_STATUSES, BatchItemInput, BatchItemStatus, BatchItemSummary, batch_continuation_key
 from deerflow.subagents.report_contract import normalize_acceptance_criteria
 from deerflow.utils.time import coerce_iso
 
@@ -193,7 +193,7 @@ class SubagentBatchRepository:
     async def _with_counts(self, session: AsyncSession, batch: SubagentBatchRow) -> dict[str, Any]:
         counts = await self._counts(session, batch.id)
         data = self._batch_dict(batch)
-        data["counts"] = {status: counts.get(status, 0) for status in ("pending", "queued", "leased", "running", "succeeded", "failed", "cancelled")}
+        data["counts"] = {status: counts.get(status, 0) for status in BATCH_ITEM_STATUSES}
         return data
 
     async def get_batch(self, batch_id: str, *, user_id: str) -> dict[str, Any] | None:
@@ -230,6 +230,7 @@ class SubagentBatchRepository:
         status: str | None = None,
         include_prompt: bool = False,
         include_result: bool = False,
+        position: int | None = None,
     ) -> list[dict[str, Any]] | None:
         async with self._sf() as session:
             batch = await session.get(SubagentBatchRow, batch_id)
@@ -244,6 +245,8 @@ class SubagentBatchRepository:
                 stmt = stmt.options(defer(SubagentBatchItemRow.prompt, raiseload=True))
             if status is not None:
                 stmt = stmt.where(SubagentBatchItemRow.status == status)
+            if position is not None:
+                stmt = stmt.where(SubagentBatchItemRow.position == position)
             stmt = stmt.order_by(SubagentBatchItemRow.position).offset(offset).limit(limit)
             rows = list((await session.execute(stmt)).scalars())
             values = []
@@ -253,6 +256,22 @@ class SubagentBatchRepository:
                     value["prompt"] = row.prompt
                 values.append(value)
             return values
+
+    async def list_item_summaries(self, batch_id: str, *, user_id: str, thread_id: str, after_position: int, limit: int, status: BatchItemStatus | None) -> list[BatchItemSummary] | None:
+        """Return an owner- and thread-scoped page of item locators."""
+        item = SubagentBatchItemRow
+        batch = SubagentBatchRow
+        match = [item.batch_id == batch.id, item.position > after_position]
+        if status is not None:
+            match.append(item.status == status)
+        # The outer join distinguishes an accessible empty page from a missing
+        # batch without loading the parent or any report, prompt or evidence.
+        stmt = select(item.position, item.item_key, item.status).select_from(batch).outerjoin(item, and_(*match)).where(batch.id == batch_id, batch.user_id == user_id, batch.thread_id == thread_id).order_by(item.position).limit(limit)
+        async with self._sf() as session:
+            rows = (await session.execute(stmt)).all()
+        if not rows:
+            return None
+        return [BatchItemSummary(position=position, item_key=key, status=state) for position, key, state in rows if position is not None]
 
     @staticmethod
     def _dependencies_ready():

@@ -107,7 +107,7 @@ def reader(service):
     return tools["read_batch_result"]
 
 
-async def submit(env):
+async def submit(env, *, items=None):
     # Use the real batch submission tool; the fake executor replaces only paid work.
     from deerflow.subagents.config import SubagentConfig
 
@@ -120,7 +120,7 @@ async def submit(env):
             title="Research",
             subagent_type="general-purpose",
             tool_call_id="submit-1",
-            items=[tools_module.BatchTaskItem(key="one", prompt="Private item prompt", acceptance_criteria=["Human review required"]), tools_module.BatchTaskItem(key="two", prompt="Second")],
+            items=items or [tools_module.BatchTaskItem(key="one", prompt="Private item prompt", acceptance_criteria=["Human review required"]), tools_module.BatchTaskItem(key="two", prompt="Second")],
             max_live_items=2,
             max_running_items=2,
         )
@@ -187,6 +187,73 @@ async def test_real_submission_worker_reopen_and_toolnode_continuation(env):
     assert env.launches == launches  # Reads never schedule or re-execute work.
     assert document.keys() == {"id", "item_key", "position", "status", "attempt", "result", "result_truncated", "error", "stop_reason", "acceptance_criteria", "acceptance_verdict"}
     await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env", ["sqlite", "postgres"], indirect=True)
+async def test_list_failed_items_and_read_selected_report_from_graph(env):
+    env.result.status = Status.FAILED
+    env.result.error = "Worker failed"
+    items = [tools_module.BatchTaskItem(key=f"record-{position}", prompt="Private prompt") for position in range(3)]
+    batch = await submit(env, items=items)
+    await complete(env, batch)
+    await complete(env, batch)
+    launches = env.launches
+
+    tools = {tool.name: tool for tool in tools_module.bind_batch_tools(env.service)}
+    assert set(tools["list_batch_items"].tool_call_schema.model_json_schema()["properties"]) == {"batch_id", "status", "after_position", "limit"}
+    graph = StateGraph(MessagesState, context_schema=dict)
+    graph.add_node("tools", ToolNode([tools["list_batch_items"], tools["read_batch_result"]]))
+    graph.add_edge(START, "tools")
+    graph.add_edge("tools", END)
+    compiled = graph.compile()
+
+    async def invoke(name="list_batch_items", user="user-1", thread="thread-1", **kwargs):
+        call = {"name": name, "args": {"batch_id": batch, **kwargs}, "id": "inspect", "type": "tool_call"}
+        output = await compiled.ainvoke({"messages": [AIMessage(content="", tool_calls=[call])]}, context={"user_id": user, "thread_id": thread})
+        return json.loads(output["messages"][-1].content)
+
+    assert await invoke(user="other") == {"status": "not_found"}
+    assert await invoke(thread="other") == {"status": "not_found"}
+    assert await invoke(status="succeeded") == {"status": "ok", "items": [], "next_after_position": None}
+    first = await invoke(status="failed", limit=1)
+    assert first == {"status": "ok", "items": [{"position": 0, "item_key": "record-0", "status": "failed"}], "next_after_position": 0}
+
+    # A retry removes the first match. A filtered OFFSET would skip position 1.
+    first_report = json.loads((await invoke("read_batch_result", position=0))["content"])
+    assert await env.repo.retry_item(batch, first_report["id"], user_id="user-1") is not None
+    remaining = await invoke(status="failed", after_position=first["next_after_position"])
+    assert remaining == {
+        "status": "ok",
+        "items": [{"position": position, "item_key": f"record-{position}", "status": "failed"} for position in (1, 2)],
+        "next_after_position": None,
+    }
+    chosen = remaining["items"][1]
+    report = json.loads((await invoke("read_batch_result", position=chosen["position"]))["content"])
+    assert report["item_key"] == chosen["item_key"] and report["error"] == "Worker failed"
+    assert env.launches == launches
+
+
+@pytest.mark.asyncio
+async def test_item_list_fits_output_budget_and_preserves_continuation(env):
+    from deerflow.config.tool_output_config import ToolOutputConfig
+
+    items = [tools_module.BatchTaskItem(key=key, prompt="Private prompt") for key in ("<record-one>", "record-two")]
+    batch = await submit(env, items=items)
+
+    def lister(budget):
+        config = SimpleNamespace(tool_output=ToolOutputConfig(tool_overrides={"list_batch_items": budget}))
+        return {tool.name: tool for tool in tools_module.bind_batch_tools(env.service, app_config=config)}["list_batch_items"]
+
+    tool = lister(145)
+    first = await tool.coroutine(runtime=runtime(), batch_id=batch)
+    assert len(first) <= 145 and "<" not in first
+    page = json.loads(first)
+    assert [item["item_key"] for item in page["items"]] == ["<record-one>"]
+    second = json.loads(await tool.coroutine(runtime=runtime(), batch_id=batch, after_position=page["next_after_position"]))
+    assert [item["item_key"] for item in second["items"]] == ["record-two"]
+    assert second["next_after_position"] is None
+    assert json.loads(await lister(60).coroutine(runtime=runtime(), batch_id=batch)) == {"status": "budget_too_small"}
 
 
 @pytest.mark.asyncio
@@ -259,10 +326,11 @@ async def test_bound_reader_stop_does_not_fall_back_to_global(monkeypatch):
     global_submitter = AsyncMock()
     monkeypatch.setattr(tools_module, "get_subagent_batch_submitter", lambda: global_submitter)
     tools = {t.name: t for t in tools_module.bind_batch_tools(submitter_provider=lambda: current[0])}
-    assert "read_batch_result" in tools
-    output = json.loads(await tools["read_batch_result"].coroutine(runtime=runtime(), batch_id="batch"))
-    assert output == {"status": "unavailable"}
+    for name in ("read_batch_result", "list_batch_items"):
+        output = json.loads(await tools[name].coroutine(runtime=runtime(), batch_id="batch"))
+        assert output == {"status": "unavailable"}
     global_submitter.read_batch_item.assert_not_awaited()
+    global_submitter.list_batch_items.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -417,10 +485,11 @@ async def test_gateway_tool_assembly_gating_and_config_binding(env, monkeypatch)
         tools = {t.name: t for t in get_available_tools(app_config=config, subagent_enabled=True)}
         raw = await tools["read_batch_result"].coroutine(runtime=runtime(), batch_id=batch)
         assert json.loads(raw)["status"] == "ok" and len(raw) <= 500
-        assert "read_batch_result" not in {t.name for t in get_available_tools(app_config=config, subagent_enabled=False)}
+        assert {"read_batch_result", "list_batch_items"} <= tools.keys()
+        assert {"read_batch_result", "list_batch_items"}.isdisjoint(t.name for t in get_available_tools(app_config=config, subagent_enabled=False))
         set_subagent_batch_submitter(None)
         assert json.loads(await tools["read_batch_result"].coroutine(runtime=runtime(), batch_id=batch)) == {"status": "unavailable"}
-        assert "read_batch_result" not in {t.name for t in get_available_tools(app_config=config, subagent_enabled=True)}
+        assert {"read_batch_result", "list_batch_items"}.isdisjoint(t.name for t in get_available_tools(app_config=config, subagent_enabled=True))
     finally:
         set_subagent_batch_submitter(None)
 
@@ -438,10 +507,7 @@ async def test_runtime_identity_is_not_a_model_argument(env):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("env", ["sqlite", "postgres"], indirect=True)
 async def test_read_batch_item_never_serves_a_gapped_position(env):
-    """``read_batch_item`` must verify the returned row's position like its
-    browser sibling: ``list_items(offset=position)`` only equals position
-    while rows are dense, so a retention gap must yield ``None`` — not the
-    next item's report attributed to the wrong item key."""
+    """Missing positions stay missing and surviving positions remain readable."""
     from sqlalchemy import delete as sa_delete
 
     from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow
@@ -457,7 +523,6 @@ async def test_read_batch_item_never_serves_a_gapped_position(env):
     assert await env.service.read_batch_item(batch_id=batch, user_id="user-1", thread_id="thread-1", position=0) is None
     # The browser projection already defends against gaps; keep them aligned.
     assert await env.service.read_browser_batch_item(batch_id=batch, user_id="user-1", thread_id="thread-1", position=0) is None
-    # Positions past the gap never resolve to a shifted row either (OFFSET
-    # semantics): the survivor is only reachable from a fresh dense batch.
-    assert await env.service.read_batch_item(batch_id=batch, user_id="user-1", thread_id="thread-1", position=1) is None
+    item = await env.service.read_batch_item(batch_id=batch, user_id="user-1", thread_id="thread-1", position=1)
+    assert item["position"] == 1 and item["item_key"] == "two"
     assert await env.service.read_batch_item(batch_id=batch, user_id="user-1", thread_id="thread-1", position=2) is None
