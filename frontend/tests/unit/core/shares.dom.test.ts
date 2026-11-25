@@ -15,6 +15,28 @@ afterEach(() => {
 });
 
 describe("share boundaries", () => {
+  it("resolves URL suffixes separately from encoded filename punctuation", () => {
+    const punctuated = { ...artifact, path: "charts/a#b?.svg" };
+    for (const suffix of ["#page=3", "?v=2", "?v=2#section"]) {
+      const href = `charts/a%20b.svg${suffix}`;
+      expect(resolveShareArtifact(href, [artifact])).toEqual(artifact);
+      expect(sharedLink(href, token, [artifact])).toBe(
+        shareArtifactURL(token, artifact.path) + suffix,
+      );
+    }
+    expect(
+      resolveShareArtifact("charts/a%23b%3F.svg#section", [punctuated]),
+    ).toEqual(punctuated);
+    expect(
+      resolveShareArtifact("../../private.svg#section", [artifact]),
+    ).toBeUndefined();
+    expect(
+      resolveShareArtifact("/api/threads/private/artifacts/a.svg#section", [
+        artifact,
+      ]),
+    ).toBeUndefined();
+  });
+
   it("only resolves copied outputs, including relative markdown references", () => {
     expect(
       resolveShareArtifact("sandbox:/mnt/user-data/outputs/charts/a%20b.svg", [

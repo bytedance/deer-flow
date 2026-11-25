@@ -24,6 +24,10 @@ for download. Text previews show at most 512 KiB. HTML scripts, forms and networ
 requests are blocked. The page rechecks availability on return and every
 30 seconds while visible.
 
+Links to copied output files may include a query or fragment, such as
+`report.pdf#page=3`. These suffixes are retained on the shared file URL;
+the file itself must still appear in the snapshot's artifact manifest.
+
 ![A public read-only conversation snapshot](assets/sharing/share-preview.png)
 
 Choose **Continue in my workspace** to create an independent conversation with

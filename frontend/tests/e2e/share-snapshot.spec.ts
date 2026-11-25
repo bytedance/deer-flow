@@ -20,7 +20,7 @@ const snapshot = {
       id: "answer",
       type: "ai",
       content:
-        "Revenue rose. [Report](sandbox:/mnt/user-data/outputs/report.html) ![tracking](https://tracker.invalid/pixel) [private](/workspace/chats/secret)",
+        "Revenue rose. [Report](sandbox:/mnt/user-data/outputs/report.html#summary) ![tracking](https://tracker.invalid/pixel) [private](/workspace/chats/secret)",
     },
     { id: "tool", type: "tool", name: "python", content: "Revenue: 42" },
   ],
@@ -85,7 +85,10 @@ test("anonymous snapshot previews files without entering the private workspace",
   ).toHaveCount(0);
   await expect(
     page.getByRole("link", { name: "Report", exact: true }),
-  ).toHaveAttribute("href", `/api/shares/${token}/artifacts/report.html`);
+  ).toHaveAttribute(
+    "href",
+    `/api/shares/${token}/artifacts/report.html#summary`,
+  );
   await page.getByRole("button", { name: "report.html", exact: true }).click();
   await expect(page.locator("iframe")).toHaveAttribute("sandbox", "");
   await expect(

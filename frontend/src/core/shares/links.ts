@@ -6,7 +6,8 @@ export function resolveShareArtifact(
   artifacts: SharedArtifact[],
   basePath = "",
 ) {
-  let path = href.replace(/^sandbox:/, "");
+  // Split URL syntax before decoding: %23 and %3F are filename characters.
+  let path = href.split(/[?#]/, 1)[0]!.replace(/^sandbox:/, "");
   try {
     path = decodeURIComponent(path);
   } catch {
@@ -38,7 +39,10 @@ export function sharedLink(
   basePath = "",
 ) {
   const artifact = resolveShareArtifact(href, artifacts, basePath);
-  if (artifact) return shareArtifactURL(token, artifact.path);
+  if (artifact)
+    return (
+      shareArtifactURL(token, artifact.path) + (/[?#].*$/.exec(href)?.[0] ?? "")
+    );
   try {
     const url = new URL(href);
     if (
