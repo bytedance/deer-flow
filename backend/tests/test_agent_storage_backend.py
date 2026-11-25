@@ -405,6 +405,60 @@ def test_file_update_holds_agent_lock_across_threads(tmp_path, monkeypatch):
     assert policy.max_total == 3
 
 
+def test_file_updates_for_different_agents_do_not_share_thread_lock(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    store = FileAgentStore()
+    for name in ("slow", "peer"):
+        store.create(name, {"name": name, "subagent_policy": {"max_total": 10}}, "soul", user_id="u1")
+
+    peer_started = threading.Event()
+    peer_finished = threading.Event()
+    peer_error: list[BaseException] = []
+
+    def peer_update():
+        try:
+            peer_started.set()
+            store.update(
+                "peer",
+                lambda current: {
+                    "name": current.name,
+                    "subagent_policy": {
+                        "max_concurrent": current.subagent_policy.max_concurrent,
+                        "max_total": 3,
+                    },
+                },
+                None,
+                user_id="u1",
+                require_existing=True,
+            )
+        except BaseException as error:  # pragma: no cover - surfaced below
+            peer_error.append(error)
+        finally:
+            peer_finished.set()
+
+    peer: threading.Thread | None = None
+
+    def hold_slow_agent(current):
+        nonlocal peer
+        peer = threading.Thread(target=peer_update)
+        peer.start()
+        assert peer_started.wait(5)
+        assert peer_finished.wait(2), "an unrelated agent must not wait on this agent's local lock"
+        assert current.subagent_policy.max_total == 10
+        return {"name": current.name, "subagent_policy": {"max_total": 11}}
+
+    store.update("slow", hold_slow_agent, None, user_id="u1", require_existing=True)
+    assert peer is not None
+    peer.join(10)
+    assert not peer.is_alive()
+    assert not peer_error
+    assert store.get("peer", user_id="u1").subagent_policy.max_total == 3
+    assert store.get("slow", user_id="u1").subagent_policy.max_total == 11
+
+
 # -- graph-subprocess config resolution (db backend's core cross-process invariant) --
 
 

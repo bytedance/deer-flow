@@ -22,6 +22,7 @@ from collections.abc import Hashable
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
+from weakref import WeakValueDictionary
 
 import yaml
 
@@ -44,13 +45,25 @@ from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 from deerflow.utils.file_lock import advisory_file_lock
 
 logger = logging.getLogger(__name__)
-_agent_write_lock = threading.RLock()
+_agent_write_locks: WeakValueDictionary[Path, threading.RLock] = WeakValueDictionary()
+_agent_write_locks_guard = threading.Lock()
 
 
 def _agent_lock_path(agent_dir: Path) -> Path:
     # Deleting an agent must not remove the lock other writers are waiting on.
     # A digest also avoids reserved Windows device names and name-length issues.
     return agent_dir.parent / ".locks" / sha256(agent_dir.name.encode()).hexdigest()
+
+
+def _get_agent_write_lock(agent_dir: Path) -> threading.RLock:
+    """Return the process-local lock corresponding to one agent's sidecar."""
+    key = _agent_lock_path(agent_dir).resolve()
+    with _agent_write_locks_guard:
+        lock = _agent_write_locks.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _agent_write_locks[key] = lock
+        return lock
 
 
 class FileAgentStore(AgentStore):
@@ -146,7 +159,7 @@ class FileAgentStore(AgentStore):
         # not be shadowed; a per-user dir may be memory-only but still blocks).
         if agent_dir.exists() or paths.agent_dir(name).exists():
             raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'")
-        with _agent_write_lock, advisory_file_lock(_agent_lock_path(agent_dir)):
+        with _get_agent_write_lock(agent_dir), advisory_file_lock(_agent_lock_path(agent_dir)):
             try:
                 agent_dir.mkdir(parents=True, exist_ok=False)
             except FileExistsError as e:
@@ -164,7 +177,7 @@ class FileAgentStore(AgentStore):
         config_path = agent_dir / "config.yaml"
         if require_existing and not config_path.exists():
             raise FileNotFoundError(f"Agent config not found: {config_path}")
-        with _agent_write_lock, advisory_file_lock(_agent_lock_path(agent_dir)):
+        with _get_agent_write_lock(agent_dir), advisory_file_lock(_agent_lock_path(agent_dir)):
             if require_existing and not config_path.exists():
                 raise FileNotFoundError(f"Agent config not found: {config_path}")
             if callable(config):
@@ -194,7 +207,7 @@ class FileAgentStore(AgentStore):
         agent_dir = paths.user_agent_dir(effective_user, name)
         if not agent_dir.exists():
             return "legacy" if paths.agent_dir(name).exists() else "missing"
-        with _agent_write_lock, advisory_file_lock(_agent_lock_path(agent_dir)):
+        with _get_agent_write_lock(agent_dir), advisory_file_lock(_agent_lock_path(agent_dir)):
             if not agent_dir.exists():
                 # The write path never targets the legacy shared layout.
                 return "legacy" if paths.agent_dir(name).exists() else "missing"
