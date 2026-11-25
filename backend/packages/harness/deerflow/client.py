@@ -34,13 +34,14 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.graph.state import CompiledStateGraph
 
 from deerflow.agents.lead_agent.agent import _authorize_model_name, _resolve_model_name, build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config, has_bash_tool
 from deerflow.agents.middlewares.tool_declarations import layer_one_outcome, narrow_declared_tools, verify_declared_tool_view
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
-from deerflow.config.agents_config import AGENT_NAME_PATTERN, load_agent_config
+from deerflow.config.agents_config import AGENT_NAME_PATTERN, AgentConfig, load_agent_config
 from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
@@ -176,6 +177,13 @@ class _AIMessageAccumulator:
         return "".join(self._chunks.get(self.last_id, ()))
 
 
+@dataclass(frozen=True)
+class _CachedAgent:
+    key: tuple
+    graph: CompiledStateGraph
+    model_name: str | None
+
+
 class DeerFlowClient:
     """Embedded Python client for DeerFlow agent system.
 
@@ -275,11 +283,14 @@ class DeerFlowClient:
         self._thread_incarnations: dict[str, str] = {}
 
         # Lazy agent — created on first call, recreated when config changes.
-        self._agent = None
-        self._agent_config_key: tuple | None = None
-        self._effective_model_name: str | None = None
-        self._loaded_agent_config_key: tuple[str, str] | None = None
-        self._loaded_agent_config = None
+        self._agent_cache: _CachedAgent | None = None
+        self._loaded_agent_config: tuple[tuple[str, str], AgentConfig | None] | None = None
+
+    @property
+    def _agent(self) -> CompiledStateGraph | None:
+        """Expose the last cached graph for existing diagnostics."""
+        cached = self._agent_cache
+        return cached.graph if cached is not None else None
 
     def reset_agent(self) -> None:
         """Force the internal agent to be recreated on the next call.
@@ -288,10 +299,7 @@ class DeerFlowClient:
         installations) that should be reflected in the system prompt
         or tool set.
         """
-        self._agent = None
-        self._agent_config_key = None
-        self._effective_model_name = None
-        self._loaded_agent_config_key = None
+        self._agent_cache = None
         self._loaded_agent_config = None
 
     # ------------------------------------------------------------------
@@ -332,8 +340,8 @@ class DeerFlowClient:
             recursion_limit=overrides.get("recursion_limit", 100),
         )
 
-    def _ensure_agent(self, config: RunnableConfig, *, context: Mapping[str, Any] | None = None):
-        """Create (or recreate) the agent when config-dependent params change."""
+    def _ensure_agent(self, config: RunnableConfig, *, context: Mapping[str, Any] | None = None) -> tuple[CompiledStateGraph, str | None]:
+        """Return the graph and effective model for this call's configuration."""
         cfg = dict(config.get("configurable", {}) or {})
         if context is not None:
             cfg.update(context)
@@ -347,8 +355,9 @@ class DeerFlowClient:
         agent_config = None
         if self._agent_name is not None:
             loaded_config_key = (self._agent_name, effective_user_id)
-            if getattr(self, "_loaded_agent_config_key", None) == loaded_config_key:
-                agent_config = self._loaded_agent_config
+            loaded_config = getattr(self, "_loaded_agent_config", None)
+            if loaded_config is not None and loaded_config[0] == loaded_config_key:
+                agent_config = loaded_config[1]
             else:
                 try:
                     agent_config = load_agent_config(self._agent_name, user_id=effective_user_id)
@@ -358,8 +367,7 @@ class DeerFlowClient:
                         self._agent_name,
                         exc_info=True,
                     )
-                self._loaded_agent_config_key = loaded_config_key
-                self._loaded_agent_config = agent_config
+                self._loaded_agent_config = (loaded_config_key, agent_config)
         memory_enabled = getattr(agent_config, "memory_enabled", True) is not False
         mcp_plugins = getattr(agent_config, "mcp_plugins", None)
         tool_groups = getattr(agent_config, "tool_groups", None)
@@ -402,8 +410,11 @@ class DeerFlowClient:
             authorization_identity,
         )
 
-        if self._agent is not None and self._agent_config_key == key:
-            return
+        # Snapshot the key and graph together; another turn may replace the
+        # cache entry without affecting the graph this turn has selected.
+        cached = self._agent_cache
+        if cached is not None and cached.key == key:
+            return cached.graph, cached.model_name
 
         thinking_enabled = cfg.get("thinking_enabled", True)
         model_name = cfg.get("model_name")
@@ -586,10 +597,10 @@ class DeerFlowClient:
         if checkpointer is not None:
             kwargs["checkpointer"] = checkpointer
 
-        self._agent = create_agent(**kwargs)
-        self._agent_config_key = key
-        self._effective_model_name = model_name
+        graph = create_agent(**kwargs)
+        self._agent_cache = _CachedAgent(key, graph, model_name)
         logger.info("Agent created: agent_name=%s, model=%s, thinking=%s", self._agent_name, model_name, thinking_enabled)
+        return graph, model_name
 
     @staticmethod
     def _get_tools(*, model_name: str | None, subagent_enabled: bool, chat_model: BaseChatModel, mcp_plugins: list[str] | None = None, groups: list[str] | None = None):
@@ -825,12 +836,10 @@ class DeerFlowClient:
         """Get the complete materialized checkpoint history for a thread."""
         checkpointer = self._get_thread_checkpointer()
         config = self._get_runnable_config(thread_id)
-        self._ensure_agent(config)
-        if self._agent is None:
-            raise RuntimeError("Agent was not initialized")
+        agent, _ = self._ensure_agent(config)
 
         accessor = CheckpointStateAccessor.bind(
-            self._agent,
+            agent,
             checkpointer,
             mode=self._checkpoint_channel_mode,
         )
@@ -1085,9 +1094,8 @@ class DeerFlowClient:
         # survives worker/isolated-loop boundaries and matches the identity
         # used by prompt assembly and the agent cache.
         context["user_id"] = effective_user_id
-        self._ensure_agent(config, context=context)
+        agent, effective_model_name = self._ensure_agent(config, context=context)
         configurable = config.get("configurable") or {}
-        effective_model_name = getattr(self, "_effective_model_name", None)
         inject_langfuse_metadata(
             config,
             thread_id=thread_id,
@@ -1170,7 +1178,7 @@ class DeerFlowClient:
             sent.update(delta)
             return delta
 
-        agent_items = self._agent.stream(
+        agent_items = agent.stream(
             state,
             config=config,
             context=context,
