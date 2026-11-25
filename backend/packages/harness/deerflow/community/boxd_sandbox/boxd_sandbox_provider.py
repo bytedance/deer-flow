@@ -598,9 +598,9 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
         else:
             unlock_and_remove = ""
         if read_only and removals:
-            lock_step = f'for p in {removals}; do if [ -e "$p" ]; then chmod -R -- a-w "$p"; sudo -n chown -R -- root:root "$p" 2>/dev/null || true; fi; done; '
+            lock_step = f'for p in {removals}; do if [ -e "$p" ]; then chmod -R -- a+rX,a-w "$p"; sudo -n chown -R -- root:root "$p" 2>/dev/null || true; fi; done; '
         elif read_only:
-            lock_step = f"chmod -R -- a-w {root}; sudo -n chown -R -- root:root {root} 2>/dev/null || true; "
+            lock_step = f"chmod -R -- a+rX,a-w {root}; sudo -n chown -R -- root:root {root} 2>/dev/null || true; "
         else:
             lock_step = ""
         script = (
