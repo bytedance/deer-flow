@@ -21,7 +21,8 @@ from deerflow.persistence.mcp_oauth_tokens import McpOAuthTokenRow
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 REVISION = "0047_mcp_oauth_tokens"
-HEAD = "0060_coordination_run_settings"
+HEAD = "0061_coordination_coordinator"
+COORDINATION_RUN_SETTINGS_REVISION = "0060_coordination_run_settings"
 COORDINATION_GRANTS_REVISION = "0059_coordination_grants"
 BROWSER_OAUTH_REVISION = "0058_mcp_browser_oauth"
 PREVIOUS = "0046_skill_mutations"
@@ -50,7 +51,8 @@ async def test_0047_remains_in_the_single_migration_chain():
     assert bootstrap._get_head_revision() == HEAD
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
     assert script.get_heads() == [HEAD]
-    assert script.get_revision(HEAD).down_revision == COORDINATION_GRANTS_REVISION
+    assert script.get_revision(HEAD).down_revision == COORDINATION_RUN_SETTINGS_REVISION
+    assert script.get_revision(COORDINATION_RUN_SETTINGS_REVISION).down_revision == COORDINATION_GRANTS_REVISION
     assert script.get_revision(COORDINATION_GRANTS_REVISION).down_revision == BROWSER_OAUTH_REVISION
     assert script.get_revision(BROWSER_OAUTH_REVISION).down_revision == "0057_coordination_workers"
     assert script.get_revision("0057_coordination_workers").down_revision == "0056_coordination_task_state"

@@ -186,6 +186,32 @@ provisioner does not delete an existing Pod to upgrade its capacity, including
 after a transient Gateway discovery failure. If the old Pod has already gone
 but its Service remains, create can safely provision the missing Pod.
 
+The Gateway also forwards the operator's `sandbox.environment` map, and the
+provisioner writes those entries to the sandbox container so image-level knobs
+such as `DISABLE_JUPYTER=true` or `DISABLE_CODE_SERVER=true` reach Kubernetes
+sandboxes the same way they reach local Docker ones. A Gateway that provisions
+through this service leaves `AIO_BASH_MAX_SESSIONS`, `MAX_SHELL_SESSIONS` and
+`DEERFLOW_LARK_BROKER_URL` out of that map, because it already sends them
+through the dedicated fields above; the provisioner ignores those names in the
+map if another client sends them anyway, so one Pod keeps a single source per
+setting. All 32 entries a request may carry are therefore the operator's own,
+keys must match `[A-Za-z_][A-Za-z0-9_]*` within 64 characters, and a value is
+limited to 1024 characters. Values are written literally: a `$` is escaped so
+Kubernetes does not expand `$(NAME)` or collapse `$$` before the container reads
+the value.
+
+The Gateway applies those limits to the filtered map while it starts, so a map
+this service would refuse stops the Gateway with `sandbox.environment` named
+instead of failing the first sandbox create. Sandbox allocation itself stays
+lazy.
+
+Both directions of a version skew drop the profile silently, so upgrade the
+provisioner before you rely on it. A request from a Gateway older than this
+change carries no map and produces the same Pods as before; a new Gateway
+talking to a provisioner from before this change gets a successful create whose
+Pod ignores the map. Existing Pods also keep the environment they were created
+with until they are recreated.
+
 ### Custom sandbox image
 
 Provisioner-created sandbox Pods use the provisioner's `SANDBOX_IMAGE` environment variable. This is separate from `sandbox.image` in `config.yaml`, which applies to local Docker or Apple Container mode.

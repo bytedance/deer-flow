@@ -33,6 +33,33 @@ async def _langgraph_runtime_with_scheduler_repositories(app, _startup_config):
     yield
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("approval_config", "expected_warnings"),
+    [
+        pytest.param({}, 1, id="omitted"),
+        pytest.param({"hitl_approval": {"enabled": False}}, 1, id="disabled"),
+        pytest.param({"hitl_approval": {"enabled": True}}, 0, id="enabled"),
+    ],
+)
+async def test_lifespan_warns_once_when_tool_approval_is_disabled(approval_config, expected_warnings, caplog):
+    from app.gateway.app import lifespan
+    from deerflow.config.app_config import AppConfig
+
+    startup_config = AppConfig(
+        sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+        memory={"enabled": False},
+        **approval_config,
+    )
+    with ExitStack() as stack:
+        for patcher in _gateway_lifespan_patches(startup_config):
+            stack.enter_context(patcher)
+        stack.enter_context(caplog.at_level(logging.WARNING, logger="app.gateway.app"))
+        async with lifespan(FastAPI()):
+            warnings = [record for record in caplog.records if record.name == "app.gateway.app" and record.levelno == logging.WARNING and "hitl_approval is not enabled" in record.getMessage()]
+            assert len(warnings) == expected_warnings
+
+
 def test_enabled_scheduler_start_failure_aborts_gateway_lifespan():
     """An enabled scheduler must fail lifespan before channel or request admission."""
     from app.gateway.app import lifespan

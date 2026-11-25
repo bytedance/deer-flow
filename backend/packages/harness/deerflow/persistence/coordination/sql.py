@@ -90,12 +90,15 @@ class CoordinationTaskRepository:
         project_id: str | None = None,
         parent_id: str | None = None,
         depends_on: Sequence[str] = (),
+        coordinator: bool = False,
         run_settings: dict[str, int | bool] | None = None,
     ) -> dict:
         """Create a task once. Dependencies refer to previously created siblings."""
         _request_id(request_id)
         if not objective.strip():
             raise ValueError("Task objective is required")
+        if coordinator and parent_id is not None:
+            raise TaskConflict("Only a root task can use a Coordinator")
         dependencies = sorted(set(depends_on))
         saved_run_settings = dict(run_settings) if run_settings else None
         async with self._write() as session:
@@ -104,7 +107,14 @@ class CoordinationTaskRepository:
                 if project_id is not None and project_id != parent.project_id:
                     raise TaskConflict("A child task must use its parent's project")
                 project_id = parent.project_id
-            create_fields = dict(objective=objective, project_id=project_id, parent_id=parent_id, depends_on=dependencies, run_settings=saved_run_settings)
+            create_fields = dict(
+                objective=objective,
+                project_id=project_id,
+                parent_id=parent_id,
+                depends_on=dependencies,
+                coordinator=True if coordinator else None,
+                run_settings=saved_run_settings,
+            )
             existing = await session.scalar(select(CoordinationTaskRow).filter_by(owner_id=owner_id, request_id=request_id))
             if existing is None:
                 if parent is not None and parent.status not in _OPEN:
@@ -231,10 +241,18 @@ class CoordinationTaskRepository:
             await self._finish_locked(session, task, outcome, result_ref)
             return _snapshot(task)
 
-    async def _finish_locked(self, session: AsyncSession, task: CoordinationTaskRow, outcome: TaskStatus, result_ref: str) -> None:
-        children = (await session.scalars(select(CoordinationTaskRow.status).filter_by(parent_id=task.id, owner_id=task.owner_id))).all()
+    @staticmethod
+    async def _child_statuses(session: AsyncSession, task: CoordinationTaskRow, *, child_ids: Sequence[str] | None = None) -> Sequence[str]:
+        query = select(CoordinationTaskRow.status).filter_by(parent_id=task.id, owner_id=task.owner_id)
+        if child_ids is not None:
+            query = query.where(CoordinationTaskRow.id.in_(child_ids))
+        return (await session.scalars(query)).all()
+
+    async def _finish_locked(self, session: AsyncSession, task: CoordinationTaskRow, outcome: TaskStatus, result_ref: str, *, child_statuses: Sequence[str] | None = None) -> None:
+        if child_statuses is None:
+            child_statuses = await self._child_statuses(session, task)
         accepted = {TaskStatus.SUCCEEDED} if outcome == TaskStatus.SUCCEEDED else {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED}
-        if any(status not in accepted for status in children):
+        if any(status not in accepted for status in child_statuses):
             raise TaskConflict("Child tasks have not settled for this outcome")
         task.status = outcome
         task.result_ref = result_ref

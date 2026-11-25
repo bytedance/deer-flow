@@ -178,7 +178,8 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
     engine, _, schema = database
     config = bootstrap._get_alembic_config(engine, postgres_schema=schema)
     previous = "0059_coordination_grants"
-    revision = "0060_coordination_run_settings"
+    run_settings_revision = "0060_coordination_run_settings"
+    revision = "0061_coordination_coordinator"
     await asyncio.to_thread(command.upgrade, config, "0055_thread_shares")
     await asyncio.to_thread(command.upgrade, config, previous)
     async with engine.begin() as conn:
@@ -189,6 +190,7 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
             )
         )
     repo = CoordinationTaskRepository(async_sessionmaker(engine))
+    await asyncio.to_thread(command.upgrade, config, run_settings_revision)
     await asyncio.to_thread(command.upgrade, config, revision)
     async with engine.connect() as conn:
 
@@ -203,11 +205,20 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
     task = await repo.get("alice", "legacy")
     assert task["status"] == TaskStatus.QUEUED
     assert task["run_settings"] is None
+    assert task["coordinator"] is None
     assert await repo.create("alice", request_id="root", objective=task["objective"], run_settings={}) == task
     await repo.append_input("alice", task["id"], request_id="update", content="Record an input")
     settings = {"recursion_limit": 400, "thinking_enabled": False}
-    configured = await repo.create("alice", request_id="configured", objective="Review", run_settings=settings)
+    configured = await repo.create("alice", request_id="configured", objective="Review", coordinator=True, run_settings=settings)
+    assert configured["coordinator"] is True
     assert (await repo.get("alice", configured["id"]))["run_settings"] == settings
+
+    await asyncio.to_thread(command.downgrade, config, run_settings_revision)
+    async with engine.connect() as conn:
+        columns = await conn.run_sync(lambda sync: {item["name"] for item in inspect(sync).get_columns("coord_tasks")})
+        assert "coordinator" not in columns
+        assert "run_settings" in columns
+        assert await conn.scalar(text("SELECT run_settings IS NOT NULL FROM coord_tasks WHERE id = :id"), {"id": configured["id"]})
 
     await asyncio.to_thread(command.downgrade, config, previous)
     async with engine.connect() as conn:
@@ -219,6 +230,8 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
         tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
     assert "mcp_oauth_attempts" in tables
     assert "coord_task_grants" not in tables
+    async with engine.connect() as conn:
+        assert await conn.scalar(text("SELECT latest_input_seq FROM coord_tasks WHERE id = 'legacy'")) == 1
     await asyncio.to_thread(command.downgrade, config, "0055_thread_shares")
     async with engine.connect() as conn:
         tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
@@ -226,6 +239,124 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
     assert not {"coord_tasks", "coord_inputs", "coord_assignments", "coord_executions", "coord_artifacts", "coord_task_grants"} & tables
     await asyncio.to_thread(command.upgrade, config, revision)
     assert (await repo.create("alice", request_id="root", objective="After re-upgrade"))["status"] == TaskStatus.QUEUED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed_input", [False, True], ids=["current", "stale-input"])
+async def test_coordinator_decision_is_atomic_idempotent_and_fenced(database, changed_input):
+    from time import time
+
+    from deerflow.persistence.coordination.workers import RUN_GRANT_METADATA, RUN_KEY_PREFIX, CoordinationWorkerRepository
+    from deerflow.persistence.run import RunRepository
+    from deerflow.persistence.user.model import UserRow
+
+    engine, dialect, schema = database
+    await bootstrap.bootstrap_schema(engine, backend=dialect, postgres_schema=schema)
+    sessions = async_sessionmaker(engine)
+    workers, runs = CoordinationWorkerRepository(sessions), RunRepository(sessions)
+    async with sessions.begin() as session:
+        session.add(UserRow(id="alice", email="alice@example.com"))
+    root = await workers.create("alice", request_id="plan", objective="Research", coordinator=True)
+    task_id = root["id"]
+    grant = {"id": "grant", "authority": {"token_version": 0, "source": "session", "permissions": ["runs:create"]}, "channel": None, "expires_at": time() + 100}
+    worker, execution, _ = await workers.prepare("alice", task_id, "lead_agent", initial_grant=grant)
+    await runs.create_thread_operation_atomic(
+        "planner-run",
+        thread_id=worker["thread_id"],
+        user_id="alice",
+        owner_worker_id="worker",
+        lease_expires_at=None,
+        idempotency_key=RUN_KEY_PREFIX + execution["id"],
+        metadata={RUN_GRANT_METADATA: "grant"},
+    )
+    first = {"key": "research", "assistant_id": "lead_agent", "objective": "Find sources", "depends_on": []}
+    second = {"key": "brief", "assistant_id": "lead_agent", "objective": "Use sources", "depends_on": ["research"]}
+    args = ("alice", task_id, execution["id"], "planner-run", "grant")
+    if changed_input:
+        await workers.append_input("alice", task_id, request_id="change", content="Use a different source")
+        with pytest.raises(TaskConflict, match="stale task inputs"):
+            await workers.submit_task_decision(*args, [first, second])
+        assert (await workers.view("alice", task_id))["children"] == []
+        return
+    with pytest.raises(TaskConflict, match="dependencies"):
+        await workers.submit_task_decision(*args, [first, {**second, "depends_on": ["missing"]}])
+    assert (await workers.view("alice", task_id))["children"] == []
+    await workers.set_grant("alice", task_id, None)
+    with pytest.raises(PermissionError):
+        await workers.submit_task_decision(*args, [first, second])
+    await workers.set_grant("alice", task_id, grant)
+    decision, retry = await asyncio.gather(*(workers.submit_task_decision(*args, [first, second]) for _ in range(2)))
+    assert decision == retry
+    view = await workers.view("alice", task_id)
+    assert len(view["children"]) == 2
+    assert (await workers.get("alice", decision["brief"]))["depends_on"] == [decision["research"]]
+    assert (await workers.grant("alice", decision["brief"]))["id"] == grant["id"]
+    assert await workers.prepare("alice", decision["brief"]) is None
+    with pytest.raises(TaskConflict, match="different tasks"):
+        await workers.submit_task_decision(*args, [first])
+    await workers.request_cancel("alice", task_id, expected_revision=view["task"]["revision"])
+    with pytest.raises(TaskConflict, match="no longer current"):
+        await workers.submit_task_decision(*args, [first, second])
+    assert await workers.prepare("alice", decision["research"]) is None
+
+
+@pytest.mark.asyncio
+async def test_coordinator_settles_only_the_current_decision(database):
+    from time import time
+
+    from deerflow.persistence.coordination.workers import RUN_GRANT_METADATA, RUN_KEY_PREFIX, CoordinationWorkerRepository
+    from deerflow.persistence.run import RunRepository
+    from deerflow.persistence.user.model import UserRow
+
+    engine, dialect, schema = database
+    await bootstrap.bootstrap_schema(engine, backend=dialect, postgres_schema=schema)
+    sessions = async_sessionmaker(engine)
+    workers, runs = CoordinationWorkerRepository(sessions), RunRepository(sessions)
+    async with sessions.begin() as session:
+        session.add(UserRow(id="alice", email="alice@example.com"))
+    root = await workers.create("alice", request_id="plan", objective="Research", coordinator=True)
+    task_id = root["id"]
+    grant = {"id": "grant", "authority": {"token_version": 0, "source": "session", "permissions": ["runs:create"]}, "channel": None, "expires_at": time() + 100}
+
+    async def admit(task_id, run_id, *, start_root=False):
+        assignment, execution, _ = await workers.prepare("alice", task_id, "lead_agent" if start_root else None, initial_grant=grant if start_root else None)
+        await runs.create_thread_operation_atomic(
+            run_id,
+            thread_id=assignment["thread_id"],
+            user_id="alice",
+            owner_worker_id="gateway",
+            lease_expires_at=None,
+            idempotency_key=RUN_KEY_PREFIX + execution["id"],
+            metadata={RUN_GRANT_METADATA: grant["id"]},
+        )
+        return execution["id"]
+
+    async def submit(execution_id, run_id, objective):
+        plan = [{"key": "research", "assistant_id": "lead_agent", "objective": objective, "depends_on": []}]
+        ids = await workers.submit_task_decision("alice", task_id, execution_id, run_id, grant["id"], plan)
+        await runs.update_status(run_id, "success")
+        return ids["research"]
+
+    first = await admit(task_id, "plan-1", start_root=True)
+    old_child = await submit(first, "plan-1", "Original source")
+    old_worker = await admit(old_child, "worker-1")
+    await workers.append_input("alice", task_id, request_id="follow-up", content="Use the replacement source")
+    assert not await workers.settle("alice", task_id, first, "plan-1", "success", [])
+    await runs.update_status("worker-1", "error")
+    assert await workers.settle("alice", old_child, old_worker, "worker-1", "error", [])
+    assert await workers.settle("alice", task_id, first, "plan-1", "success", [])
+    assert (await workers.view("alice", task_id))["execution"]["status"] == "superseded"
+
+    second = await admit(task_id, "plan-2")
+    new_child = await submit(second, "plan-2", "Replacement source")
+    assert not await workers.settle("alice", task_id, second, "plan-2", "success", [])
+    new_worker = await admit(new_child, "worker-2")
+    await runs.update_status("worker-2", "success")
+    assert await workers.settle("alice", new_child, new_worker, "worker-2", "success", [])
+    assert await workers.settle("alice", task_id, second, "plan-2", "success", [])
+    view = await workers.view("alice", task_id)
+    assert view["task"]["status"] == TaskStatus.SUCCEEDED
+    assert {row["id"]: row["status"] for row in view["children"]} == {old_child: TaskStatus.FAILED, new_child: TaskStatus.SUCCEEDED}
 
 
 @pytest.mark.asyncio
