@@ -69,10 +69,10 @@ make test-blocking-io
 - **`RunJournal` is changed on its owning event loop only.** A recorder failure
   fails open, and a slow recorder must not delay tool state.
 - **Retry a sub-agent event batch only on `RunEventStoreNotCommittedError`.**
-  The worker drains an in-flight write before propagating caller cancellation.
-  Reserve the retry signal for transient failures with no committed events
-  across the entire batch. An uncertain outcome stops further history writes
-  because replay could duplicate steps.
+  Drain writes before propagating caller cancellation. Signal retry only for
+  transient failures that committed no events. An uncertain outcome stops
+  history writes to prevent duplicate steps. Close the SQL producer only when
+  the final flush confirms all writes.
 - **Usage replay may enrich a message, never add or remove one.** A provider can
   report the end of the same model call twice.
 - **Event-store mutations of one thread share one fence** (an asyncio lock plus a

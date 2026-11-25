@@ -364,18 +364,22 @@ class JsonlRunEventStore(RunEventStore):
 
     def _append_record_groups(self, groups: list[tuple[Path, list[dict[str, Any]]]]) -> None:
         """Append run groups and restore their original sizes if one fails."""
-        original_sizes: dict[Path, int | None] = {}
+        original_sizes: list[tuple[Path, int | None]] = []
         try:
             for path, records in groups:
-                original_sizes[path] = path.stat().st_size if path.exists() else None
+                try:
+                    original_size = path.stat().st_size
+                except FileNotFoundError:
+                    original_size = None
+                original_sizes.append((path, original_size))
                 self._append_records(path, records)
         except Exception as exc:
             rolled_back = True
-            for path, original_size in original_sizes.items():
+            # Undo in reverse append order because two run IDs may name the same file.
+            for path, original_size in reversed(original_sizes):
                 try:
                     if original_size is None:
-                        if path.exists():
-                            path.unlink()
+                        path.unlink(missing_ok=True)
                     else:
                         with open(path, "r+b") as f:
                             f.truncate(original_size)

@@ -11,12 +11,13 @@ import hashlib
 import json
 import logging
 import re
+import sqlite3
 import weakref
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import and_, delete, func, or_, select, text, update
-from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import TimeoutError as SqlTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -31,6 +32,25 @@ from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user,
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
+
+
+def _is_transient_db_error(exc: Exception) -> bool:
+    if isinstance(exc, DBAPIError):
+        if exc.connection_invalidated:
+            return True
+        exc = exc.orig
+    if isinstance(exc, (ConnectionError, TimeoutError, SqlTimeoutError)):
+        return True
+    if isinstance(exc, sqlite3.Error):
+        # Extended codes (e.g. SQLITE_BUSY_SNAPSHOT) keep the primary code in the low byte.
+        return getattr(exc, "sqlite_errorcode", 0) & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    return getattr(exc, "sqlstate", None) in {
+        "08003",  # connection_does_not_exist
+        "08006",  # connection_failure
+        "40001",  # serialization_failure
+        "40P01",  # deadlock_detected
+        "55P03",  # lock_not_available
+    }
 
 
 def _parse_created_at(value: str | None) -> datetime:
@@ -373,7 +393,7 @@ class DbRunEventStore(RunEventStore):
                         commit_started = True
                     return [self._row_to_dict(r) for r in rows]
         except Exception as exc:
-            if not commit_started and isinstance(exc, (OperationalError, InterfaceError, SqlTimeoutError, TimeoutError, ConnectionError)):
+            if not commit_started and _is_transient_db_error(exc):
                 raise RunEventStoreNotCommittedError(f"DB batch failed before commit: {type(exc).__name__}: {exc}") from exc
             raise
 

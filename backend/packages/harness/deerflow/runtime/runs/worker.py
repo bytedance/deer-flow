@@ -1025,8 +1025,13 @@ class _SubagentEventBuffer:
         if isinstance(task_id, str) and len(self._affected_tasks) < 20:
             self._affected_tasks.add(task_id)
 
+    @property
+    def writes_confirmed(self) -> bool:
+        """Whether the producer can close after the final flush has settled."""
+        return not self._persistence_stopped and not self._pending
+
     def log_summary(self) -> None:
-        if self._unconfirmed_events or self._skipped_events or self._pending:
+        if not self.writes_confirmed:
             for event in self._pending:
                 self._remember_task(event)
             logger.warning(
@@ -2602,7 +2607,7 @@ async def run_agent(
                                 raise RuntimeError(evidence_failure)
 
                         evidence_receipt = await journal.finish_evidence(before_receipt=confirm_terminal)
-                        if evidence_receipt is not None and (subagent_events is None or not subagent_events._pending):
+                        if evidence_receipt is not None and (subagent_events is None or subagent_events.writes_confirmed):
                             from deerflow.runtime.events.store.db import DbRunEventStore
 
                             if isinstance(event_store, DbRunEventStore) and current_producer() is not None:
