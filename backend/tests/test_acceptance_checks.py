@@ -276,6 +276,29 @@ class TestFileLeaves:
             verdict = check_acceptance_criteria([criterion], runtime=runtime, thread_data=THREAD_DATA, content_reader=_reader(files), size_prober=_prober(files))
             assert verdict["leaves"][0]["holds"] is True, criterion
 
+    def test_error_prefixed_content_is_valid_after_lazy_local_init(self, no_sandbox_authz_config):
+        """A task may start without a sandbox id; the size probe then acquires
+        the local sandbox. Reclassify after the probe so a genuine ``Error:``
+        report is not mistaken for a remote provider failure."""
+        runtime = SimpleNamespace(state={"sandbox": {}})
+        files = {"/mnt/user-data/outputs/error.log": "Error: summary of yesterday's incidents"}
+
+        def lazy_local_size_probe(*_args):
+            runtime.state["sandbox"]["sandbox_id"] = "local"
+            return len(files["/mnt/user-data/outputs/error.log"])
+
+        verdict = check_acceptance_criteria(
+            ["file:../outputs/error.log exists"],
+            runtime=runtime,
+            thread_data=THREAD_DATA,
+            content_reader=_reader(files),
+            size_prober=lazy_local_size_probe,
+        )
+
+        leaf = verdict["leaves"][0]
+        assert (leaf["checked"], leaf["holds"]) == (True, True)
+        assert "exists" in leaf["detail"]
+
     def test_binary_deliverable_holds_file_leaves(self):
         """PR review: a valid binary deliverable raises UnicodeDecodeError on
         a text read — that proves existence and non-emptiness, not failure,

@@ -858,7 +858,11 @@ def _check_file_leaf(
     except (OSError, SandboxError) as exc:
         base["detail"] = _bound_detail(f"read failed: {exc}")
         return base
-    if not local and content.startswith(_PROVIDER_ERROR_PREFIX):
+    # The probes above may have lazily initialized the parent's sandbox, so the
+    # earlier classification can be stale: recheck before interpreting the
+    # provider result. A local read returns genuine content even when it starts
+    # with ``Error:``; only a remote provider encodes failures as text.
+    if not is_local_sandbox(runtime) and content.startswith(_PROVIDER_ERROR_PREFIX):
         # A missing/inaccessible file on a REMOTE provider comes back as an
         # error string, not an exception — the check ran and the file cannot
         # be confirmed, so the leaf deterministically does not hold. The
