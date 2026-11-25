@@ -70,6 +70,59 @@ the same workload and record:
 | Cleanup | Release, idle timeout, process restart, and orphan cleanup free resources |
 | Operations | Deployment prerequisites, privileged components, networking, storage, and upgrade path |
 
+## AIO idle baseline and the lean profile
+
+Measured on `all-in-one-sandbox:1.11.0` with a local Docker run, no workload,
+and `/v1/sandbox` answering 200 in every configuration:
+
+| Configuration | Idle memory |
+| --- | --- |
+| Image defaults | 725 MiB |
+| `DISABLE_JUPYTER=true`, `DISABLE_CODE_SERVER=true` | 281 MiB |
+| The two above plus `DISABLE_BROWSER`, `DISABLE_MCP_BROWSER`, `DISABLE_VNC`, `DISABLE_NODEJS_REPL` | 165 MiB |
+
+The image also reads `DISABLE_BROWSER`, `DISABLE_MCP_BROWSER`, `DISABLE_VNC` and
+`DISABLE_NODEJS_REPL`. Turning those off removes browser screenshots, the
+browser MCP server, the desktop view and Node REPL execution, so decide per
+deployment whether the agent stack needs them.
+
+The same image was measured in a temporary Kubernetes 1.31.5 cluster (k3d,
+one node) with no workload. Every Pod answered `/v1/sandbox` with 200 after
+90 seconds of idle time, and memory came from the Pod's cgroup
+`memory.current`:
+
+| Configuration | Kubernetes idle memory |
+| --- | --- |
+| Image defaults | 544 MiB |
+| `DISABLE_JUPYTER=true`, `DISABLE_CODE_SERVER=true` | 317 MiB |
+| The two above plus `DISABLE_BROWSER`, `DISABLE_MCP_BROWSER`, `DISABLE_VNC`, `DISABLE_NODEJS_REPL` | 191 MiB |
+
+Kubernetes adds kubelet and container-runtime overhead and can report different
+values from `docker stats`. Compare profiles in the same cluster; the relative
+reduction is what decides whether the lean profile fits the deployment.
+
+Deployments set these through `sandbox.environment`, which reaches local Docker
+containers and, through the provisioner, Kubernetes sandbox Pods. The Kubernetes
+path needs a provisioner that forwards that map: older provisioners ignore it
+and start the Pod with image defaults, so upgrade them first. Pods that already
+exist keep the environment they were created with until they are recreated. The
+provisioner accepts at most 32 operator entries, names matching
+`[A-Za-z_][A-Za-z0-9_]*` within 64 characters, and values of up to 1024
+characters; the Gateway checks the same limits at startup, so a map it cannot
+deliver stops the process with `sandbox.environment` named.
+
+```yaml
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  environment:
+    DISABLE_JUPYTER: "true"
+    DISABLE_CODE_SERVER: "true"
+```
+
+Keep a measured record of any other combination before recommending it. The
+numbers above are idle figures; the workload samples in the first section decide
+whether a lean profile still serves the tools an agent uses.
+
 ## PR Guidance
 
 Do not claim that a new provider fixes high-concurrency memory usage until the

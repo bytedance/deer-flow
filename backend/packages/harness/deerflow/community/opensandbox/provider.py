@@ -131,6 +131,9 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
     uses_thread_data_mounts = False
     needs_upload_permission_adjustment = True
     supports_agent_skill_isolation = True
+    # acquire() installs the thread's prepared skill view on new and warm
+    # remotes, so a fresh policy-scoped run can defer acquisition. An active
+    # or initializing remote can already hold a different view.
     supports_lazy_agent_skill_isolation = True
     _idle_checker_thread_name = "opensandbox-idle-reaper"
     _MAX_SYNC_FILES = 2000
@@ -145,7 +148,6 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         self._lock = threading.Lock()
         self._sandboxes: dict[str, OpenSandboxSandbox] = {}
         self._thread_sandboxes: dict[tuple[str, str], str] = {}
-        self._acquiring_scopes: set[tuple[str, str]] = set()
         self._warm_pool: dict[str, tuple[OpenSandboxSandbox, float]] = {}
         self._acquire_serializer: AcquireSerializer[str] = AcquireSerializer(thread_name_prefix="opensandbox-acquire-wait")
         self._idle_checker_stop = threading.Event()
@@ -275,12 +277,6 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
     def _thread_key(thread_id: str, user_id: str | None) -> tuple[str, str]:
         return (user_id or "", thread_id)
 
-    def can_defer_agent_skill_acquisition(self, *, thread_id: str, user_id: str) -> bool:
-        key = self._thread_key(thread_id, user_id)
-        # An acquire already in progress may have captured the previous view.
-        with self._lock:
-            return key not in self._thread_sandboxes and key not in self._acquiring_scopes
-
     def _start_idle_checker(self) -> None:
         if self._config["idle_timeout"] <= 0:
             return
@@ -315,6 +311,17 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         logger.warning("Invalidating OpenSandbox %s after terminal failure: %s", sandbox_id, reason)
         self._destroy_quietly(sandbox, context="terminal failure")
 
+    def requires_eager_agent_skill_sync(self, thread_id: str, *, user_id: str | None) -> bool:
+        sandbox_id = self._sandbox_id(thread_id, user_id or "")
+        with self._lock:
+            existing = self._thread_sandboxes.get(self._thread_key(thread_id, user_id))
+            if existing is not None and existing in self._sandboxes:
+                return True
+            # An acquire can already be uploading an older view before the
+            # remote enters the active registry. Read both under the registry
+            # lock so publication cannot fall between these checks.
+            return self._acquire_serializer.has_pending(sandbox_id)
+
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         with self._lock:
             if self._shutdown_called:
@@ -341,13 +348,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         key = self._thread_key(thread_id, user_id)
         sandbox_id = self._sandbox_id(thread_id, user_id or "")
         with self._acquire_serializer.hold(sandbox_id):
-            with self._lock:
-                self._acquiring_scopes.add(key)
-            try:
-                return self._acquire_scope_locked(key, sandbox_id, thread_id=thread_id, user_id=user_id)
-            finally:
-                with self._lock:
-                    self._acquiring_scopes.remove(key)
+            return self._acquire_scope_locked(key, sandbox_id, thread_id=thread_id, user_id=user_id)
 
     async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire without blocking the event loop.
@@ -489,10 +490,15 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
 
         storage = get_or_new_user_skill_storage(user_id, app_config=get_app_config())
         if thread_id is not None and thread_skill_projection_exists(storage, thread_id):
-            projection = get_thread_skill_projection_paths(storage, thread_id)
-        else:
-            projection = ensure_skill_projections(storage)
-        self._replace_skill_projection(sandbox, projection)
+            # A policy-scoped thread gets the view the middleware prepared for
+            # the run. Clear first so a failed upload never leaves the shared
+            # view or a previous agent's files on a parked warm remote.
+            # Installing the view here lets the middleware defer acquisition
+            # to the first sandbox tool call (supports_lazy_agent_skill_isolation).
+            self._replace_skill_projection(sandbox, None)
+            self._replace_skill_projection(sandbox, get_thread_skill_projection_paths(storage, thread_id))
+            return
+        self._replace_skill_projection(sandbox, ensure_skill_projections(storage))
 
     def _park_failed_skill_upload(self, sandbox: OpenSandboxSandbox, *, was_active: bool) -> None:
         sandbox_id = sandbox.id
@@ -530,7 +536,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 self._invalidate_sandbox(sandbox, "skill projection setup failed")
                 raise
 
-    def _replace_skill_projection(self, sandbox: OpenSandboxSandbox, projection: SkillProjectionPaths) -> None:
+    def _replace_skill_projection(self, sandbox: OpenSandboxSandbox, projection: SkillProjectionPaths | None) -> None:
         root = self._config["skills_root"]
         stage = root / ".deerflow-skills-stage"
         deadline = time.monotonic() + self._SYNC_DEADLINE_SECONDS
@@ -553,10 +559,11 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             run(f"{no_links}; mkdir -p -- {qroot}; rm -rf -- {qstage}; mkdir -m 700 -- {qstage}; mkdir -- {staged}")
         except Exception as exc:
             raise RuntimeError("Failed to synchronize OpenSandbox skill projection") from exc
-        try:
-            self._upload_skill_projection(sandbox, projection, stage=stage, run=run, deadline=deadline)
-        except Exception as exc:
-            raise _SkillUploadError("Failed to synchronize OpenSandbox skill projection") from exc
+        if projection is not None:
+            try:
+                self._upload_skill_projection(sandbox, projection, stage=stage, run=run, deadline=deadline)
+            except Exception as exc:
+                raise _SkillUploadError("Failed to synchronize OpenSandbox skill projection") from exc
         try:
             run(f"{no_links}; test ! -L {qstage}; rm -rf -- {destinations}; mv -- {staged} {qroot}; rmdir -- {qstage}")
         except Exception as exc:

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import logging
 import posixpath
+import re
+from collections.abc import Mapping
 from pathlib import PurePosixPath
 
 import requests
@@ -58,6 +60,45 @@ _RESERVED_SANDBOX_MOUNT_PATHS = (
 )
 
 _AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
+# ``sandbox.environment`` keys the provider composes itself and forwards through
+# dedicated request fields. Sending them in the operator map as well would spend
+# the provisioner's entry budget on values it already owns, so the map trimmed
+# here leaves the published 32-entry limit entirely to the operator.
+PROVISIONER_OWNED_ENVIRONMENT_KEYS = frozenset({"AIO_BASH_MAX_SESSIONS", "MAX_SHELL_SESSIONS", "DEERFLOW_LARK_BROKER_URL"})
+# The provisioner's own limits for the forwarded map. Checked here so a config
+# that cannot be delivered fails at Gateway start-up with the setting named,
+# instead of surfacing later as a bare 422 on every sandbox create.
+_PROVISIONER_ENVIRONMENT_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+_PROVISIONER_MAX_ENVIRONMENT_ENTRIES = 32
+_PROVISIONER_MAX_ENVIRONMENT_VALUE_CHARS = 1024
+
+
+def operator_provisioner_environment(environment: Mapping[str, str] | None) -> dict[str, str]:
+    """Return the ``sandbox.environment`` entries that actually reach the provisioner.
+
+    Keys the provider fills from dedicated request fields are dropped here, so
+    the published entry limit counts operator entries only. Gateway start-up
+    and ``RemoteSandboxBackend`` both go through this function; a map that one
+    of them publishes and the other trims would drift.
+    """
+    return {name: value for name, value in (environment or {}).items() if name not in PROVISIONER_OWNED_ENVIRONMENT_KEYS}
+
+
+def check_provisioner_environment(environment: dict[str, str]) -> None:
+    """Raise ``ValueError`` when the provisioner would reject ``sandbox.environment``.
+
+    Messages name the setting and the offending key but never echo a value,
+    because these entries commonly carry credentials.
+    """
+    if len(environment) > _PROVISIONER_MAX_ENVIRONMENT_ENTRIES:
+        raise ValueError(f"sandbox.environment carries {len(environment)} entries; the provisioner applies at most {_PROVISIONER_MAX_ENVIRONMENT_ENTRIES}")
+    for name, value in environment.items():
+        if not _PROVISIONER_ENVIRONMENT_KEY.fullmatch(name):
+            raise ValueError(f"sandbox.environment key {name!r} must match [A-Za-z_][A-Za-z0-9_]* and be at most 64 characters")
+        if "\x00" in value:
+            raise ValueError(f"sandbox.environment value for {name!r} contains a NUL byte")
+        if len(value) > _PROVISIONER_MAX_ENVIRONMENT_VALUE_CHARS:
+            raise ValueError(f"sandbox.environment value for {name!r} exceeds {_PROVISIONER_MAX_ENVIRONMENT_VALUE_CHARS} characters")
 
 
 def _normalize_skills_container_path(container_path: str) -> str:
@@ -153,6 +194,7 @@ class RemoteSandboxBackend(SandboxBackend):
         *,
         required_shell_sessions: int = 0,
         max_bash_sessions: int | None = None,
+        environment: dict[str, str] | None = None,
     ):
         """Initialize with the provisioner service URL and optional API key.
 
@@ -165,12 +207,19 @@ class RemoteSandboxBackend(SandboxBackend):
                                 to each provisioned sandbox Pod.
             required_shell_sessions: Minimum usable capacity, even when new Pods use the image default.
             max_bash_sessions: Bash capacity to provision and attest before admission.
+            environment: Operator ``sandbox.environment`` forwarded to the
+                sandbox Pod so optional AIO services can be disabled per
+                deployment (for example ``DISABLE_JUPYTER``). Keys the
+                provider sets from dedicated fields are dropped before the
+                request is sent.
         """
         self._provisioner_url = provisioner_url.rstrip("/")
         self._api_key = api_key
         self._max_shell_sessions = max_shell_sessions
         self._max_bash_sessions = max_bash_sessions
         self._required_shell_sessions = max(required_shell_sessions, max_shell_sessions or 0)
+        self._environment = operator_provisioner_environment(environment)
+        check_provisioner_environment(self._environment)
 
     @property
     def provisioner_url(self) -> str:
@@ -354,6 +403,8 @@ class RemoteSandboxBackend(SandboxBackend):
             payload["max_shell_sessions"] = self._max_shell_sessions
         if self._max_bash_sessions is not None:
             payload["max_bash_sessions"] = self._max_bash_sessions
+        if self._environment:
+            payload["environment"] = dict(self._environment)
         provisioner_extra_mounts = _provisioner_extra_mounts_payload(
             extra_mounts,
             skills_container_path=normalized_skills_container_path,

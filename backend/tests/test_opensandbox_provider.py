@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import types
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -29,7 +30,6 @@ from typing import Any
 
 import httpx
 import pytest
-from langchain.tools import ToolRuntime
 from langgraph.runtime import Runtime
 
 from deerflow.community.opensandbox.provider import OpenSandboxProvider, _import_sdk
@@ -39,7 +39,6 @@ from deerflow.config.extensions_config import SkillStateConfig
 from deerflow.config.paths import Paths
 from deerflow.sandbox.middleware import SandboxMiddleware
 from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
-from deerflow.sandbox.tools import ensure_sandbox_initialized, ensure_sandbox_initialized_async
 from deerflow.skills.projection import get_thread_skill_projection_paths
 from deerflow.skills.storage import get_or_new_user_skill_storage
 
@@ -617,55 +616,6 @@ def _remote_skills(remote):
     return {item.parent.name for item in remote.skill_root.rglob("SKILL.md")}
 
 
-def _tool_runtime(state, context):
-    return ToolRuntime(
-        state=state,
-        context=context,
-        config={"configurable": {}},
-        stream_writer=lambda _: None,
-        tools=[],
-        tool_call_id="first-sandbox-tool",
-        store=None,
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("async_init", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("existing_remote", [False, True], ids=["fresh", "active"])
-async def test_opensandbox_empty_skill_projection_precedes_tool_access(opensandbox_skill_view, async_init, existing_remote):
-    env = opensandbox_skill_view
-    env.skill("shared")
-    if existing_remote:
-        env.provider.acquire("thread", user_id="alice")
-        assert _remote_skills(env.sdk.remotes[0]) == {"shared"}
-
-    middleware = SandboxMiddleware(lazy_init=True, available_skills=set())
-    context = {"thread_id": "thread", "user_id": "alice"}
-    state = {}
-    runtime = Runtime(context=context)
-    update = await middleware.abefore_agent(state, runtime) if async_init else middleware.before_agent(state, runtime)
-    assert len(env.sdk.create_calls) == int(existing_remote)
-    if existing_remote:
-        assert update is not None
-        assert update == {"sandbox": {"sandbox_id": context["sandbox_id"]}}
-        assert _remote_skills(env.sdk.remotes[0]) == set()
-        state.update(update)
-    else:
-        assert update is None
-        assert "sandbox_id" not in context
-
-    tool_runtime = _tool_runtime(state, context)
-    sandbox = await ensure_sandbox_initialized_async(tool_runtime) if async_init else ensure_sandbox_initialized(tool_runtime)
-    assert len(env.sdk.create_calls) == 1
-    assert state["sandbox"] == {"sandbox_id": sandbox.id}
-    assert _remote_skills(env.sdk.remotes[0]) == set()
-
-    remote = env.sdk.remotes[0]
-    commands = len(remote.commands.calls)
-    assert env.provider.acquire("thread", user_id="alice") == sandbox.id
-    assert len(remote.commands.calls) == commands
-
-
 def test_opensandbox_skill_views_replace_on_warm_reuse(opensandbox_skill_view):
     env = opensandbox_skill_view
     package = env.skill("alpha")
@@ -696,16 +646,108 @@ def test_opensandbox_skill_views_replace_on_warm_reuse(opensandbox_skill_view):
 
     for allowlist, expected in [({"alpha"}, {"alpha"}), (set(), set()), (None, {"alpha", "beta", "alice-only"})]:
         runtime = Runtime(context={"thread_id": "thread", "user_id": "alice"})
-        middleware = SandboxMiddleware(lazy_init=True, available_skills=allowlist)
-        state = {}
-        assert middleware.before_agent(state, runtime) is None
-        assert env.provider.get(alice_id) is None
-        assert ensure_sandbox_initialized(_tool_runtime(state, runtime.context)).id == alice_id
+        # A fresh run defers acquisition; the first sandbox tool's acquire
+        # reclaims the warm remote with the run's scoped view.
+        assert SandboxMiddleware(lazy_init=True, available_skills=allowlist).before_agent({}, runtime) is None
+        assert "sandbox_id" not in runtime.context
+        assert env.provider.acquire("thread", user_id="alice") == alice_id
         assert _remote_skills(alice) == expected
         assert {p.name for p in alice.skill_root.iterdir()} == {"public", "custom", "legacy", "integrations"}
-        middleware.after_agent(state, runtime)
+        env.provider.release(alice_id)
     assert len(env.sdk.remotes) == 2
     assert _remote_skills(bob) == {"alpha", "beta", "bob-only"}
+
+
+def test_opensandbox_policy_run_without_sandbox_tool_creates_no_remote(opensandbox_skill_view):
+    env = opensandbox_skill_view
+    env.skill("alpha")
+    runtime = Runtime(context={"thread_id": "fresh", "user_id": "alice"})
+
+    assert SandboxMiddleware(lazy_init=True, available_skills=set()).before_agent({}, runtime) is None
+    assert env.sdk.remotes == []
+    assert "sandbox_id" not in runtime.context
+
+    # A later sandbox tool gets a remote holding only the (empty) scoped view.
+    sandbox_id = env.provider.acquire("fresh", user_id="alice")
+    remote = env.sdk.remotes[0]
+    assert env.provider.get(sandbox_id) is not None
+    assert _remote_skills(remote) == set()
+    assert {p.name for p in remote.skill_root.iterdir()} == {"public", "custom", "legacy", "integrations"}
+
+
+def test_opensandbox_policy_run_syncs_a_remote_an_upload_holds(opensandbox_skill_view):
+    env = opensandbox_skill_view
+    env.skill("alpha")
+    # An upload acquired the thread's remote before the run started.
+    sandbox_id = env.provider.acquire("thread", user_id="alice")
+    remote = env.sdk.remotes[0]
+    assert _remote_skills(remote) == {"alpha"}
+    env.skill("beta")
+    runtime = Runtime(context={"thread_id": "thread", "user_id": "alice"})
+
+    # The active remote would be reused without the run's view: stay eager.
+    update = SandboxMiddleware(lazy_init=True, available_skills={"alpha", "beta"}).before_agent({}, runtime)
+    assert update == {"sandbox": {"sandbox_id": sandbox_id}}
+    assert env.sdk.remotes == [remote]
+    assert _remote_skills(remote) == {"alpha", "beta"}
+    assert env.provider.acquire("thread", user_id="alice") == sandbox_id
+    assert _remote_skills(remote) == {"alpha", "beta"}
+
+
+def test_opensandbox_policy_run_syncs_a_remote_an_upload_is_initializing(opensandbox_skill_view, monkeypatch):
+    env = opensandbox_skill_view
+    env.skill("alpha")
+    initial_skill_written = threading.Event()
+    allow_publish = threading.Event()
+    create_remote = env.sdk.remote_factory
+
+    def create_paused_remote(index):
+        remote = create_remote(index)
+        write_file = remote.files.write_file
+
+        def write(path, data, *, mode):
+            write_file(path, data, mode=mode)
+            if not initial_skill_written.is_set():
+                initial_skill_written.set()
+                assert allow_publish.wait(10)
+
+        remote.files.write_file = write
+        return remote
+
+    monkeypatch.setattr(env.sdk, "remote_factory", create_paused_remote)
+    runtime = Runtime(context={"thread_id": "thread", "user_id": "alice"})
+    middleware = SandboxMiddleware(lazy_init=True, available_skills={"alpha", "beta"})
+    decision_made = threading.Event()
+    can_defer = middleware._can_defer_sandbox_acquisition
+
+    def record_decision(*args):
+        result = can_defer(*args)
+        decision_made.set()
+        return result
+
+    monkeypatch.setattr(middleware, "_can_defer_sandbox_acquisition", record_decision)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        upload = executor.submit(env.provider.acquire, "thread", user_id="alice")
+        try:
+            assert initial_skill_written.wait(10)
+            remote = env.sdk.remotes[0]
+            assert _remote_skills(remote) == {"alpha"}
+            env.skill("beta")
+            # Another user's run on the same thread ID can still stay lazy.
+            other_user = Runtime(context={"thread_id": "thread", "user_id": "bob"})
+            assert SandboxMiddleware(lazy_init=True, available_skills={"alpha"}).before_agent({}, other_user) is None
+            run = executor.submit(middleware.before_agent, {}, runtime)
+            assert decision_made.wait(10)
+        finally:
+            allow_publish.set()
+
+        sandbox_id = upload.result(timeout=10)
+        update = run.result(timeout=10)
+
+    assert env.provider.acquire("thread", user_id="alice") == sandbox_id
+    assert env.sdk.remotes == [remote]
+    assert _remote_skills(remote) == {"alpha", "beta"}
+    assert update == {"sandbox": {"sandbox_id": sandbox_id}}
 
 
 @pytest.mark.parametrize("restricted", [False, True])
@@ -738,7 +780,7 @@ def test_opensandbox_skill_partial_upload_preserves_warm_workspace(opensandbox_s
     assert "sandbox_id" not in runtime.context
     assert env.provider.get(sandbox_id) is None
     assert remote.destroy_calls == 0
-    assert _remote_skills(remote) == {"alpha", "beta", "allowed"}
+    assert (remote.skill_root / "custom" / "allowed").exists() is not restricted
 
     assert middleware.before_agent({}, runtime) == {"sandbox": {"sandbox_id": sandbox_id}}
     assert len(env.sdk.remotes) == 1
@@ -765,9 +807,8 @@ def test_opensandbox_skill_upload_preserves_package_links(opensandbox_skill_view
     (package / "empty link").symlink_to("assets/empty", target_is_directory=True)
 
     runtime = Runtime(context={"thread_id": "thread", "user_id": "alice"})
-    state = {}
-    SandboxMiddleware(lazy_init=True, available_skills={"allowed"}).before_agent(state, runtime)
-    ensure_sandbox_initialized(_tool_runtime(state, runtime.context))
+    assert SandboxMiddleware(lazy_init=True, available_skills={"allowed"}).before_agent({}, runtime) is None
+    env.provider.acquire("thread", user_id="alice")
     uploaded = env.sdk.remotes[0].skill_root / "custom" / "allowed"
     assert (uploaded / "file link").is_symlink()
     assert (uploaded / "file link").read_bytes() == b"data"
@@ -1930,11 +1971,10 @@ def test_concurrent_same_scope_acquire_creates_once(monkeypatch: pytest.MonkeyPa
     provider, sdk = _install(monkeypatch)
     original_create = sdk.create
     started = threading.Event()
-    release = threading.Event()
 
     def slow_create(image: str, **kwargs: Any) -> _FakeRemote:
         started.set()
-        assert release.wait(timeout=5)
+        time.sleep(0.05)
         return original_create(image, **kwargs)
 
     sdk.create = slow_create  # type: ignore[method-assign]
@@ -1942,19 +1982,13 @@ def test_concurrent_same_scope_acquire_creates_once(monkeypatch: pytest.MonkeyPa
 
     first = threading.Thread(target=lambda: results.append(provider.acquire("thread", user_id="user")))
     second = threading.Thread(target=lambda: results.append(provider.acquire("thread", user_id="user")))
-    assert provider.can_defer_agent_skill_acquisition(thread_id="thread", user_id="user")
     first.start()
-    try:
-        assert started.wait(timeout=2)
-        assert not provider.can_defer_agent_skill_acquisition(thread_id="thread", user_id="user")
-        second.start()
-    finally:
-        release.set()
+    assert started.wait(timeout=2)
+    second.start()
     first.join(timeout=2)
     second.join(timeout=2)
     assert len(results) == 2 and results[0] == results[1]
     assert len(sdk.create_calls) == 1
-    assert not provider.can_defer_agent_skill_acquisition(thread_id="thread", user_id="user")
     provider.shutdown()
 
 

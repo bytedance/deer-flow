@@ -1610,7 +1610,7 @@ is attempted, and the container is recycled instead of being returned to the
 warm pool. Session-level cleanup does not clear that quarantine because a
 timed-out create may commit after cleanup has already returned.
 
-`prewarm` is disabled by default and applies only to asynchronous AIO runs with
+`prewarm` is disabled by default and applies only to asynchronous AIO and veFaaS runs with
 an unconditional outer execution-lease cleanup: the Gateway/embedded run worker
 and native subagent executor. Direct `create_deerflow_agent(...).ainvoke()` and
 `.astream()` calls retain ordinary lazy acquisition even when this setting is on.

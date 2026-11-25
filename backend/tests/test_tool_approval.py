@@ -36,6 +36,7 @@ from test_hitl_approval_api import (  # noqa: F401
     isolated_deer_flow_home,
 )
 
+from deerflow.agents.lead_agent.agent import _insert_hitl_approval_middleware
 from deerflow.approvals.middleware import ToolApprovalMiddleware
 from deerflow.approvals.policy import action_fingerprint, effective_outcome, resolve_mode, tool_descriptor
 from deerflow.approvals.reviewer import review_operation
@@ -49,6 +50,20 @@ from deerflow.runtime import RunManager, RunStatus
 from deerflow.runtime.runs.manager import PersistenceRetryPolicy
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.tools.sync import make_sync_tool_wrapper
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_agent_assembly_mounts_tool_approval_only_when_enabled(enabled, caplog):
+    app_config = AppConfig(
+        sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+        hitl_approval=HitlApprovalConfig(enabled=enabled),
+    )
+    for _ in range(2):
+        middlewares = []
+        _insert_hitl_approval_middleware(middlewares, [], app_config, supports_resume=True)
+        assert [type(middleware) for middleware in middlewares] == ([ToolApprovalMiddleware] if enabled else [])
+    assert "hitl_approval is not enabled" not in caplog.text
+
 
 # --- test_tool_approval_call_ids ---
 
