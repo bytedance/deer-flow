@@ -508,6 +508,9 @@ the returned Markdown.
 When extraction returns a whole document, the fallback uses the source HTML
 body consistently with or without a source URL. Calls without a source URL
 retain relative link destinations and do not repeat the document title.
+Only explicit document-level wrappers trigger that fallback. An inline SVG
+chart's title or a document-tag example in a comment or script leaves the
+successfully extracted article intact.
 Chat tool-step titles accept leading blank lines and up to three spaces before
 a page's first H1 heading. Indented code, including mixed spaces and tabs, is
 not used as a title; the tool step falls back to the URL.

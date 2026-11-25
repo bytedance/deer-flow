@@ -235,17 +235,18 @@ def test_falls_back_when_extraction_returns_unextracted_document(monkeypatch, ur
     assert f"[Reference]({urljoin(url or '', '/reference')})" in md
 
 
-def test_link_free_article_with_link_bearing_chrome_does_not_fall_back(monkeypatch):
+@pytest.mark.parametrize("url", [None, PAGE_URL])
+@pytest.mark.parametrize("decoration", ["", "<svg><title>Chart</title></svg>", "<!-- <body>Example</body> -->", '<script>const example = "<body>";</script>', "<svg><foreignObject><body>Chart</body></foreignObject></svg>"])
+def test_link_free_article_with_link_bearing_chrome_does_not_fall_back(monkeypatch, url, decoration):
     """A legitimately link-free article whose page chrome has links must NOT
     trigger the unextracted-document fallback — Readability correctly strips
     the chrome, and the article body genuinely has no links."""
     import deerflow.utils.readability as R
 
     prose = "Long enough prose for the readability extractor to retain this as content. "
-    html = f'<html><head><title>Guide</title></head><body><nav><a href="/home">Home</a> <a href="/about">About</a></nav><article><p>{prose * 4}</p></article></body></html>'
-    url = PAGE_URL
+    html = f'<html><head><title>Guide</title></head><body><nav><a href="/home">Home</a> <a href="/about">About</a></nav><article><p>{prose * 4}</p>{decoration}</article></body></html>'
 
-    extracted_content = f"<div><p>{prose * 4}</p></div>"
+    extracted_content = f"<div><p>{prose * 4}</p>{decoration}</div>"
 
     def fake_extract(html, use_readability=True):
         return {"title": "Guide", "content": extracted_content}
