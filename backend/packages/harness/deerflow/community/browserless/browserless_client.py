@@ -34,6 +34,14 @@ def _get_header(headers: Any, name: str) -> str:
     return str(headers.get(name.lower(), ""))
 
 
+def _sanitize_target_status_code(value: str) -> str:
+    """Return a valid 3-digit HTTP status code (100-599), or empty string."""
+    code = value.strip()
+    if len(code) == 3 and code.isascii() and code.isdigit() and 100 <= int(code) <= 599:
+        return code
+    return ""
+
+
 async def _settle(future: "asyncio.Future[Any]") -> Any:
     """Await a future that owns a resource, even if this task is cancelled again.
 
@@ -99,6 +107,12 @@ class BrowserlessClient:
                 if encoded != self.token:
                     text = redact_secret(text, encoded)
         return text
+
+    def _target_status_headers(self, headers: Any) -> tuple[str, str]:
+        """Validate ``X-Response-Code`` and redact ``X-Response-Status`` at the client boundary."""
+        target_code = _sanitize_target_status_code(_get_header(headers, "X-Response-Code"))
+        target_status = self.redact(_get_header(headers, "X-Response-Status"))
+        return target_code, target_status
 
     async def fetch_html(
         self,
@@ -209,10 +223,14 @@ class BrowserlessClient:
                 )
 
                 code = resp.status_code
-                target_code = resp.headers.get("X-Response-Code", "")
-                target_status = resp.headers.get("X-Response-Status", "")
+                target_code, target_status = self._target_status_headers(resp.headers)
 
-                logger.debug(f"Browserless response: code={code}, target_code={target_code}, target_status={target_status}")
+                logger.debug(
+                    "Browserless response: code=%s, target_code=%s, target_status=%s",
+                    code,
+                    target_code,
+                    target_status,
+                )
 
                 if code != 200:
                     return f"Error: Browserless HTTP {code}: {self.redact(resp.text)[:200]}"
@@ -223,8 +241,8 @@ class BrowserlessClient:
 
                 return BrowserlessFetchResult(
                     html=html,
-                    target_status_code=_get_header(resp.headers, "X-Response-Code"),
-                    target_status=_get_header(resp.headers, "X-Response-Status"),
+                    target_status_code=target_code,
+                    target_status=target_status,
                 )
 
         except httpx.TimeoutException:
@@ -303,11 +321,12 @@ class BrowserlessClient:
                 )
 
                 code = resp.status_code
+                target_code, target_status = self._target_status_headers(resp.headers)
                 logger.debug(
                     "Browserless screenshot response: code=%s, target_code=%s, target_status=%s",
                     code,
-                    resp.headers.get("X-Response-Code", ""),
-                    resp.headers.get("X-Response-Status", ""),
+                    target_code,
+                    target_status,
                 )
 
                 if code != 200:
@@ -320,8 +339,8 @@ class BrowserlessClient:
                 return BrowserlessScreenshotResult(
                     content=content,
                     content_type=_get_header(resp.headers, "Content-Type"),
-                    target_status_code=_get_header(resp.headers, "X-Response-Code"),
-                    target_status=_get_header(resp.headers, "X-Response-Status"),
+                    target_status_code=target_code,
+                    target_status=target_status,
                     final_url=_get_header(resp.headers, "X-Response-URL"),
                 )
 
