@@ -298,6 +298,9 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
             captured["new_session"] = kwargs
             return SimpleNamespace(session_id="session-1")
 
+        async def set_session_model(self, **kwargs):
+            captured["set_session_model"] = kwargs
+
         async def prompt(self, **kwargs):
             captured["prompt"] = kwargs
             client = captured["client"]
@@ -393,8 +396,8 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
                 "env": [],
             }
         ],
-        "model": "gpt-5-codex",
     }
+    assert captured["set_session_model"] == {"session_id": "session-1", "model_id": "gpt-5-codex"}
     assert captured["prompt"] == {
         "session_id": "session-1",
         "prompt": [{"type": "text", "text": "Implement the fix"}],
@@ -920,8 +923,12 @@ from pathlib import Path
 import acp
 from acp.schema import InitializeResponse, NewSessionResponse, PromptResponse
 
+model_api = sys.argv[4] if len(sys.argv) > 4 else ""
+
 
 class _TestAgent:
+    _model = "default"
+
     def on_connect(self, conn):
         self._conn = conn
 
@@ -941,14 +948,58 @@ class _TestAgent:
 
     async def new_session(self, cwd, additional_directories=None, mcp_servers=None, **kwargs):
         await self._enter_phase("new_session")
+        if model_api.startswith("config"):
+            return NewSessionResponse(session_id="test-session", config_options=self._model_options())
+        if model_api == "legacy":
+            return NewSessionResponse(session_id="test-session", models={
+                "currentModelId": self._model,
+                "availableModels": [{"modelId": value, "name": value} for value in ("default", "chosen")],
+            })
         return NewSessionResponse(session_id="test-session")
+
+    def _model_options(self):
+        choices = [{"value": value, "name": value} for value in ("default", "chosen")]
+        option = {
+            "id": "llm-model", "name": "Model", "category": "model", "type": "select",
+            "currentValue": self._model, "options": choices,
+        }
+        if model_api == "config-no-category":
+            option["id"] = "model"
+            del option["category"]
+        if model_api == "config-grouped":
+            option["options"] = [
+                {"group": choice["value"], "name": choice["name"], "options": [choice]}
+                for choice in choices
+            ]
+        return [option]
+
+    async def set_config_option(self, config_id, session_id, value, **kwargs):
+        assert config_id == self._model_options()[0]["id"]
+        if model_api == "config-no-change":
+            await self._enter_phase("select_model")
+        else:
+            await self._select_model(value)
+        return {"configOptions": [] if model_api == "config-no-confirmation" else self._model_options()}
+
+    async def set_session_model(self, model_id, session_id, **kwargs):
+        assert model_api == "legacy"
+        await self._select_model(model_id)
+        return {}
+
+    async def _select_model(self, model):
+        await self._enter_phase("select_model")
+        if model not in ("default", "chosen"):
+            raise ValueError("Unknown model")
+        self._model = model
 
     async def prompt(self, session_id, prompt, **kwargs):
         await self._enter_phase("prompt")
+        if model_api:
+            await self._conn.session_update(session_id=session_id, update=acp.update_agent_message_text(self._model))
         return PromptResponse(stop_reason="end_turn")
 
 
-asyncio.run(acp.run_agent(_TestAgent()))
+asyncio.run(acp.run_agent(_TestAgent(), use_unstable_protocol=model_api == "legacy"))
 """
 
 
@@ -986,14 +1037,17 @@ def acp_subprocess_tool(monkeypatch, tmp_path):
 
     monkeypatch.setattr(acp_module, "spawn_agent_process", _spying_spawn_agent_process)
 
-    def build_tool(hang_phase="", phase_delay=0, timeout_seconds=2):
+    def build_tool(hang_phase="", phase_delay=0, timeout_seconds=2, model=None, model_api=""):
+        if hang_phase == "select_model":
+            model, model_api = "chosen", "config"
         tool = build_invoke_acp_agent_tool(
             {
                 "test": ACPAgentConfig(
                     command=sys.executable,
-                    args=[str(script_path), hang_phase, str(phase_delay), str(phase_path)],
+                    args=[str(script_path), hang_phase, str(phase_delay), str(phase_path), model_api],
                     description="Test ACP agent",
                     timeout_seconds=timeout_seconds,
+                    model=model,
                 )
             }
         )
@@ -1003,7 +1057,39 @@ def acp_subprocess_tool(monkeypatch, tmp_path):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("phase", ["initialize", "new_session", "prompt"])
+@pytest.mark.parametrize(
+    ("model_api", "model", "rejected_phase"),
+    [
+        ("config", None, None),
+        ("config", "chosen", None),
+        ("config", "missing", "new_session"),
+        ("config-no-category", "chosen", None),
+        ("config-grouped", "chosen", None),
+        ("config-grouped", "missing", "new_session"),
+        ("config-no-change", "chosen", "select_model"),
+        ("config-no-confirmation", "chosen", "select_model"),
+        ("legacy", None, None),
+        ("legacy", "chosen", None),
+        ("legacy", "missing", "select_model"),
+    ],
+)
+async def test_invoke_acp_agent_selects_model_before_prompt(acp_subprocess_tool, model_api, model, rejected_phase):
+    tool = acp_subprocess_tool.build_tool(model=model, model_api=model_api)
+    result = await asyncio.wait_for(tool.ainvoke({"agent": "test", "prompt": "do work"}), timeout=15)
+    if rejected_phase:
+        assert result.startswith("Error invoking ACP agent")
+        assert acp_subprocess_tool.phase_path.read_text(encoding="utf-8") == rejected_phase
+        if rejected_phase == "new_session":
+            assert "not an advertised choice" in result
+        elif model_api.startswith("config"):
+            assert "did not confirm the configured model" in result
+    else:
+        assert result == (model or "default")
+    assert acp_subprocess_tool.captured["proc"].returncode is not None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("phase", ["initialize", "new_session", "select_model", "prompt"])
 async def test_invoke_acp_agent_times_out_and_kills_hung_subprocess(acp_subprocess_tool, phase):
     tool = acp_subprocess_tool.build_tool(hang_phase=phase)
     start = time.monotonic()

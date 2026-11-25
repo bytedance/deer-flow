@@ -2161,6 +2161,13 @@ export function InputBox({
   // the stop affordance (gated above), so the send denial only applies to
   // the send state.
   const sendDenied = status !== "streaming" && !canCreateRuns;
+  const submitTitle = stopDenied
+    ? t.inputBox.stopStreamingUnavailable
+    : sendDenied
+      ? t.inputBox.startTurnUnavailable
+      : status === "streaming"
+        ? t.inputBox.stopRun
+        : undefined;
   const inputPolishUndoAvailable =
     !polishingInput &&
     inputPolishUndo !== null &&
@@ -3579,29 +3586,8 @@ export function InputBox({
               }
               variant="outline"
               status={status}
-              {...(status === "streaming" && canSendBusyInput
-                ? {
-                    "aria-label": t.inputBox.stopRun,
-                    title: t.inputBox.stopRun,
-                  }
-                : {})}
-              // A bare disabled square reads as a broken composer; explain
-              // the permission boundary (native title, since a Radix
-              // tooltip won't fire on a disabled button). Spread
-              // conditionally: an explicitly-undefined aria-label would
-              // clobber PromptInputSubmit's default aria-label="Submit"
-              // and strip the submit control's accessible name.
-              {...(stopDenied
-                ? {
-                    "aria-label": t.inputBox.stopStreamingUnavailable,
-                    title: t.inputBox.stopStreamingUnavailable,
-                  }
-                : sendDenied
-                  ? {
-                      "aria-label": t.inputBox.startTurnUnavailable,
-                      title: t.inputBox.startTurnUnavailable,
-                    }
-                  : {})}
+              aria-label={submitTitle ?? t.inputBox.send}
+              title={submitTitle}
               onClick={(e) => {
                 if (status === "streaming") {
                   e.preventDefault();

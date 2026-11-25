@@ -131,6 +131,10 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
     uses_thread_data_mounts = False
     needs_upload_permission_adjustment = True
     supports_agent_skill_isolation = True
+    # acquire() installs the thread's prepared skill view on new and warm
+    # remotes, so a fresh policy-scoped run can defer acquisition. An active
+    # or initializing remote can already hold a different view.
+    supports_lazy_agent_skill_isolation = True
     _idle_checker_thread_name = "opensandbox-idle-reaper"
     _MAX_SYNC_FILES = 2000
     _MAX_SYNC_TOTAL_BYTES = 512 * 1024 * 1024
@@ -307,6 +311,17 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         logger.warning("Invalidating OpenSandbox %s after terminal failure: %s", sandbox_id, reason)
         self._destroy_quietly(sandbox, context="terminal failure")
 
+    def requires_eager_agent_skill_sync(self, thread_id: str, *, user_id: str | None) -> bool:
+        sandbox_id = self._sandbox_id(thread_id, user_id or "")
+        with self._lock:
+            existing = self._thread_sandboxes.get(self._thread_key(thread_id, user_id))
+            if existing is not None and existing in self._sandboxes:
+                return True
+            # An acquire can already be uploading an older view before the
+            # remote enters the active registry. Read both under the registry
+            # lock so publication cannot fall between these checks.
+            return self._acquire_serializer.has_pending(sandbox_id)
+
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         with self._lock:
             if self._shutdown_called:
@@ -470,14 +485,20 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
     def _prepare_new_skill_view(self, sandbox: OpenSandboxSandbox, *, thread_id: str | None, user_id: str | None) -> None:
         if not user_id:
             return
-        from deerflow.skills.projection import ensure_skill_projections, thread_skill_projection_exists
+        from deerflow.skills.projection import ensure_skill_projections, get_thread_skill_projection_paths, thread_skill_projection_exists
         from deerflow.skills.storage import get_or_new_user_skill_storage
 
         storage = get_or_new_user_skill_storage(user_id, app_config=get_app_config())
-        # Eager middleware installs the scoped view. Until then do not expose
-        # either the shared view or the previous agent's files on a warm remote.
-        projection = None if thread_id is not None and thread_skill_projection_exists(storage, thread_id) else ensure_skill_projections(storage)
-        self._replace_skill_projection(sandbox, projection)
+        if thread_id is not None and thread_skill_projection_exists(storage, thread_id):
+            # A policy-scoped thread gets the view the middleware prepared for
+            # the run. Clear first so a failed upload never leaves the shared
+            # view or a previous agent's files on a parked warm remote.
+            # Installing the view here lets the middleware defer acquisition
+            # to the first sandbox tool call (supports_lazy_agent_skill_isolation).
+            self._replace_skill_projection(sandbox, None)
+            self._replace_skill_projection(sandbox, get_thread_skill_projection_paths(storage, thread_id))
+            return
+        self._replace_skill_projection(sandbox, ensure_skill_projections(storage))
 
     def _park_failed_skill_upload(self, sandbox: OpenSandboxSandbox, *, was_active: bool) -> None:
         sandbox_id = sandbox.id

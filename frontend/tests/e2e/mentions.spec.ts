@@ -360,7 +360,7 @@ for (const enabledAfterRetry of [true, false]) {
     await expect(retry).toBeVisible();
     await expect(page.getByTestId("conversation-reference-chip")).toBeVisible();
     await expect(
-      page.getByRole("button", { name: "Submit", exact: true }),
+      page.getByRole("button", { name: "Send", exact: true }),
     ).toBeDisabled();
     await input.press("End");
     await input.pressSequentially("after retry");
@@ -382,7 +382,7 @@ for (const enabledAfterRetry of [true, false]) {
     await retry.click();
     await expect(retry).toBeHidden();
     await expect(
-      page.getByRole("button", { name: "Submit", exact: true }),
+      page.getByRole("button", { name: "Send", exact: true }),
     ).toBeEnabled();
     if (enabledAfterRetry)
       await expect(

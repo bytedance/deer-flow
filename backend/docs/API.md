@@ -1331,6 +1331,12 @@ GET /api/skills/custom/{skill_name}/history
 An invalid skill name returns `400`; a skill with neither a `SKILL.md` nor
 recorded history returns `404`.
 
+Each entry's `prev_content` is the content that change replaced. Edits,
+rollbacks and deletions through these routes and the agent's `skill_manage` tool
+take one lock per user, also across Gateway processes that share the home
+volume, so they cannot interleave. An agent patch is refused, and nothing is
+written, when `SKILL.md` changed while the patch was being scanned.
+
 #### Rollback Custom Skill
 
 Restore a custom skill's `SKILL.md` from a history entry. The restored content is

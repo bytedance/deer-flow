@@ -755,6 +755,7 @@ export const zhCN: Translations = {
       },
     ],
     pleaseWaitStreaming: "请等待当前响应完成。",
+    send: "发送",
     runInputMode: "运行中发送方式",
     queueMode: "排队执行",
     steerMode: "调整当前任务",

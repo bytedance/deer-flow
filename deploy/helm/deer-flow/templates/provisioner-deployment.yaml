@@ -53,6 +53,16 @@ spec:
               value: {{ include "deer-flow.namespace" . | quote }}
             - name: SANDBOX_IMAGE
               value: {{ .Values.provisioner.sandboxImage | quote }}
+            {{- with .Values.provisioner.sandboxResources }}
+            {{- range $resource, $quantity := .requests }}
+            - name: SANDBOX_{{ $resource | replace "-" "_" | upper }}_REQUEST
+              value: {{ $quantity | quote }}
+            {{- end }}
+            {{- range $resource, $quantity := .limits }}
+            - name: SANDBOX_{{ $resource | replace "-" "_" | upper }}_LIMIT
+              value: {{ $quantity | quote }}
+            {{- end }}
+            {{- end }}
             # Shared secret the gateway sends as X-API-Key. verify_api_key in
             # docker/provisioner/app.py answers 401 to every /api/* request
             # while this is empty or mismatched, so a provisioner without it
