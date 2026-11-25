@@ -379,7 +379,8 @@ def test_skill_activation_middleware_activates_once_across_tool_loop(monkeypatch
 
     # --- model call 2: same turn, real state after the tool result comes back.
     # The reminder from call 1 is gone (never persisted), exactly as create_agent
-    # rebuilds it. It must NOT be re-injected. ---
+    # rebuilds it. The skill is current-turn context, so it is replayed from the
+    # run record at the same position, without another activation. ---
     ai_tool_call = first_result
     tool_result = ToolMessage(content="echoed", tool_call_id="call-1", id="tool-1")
     second_capture = {}
@@ -390,8 +391,10 @@ def test_skill_activation_middleware_activates_once_across_tool_loop(monkeypatch
 
     second_result = middleware.wrap_model_call(_make_model_request([user, ai_tool_call, tool_result], runtime=runtime), second_handler)
     assert isinstance(second_result, AIMessage)
-    assert second_capture["messages"] == [user, ai_tool_call, tool_result]
-    assert sum(is_slash_skill_activation_reminder(message) for message in second_capture["messages"]) == 0
+    assert second_capture["messages"][1:] == [user, ai_tool_call, tool_result]
+    assert second_capture["messages"][0].content == first_capture["messages"][0].content
+    assert sum(is_slash_skill_activation_reminder(message) for message in second_capture["messages"]) == 1
+    assert "skill_usage" not in second_result.additional_kwargs
 
     # Skill read from disk once and the activation audit event recorded once for the
     # whole multi-call turn.
@@ -486,8 +489,9 @@ def test_skill_activation_survives_a_retried_model_call_in_real_agent_graph(monk
     run = _run_retrying_slash_graph(monkeypatch, tmp_path, model=model, asynchronous=asynchronous)
 
     # Failed activation call, its retry, then the tool loop's follow-up call.
-    assert run.carries_skill == [True, True, False]
+    assert run.carries_skill == [True, True, True]
     assert run.result["messages"][-1].content == "final answer"
+    assert "skill_usage" not in run.result["messages"][-1].additional_kwargs
     assert run.disk_reads == 1
     assert sum(1 for kwargs in run.audits if kwargs.get("action") == "activate") == 1
     assert [usage["name"] for usage in run.usages] == ["data-analysis"]

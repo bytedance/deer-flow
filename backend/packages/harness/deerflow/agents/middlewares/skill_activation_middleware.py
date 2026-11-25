@@ -72,9 +72,11 @@ _REGISTRY_LOAD_FAILED = object()
 # on every model call. The reminder is added via request.override(messages=...) for
 # a single model call and never persisted to graph state, so the 2nd..Nth model call
 # of a turn rebuilds request.messages from state without it — the run context is
-# the only signal that survives the tool loop. A retry of the activation call
-# (nothing has answered the slash message yet) replays the recorded reminder rather
-# than dropping it. All three live in secret_context so they are covered by
+# the only signal that survives the tool loop. Every later model call of the run
+# replays the recorded reminder, at the same position, so the skill stays
+# current-turn context for the whole tool loop: a retry of the activation call
+# (nothing has answered the slash message yet) and the tool loop's follow-up calls
+# alike. All three live in secret_context so they are covered by
 # REDACTED_CONTEXT_KEYS in one place.
 
 
@@ -95,9 +97,12 @@ class _Activation:
 class _ActivationResolution:
     activation: _Activation | None = None
     failure_message: str | None = None
-    # A retry of the call that already activated: re-inject the reminder, but the
+    # A later call of the run that already activated: re-inject the reminder, but the
     # once-per-activation side effects (audit, usage record) already happened.
     replayed: bool = False
+    # The replayed activation call was already answered, so this is a tool-loop
+    # follow-up. Its response must not carry the usage stamp a second time.
+    answered: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,7 +462,8 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         call. LLMErrorHandlingMiddleware sits outside this middleware and retries a
         failed or empty call by running this wrap again on the same request, so the
         retry sees no AI message after the target; a follow-up call sees the
-        response the activation call produced.
+        response the activation call produced. Both carry the reminder; only the
+        retry restamps usage, because its response replaces the discarded one.
         """
         return any(isinstance(message, AIMessage) for message in messages[target_index + 1 :])
 
@@ -478,18 +484,17 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         # The message scan above cannot catch it because the reminder lives only in
         # a per-call request override, never in state — the run context is the
         # durable signal (see _recorded_activation / _SLASH_SKILL_ACTIVATION_RUN_KEY).
-        # Once the activation call has been answered, skipping here avoids the
-        # redundant skill disk read, reminder re-injection, and duplicate "activate"
-        # audit. Before that, this call is a retry of the activation call and must
-        # carry the same reminder, replayed from the record rather than re-read so
-        # it matches what was audited. run_key is computed once here and threaded
-        # through to the write site in _prepare_model_request.
+        # The skill is current-turn context, so every later call of the run (a
+        # retry of the activation call or a tool-loop follow-up) carries the same
+        # reminder, replayed from the record rather than re-read so it matches
+        # what was audited and skips the redundant disk read and "activate" audit.
+        # run_key is computed once here and threaded through to the write site in
+        # _prepare_model_request.
         run_key = self._activation_run_key(target)
         recorded = self._recorded_activation(run_context, run_key)
         if recorded is not None:
-            if self._target_answered(messages, target_index):
-                return None
-            return target_index, target, _ActivationResolution(activation=recorded, replayed=True), run_key
+            resolution = _ActivationResolution(activation=recorded, replayed=True, answered=self._target_answered(messages, target_index))
+            return target_index, target, resolution, run_key
 
         content = get_original_user_content_text(target.content, target.additional_kwargs)
         names = target.additional_kwargs.get("skill_references")
@@ -581,7 +586,9 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         activation_msg = self._make_activation_message(target, "\n\n".join(self._build_activation_reminder(item, include_user_request=index == 0) for index, item in enumerate((activation, *activation.additional_activations))))
         messages = list(request.messages)
         messages.insert(target_index, activation_msg)
-        return request.override(messages=messages), activation
+        # A follow-up call's response is not the activation response: the
+        # activation call already stamped usage and bound the slash secret source.
+        return request.override(messages=messages), None if resolution.answered else activation
 
     def _handle_model_request(
         self,
