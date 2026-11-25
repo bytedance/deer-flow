@@ -98,8 +98,8 @@ def _relabel_tool_call_ids(tool_calls: list, msg_index: int, source: str) -> tup
     model-bound message agree on it without threading state between them.
 
     Returns the rewritten list, one ``{original, synthetic, name, executable}`` claim
-    entry per relabelled call, and whether anything changed. Invalid calls never
-    execute, so they are flagged unexecutable and only pair with a result no executable call can claim.
+    entry per relabelled call, and whether anything changed. The executable flag
+    breaks ties between equally strong name matches.
     """
     relabeled: list = []
     assigned: list[dict] = []
@@ -138,7 +138,11 @@ def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional:
 
     Malformed originals are all equally empty, so they cannot identify their own
     result; ``open_calls`` is already scoped to the issuing turn. Within that turn the
-    result's name narrows the candidates, and only a *forced* choice is taken:
+    result's name narrows the candidates. An exact name match takes precedence
+    over candidates with missing names. Within the same name-match priority,
+    executable calls take precedence so an invalid same-name sibling cannot
+    steal or block their result (#7821). A persisted ToolMessage can still pair
+    with an invalid call (#2894). Among the remaining candidates:
 
     * one compatible call — its name, or being the turn's only call, identifies it;
     * several compatible calls — position identifies them, but only while ``positional``
@@ -150,30 +154,22 @@ def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional:
       A *missing* result means a call was interrupted — this middleware's own trigger —
       so the surviving results can no longer be trusted to line up with the calls.
 
-    Claiming is two-tier, executable first. An invalid call never executes, so a result
-    that an executable call can take must go to it: a same-name invalid sibling must not
-    make the only executable call look ambiguous (#7821), and it must not take that
-    call's result. When no executable call matches, an invalid entry still claims the
-    result — a real ToolMessage already in history for an invalid call is that call's own
-    output, and dropping it would swap real output for the recovery placeholder (#2894).
-
     Returning ``None`` leaves the result malformed for the orphan pass to drop, which is
     what an unattributable result gets today — better than inventing a pairing.
     """
+    candidates = [position for position, entry in enumerate(open_calls) if _same_tool_call_id(entry["original"], result.tool_call_id) and _names_can_pair(entry["name"], result.name)]
+    if not candidates:
+        return None
 
-    def compatible(executable: bool) -> list[int]:
-        return [position for position, entry in enumerate(open_calls) if entry["executable"] is executable and _same_tool_call_id(entry["original"], result.tool_call_id) and _names_can_pair(entry["name"], result.name)]
+    if _valid_tool_name(result.name):
+        exact_matches = [position for position in candidates if _valid_tool_name(open_calls[position]["name"])]
+        candidates = exact_matches or candidates
 
-    for executable in (True, False):
-        candidates = compatible(executable)
-        if not candidates:
-            continue
-        # A multi-match under one tier is ambiguous; the invalid tier is no more
-        # resolvable than the executable one, so stop rather than fall through.
-        if len(candidates) > 1 and not positional:
-            return None
-        return open_calls.pop(candidates[0])["synthetic"]
-    return None
+    executable_matches = [position for position in candidates if open_calls[position]["executable"]]
+    candidates = executable_matches or candidates
+    if len(candidates) > 1 and not positional:
+        return None
+    return open_calls.pop(candidates[0])["synthetic"]
 
 
 def _normalize_tool_name(name: object) -> str:

@@ -1178,6 +1178,29 @@ class TestMalformedToolCallIdRecovery:
         assert results[first].content == "EXEC ONE"
         assert results[second].content == "EXEC TWO"
 
+    @pytest.mark.parametrize("missing_name", [None, "", "   "])
+    def test_exact_name_wins_over_an_unnamed_executable_sibling(self, missing_name):
+        mw = DanglingToolCallMiddleware()
+        messages = [
+            AIMessage.model_construct(
+                content="",
+                tool_calls=[_tc(missing_name, "")],
+                invalid_tool_calls=[_invalid_tc(name="read_file", tc_id="")],
+            ),
+            ToolMessage(content="PERSISTED OUTPUT", tool_call_id="", name="read_file"),
+        ]
+
+        patched = mw._build_patched_messages(messages)
+
+        assert patched is not None
+        assert patched[0].tool_calls[0]["name"] == "unknown_tool"
+        unnamed_id = patched[0].tool_calls[0]["id"]
+        named_id = patched[0].invalid_tool_calls[0]["id"]
+        results = {message.tool_call_id: message for message in patched[1:]}
+        assert results[named_id].content == "PERSISTED OUTPUT"
+        assert results[named_id].status == "success"
+        assert results[unnamed_id].status == "error"
+
     def test_executable_call_wins_over_a_same_name_invalid_sibling(self):
         """An invalid sibling with the same name must not steal the real result (#7821).
 
