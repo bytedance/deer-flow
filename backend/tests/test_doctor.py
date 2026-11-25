@@ -602,6 +602,19 @@ class TestCheckWebSearch:
         result = doctor.check_web_search(cfg)
         assert (result.status, result.detail) == ("ok", "WebRouter (pinned to 'exa', no fallback)")
 
+    @pytest.mark.parametrize(
+        ("pinned", "reason"),
+        [("exa:exa-instnat", "has no mode part 'exa-instnat'"), ("exaa", "Unknown provider 'exaa'"), ("extract:exa", "names 'extract'")],
+    )
+    def test_webrouter_invalid_id_warns(self, tmp_path, monkeypatch, pinned, reason):
+        monkeypatch.setenv("EXA_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(f"config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.webrouter.tools:web_search_tool\n    provider: '{pinned}'\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.detail.startswith(f"WebRouter provider '{pinned}' is not valid: ")
+        assert reason in result.detail
+
     def test_webrouter_without_the_extra_warns(self, tmp_path, monkeypatch):
         monkeypatch.setattr(doctor, "find_spec", lambda name: None)
         cfg = tmp_path / "config.yaml"

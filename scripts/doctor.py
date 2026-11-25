@@ -654,23 +654,28 @@ def check_llm_auth(config_path: Path) -> list[CheckResult]:
 
 
 def _webrouter_route(tool: dict, tool_name: str) -> tuple[str, str]:
-    """Return the backend a WebRouter tool names and how it routes: auto, parallel, pinned or unconfigured.
+    """Return what a WebRouter tool's ``provider`` names and how it routes: auto, invalid, unconfigured, parallel or pinned.
 
     ``provider: auto`` (the default) falls back across keyless backends. ``max``
     (fetch only) sends each page to every configured backend at once. Any other
-    name pins one backend, with no fallback, and needs its own key. Like
-    WebRouter, this ignores case and reads ids of the form
-    ``[search|extract:]backend[:mode]``, such as ``exa:exa-instant``.
+    id pins one backend, with no fallback, and needs its own key. WebRouter's own
+    class lookup checks the whole id (case, ``[search|extract:]backend[:mode]``);
+    for an invalid id the first item is WebRouter's error message.
     """
     provider = tool.get("provider")
-    parts = provider.strip().lower().split(":") if isinstance(provider, str) else [""]
-    if len(parts) > 1 and parts[0] == ("extract" if tool_name == "web_fetch" else "search"):
-        parts.pop(0)
-    backend = parts[0]
-    if backend in ("", "auto"):
+    provider = provider.strip() if isinstance(provider, str) else ""
+    if provider.lower() in ("", "auto"):
         return "auto", "auto"
     import web_router
+    from web_router import registry
 
+    lookup = registry.get_extract_provider_class if tool_name == "web_fetch" else registry.get_provider_class
+    try:
+        lookup(provider)
+    except (web_router.InvalidParameterError, web_router.ProviderNotFoundError) as e:
+        return str(e), "invalid"
+    parts = provider.lower().split(":")
+    backend = parts[1] if len(parts) > 1 and parts[0] in ("search", "extract") else parts[0]
     configured = web_router.configured_extract_providers() if tool_name == "web_fetch" else web_router.configured_providers()
     if backend not in configured:
         return backend, "unconfigured"
@@ -881,6 +886,8 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                         if find_spec("web_router") is None:
                             return CheckResult(label, "warn", "WebRouter is configured but the webrouter extra is not installed", fix="cd backend && uv sync --extra webrouter")
                         backend, route = _webrouter_route(tool, tool_name)
+                        if route == "invalid":
+                            return CheckResult(label, "warn", f"WebRouter provider '{tool.get('provider')}' is not valid: {backend}", fix="Fix 'provider' to a WebRouter id such as 'exa' or 'exa:exa-instant', or remove it to route automatically")
                         if route == "unconfigured":
                             return CheckResult(label, "warn", f"WebRouter is pinned to '{backend}', which is not configured here", fix=f"Set the API key '{backend}' needs in .env, or remove 'provider' to route automatically")
                         if route == "parallel":
