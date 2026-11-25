@@ -237,23 +237,40 @@ class Mem0Manager(MemoryManager):
         thread_id: str | None = None,
         query: str | None = None,
     ) -> str:
-        """Query-less recall: this backend ignores the optional ``query``
-        hint and injects the bucket's most recent memories (top_k).
-        Query-aware recall is available via search() in mode="tool"."""
+        """Recall up to ``top_k`` memories for injection.
+
+        With a ``query`` hint, mem0 semantic search ranks the bucket against
+        it (``score_threshold`` applies). When there is no hint, or search
+        finds nothing, the bucket's most recent memories are injected
+        instead: the host injects memory once per thread, so a greeting
+        with no semantic match must not leave the whole thread without
+        memory. A failed search is a failed read and is not retried as a
+        listing; the read policy decides it once.
+        """
         filters = _build_filters(user_id=user_id, agent_name=agent_name, run_id=thread_id)
         if filters is None:
             return ""
         top_k = self._config.top_k
-        records = self._read_or_fallback(
-            [],
-            lambda: _deduplicate_context_records(
-                self._client.list_memories(
+        query = query.strip() if isinstance(query, str) else None
+
+        def recall() -> list[dict[str, Any]]:
+            records: list[dict[str, Any]] = []
+            if query:
+                records = self._client.search_memories(
+                    query=query,
+                    filters=filters,
+                    top_k=top_k,
+                    threshold=self._config.score_threshold,
+                )
+            if not records:
+                records = self._client.list_memories(
                     filters=filters,
                     page_size=min(top_k, 200),
                     max_items=top_k,
                 )
-            ),
-        )
+            return _deduplicate_context_records(records)
+
+        records = self._read_or_fallback([], recall)
         budget = self._config.max_injection_chars
         lines: list[str] = []
         used = 0

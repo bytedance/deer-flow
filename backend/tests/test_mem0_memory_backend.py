@@ -573,6 +573,92 @@ class TestMem0ManagerGetContext:
 
         assert called_from and called_from[0] != event_loop_thread
 
+    @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+    def test_query_hint_injects_search_results_in_relevance_order(self, asynchronous: bool) -> None:
+        mgr, fake = _manager({"top_k": 3, "score_threshold": 0.4})
+        fake.search_results = [
+            {"id": "m2", "memory": "prefers concise bullet reports", "score": 0.9},
+            {"id": "m2", "memory": "prefers concise bullet reports", "score": 0.9},  # dup by id
+            {"id": "m1", "memory": "researches battery chemistry", "score": 0.5},
+        ]
+        fake.list_results = [{"id": "m9", "memory": "most recent, unrelated"}]
+        scope = {"agent_name": "lead_agent", "query": "  write a battery report  "}
+
+        ctx = asyncio.run(mgr.aget_context("u1", **scope)) if asynchronous else mgr.get_context("u1", **scope)
+
+        assert ctx == "- prefers concise bullet reports\n- researches battery chemistry"
+        assert fake.search_calls == [
+            {
+                "query": "write a battery report",
+                "filters": {"AND": [{"user_id": "u1"}, {"agent_id": "lead_agent"}]},
+                "top_k": 3,
+                "threshold": 0.4,
+            }
+        ]
+        assert fake.list_calls == []
+
+    def test_query_without_matches_falls_back_to_recent_memories(self) -> None:
+        """Injection happens once per thread: a greeting that matches nothing
+        must still give the thread the user's memory."""
+        mgr, fake = _manager()
+        fake.list_results = [{"id": "m1", "memory": "lives in Austin"}]
+
+        assert mgr.get_context("u1", query="hi") == "- lives in Austin"
+        assert len(fake.search_calls) == 1
+        assert fake.list_calls[0]["max_items"] == 8
+
+    @pytest.mark.parametrize("query", [None, "", "   "], ids=["none", "empty", "blank"])
+    def test_missing_query_keeps_recent_listing(self, query: str | None) -> None:
+        mgr, fake = _manager()
+        fake.list_results = [{"id": "m1", "memory": "lives in Austin"}]
+
+        assert mgr.get_context("u1", query=query) == "- lives in Austin"
+        assert fake.search_calls == []
+
+    @pytest.mark.parametrize("policy", ["fail_open", "fail_closed"])
+    def test_search_failure_obeys_read_policy_without_listing(self, policy: str) -> None:
+        from deerflow.agents.memory.manager import MemoryReadError
+
+        mgr, fake = _manager({"failure_policy": {"read": policy}})
+
+        def failing_search(**kwargs: Any) -> list[dict[str, Any]]:
+            raise Mem0APIError("down")
+
+        fake.search_memories = failing_search
+        fake.list_results = [{"id": "m1", "memory": "lives in Austin"}]
+
+        if policy == "fail_open":
+            assert mgr.get_context("u1", query="report") == ""
+        else:
+            with pytest.raises(MemoryReadError):
+                mgr.get_context("u1", query="report")
+        assert fake.list_calls == []
+
+    def test_query_hint_reaches_mem0_search_endpoint(self) -> None:
+        """The payload shape is the contract: drive the real HTTP client."""
+        import json
+
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"results": [{"id": "m1", "memory": "likes cricket", "score": 0.8}]})
+
+        mgr, _fake = _manager()
+        mgr._client = _client(handler)
+        try:
+            assert mgr.get_context("u1", agent_name="lead_agent", query="weekend plans") == "- likes cricket"
+        finally:
+            mgr.close()
+
+        assert [request.url.path for request in requests] == ["/v3/memories/search/"]
+        assert json.loads(requests[0].content) == {
+            "query": "weekend plans",
+            "filters": {"AND": [{"user_id": "u1"}, {"agent_id": "lead_agent"}]},
+            "top_k": 8,
+            "threshold": 0.1,
+        }
+
 
 class TestMem0ManagerSearch:
     def test_maps_results_to_backend_neutral_shape(self) -> None:

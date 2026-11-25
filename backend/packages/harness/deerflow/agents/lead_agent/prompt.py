@@ -815,8 +815,8 @@ def _get_memory_context(
             Gateway or standalone LangGraph Server identity.
         query: Optional current-turn query hint forwarded to the memory
             backend. Backends that enable query-aware ranking (DeerMem
-            ``retrieval_relevance_enabled``) rank injected facts against it;
-            others ignore it.
+            ``retrieval_relevance_enabled``, mem0 semantic search) rank
+            injected facts against it; others ignore it.
 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.

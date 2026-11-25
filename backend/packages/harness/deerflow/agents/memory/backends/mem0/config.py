@@ -58,7 +58,8 @@ class Mem0Config:
     allow_insecure_http: bool = False
     #: Max memories injected by get_context / default search breadth (1-1000).
     top_k: int = 8
-    #: Minimum relevance score for search() results (mem0 `threshold`, 0-1).
+    #: Minimum relevance score for search() and query-aware get_context
+    #: results (mem0 `threshold`, 0-1).
     score_threshold: float = 0.1
     #: Hard cap on the injection text returned by get_context; memories that
     #: do not fit whole are skipped (truncation happens on entry boundaries).

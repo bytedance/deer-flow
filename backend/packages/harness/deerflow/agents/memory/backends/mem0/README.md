@@ -34,6 +34,19 @@ trusted local-development server that only exposes HTTP, opt in explicitly
 with `allow_insecure_http: true`; do not use that setting across an untrusted
 network.
 
+## Recall
+
+Prompt injection passes the current user message to the backend as a query
+hint. The backend then runs a mem0 semantic search over the user's bucket and
+injects the best `top_k` matches with a score of at least `score_threshold`, in
+relevance order. When there is no hint, for example for an attachment-only
+message, or when the search finds no match, the backend injects the bucket's
+`top_k` most recent memories, as it did before. A greeting therefore still
+receives the user's memory for the rest of the thread.
+
+A failed search follows `failure_policy.read` and is not retried as a listing,
+so a slow mem0 server costs one request timeout, not two.
+
 ## Identity mapping
 
 | DeerFlow | mem0 |
@@ -44,9 +57,11 @@ network.
 
 ## Limitations
 
-- `mode: middleware` recall is query-less (the `get_context` contract carries
-  no query): the bucket's most recent `top_k` memories are injected. For
-  query-aware semantic recall use `mode: tool`.
+- `mode: middleware` recall runs once, when DeerFlow injects memory at the
+  start of a thread. It uses the text of that first user message, so memories
+  that only become relevant later in the thread are not recalled
+  automatically. Use `mode: tool` when the agent should search memory during
+  the conversation.
 - `mode: tool` retains the passive per-turn write middleware for this backend,
   because mem0 extracts and deduplicates facts from conversations through
   `add()`. The agent still gains query-aware `memory_search`, while new
