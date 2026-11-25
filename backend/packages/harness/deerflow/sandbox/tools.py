@@ -2404,7 +2404,12 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
 
 
 def _sandbox_capacity_result(runtime: Runtime, error: SandboxCapacityExceededError, tool_name: str | None) -> str | ToolMessage:
-    reason = "The sandbox provider is shutting down" if error.reason == "shutdown" else "The sandbox pool is busy"
+    reason = {
+        "capacity": "The sandbox pool is busy",
+        "capacity_backend": "The sandbox capacity service is unavailable",
+        "capacity_initializing": "The sandbox capacity service is initializing",
+        "shutdown": "The sandbox provider is shutting down",
+    }.get(error.reason, "Sandbox capacity is temporarily unavailable")
     retry_after = error.retry_after_seconds
     content = f"Error: {reason}. Retry in about {retry_after:g} seconds. If the sandbox is still unavailable, tell the user to try again later."
     call_id = getattr(runtime, "tool_call_id", None)

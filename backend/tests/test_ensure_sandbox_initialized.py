@@ -168,8 +168,11 @@ def _make_runtime(state: dict) -> ToolRuntime:
         (read_file_tool, {"path": "/mnt/user-data/workspace/note.txt"}, "capacity", "sandbox pool is busy"),
         (str_replace_tool, {"path": "/mnt/user-data/workspace/note.txt", "old_str": "a", "new_str": "b"}, "capacity", "sandbox pool is busy"),
         (write_file_tool, {"path": "/mnt/user-data/workspace/note.txt", "content": "note"}, "shutdown", "provider is shutting down"),
+        (ls_tool, {"path": "/mnt/user-data/workspace"}, "capacity_backend", "sandbox capacity service is unavailable"),
+        (ls_tool, {"path": "/mnt/user-data/workspace"}, "capacity_initializing", "sandbox capacity service is initializing"),
+        (ls_tool, {"path": "/mnt/user-data/workspace"}, "other", "capacity is temporarily unavailable"),
     ],
-    ids=["bash", "ls", "glob", "grep", "read-file", "str-replace", "write-file"],
+    ids=["bash", "ls", "glob", "grep", "read-file", "str-replace", "write-file", "backend-unavailable", "initializing", "other-reason"],
 )
 async def test_capacity_rejection_reaches_the_model(tool, args, reason, explanation, asynchronous, monkeypatch):
     error = SandboxCapacityExceededError(replicas=2, retry_after_seconds=17, reason=reason)
