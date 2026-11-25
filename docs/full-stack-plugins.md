@@ -12,6 +12,13 @@ modules must render an unavailable state. The independent
 [knowledge center](../examples/deerflow-extension-knowledge-center/README.md)
 demonstrates capability-aware ingestion and status views using existing APIs.
 
+A page surface opened as `…?thread=<id>` receives that value as
+`context.threadId`: the first value, trimmed, at most 256 characters, otherwise
+ignored. It is caller input, not an authorization — the host does not verify
+access to the thread, so a plugin that acts on it must check ownership itself
+(the run-postmortem example compares each snapshot's owner with the
+authenticated principal before returning a report).
+
 A deployment-installed Python extension can register a `PluginContribution` with
 optional browser code, authenticated backend actions and model tools. This extends
 the existing `install(registry, config)` workflow. MCP and Skills keep their existing
