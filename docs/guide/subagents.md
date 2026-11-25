@@ -254,7 +254,7 @@ summaries establish a hold only when at least one test ran without a reported
 failure. Zero-test or all-skipped modules do not supply positive evidence;
 failures in any module take precedence over passing counts.
 
-For file acceptance criteria, an empty regular file in the shared workspace can satisfy `file:<path> exists` and `file_written:<path>`, including on remote sandboxes. It fails `file:<path> non-empty` with a deterministic empty-file result. On the local sandbox, every file criterion that reaches path resolution authorizes `sandbox:execute` before resolving the path or probing metadata; a revoked permission returns `UNVERIFIED` without revealing whether the file exists or how large it is.
+For file acceptance criteria, an empty regular file in the shared workspace can satisfy `file:<path> exists` and `file_written:<path>`, including on remote sandboxes. It fails `file:<path> non-empty` with a deterministic empty-file result. On the local sandbox, every file criterion that reaches path resolution authorizes `sandbox:execute` before resolving the path or probing metadata; a revoked permission returns `UNVERIFIED` without revealing whether the file exists or how large it is. The `task` and `batch_task` entry points make this admission decision on the event loop that owns the run, so authorization providers that must be constructed on a running loop keep working; the offloaded checklist carries the decision instead of reconstructing the provider in its worker.
 
 To require CSV header columns, set a `task` or `batch_task` item's criterion to
 `file:../outputs/report.csv csv-columns:["id","name"]`. The JSON array must contain

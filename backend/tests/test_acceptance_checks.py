@@ -13,6 +13,7 @@ import pytest
 
 from deerflow.subagents.acceptance_checks import (
     check_acceptance_criteria,
+    check_acceptance_criteria_async,
     render_acceptance_section,
     render_acceptance_segment,
     validate_acceptance_verdict,
@@ -558,6 +559,131 @@ class TestFileLeafAuthorization:
         assert leaf["checked"] is False
         assert "csv-columns requires" in leaf["detail"]
         probe.assert_not_called()
+
+
+class TestAsyncAdmission:
+    """The async entry point decides sandbox:execute on the owning event loop;
+    a loop-affine provider must never be reconstructed in the checklist worker."""
+
+    @staticmethod
+    def _install_loop_affine_provider(monkeypatch, *, allow):
+        import asyncio
+        from types import ModuleType
+
+        from deerflow.authz.provider import AuthzDecision
+        from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
+
+        provider_module = ModuleType("loop_affine_acceptance_test_provider")
+        constructed_on = []
+
+        class LoopAffineProvider:
+            name = "loop-affine"
+
+            def __init__(self):
+                self.loop = asyncio.get_running_loop()
+                constructed_on.append(self.loop)
+
+            def authorize(self, request):
+                return AuthzDecision(allow=allow)
+
+            async def aauthorize(self, request):
+                assert asyncio.get_running_loop() is self.loop
+                return AuthzDecision(allow=allow)
+
+            def filter_resources(self, principal, resource_type, candidates):
+                return list(candidates)
+
+        provider_module.LoopAffineProvider = LoopAffineProvider
+        monkeypatch.setitem(sys.modules, provider_module.__name__, provider_module)
+        config = SimpleNamespace(
+            authorization=AuthorizationConfig(
+                enabled=True,
+                fail_closed=True,
+                default_role="user",
+                provider=AuthorizationProviderConfig(use=f"{provider_module.__name__}:LoopAffineProvider"),
+            )
+        )
+        monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+        return constructed_on
+
+    @pytest.mark.parametrize("allow", [True, False])
+    @pytest.mark.parametrize("content", [None, b"x" * 60_000], ids=["missing", "large"])
+    def test_loop_affine_provider_decides_on_the_loop(self, tmp_path, monkeypatch, allow, content):
+        """Metadata-only leaves keep their definitive verdicts under a provider
+        that can only be constructed on a running event loop."""
+        import asyncio
+
+        constructed_on = self._install_loop_affine_provider(monkeypatch, allow=allow)
+        if content is not None:
+            (tmp_path / "report.md").write_bytes(content)
+        runtime = SimpleNamespace(
+            state={"sandbox": {"sandbox_id": "local"}},
+            context={"thread_id": "thread-1", "user_id": "user-1", "user_role": "user"},
+        )
+
+        async def run():
+            loop = asyncio.get_running_loop()
+            verdict = await check_acceptance_criteria_async(
+                ["file:report.md exists"],
+                runtime=runtime,
+                thread_data={"workspace_path": str(tmp_path)},
+            )
+            assert constructed_on == [loop]
+            return verdict
+
+        verdict = asyncio.run(run())
+        leaf = verdict["leaves"][0]
+        if allow:
+            assert leaf["checked"] is True
+            assert leaf["holds"] == (content is not None)
+            if content is None:
+                assert leaf["detail"] == "file does not exist"
+            else:
+                assert "60000 bytes" in leaf["detail"]
+        else:
+            assert (leaf["checked"], leaf["holds"]) == (False, False)
+            assert leaf["detail"] == "sandbox access denied; file unverified"
+
+    def test_denied_async_admission_does_not_probe(self, monkeypatch):
+        from deerflow.subagents import acceptance_checks as checks
+
+        self._install_loop_affine_provider(monkeypatch, allow=False)
+        probe = Mock(side_effect=AssertionError("denied admission must not probe"))
+        monkeypatch.setattr(checks, "_probe_file_size", probe)
+        monkeypatch.setattr(checks, "_resolve_scoped_path", Mock(side_effect=AssertionError("denied admission must not resolve")))
+        runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}}, context={"user_id": "user-1", "user_role": "user"})
+
+        import asyncio
+
+        verdict = asyncio.run(
+            check_acceptance_criteria_async(
+                ["file:../outputs/report.md exists"],
+                runtime=runtime,
+                thread_data=THREAD_DATA,
+            )
+        )
+        leaf = verdict["leaves"][0]
+        assert (leaf["checked"], leaf["holds"]) == (False, False)
+        assert leaf["detail"] == "sandbox access denied; file unverified"
+        probe.assert_not_called()
+
+    def test_evidence_only_criteria_skip_admission(self, monkeypatch):
+        authorize = Mock(side_effect=AssertionError("evidence-only criteria need no sandbox admission"))
+        monkeypatch.setattr("deerflow.authz.sandbox_authz.authorize_sandbox_execution_async", authorize)
+        runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}}, context={})
+
+        import asyncio
+
+        verdict = asyncio.run(
+            check_acceptance_criteria_async(
+                ["tests_passed:pytest tests/check.py"],
+                runtime=runtime,
+                thread_data=THREAD_DATA,
+                bash_executions=[_bash_execution("pytest tests/check.py", output_tail="3 passed")],
+            )
+        )
+        assert verdict["leaves"][0]["holds"] is True
+        authorize.assert_not_called()
 
 
 class TestFileLeafSizeProbe:
