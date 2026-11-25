@@ -956,3 +956,42 @@ def test_normalize_symlink_target_is_identity_off_windows(monkeypatch):
     # "\\?\" there must be recorded verbatim.
     monkeypatch.setattr(os, "name", "posix")
     assert _normalize_symlink_target(r"\\?\C:\Users\u1\target.txt") == r"\\?\C:\Users\u1\target.txt"
+
+
+def test_same_file_compares_symlink_status_and_target(tmp_path):
+    """Retargeted links and file/symlink swaps must count as changed (#8550).
+
+    Symlink snapshots never populate sha256, so a retargeted link (or a swap
+    between a regular file and a symlink) that keeps the same size and mtime
+    used to fall through to the size/mtime comparison and was reported
+    unchanged.
+    """
+    from deerflow.workspace_changes import FileSnapshot, WorkspaceSnapshot
+
+    def snap(*, symlink: bool, target: str | None) -> FileSnapshot:
+        return FileSnapshot(
+            path="/mnt/user-data/workspace/link",
+            root="workspace",
+            size=4,
+            mtime_ns=1_000,
+            sha256=None,
+            symlink=symlink,
+            symlink_target=target,
+        )
+
+    def snapshot(snapshot_file: FileSnapshot) -> WorkspaceSnapshot:
+        return WorkspaceSnapshot(files={snapshot_file.path: snapshot_file})
+
+    # Same target is unchanged.
+    before = snapshot(snap(symlink=True, target="real.txt"))
+    after = snapshot(snap(symlink=True, target="real.txt"))
+    assert get_changed_paths(before, after) == set()
+
+    # Retargeted link with the same size and mtime is a change.
+    after = snapshot(snap(symlink=True, target="other.txt"))
+    assert get_changed_paths(before, after) == {"/mnt/user-data/workspace/link"}
+
+    # Regular file replaced by a symlink with the same size and mtime is a change.
+    before = snapshot(snap(symlink=False, target=None))
+    after = snapshot(snap(symlink=True, target=None))
+    assert get_changed_paths(before, after) == {"/mnt/user-data/workspace/link"}
