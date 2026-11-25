@@ -490,3 +490,59 @@ def test_cli_empty_runs_dir_falls_back_to_eval_dirs(tmp_path, benchmark_script):
 
     assert completed.returncode == 0, completed.stderr
     assert_single_passing_run(tmp_path)
+
+
+def test_cli_flat_comparison_puts_current_skill_first(tmp_path, benchmark_script):
+    for config, pass_rate in (("old_skill", 0.0), ("with_skill", 1.0)):
+        config_dir = tmp_path / "eval-1" / config
+        config_dir.mkdir(parents=True)
+        (config_dir / "grading.json").write_text(
+            json.dumps({"summary": {"pass_rate": pass_rate}}), encoding="utf-8"
+        )
+
+    completed = run_cli(benchmark_script, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((tmp_path / "benchmark.json").read_text(encoding="utf-8"))
+    assert [run["configuration"] for run in report["runs"]] == [
+        "with_skill",
+        "old_skill",
+    ]
+    assert report["run_summary"]["delta"]["pass_rate"] == "+1.00"
+    assert report["metadata"]["runs_per_configuration"] == 1
+    assert "1 run each per configuration" in (tmp_path / "benchmark.md").read_text(
+        encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize("grading", [{}, {"summary": {}}, {"summary": []}, []])
+def test_cli_flat_grade_without_usable_summary_fails(
+    tmp_path, benchmark_script, grading
+):
+    config_dir = tmp_path / "eval-1" / "with_skill"
+    config_dir.mkdir(parents=True)
+    (config_dir / "grading.json").write_text(json.dumps(grading), encoding="utf-8")
+
+    completed = run_cli(benchmark_script, tmp_path)
+
+    assert completed.returncode == 1
+    assert "No run results found" in completed.stderr
+    assert not (tmp_path / "benchmark.json").exists()
+    assert not (tmp_path / "benchmark.md").exists()
+
+
+def test_cli_reports_uneven_run_counts(tmp_path, benchmark_script):
+    write_run(tmp_path)
+    write_run(tmp_path, run_number=2)
+    write_run(tmp_path, config="without_skill")
+
+    completed = run_cli(benchmark_script, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((tmp_path / "benchmark.json").read_text(encoding="utf-8"))
+    assert report["metadata"]["runs_per_configuration"] is None
+    assert report["metadata"]["run_counts_by_eval"] == {
+        "1": {"with_skill": 2, "without_skill": 1}
+    }
+    markdown = (tmp_path / "benchmark.md").read_text(encoding="utf-8")
+    assert "Eval 1: with_skill=2, without_skill=1" in markdown

@@ -38,6 +38,7 @@ import argparse
 import json
 import math
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -98,6 +99,7 @@ def load_run_results(benchmark_dir: Path) -> dict:
         return {}
 
     results: dict[str, list] = {}
+    has_flat_runs = False
 
     for eval_idx, eval_dir in enumerate(sorted(search_dir.glob("eval-*"))):
         metadata_path = eval_dir / "eval_metadata.json"
@@ -118,7 +120,8 @@ def load_run_results(benchmark_dir: Path) -> dict:
             if not config_dir.is_dir():
                 continue
             run_dirs = [(int(d.name.split("-")[1]), d) for d in sorted(config_dir.glob("run-*"))]
-            if not run_dirs and (config_dir / "grading.json").exists():
+            is_flat = not run_dirs and (config_dir / "grading.json").exists()
+            if is_flat:
                 # Flat layout (eval-<ID>/<config>/{outputs/,grading.json}) as
                 # documented in SKILL.md and grader.md: the config dir is the run.
                 run_dirs = [(1, config_dir)]
@@ -126,8 +129,8 @@ def load_run_results(benchmark_dir: Path) -> dict:
             if not run_dirs:
                 continue
             config = config_dir.name
-            if config not in results:
-                results[config] = []
+            if not is_flat:
+                results.setdefault(config, [])
 
             for run_number, run_dir in run_dirs:
                 grading_file = run_dir / "grading.json"
@@ -143,14 +146,22 @@ def load_run_results(benchmark_dir: Path) -> dict:
                     print(f"Warning: Invalid JSON in {grading_file}: {e}", file=sys.stderr)
                     continue
 
+                summary = grading.get("summary", {}) if isinstance(grading, dict) else {}
+                if is_flat:
+                    pass_rate = summary.get("pass_rate") if isinstance(summary, dict) else None
+                    if type(pass_rate) not in (int, float) or not 0 <= pass_rate <= 1:
+                        print(f"Warning: Missing or invalid grading summary in {grading_file}", file=sys.stderr)
+                        continue
+                    has_flat_runs = True
+
                 # Extract metrics
                 result = {
                     "eval_id": eval_id,
                     "run_number": run_number,
-                    "pass_rate": grading.get("summary", {}).get("pass_rate", 0.0),
-                    "passed": grading.get("summary", {}).get("passed", 0),
-                    "failed": grading.get("summary", {}).get("failed", 0),
-                    "total": grading.get("summary", {}).get("total", 0),
+                    "pass_rate": summary.get("pass_rate", 0.0),
+                    "passed": summary.get("passed", 0),
+                    "failed": summary.get("failed", 0),
+                    "total": summary.get("total", 0),
                 }
 
                 # Read recorded tokens independently of the grading duration.
@@ -194,8 +205,10 @@ def load_run_results(benchmark_dir: Path) -> dict:
                 notes.extend(notes_summary.get("workarounds", []))
                 result["notes"] = notes
 
-                results[config].append(result)
+                results.setdefault(config, []).append(result)
 
+    if has_flat_runs and "with_skill" in results:
+        return dict(sorted(results.items(), key=lambda item: item[0] != "with_skill"))
     return results
 
 
@@ -279,12 +292,14 @@ def generate_benchmark(benchmark_dir: Path, skill_name: str = "", skill_path: st
                 "notes": result["notes"]
             })
 
-    # Determine eval IDs from results
-    eval_ids = sorted(set(
-        r["eval_id"]
-        for config in results.values()
-        for r in config
-    ))
+    eval_ids = sorted({run["eval_id"] for run in runs})
+    run_counts = Counter((run["eval_id"], run["configuration"]) for run in runs)
+    counts_by_eval = {
+        eval_id: {config: run_counts[eval_id, config] for config in results}
+        for eval_id in eval_ids
+    }
+    observed_counts = {count for counts in counts_by_eval.values() for count in counts.values()}
+    uniform_count = next(iter(observed_counts)) if len(observed_counts) == 1 else None
 
     benchmark = {
         "metadata": {
@@ -294,7 +309,8 @@ def generate_benchmark(benchmark_dir: Path, skill_name: str = "", skill_path: st
             "analyzer_model": "<model-name>",
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "evals_run": eval_ids,
-            "runs_per_configuration": 3
+            "runs_per_configuration": uniform_count,
+            **({"run_counts_by_eval": counts_by_eval} if len(observed_counts) > 1 else {}),
         },
         "runs": runs,
         "run_summary": run_summary,
@@ -316,12 +332,23 @@ def generate_markdown(benchmark: dict) -> str:
     label_a = config_a.replace("_", " ").title()
     label_b = config_b.replace("_", " ").title()
 
+    evals = ", ".join(map(str, metadata["evals_run"]))
+    uniform_count = metadata["runs_per_configuration"]
+    if uniform_count is not None:
+        run_label = "run" if uniform_count == 1 else "runs"
+        evals += f" ({uniform_count} {run_label} each per configuration)"
+    else:
+        counts_by_eval = metadata.get("run_counts_by_eval", {})
+        for eval_id, counts in counts_by_eval.items():
+            breakdown = ", ".join(f"{config}={count}" for config, count in counts.items())
+            evals += f"\n- Eval {eval_id}: {breakdown}"
+
     lines = [
         f"# Skill Benchmark: {metadata['skill_name']}",
         "",
         f"**Model**: {metadata['executor_model']}",
         f"**Date**: {metadata['timestamp']}",
-        f"**Evals**: {', '.join(map(str, metadata['evals_run']))} ({metadata['runs_per_configuration']} runs each per configuration)",
+        f"**Evals**: {evals}",
         "",
         "## Summary",
         "",
