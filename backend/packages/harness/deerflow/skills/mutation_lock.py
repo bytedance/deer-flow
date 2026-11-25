@@ -32,7 +32,7 @@ from deerflow.skills.types import SkillCategory
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows
-    fcntl = None
+    fcntl = None  # type: ignore[assignment]
     import msvcrt
 
 _locks: dict[str, threading.Lock] = {}
