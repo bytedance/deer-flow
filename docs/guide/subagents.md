@@ -342,7 +342,9 @@ batch may belong to the resumed call and the checkpoint cannot establish its
 origin, `batch_task` returns a submission conflict. Inspect the batches on the
 thread to find any work already stored. A later model response can reuse the
 same tool-call ID when the checkpoint attributes the old batch to an earlier
-dispatch.
+dispatch. When automatic or manual context compaction removes a dispatch and
+its successful receipt, the checkpoint retains the batch ID. Later turns can
+then reuse the tool-call ID after the earlier receipt leaves the conversation.
 
 Queued requests finish removing their queue entry and returning any transferred
 slot before cancellation propagates. The cleanup waits for the capacity lock
@@ -387,8 +389,10 @@ async with runtime:
 
 Custom SDK repositories can keep their original `create_batch` signature. The
 built-in SQL repository verifies submission digests and resolves replays before
-applying new batch limits. Adapters can opt into this behavior by declaring the
-`submission_digest` keyword on `create_batch` and implementing `find_submission`.
+applying new batch limits. Adapters that forward the execution snapshot to SQL
+can replay a submission with the original signature. An adapter can also
+declare the `submission_digest` keyword and expose `find_submission` to resolve
+replays before checking current batch limits.
 
 Gateway run finalization also retains ownership through caller cancellation: it finishes terminal persistence, stream completion, and resource cleanup before propagating the interruption. Backend I/O must terminate or enforce its own timeout. Gateway shutdown includes workers still finalizing after their terminal status commits; an expired shutdown drain budget is logged and does not cancel their outstanding writes.
 

@@ -3,11 +3,47 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, NotRequired, Protocol, TypedDict
 
+from langchain_core.messages import AIMessage, ToolMessage
+
 BATCH_CONTINUATION_NAMESPACE = "native-subagent-batches"
 BATCH_RECEIPT_ID_KEY = "subagent_batch_id"
+COMPACTED_BATCH_RECEIPTS_CHANNEL = "compacted_batch_receipt_ids"
+BATCH_SUBMISSION_DIGEST_KEY = "_submission_digest"
+
+
+def iter_batch_dispatch_receipts(messages: Iterable[object]) -> Iterator[tuple[AIMessage, ToolMessage, str]]:
+    """Pair successful receipts with the model response that issued their call."""
+    dispatch = None
+    for message in messages:
+        if isinstance(message, AIMessage):
+            dispatch = message
+        elif not isinstance(message, ToolMessage):
+            dispatch = None
+        elif dispatch is not None and message.name == "batch_task" and message.status == "success":
+            batch_id = message.additional_kwargs.get(BATCH_RECEIPT_ID_KEY)
+            if not isinstance(batch_id, str):
+                continue
+            calls = [call for call in dispatch.tool_calls or () if isinstance(call, dict) and call.get("id") == message.tool_call_id]
+            if len(calls) == 1 and calls[0].get("name") == "batch_task":
+                yield dispatch, message, batch_id
+
+
+def compacted_batch_receipt_ids(state: object) -> set[str]:
+    values = state.get(COMPACTED_BATCH_RECEIPTS_CHANNEL) if isinstance(state, Mapping) else getattr(state, COMPACTED_BATCH_RECEIPTS_CHANNEL, None)
+    return {value for value in values if isinstance(value, str)} if isinstance(values, list) else set()
+
+
+def compacted_batch_receipt_update(state: Mapping[str, Any], removed_messages: Iterable[object]) -> dict[str, list[str]]:
+    removed = {id(message) for message in removed_messages}
+    batch_ids = {batch_id for dispatch, receipt, batch_id in iter_batch_dispatch_receipts(state["messages"]) if id(dispatch) in removed and id(receipt) in removed}
+    if not batch_ids:
+        return {}
+    # Checkpoint these IDs in the same write that removes the paired messages.
+    return {COMPACTED_BATCH_RECEIPTS_CHANNEL: sorted(compacted_batch_receipt_ids(state) | batch_ids)}
 
 
 def batch_continuation_key(batch_id: str) -> str:

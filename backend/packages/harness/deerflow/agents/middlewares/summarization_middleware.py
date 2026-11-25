@@ -38,6 +38,7 @@ from deerflow.models import create_chat_model
 from deerflow.models.reasoning import resolve_reasoning_contract
 from deerflow.models.vllm_provider import VllmChatModel, count_tokens_with_replayed_reasoning
 from deerflow.runtime.events.catalog import MIDDLEWARE_SUMMARIZE_TAG
+from deerflow.subagents.batch_runtime import compacted_batch_receipt_update
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
 
@@ -1074,6 +1075,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 *result.preserved_messages,
             ],
             "summary_text": result.summary_text,
+            **compacted_batch_receipt_update(state, result.messages_to_summarize),
             **({"task_history": result.task_history} if result.task_history is not None else {}),
         }
 
@@ -1087,6 +1089,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 *result.preserved_messages,
             ],
             "summary_text": result.summary_text,
+            **compacted_batch_receipt_update(state, result.messages_to_summarize),
             **({"task_history": result.task_history} if result.task_history is not None else {}),
         }
 

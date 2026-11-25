@@ -603,13 +603,14 @@ async def test_item_list_selects_only_the_heavy_columns_it_returns(tmp_path) -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("same_request", [True, False], ids=["replay", "conflict"])
-async def test_concurrent_submission_key_has_one_winner(submission_repo, same_request) -> None:
+@pytest.mark.parametrize("use_digest", [True, False], ids=["digest", "digestless"])
+async def test_concurrent_submission_key_has_one_winner(submission_repo, same_request, use_digest) -> None:
     repo = submission_repo
     barrier = asyncio.Barrier(2)
 
     async def submit(batch_id, items, digest):
         await barrier.wait()
-        return await _submit(repo, batch_id, items, submission_digest=digest)
+        return await _submit(repo, batch_id, items, submission_digest=digest if use_digest else None)
 
     first_items = [{"key": "one", "prompt": "First request"}]
     second_items = first_items if same_request else [{"key": "two", "prompt": "Second request"}]

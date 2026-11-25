@@ -32,7 +32,9 @@ from deerflow.subagents.batch_runtime import (
     BatchItemInput,
     BatchSubmitRequest,
     SubagentBatchSubmitter,
+    compacted_batch_receipt_ids,
     get_subagent_batch_submitter,
+    iter_batch_dispatch_receipts,
 )
 from deerflow.subagents.registry import get_available_subagent_names, get_subagent_config
 from deerflow.tools.sync import make_sync_tool_wrapper
@@ -161,18 +163,10 @@ def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -
 
 def _dispatch_receipts(state: object, dispatch: AIMessage, tool_call_id: str) -> BatchDispatchReceipts:
     messages = state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
-    previous, current = set(), set()
-    receipts = None
-    for message in messages or ():
-        if isinstance(message, AIMessage):
-            calls = [call for call in message.tool_calls or () if isinstance(call, dict) and call.get("id") == tool_call_id]
-            receipts = (current if message is dispatch else previous) if len(calls) == 1 and calls[0].get("name") == "batch_task" else None
-        elif not isinstance(message, ToolMessage):
-            receipts = None
-        elif receipts is not None and message.name == "batch_task" and message.tool_call_id == tool_call_id and message.status == "success":
-            batch_id = message.additional_kwargs.get(BATCH_RECEIPT_ID_KEY)
-            if isinstance(batch_id, str):
-                receipts.add(batch_id)
+    previous, current = compacted_batch_receipt_ids(state), set()
+    for issuer, receipt, batch_id in iter_batch_dispatch_receipts(messages or ()):
+        if receipt.tool_call_id == tool_call_id:
+            (current if issuer is dispatch else previous).add(batch_id)
     return BatchDispatchReceipts(current=frozenset(current), previous=frozenset(previous))
 
 

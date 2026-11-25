@@ -17,7 +17,7 @@ from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.subagent_batches.model import SubagentBatchDependencyRow, SubagentBatchItemRow, SubagentBatchRow
 from deerflow.subagents.acceptance_checks import AcceptanceVerdict, validate_acceptance_verdict
 from deerflow.subagents.batch_dependencies import batch_dependencies
-from deerflow.subagents.batch_runtime import BATCH_CONTINUATION_NAMESPACE, BatchItemInput, BatchSubmitRequest, batch_continuation_key
+from deerflow.subagents.batch_runtime import BATCH_CONTINUATION_NAMESPACE, BATCH_SUBMISSION_DIGEST_KEY, BatchItemInput, BatchSubmitRequest, batch_continuation_key
 from deerflow.subagents.report_contract import normalize_acceptance_criteria
 from deerflow.utils.time import coerce_iso
 
@@ -25,7 +25,6 @@ BATCH_ACTIVE_STATUSES = ("queued", "running", "paused")
 BATCH_TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 ITEM_ACTIVE_STATUSES = ("queued", "leased", "running")
 ITEM_TERMINAL_STATUSES = ("succeeded", "failed", "cancelled")
-_SUBMISSION_DIGEST_KEY = "_submission_digest"
 _BATCH_PUBLIC_FIELDS = (
     "id",
     "thread_id",
@@ -68,8 +67,22 @@ class BatchSubmissionConflictError(ValueError):
 
 
 def _check_submission(batch: SubagentBatchRow, *, thread_id: str, tool_call_id: str | None, incarnation: Any, digest: str | None) -> None:
-    if batch.thread_id != thread_id or batch.tool_call_id != tool_call_id or batch.execution_spec.get(THREAD_INCARNATION_CONTEXT_KEY) != incarnation or digest is None or batch.execution_spec.get(_SUBMISSION_DIGEST_KEY) != digest:
+    if batch.thread_id != thread_id or batch.tool_call_id != tool_call_id or batch.execution_spec.get(THREAD_INCARNATION_CONTEXT_KEY) != incarnation or digest is None or batch.execution_spec.get(BATCH_SUBMISSION_DIGEST_KEY) != digest:
         raise BatchSubmissionConflictError("Batch submission conflict: this identity was already used with a different or unverifiable request")
+
+
+def _can_recover_digestless_submission(batch: SubagentBatchRow, request: BatchSubmitRequest) -> bool:
+    # A dispatch-scoped row written by an older adapter can be checked against
+    # its stored items. Run-scoped legacy keys still require checkpoint evidence.
+    return (
+        batch.execution_spec.get(BATCH_SUBMISSION_DIGEST_KEY) is None
+        and request.submission_key.startswith("batch-v1:")
+        and batch.submission_key != f"{batch.run_id or batch.thread_id}:{batch.tool_call_id}"
+        and batch.run_id == request.run_id
+        and batch.thread_id == request.thread_id
+        and batch.tool_call_id == request.tool_call_id
+        and batch.execution_spec.get(THREAD_INCARNATION_CONTEXT_KEY) == request.execution_spec.get(THREAD_INCARNATION_CONTEXT_KEY)
+    )
 
 
 class SubagentBatchRepository:
@@ -118,8 +131,7 @@ class SubagentBatchRepository:
         async with self._sf() as session:
             existing = await session.scalar(select(SubagentBatchRow).filter_by(user_id=request.user_id, submission_key=request.submission_key))
             if existing is not None:
-                _check_submission(existing, thread_id=request.thread_id, tool_call_id=request.tool_call_id, incarnation=incarnation, digest=submission_digest)
-                return await self._with_counts(session, existing)
+                return await self._resolve_submission(session, existing, request, title=title, submission_digest=submission_digest)
 
             receipts = request.dispatch_receipts
             if receipts is None:
@@ -143,6 +155,11 @@ class SubagentBatchRepository:
                 if batch.id not in receipts.previous and batch.execution_spec.get(THREAD_INCARNATION_CONTEXT_KEY) == incarnation and await self._matches_legacy_request(session, batch, request, title):
                     return await self._with_counts(session, batch)
             raise BatchSubmissionConflictError("Batch submission conflict: a legacy batch may already contain this work. Inspect the existing batches before requesting a new submission.")
+
+    async def _resolve_submission(self, session: AsyncSession, batch: SubagentBatchRow, request: BatchSubmitRequest, *, title: str, submission_digest: str | None) -> dict[str, Any]:
+        if not (_can_recover_digestless_submission(batch, request) and await self._matches_legacy_request(session, batch, request, title)):
+            _check_submission(batch, thread_id=request.thread_id, tool_call_id=request.tool_call_id, incarnation=request.execution_spec.get(THREAD_INCARNATION_CONTEXT_KEY), digest=submission_digest)
+        return await self._with_counts(session, batch)
 
     async def _matches_legacy_request(self, session: AsyncSession, batch: SubagentBatchRow, request: BatchSubmitRequest, title: str) -> bool:
         if (
@@ -191,6 +208,9 @@ class SubagentBatchRepository:
         continuation: dict[str, Any] | None = None,
         submission_digest: str | None = None,
     ) -> dict[str, Any]:
+        if submission_digest is None:
+            # Legacy adapters forward the digest inside the execution snapshot.
+            submission_digest = execution_spec.get(BATCH_SUBMISSION_DIGEST_KEY)
         dependencies = batch_dependencies(items)
         now = datetime.now(UTC)
         values = dict(
@@ -207,7 +227,7 @@ class SubagentBatchRepository:
             max_live_items=max_live_items,
             max_running_items=max_running_items,
             max_attempts=max_attempts,
-            execution_spec=execution_spec if submission_digest is None else {**execution_spec, _SUBMISSION_DIGEST_KEY: submission_digest},
+            execution_spec=execution_spec if submission_digest is None else {**execution_spec, BATCH_SUBMISSION_DIGEST_KEY: submission_digest},
             continuation_json=continuation,
             continuation_status="pending" if continuation is not None else None,
             created_at=now,
@@ -239,6 +259,22 @@ class SubagentBatchRepository:
                 existing = await session.scalar(select(SubagentBatchRow).filter_by(user_id=user_id, submission_key=submission_key))
                 if existing is None:
                     raise RuntimeError("Conflicting batch submission disappeared before it could be read")
+                if tool_call_id is not None and existing.execution_spec.get(BATCH_SUBMISSION_DIGEST_KEY) is None:
+                    request = BatchSubmitRequest(
+                        user_id=user_id,
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        tool_call_id=tool_call_id,
+                        submission_key=submission_key,
+                        title=title,
+                        subagent_type=subagent_type,
+                        items=items,
+                        max_live_items=max_live_items,
+                        max_running_items=max_running_items,
+                        execution_spec=execution_spec,
+                        continuation=(continuation or {}).get("prompt"),
+                    )
+                    return await self._resolve_submission(session, existing, request, title=title, submission_digest=submission_digest)
                 _check_submission(existing, thread_id=thread_id, tool_call_id=tool_call_id, incarnation=execution_spec.get(THREAD_INCARNATION_CONTEXT_KEY), digest=submission_digest)
                 return await self._with_counts(session, existing)
 

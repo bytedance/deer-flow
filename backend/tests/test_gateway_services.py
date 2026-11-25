@@ -244,20 +244,19 @@ def test_external_goal_outcome_is_rejected(boundary):
 
 
 @pytest.mark.parametrize("boundary", ["run", "state"])
-def test_external_loop_cap_is_rejected(boundary):
-    """A caller copy of loop detection's cap record could lift a cap or block a tool."""
+@pytest.mark.parametrize("channel", ["loop_cap", "compacted_batch_receipt_ids"])
+def test_external_internal_state_is_rejected(boundary, channel):
     from fastapi import HTTPException
 
     from app.gateway.services import SERVER_OWNED_STATE_CHANNELS, normalize_input, strip_server_owned_state_metadata
-    from deerflow.agents.middlewares.loop_detection_middleware import LOOP_CAP_STATE_KEY
 
-    assert LOOP_CAP_STATE_KEY in SERVER_OWNED_STATE_CHANNELS
+    assert channel in SERVER_OWNED_STATE_CHANNELS
     transform = normalize_input if boundary == "run" else strip_server_owned_state_metadata
     with pytest.raises(HTTPException) as error:
-        transform({LOOP_CAP_STATE_KEY: None})
+        transform({channel: ["batch-id"]})
 
     assert error.value.status_code == 400
-    assert error.value.detail == "External loop_cap state is not allowed"
+    assert error.value.detail == f"External {channel} state is not allowed"
 
 
 @pytest.mark.parametrize("boundary", ["run", "state"])

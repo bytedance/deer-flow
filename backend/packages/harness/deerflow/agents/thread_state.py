@@ -5,6 +5,7 @@ from functools import cache
 from typing import Annotated, Any, NotRequired, TypedDict, cast, get_type_hints
 
 from langchain.agents import AgentState
+from langchain.agents.middleware.types import PrivateStateAttr
 from langchain_core.messages import (
     AnyMessage,
     BaseMessageChunk,
@@ -480,6 +481,7 @@ class ThreadState(AgentState):
     task_notes: Annotated[dict | None, TaskNotesChannel(dict | None, merge_task_notes)]
     task_history: NotRequired[dict | None]
     summary_text: NotRequired[str | None]
+    compacted_batch_receipt_ids: Annotated[NotRequired[list[str]], PrivateStateAttr]
     background_tasks: NotRequired[list[BackgroundTaskState]]
     # Server-owned: see ``deerflow.utils.messages.IMPORTED_HISTORY_CHANNEL``.
     imported_history: NotRequired[str | None]

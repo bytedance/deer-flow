@@ -21,7 +21,7 @@ from deerflow.extensions import LoadedExtensions, get_loaded_extensions
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.subagents.batch_acceptance import check_batch_acceptance
 from deerflow.subagents.batch_lease import BatchItemLease
-from deerflow.subagents.batch_runtime import BatchSubmitRequest
+from deerflow.subagents.batch_runtime import BATCH_SUBMISSION_DIGEST_KEY, BatchSubmitRequest
 from deerflow.subagents.capacity import SubagentExecutionCapacity
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 from deerflow.subagents.executor import (
@@ -343,15 +343,21 @@ class SubagentBatchService:
             digest_parameter = inspect.signature(create_batch).parameters.get("submission_digest")
         except (TypeError, ValueError):
             digest_parameter = None
+        find_submission = getattr(self._repository, "find_submission", None)
+        digest = await run_assembly(_submission_digest, request, title)
+        if callable(find_submission):
+            existing = await find_submission(request, title=title, submission_digest=digest)
+            if existing is not None:
+                return existing
+
+        execution_spec = request.execution_spec
         submission_fields = {}
         if digest_parameter is not None and digest_parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
-            digest = await run_assembly(_submission_digest, request, title)
             submission_fields["submission_digest"] = digest
-            find_submission = getattr(self._repository, "find_submission", None)
-            if callable(find_submission):
-                existing = await find_submission(request, title=title, submission_digest=digest)
-                if existing is not None:
-                    return existing
+        else:
+            # Old adapters can forward the fingerprint through their existing
+            # JSON execution snapshot, including when they expose only create_batch.
+            execution_spec = {**execution_spec, BATCH_SUBMISSION_DIGEST_KEY: digest}
 
         total = len(request.items)
         if total < 1 or total > self._config.max_items_per_batch:
@@ -380,7 +386,7 @@ class SubagentBatchService:
             max_live_items=max_live,
             max_running_items=max_running,
             max_attempts=self._config.max_attempts,
-            execution_spec=request.execution_spec,
+            execution_spec=execution_spec,
             **submission_fields,
             **({"continuation": continuation} if continuation is not None else {}),
         )
