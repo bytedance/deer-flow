@@ -491,7 +491,8 @@ class TelegramChannel(Channel):
                 if self._is_not_modified(exc):
                     return True
                 if self._is_retry_after(exc) and attempt == 0:
-                    await asyncio.sleep(self._retry_after_seconds(exc))
+                    # Same bounded, validated flood wait as new sends (#8548).
+                    await asyncio.sleep(self._outbound_retry_delay(attempt, exc))
                     continue
                 logger.warning("[Telegram] final edit failed in chat=%s: %s", chat_id, exc)
                 return False
@@ -522,7 +523,8 @@ class TelegramChannel(Channel):
                 return True
             except Exception as exc:
                 if self._is_retry_after(exc) and attempt == 0:
-                    await asyncio.sleep(self._retry_after_seconds(exc))
+                    # Same bounded, validated flood wait as new sends (#8548).
+                    await asyncio.sleep(self._outbound_retry_delay(attempt, exc))
                     continue
                 if isinstance(exc, (BadRequest, EndPointNotFound)):
                     logger.warning("[Telegram] Rich Message rejected in chat=%s; falling back to plain text: %s", chat_id, exc)
@@ -987,7 +989,7 @@ class TelegramChannel(Channel):
 
         Only sends through ``_send_with_retry`` use this policy. The running
         acknowledgment and intermediate stream updates are best effort.
-        Final edits have their own retry path.
+        Final-edit retries reuse this bounded, validated flood wait.
         """
         delay = super()._outbound_retry_delay(attempt, exc)
         if not self._is_retry_after(exc):

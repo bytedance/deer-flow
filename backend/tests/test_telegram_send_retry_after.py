@@ -349,3 +349,80 @@ class TestTelegramNewMessageRetryAfter:
         assert _run(channel._send_with_retry(flaky, max_retries=3)) == "sent"
         assert attempts["n"] == 3
         assert sleeps == [1, 2]
+
+
+class TestTelegramFinalEditRetryAfter:
+    def test_final_chunk_edit_caps_large_retry_after(self, monkeypatch):
+        async def go():
+            channel, bot = _channel_with_bot()
+            sleeps: list[float] = []
+
+            async def fake_sleep(delay):
+                sleeps.append(delay)
+
+            monkeypatch.setattr("app.channels.telegram.asyncio.sleep", fake_sleep)
+            real_edit = bot.edit_message_text
+            calls = {"n": 0}
+
+            async def flaky(**kwargs):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise _flood(timedelta(hours=2))
+                return await real_edit(**kwargs)
+
+            bot.edit_message_text = flaky
+            edited = await channel._edit_final_chunk(bot, 12345, 100, "hello")
+            assert edited is True
+            assert sleeps == [60.0]
+
+        _run(go())
+
+    def test_final_chunk_edit_falls_back_on_unusable_hint(self, monkeypatch):
+        async def go():
+            channel, bot = _channel_with_bot()
+            sleeps: list[float] = []
+
+            async def fake_sleep(delay):
+                sleeps.append(delay)
+
+            monkeypatch.setattr("app.channels.telegram.asyncio.sleep", fake_sleep)
+            real_edit = bot.edit_message_text
+            calls = {"n": 0}
+
+            async def flaky(**kwargs):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise _flood("invalid")
+                return await real_edit(**kwargs)
+
+            bot.edit_message_text = flaky
+            edited = await channel._edit_final_chunk(bot, 12345, 100, "hello")
+            assert edited is True
+            assert sleeps == [1.0]
+
+        _run(go())
+
+    def test_rich_edit_caps_large_retry_after(self, monkeypatch):
+        async def go():
+            channel, bot = _channel_with_bot()
+            sleeps: list[float] = []
+
+            async def fake_sleep(delay):
+                sleeps.append(delay)
+
+            monkeypatch.setattr("app.channels.telegram.asyncio.sleep", fake_sleep)
+            real_rich = bot.do_api_request
+            calls = {"n": 0}
+
+            async def flaky(endpoint, api_kwargs):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise _flood(timedelta(hours=2))
+                return await real_rich(endpoint, api_kwargs)
+
+            bot.do_api_request = flaky
+            edited = await channel._edit_rich_message("12345", 100, "**answer**")
+            assert edited is True
+            assert sleeps == [60.0]
+
+        _run(go())
