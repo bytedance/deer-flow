@@ -377,6 +377,8 @@ class _BoundAgentRuns:
             except TaskConflict as exc:
                 raise AgentRunError(409, str(exc)) from exc
         thread_id = worker["thread_id"]
+        frozen = dict(frozen)
+        planner_input_key = frozen.pop("planner_input_key", None)
         async with self._request("runs:create", thread_id) as request:
             record = await request.app.state.thread_store.get(thread_id, user_id=self._user_id)
             if record is None or record.get("assistant_id") != worker["assistant_id"] or (record.get("metadata") or {}).get(THREAD_PROJECT_METADATA_KEY) != project_id:
@@ -395,7 +397,26 @@ class _BoundAgentRuns:
             )
             request.state.coordination_execution_id = execution_id
             request.state.coordination_grant_id = grant_id
-            record = await start_run(body, thread_id, request, require_existing_thread=True, idempotency_key=RUN_KEY_PREFIX + execution_id)
+            coordinator_factory = None
+            if "expected_revision" in frozen:
+                from app.gateway.authz import authorize_model_use
+                from app.gateway.coordinator_agent import build_coordinator_factory
+
+                async def check_model_access(app_config):
+                    async with self._request("runs:create", thread_id) as model_request:
+                        await asyncio.to_thread(authorize_model_use, model_request.state.user, None, is_internal=False, app_config=app_config)
+
+                workers = request.app.state.coordination_workers
+                coordinator_factory = build_coordinator_factory(workers, self._user_id, task_id, execution_id, grant_id, worker["assistant_id"], check_model_access)
+            record = await start_run(
+                body,
+                thread_id,
+                request,
+                require_existing_thread=True,
+                idempotency_key=RUN_KEY_PREFIX + execution_id,
+                agent_factory_override=coordinator_factory,
+                input_message_idempotency_key=planner_input_key,
+            )
             return _view(record)
 
     async def wait_coordination_worker(self, *, thread_id, run_id, timeout=60):
@@ -421,6 +442,19 @@ class _BoundAgentRuns:
 
         async with self._request("runs:cancel", thread_id) as request:
             await get_subagent_batch_service(request).cancel_batch(batch_id=batch_id, user_id=self._user_id, continuation_authority=self)
+
+    async def coordination_result_text(self, *, thread_id, run_id):
+        from app.gateway.conversation_access import _visible_text
+        from app.gateway.deps import get_run_event_store
+
+        async with self._request("runs:read", thread_id) as request:
+            rows = await get_run_event_store(request).list_messages_by_run(thread_id, run_id, user_id=self._user_id, limit=12)
+        for row in reversed(rows):
+            if row.get("event_type") in ("llm.ai.response", "ai_message"):
+                visible = _visible_text(row, thread_id=thread_id)
+                if visible is not None and visible[0] == "assistant":
+                    return visible[1][:4000]
+        return None
 
     async def coordination_recovery_checkpoint(self, *, thread_id, run_id):
         from app.gateway.deps import get_run_store

@@ -3,7 +3,7 @@
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import JSON, BigInteger, DateTime, Double, ForeignKey, ForeignKeyConstraint, Index, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Double, ForeignKey, ForeignKeyConstraint, Index, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -34,6 +34,7 @@ class CoordinationTaskRow(Base):
     parent_id: Mapped[str | None] = mapped_column(ForeignKey("coord_tasks.id"))
     depends_on: Mapped[list[str]] = mapped_column(JSON)
     objective: Mapped[str] = mapped_column(Text)
+    coordinator: Mapped[bool | None] = mapped_column(Boolean)
     run_settings: Mapped[dict[str, int | bool] | None] = mapped_column(JSON(none_as_null=True))
     status: Mapped[str] = mapped_column(String(16))
     revision: Mapped[int] = mapped_column(BigInteger)
@@ -92,6 +93,8 @@ class CoordinationExecutionRow(Base):
     frozen_input: Mapped[dict] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(32))
     run_id: Mapped[str | None] = mapped_column(String(64), unique=True)
+    decision: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    result_text: Mapped[str | None] = mapped_column(Text)
 
 
 class CoordinationArtifactRow(Base):
