@@ -851,6 +851,67 @@ def test_stale_closed_adapter_cannot_invalidate_recreated_box(monkeypatch):
     provider.shutdown()
 
 
+def test_late_terminal_failure_from_replaced_box_keeps_replacement(monkeypatch):
+    """A replaced generation's late failure must not close the recreated box.
+
+    Unlike the stale-closed case above, this command is already past the
+    ``_closed`` check when the scope is rebuilt, so its terminal failure
+    reaches the provider after the replacement exists (#8619).
+    """
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config({"health_check_skip_seconds": 5}),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    sid = provider.acquire("thread-1", user_id="u1")
+    old = provider.get(sid)
+    assert old is not None
+
+    slow_mode, entered, gate = threading.Event(), threading.Event(), threading.Event()
+
+    def controlled_run(coro, *, timeout=None):
+        if slow_mode.is_set():
+            coro.close()
+            entered.set()
+            gate.wait(10)
+            raise RuntimeError("vsock disconnected")
+        return _fake_run(coro, timeout=timeout)
+
+    old._run = controlled_run
+    slow_mode.set()
+    result: list[str] = []
+    worker = threading.Thread(target=lambda: result.append(old.execute_command("echo slow")), daemon=True)
+    try:
+        worker.start()
+        assert entered.wait(10)  # the command is inside the runner
+        slow_mode.clear()
+        provider._invalidate_box(sid, "vsock disconnected")  # a concurrent failure evicts this generation
+        provider._loop.run = _fake_run
+        sid2 = provider.acquire("thread-1", user_id="u1")
+        replacement = provider.get(sid2)
+        assert sid2 == sid
+        assert replacement is not None
+        assert replacement is not old
+        gate.set()  # the in-flight command now fails terminally
+        worker.join(10)
+        assert not worker.is_alive()
+        assert result == ["Error: vsock disconnected"]
+
+        assert provider.get(sid2) is replacement
+        assert replacement._closed is False
+    finally:
+        gate.set()
+        worker.join(10)
+        provider.shutdown()
+
+
 def test_acquire_different_threads_dont_reclaim_each_other(monkeypatch):
     """Thread A's box can't be reclaimed by thread B."""
     monkeypatch.setattr(
