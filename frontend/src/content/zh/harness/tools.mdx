@@ -371,7 +371,7 @@ tools:
     use: deerflow.community.webrouter.tools:web_fetch_tool
     # provider: auto # 或指定单个后端，例如 nimble, tavily, jina, firecrawl
 ```
-通过托管读取服务以 Markdown 形式返回页面内容，并在后端之间自动回退。无需 API Key：未配置 Key 时，页面由免密钥额度读取（Nimble、Tavily、Jina、Firecrawl、Keenable）。环境中的后端 Key 与 `web_search` 一样会被使用。
+通过托管读取服务以 Markdown 形式返回页面内容，并在后端之间自动回退。无需 API Key：未配置 Key 时，页面由免密钥额度读取（Nimble、Tavily、Jina、Firecrawl、Keenable）。环境中的后端 Key 与 `web_search` 一样会被使用。`provider: max` 会把每个页面同时发送给所有已配置的后端并采用最先返回的结果，因此一次读取会访问多个服务，每个配置了 Key 的后端都会对该次读取计费。
 
 安装：`cd backend && uv sync --extra webrouter`（Docker：`UV_EXTRAS=webrouter`）
 

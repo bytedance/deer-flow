@@ -653,19 +653,28 @@ def check_llm_auth(config_path: Path) -> list[CheckResult]:
     return results
 
 
-def _webrouter_pin(tool: dict, tool_name: str) -> tuple[str | None, bool]:
-    """Return the backend a WebRouter tool is pinned to, and whether WebRouter can use it here.
+def _webrouter_route(tool: dict, tool_name: str) -> tuple[str, str]:
+    """Return the backend a WebRouter tool names and how it routes: auto, parallel, pinned or unconfigured.
 
-    ``provider: auto`` (the default) falls back across keyless backends, so it
-    is not a pin; a named backend does not fall back and needs its own key.
+    ``provider: auto`` (the default) falls back across keyless backends. ``max``
+    (fetch only) sends each page to every configured backend at once. Any other
+    name pins one backend, with no fallback, and needs its own key. Like
+    WebRouter, this ignores case and reads ids of the form
+    ``[search|extract:]backend[:mode]``, such as ``exa:exa-instant``.
     """
-    pinned = tool.get("provider")
-    if not isinstance(pinned, str) or pinned.strip() in ("", "auto"):
-        return None, True
+    provider = tool.get("provider")
+    parts = provider.strip().lower().split(":") if isinstance(provider, str) else [""]
+    if len(parts) > 1 and parts[0] == ("extract" if tool_name == "web_fetch" else "search"):
+        parts.pop(0)
+    backend = parts[0]
+    if backend in ("", "auto"):
+        return "auto", "auto"
     import web_router
 
     configured = web_router.configured_extract_providers() if tool_name == "web_fetch" else web_router.configured_providers()
-    return pinned.strip(), pinned.strip() in configured
+    if backend not in configured:
+        return backend, "unconfigured"
+    return backend, "parallel" if backend == "max" else "pinned"
 
 
 def check_web_search(config_path: Path) -> CheckResult:
@@ -871,11 +880,13 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                     if provider == "webrouter":
                         if find_spec("web_router") is None:
                             return CheckResult(label, "warn", "WebRouter is configured but the webrouter extra is not installed", fix="cd backend && uv sync --extra webrouter")
-                        pinned, usable = _webrouter_pin(tool, tool_name)
-                        if pinned and not usable:
-                            return CheckResult(label, "warn", f"WebRouter is pinned to '{pinned}', which is not configured here", fix=f"Set the API key '{pinned}' needs in .env, or remove 'provider' to route automatically")
-                        if pinned:
-                            return CheckResult(label, "ok", f"WebRouter (pinned to '{pinned}', no fallback)")
+                        backend, route = _webrouter_route(tool, tool_name)
+                        if route == "unconfigured":
+                            return CheckResult(label, "warn", f"WebRouter is pinned to '{backend}', which is not configured here", fix=f"Set the API key '{backend}' needs in .env, or remove 'provider' to route automatically")
+                        if route == "parallel":
+                            return CheckResult(label, "ok", "WebRouter ('max': each page goes to every configured fetch backend in parallel)")
+                        if route == "pinned":
+                            return CheckResult(label, "ok", f"WebRouter (pinned to '{backend}', no fallback)")
                     var, reads_config = free_provider_keys.get(provider, (None, False))
                     sources = [_config_source(tool, "api_key")] if reads_config else []
                     if var:

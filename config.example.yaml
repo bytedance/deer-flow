@@ -1366,6 +1366,7 @@ tools:
   #   group: web
   #   use: deerflow.community.webrouter.tools:web_fetch_tool
   #   # provider: auto                # or one extract backend: nimble, tavily, jina, firecrawl, ...
+  #                                   # 'max' sends each page to every configured backend at once
   #   # timeout: 60                   # Seconds
 
   # Image search tool (uses DuckDuckGo)

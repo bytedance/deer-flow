@@ -594,6 +594,14 @@ class TestCheckWebSearch:
         if status == "warn":
             assert result.detail == "WebRouter is pinned to 'brave', which is not configured here"
 
+    @pytest.mark.parametrize("pinned", ["EXA", "exa:exa-instant", "search:exa:exa-instant"])
+    def test_webrouter_pinned_backend_accepts_webrouter_ids(self, tmp_path, monkeypatch, pinned):
+        monkeypatch.setenv("EXA_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(f"config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.webrouter.tools:web_search_tool\n    provider: '{pinned}'\n")
+        result = doctor.check_web_search(cfg)
+        assert (result.status, result.detail) == ("ok", "WebRouter (pinned to 'exa', no fallback)")
+
     def test_webrouter_without_the_extra_warns(self, tmp_path, monkeypatch):
         monkeypatch.setattr(doctor, "find_spec", lambda name: None)
         cfg = tmp_path / "config.yaml"
@@ -902,6 +910,13 @@ class TestCheckWebFetch:
         result = doctor.check_web_fetch(cfg)
         assert result.status == "ok"
         assert "WebRouter" in result.detail
+
+    @pytest.mark.parametrize("provider", ["max", "MAX"])
+    def test_webrouter_max_is_reported_as_parallel(self, tmp_path, provider):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(f"config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.webrouter.tools:web_fetch_tool\n    provider: {provider}\n")
+        result = doctor.check_web_fetch(cfg)
+        assert (result.status, result.detail) == ("ok", "WebRouter ('max': each page goes to every configured fetch backend in parallel)")
 
     def test_webrouter_pinned_fetch_backend_without_its_key_warns(self, tmp_path, monkeypatch):
         monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
