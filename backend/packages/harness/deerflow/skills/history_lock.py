@@ -9,7 +9,7 @@ from contextlib import contextmanager
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows
-    fcntl = None
+    fcntl = None  # type: ignore[assignment]
     import msvcrt
 
 
