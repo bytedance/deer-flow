@@ -1,6 +1,8 @@
 # Skills & Tools
 
-**Runtime tool approvals**: Enable `hitl_approval.enabled` to offer Ask and Auto
+**Runtime tool approvals.** HITL approval is **disabled by default**. When it is
+disabled, tool calls can execute without runtime human review, and the Gateway
+logs a warning at startup. Enable `hitl_approval.enabled` to offer Ask and Auto
 independently of reasoning mode. Operators can also enable Full access in
 `hitl_approval.allowed_modes`. Ask presents the complete operation before
 execution. Auto makes a separate, tool-free review call using
@@ -195,7 +197,8 @@ Skills are loaded progressively — only when the task needs them, not all at on
 
 The bundled video-generation command reports failures on stderr and exits with
 status 1, including when the selected provider has no API key. Callers can check
-the exit status before presenting an output file.
+the exit status before presenting an output file. A zero-byte video download
+fails before the command opens the output file, preserving any previous video.
 
 The bundled podcast-generation command returns a nonzero exit status and writes
 diagnostics to stderr when generation fails. Callers can check the status before
@@ -232,7 +235,7 @@ and other runs.
 
 `SKILL.md` YAML frontmatter must open and close with `---` on its own line (trailing spaces or tabs are allowed). A line such as `---suffix` is not a closing delimiter.
 
-Custom skill history preserves Unicode line separators inside saved content and metadata, keeping those revisions readable for history inspection and rollback. Malformed JSON history records are still rejected.
+Custom skill history preserves Unicode line separators inside saved content and metadata, keeping those revisions readable for history inspection and rollback. Malformed JSON history records are still rejected. Each record is appended whole under the history file's lock, so concurrent edits from the agent, the skill API or several Gateway workers cannot join two records on one line. History reads take the same lock, so they never see a record that is still being written.
 
 The bundled `github-deep-research` API client also works without `requests`, using
 Python's standard-library HTTP client. Its fallback preserves spaces, Unicode, and
@@ -503,6 +506,12 @@ repeatedly starting a missing toolchain. A non-zero extraction exit falls back
 only for that document, because malformed or oversized input can fail while
 the toolchain remains healthy. The fallback keeps resolved article links in
 the returned Markdown.
+When extraction returns a whole document, the fallback uses the source HTML
+body consistently with or without a source URL. Calls without a source URL
+retain relative link destinations and do not repeat the document title.
+Only explicit document-level wrappers trigger that fallback. An inline SVG
+chart's title or a document-tag example in a comment or script leaves the
+successfully extracted article intact.
 Chat tool-step titles accept leading blank lines and up to three spaces before
 a page's first H1 heading. Indented code, including mixed spaces and tabs, is
 not used as a title; the tool step falls back to the URL.

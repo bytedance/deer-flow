@@ -2212,8 +2212,8 @@ def test_custom_skill_mutation_lock_is_scoped_to_the_owning_user(tmp_path, monke
     two users that own disjoint custom-skill trees must not share the lock that
     also spans write_custom_skill's whole projection rebuild.
     """
-    from app.gateway.routers.skills import _custom_skill_mutation_lock
     from deerflow.config.paths import Paths
+    from deerflow.skills.mutation_lock import custom_skill_mutation_lock
 
     monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
     monkeypatch.setattr("deerflow.config.paths._paths", None)
@@ -2222,8 +2222,8 @@ def test_custom_skill_mutation_lock_is_scoped_to_the_owning_user(tmp_path, monke
     alice_second_instance = UserScopedSkillStorage("alice", host_path=str(tmp_path / "skills"))
     bob = UserScopedSkillStorage("bob", host_path=str(tmp_path / "skills"))
 
-    assert _custom_skill_mutation_lock(alice) is _custom_skill_mutation_lock(alice_second_instance)
-    assert _custom_skill_mutation_lock(alice) is not _custom_skill_mutation_lock(bob)
+    assert custom_skill_mutation_lock(alice) is custom_skill_mutation_lock(alice_second_instance)
+    assert custom_skill_mutation_lock(alice) is not custom_skill_mutation_lock(bob)
 
 
 def test_custom_skill_update_does_not_serialize_an_unrelated_user(monkeypatch, tmp_path):

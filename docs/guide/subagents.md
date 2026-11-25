@@ -115,6 +115,16 @@ error and timeout policies. Repeated cancellation does not abandon this cleanup.
 Task-stop reports an interrupted execution as aborted, preserving any completed,
 failed or timed-out outcome already published before cancellation.
 
+The worker saves sub-agent step history separately from the live stream. It
+retries a batch only when the store confirms that no event was committed, such
+as after a transient database error before commit or a successful JSONL rollback.
+After three consecutive failed attempts, an uncertain write, or cancellation by
+the store, the worker releases the buffer and stops saving sub-agent events for
+that run. Live events and task results still reach the caller, but reloading
+the run can show an incomplete history. The `subagent history incomplete` log
+lists the unconfirmed and skipped event counts and a sample of affected task IDs.
+Unconfirmed events may already be in the store.
+
 Ordinary `task` calls accept `context_mode="isolated"` (default) or
 `context_mode="snapshot"`. Isolated tasks receive their delegated prompt as
 before. Snapshot tasks also receive the parent's retained conversation and
@@ -366,7 +376,7 @@ async with runtime:
 
 Gateway run finalization also retains ownership through caller cancellation: it finishes terminal persistence, stream completion, and resource cleanup before propagating the interruption. Backend I/O must terminate or enforce its own timeout. Gateway shutdown includes workers still finalizing after their terminal status commits; an expired shutdown drain budget is logged and does not cancel their outstanding writes.
 
-Cancelled, replaced, failed or hard-stopped executions stop their owned bash processes before releasing the sandbox lease on AIO and POSIX LocalSandbox, including ordinary `nohup` children. Background services from successful earlier turns remain running. Cleanup tracks inherited execution markers and process groups; it is not a security boundary against scripts deliberately escaping that ownership. Windows LocalSandbox and third-party providers retain their existing behavior.
+Cancelled, replaced, failed or hard-stopped executions stop their owned bash processes before releasing the sandbox lease on AIO and POSIX LocalSandbox, including ordinary `nohup` children. On AIO, cleanup first interrupts the cancelled command's process groups the way Ctrl-C does, so the shell skips the rest of a `;`, newline, loop, pipeline or subshell command; the persistent shell keeps its working directory and exports. If the running program ignores or handles that interrupt, the shell runs the next statement once cleanup has stopped the program. Background services from successful earlier turns remain running. Cleanup tracks inherited execution markers and process groups; it is not a security boundary against scripts deliberately escaping that ownership. Windows LocalSandbox and third-party providers retain their existing behavior.
 
 Terminal cleanup releases the run journal and its message-sequence callback even when diagnostic logs retain a checkpoint-inspection traceback.
 

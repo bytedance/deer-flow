@@ -289,6 +289,18 @@ class SandboxConfig(BaseModel):
             (``BOXD_API_KEY`` is the fallback for ``boxd_api_key``).
         vcpu, memory, from_snapshot, auto_suspend_timeout, ready_timeout,
             name_prefix, labels: machine shape, readiness deadline and naming.
+
+    VeFaaSSandboxProvider specific options:
+        vefaas: Optional nested mapping (or flat fields on ``sandbox``) holding
+            ``region``, ``endpoint``, ``function_id``, ``sandbox_base_url``,
+            ``access_key`` / ``secret_key`` / ``session_token`` (or ``*_env``),
+            ``sandbox_access_token``, ``cpu_milli``, ``memory_mb``,
+            ``timeout_minutes``, ``ready_timeout``, ``request_timeout``,
+            ``allow_insecure_http``, ``tos_mount``, ``metadata``,
+            ``snapshot_id``, ``pause_on_idle``, ``auto_pause``,
+            ``snapshot_on_idle``, ``snapshot_type``, ``snapshot_retention_days``,
+            ``snapshot_timeout``, ``max_snapshots_per_sandbox``,
+            ``precache_images``, and ``precache_on_startup``.
     """
 
     use: str = Field(
@@ -310,12 +322,12 @@ class SandboxConfig(BaseModel):
 
     prewarm: bool = Field(
         default=False,
-        description=("Start an AioSandboxProvider acquire in parallel with the first model call when the user input contains a strong sandbox-use signal. Disabled by default; ignored by other sandbox providers."),
+        description=("Start an AioSandboxProvider or VeFaaSSandboxProvider acquire in parallel with the first model call when the user input contains a strong sandbox-use signal. Disabled by default; ignored by other sandbox providers."),
     )
     prewarm_max_concurrent: int = Field(
         default=1,
         ge=1,
-        description=("Maximum pending or ready-but-unused AIO prewarms per provider instance in this process. When full, skip speculation without delaying foreground tools. This is not a total container or deployment-wide limit."),
+        description=("Maximum pending or ready-but-unused sandbox prewarms per provider instance in this process. When full, skip speculation without delaying foreground tools. This is not a total container or deployment-wide limit."),
     )
     image: str | None = Field(
         default=None,
