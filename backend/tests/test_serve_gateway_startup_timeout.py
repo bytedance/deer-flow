@@ -36,8 +36,12 @@ lsof() {
     return 1
 }
 sleep() {
-    printf '%s\n' "$(( $(cat "$TEST_CLOCK") + 1 ))" > "$TEST_CLOCK"
-    SECONDS=$((SECONDS + ${1:-1}))
+    step=${1:-1}
+    clock=$(( $(cat "$TEST_CLOCK") + step ))
+    printf '%s\n' "$clock" > "$TEST_CLOCK"
+    # The simulated clock is the budget. Assigning it drops wall time spent
+    # spawning the compat watchdog, which must not consume the 240s case.
+    SECONDS=$clock
 }
 python3() { "$TEST_PYTHON" "$@"; }
 env() {
@@ -61,7 +65,16 @@ source "$@"
 """
 
 
-def _run_launcher(tmp_path: Path, *, timeout: str | None, ready_at: int = 145, args: tuple[str, ...] = ("--dev",), dotenv: bool = False) -> subprocess.CompletedProcess[str]:
+def _run_launcher(
+    tmp_path: Path,
+    *,
+    timeout: str | None,
+    ready_at: int = 145,
+    args: tuple[str, ...] = ("--dev",),
+    dotenv: bool = False,
+    force_compat: bool = False,
+    subprocess_timeout: int = 60,
+) -> subprocess.CompletedProcess[str]:
     checkout = tmp_path / "checkout"
     scripts = checkout / "scripts"
     scripts.mkdir(parents=True)
@@ -75,6 +88,8 @@ def _run_launcher(tmp_path: Path, *, timeout: str | None, ready_at: int = 145, a
     (tmp_path / "clock").write_text("0\n", encoding="utf-8", newline="\n")
     bash = require_script_bash()
     env = {key: value for key, value in os.environ.items() if key not in {"BASH_ENV", "ENV", "DEER_FLOW_GATEWAY_STARTUP_TIMEOUT", "DEER_FLOW_ENV_FILE"}}
+    if force_compat:
+        _force_compat_copy(scripts / "wait-for-port.sh")
     env.update(
         TEST_BASH=bash,
         TEST_PYTHON=Path(sys.executable).as_posix(),
@@ -91,30 +106,54 @@ def _run_launcher(tmp_path: Path, *, timeout: str | None, ready_at: int = 145, a
             (checkout / ".env").write_text(f"DEER_FLOW_GATEWAY_STARTUP_TIMEOUT={timeout}\n", encoding="utf-8", newline="\n")
         else:
             env["DEER_FLOW_GATEWAY_STARTUP_TIMEOUT"] = timeout
-    return subprocess.run(
+    proc = subprocess.Popen(
         [bash, "-c", _PRELUDE, "startup-timeout-test", (scripts / "serve.sh").as_posix(), "--skip-install", *args],
         cwd=checkout,
         env=env,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         encoding="utf-8",
         errors="replace",
-        # Each simulated second may also run the netstat fallback. On Windows
-        # that command substitution is slow enough that 145 polls exceed 20s.
-        timeout=60,
-        check=False,
     )
+    try:
+        stdout, stderr = proc.communicate(timeout=subprocess_timeout)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False)
+        else:
+            proc.kill()
+        stdout, stderr = proc.communicate(timeout=5)
+        raise
+    return subprocess.CompletedProcess(proc.args, proc.returncode if proc.returncode is not None else 1, stdout or "", stderr or "")
 
 
+@pytest.mark.parametrize("force_compat", [False, True])
 @pytest.mark.parametrize("args", [("--dev",), ("--prod",), ("--dev", "--daemon")])
-def test_configured_gateway_timeout_allows_slow_startup(tmp_path: Path, args: tuple[str, ...]) -> None:
-    result = _run_launcher(tmp_path, timeout="240", args=args)
+def test_configured_gateway_timeout_allows_slow_startup(tmp_path: Path, args: tuple[str, ...], force_compat: bool) -> None:
+    """A listener ready at 145s still fits a 240s budget.
+
+    force_compat runs the compat watchdog on this interpreter. That is not a
+    Bash 3.2 parse and not a macOS set -m result. The watchdog uses the real
+    sleep binary and is reaped after every probe, so this must not spend 240s.
+    """
+    limit = 210 if force_compat else 60
+    started = time.monotonic()
+    result = _run_launcher(tmp_path, timeout="240", args=args, force_compat=force_compat, subprocess_timeout=limit)
+    elapsed = time.monotonic() - started
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Gateway started on localhost:8001" in result.stdout
+    assert elapsed < limit, f"spent {elapsed:.0f}s"
 
 
-def test_gateway_timeout_can_be_loaded_from_dotenv(tmp_path: Path) -> None:
-    result = _run_launcher(tmp_path, timeout="240", dotenv=True)
+@pytest.mark.parametrize("force_compat", [False, True])
+def test_gateway_timeout_can_be_loaded_from_dotenv(tmp_path: Path, force_compat: bool) -> None:
+    """Same 145s/240s case when the budget comes from .env. See the slow-startup test."""
+    limit = 210 if force_compat else 60
+    started = time.monotonic()
+    result = _run_launcher(tmp_path, timeout="240", dotenv=True, force_compat=force_compat, subprocess_timeout=limit)
+    elapsed = time.monotonic() - started
     assert result.returncode == 0, result.stdout + result.stderr
+    assert elapsed < limit, f"spent {elapsed:.0f}s"
 
 
 def test_default_gateway_timeout_accepts_a_fast_startup(tmp_path: Path) -> None:
@@ -1021,6 +1060,106 @@ netstat() {{
     finally:
         for pid in run.pids:
             _kill_pid(bash, pid)
+        for _kind, pid in _logged_pids(tmp_path):
+            _kill_pid(bash, pid)
+
+
+def test_compat_term_before_the_sleep_pid_is_read(tmp_path: Path) -> None:
+    """TERM before the fifo read must reap the watchdog sleep and close the pipe.
+
+    The hold is test-only. This runs the compat function on the installed bash,
+    which is not Bash 3.2 and not macOS.
+    """
+    bash = require_script_bash()
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for name in ("port-listening.sh", "wait-for-port.sh", "wait-for-port-bash4.sh"):
+        shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
+    _force_compat_copy(scripts / "wait-for-port.sh")
+    hold = tmp_path / "hold"
+    script_pid_file = tmp_path / "script.pid"
+    pid_log = tmp_path / "wait-pids.txt"
+    launch = r"""
+set -m
+"$TEST_BASH" "$TEST_SCRIPT" 8001 30 Gateway &
+child=$!
+printf '%s\n' "$child" > "$TEST_SCRIPT_PID"
+set +m
+wait "$child"
+code=$?
+printf 'WAIT_CODE:%s\n' "$code"
+exit "$code"
+"""
+    prelude = "\n".join(
+        (
+            "command() {",
+            '    if [ "$1" = -v ] && { [ "$2" = lsof ] || [ "$2" = ss ]; }; then',
+            "        return 1",
+            "    fi",
+            '    builtin command "$@"',
+            "}",
+            "netstat() { sleep 30; }",
+            "export -f command netstat",
+            launch,
+        )
+    )
+    env = {key: value for key, value in os.environ.items() if key not in {"BASH_ENV", "ENV"}}
+    env.update(
+        OSTYPE="msys",
+        TEST_BASH=bash,
+        TEST_SCRIPT=(scripts / "wait-for-port.sh").as_posix(),
+        TEST_SCRIPT_PID=script_pid_file.as_posix(),
+        DEER_FLOW_WAIT_PORT_PID_LOG=pid_log.as_posix(),
+        DEER_FLOW_WAIT_PORT_HOLD_FIFO=hold.as_posix(),
+    )
+    proc = subprocess.Popen(
+        [bash, "-c", prelude, "term-before-fifo"],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+        errors="replace",
+    )
+    script_pid = ""
+    sleep_pids: list[str] = []
+    deadline = time.monotonic() + 8
+    try:
+        while time.monotonic() < deadline:
+            if script_pid_file.exists():
+                script_pid = script_pid_file.read_text(encoding="utf-8").strip()
+            sleep_pids = [pid for kind, pid in _logged_pids(tmp_path) if kind == "sleep"]
+            if script_pid.isdigit() and hold.exists() and sleep_pids:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail(f"handoff window did not open pid={script_pid!r} hold={hold.exists()} sleep={sleep_pids}")
+        subprocess.run(
+            [bash, "-c", 'kill -TERM "$1"', "term-script", script_pid],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=12)
+        except subprocess.TimeoutExpired:
+            pytest.fail("captured pipe stayed open after TERM; the watchdog sleep was not reaped")
+        assert proc.returncode == 143, f"rc={proc.returncode}\n{stdout}\n{stderr}"
+        rows = _logged_pids(tmp_path)
+        assert any(kind == "sleep" for kind, _pid in rows)
+        for kind, pid in rows:
+            state = _process_state(bash, pid)
+            assert state == "gone", f"{kind} pid {pid} is {state}"
+    finally:
+        if proc.poll() is None:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, check=False)
+            else:
+                proc.kill()
+            proc.wait(timeout=5)
+        if script_pid.isdigit():
+            _kill_pid(bash, script_pid)
         for _kind, pid in _logged_pids(tmp_path):
             _kill_pid(bash, pid)
 

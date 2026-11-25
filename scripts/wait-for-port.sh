@@ -64,6 +64,7 @@ _fail_timed_out() {
 _compat_probe_pid=
 _compat_sleeper_pid=
 _compat_sleep_pid=
+_compat_hold_sleep=
 
 # Optional test log, same idea as DEER_FLOW_WAIT_PORT_BRANCH_LOG. Unset in normal runs.
 _compat_note_pid() {
@@ -102,7 +103,7 @@ _compat_pgid() {
     fi
 }
 
-# pid only. Used for the sleeper and for a probe that is not its own group.
+# pid only. Used for the sleeper shell and for a probe that is not its own group.
 _compat_signal_pid() {
     local pid=$1
     [ -n "$pid" ] || return 0
@@ -111,6 +112,108 @@ _compat_signal_pid() {
         kill -TERM "$pid" 2>/dev/null || true
         kill -KILL "$pid" 2>/dev/null || true
     fi
+}
+
+# Direct children. GNU/BSD ps can select by parent. Git Bash cannot, and its
+# ps -l columns are PID PPID PGID. Empty output means no child was seen.
+_compat_child_pids() {
+    local pid=$1 raw line child ppid
+    [ -n "$pid" ] || return 0
+    if ps -o pid= --ppid "$pid" >/dev/null 2>&1; then
+        ps -o pid= --ppid "$pid" 2>/dev/null
+        return 0
+    fi
+    raw=$(ps -l 2>/dev/null) || return 0
+    while IFS= read -r line; do
+        set -f
+        # shellcheck disable=SC2086
+        set -- $line
+        set +f
+        child=${1:-}
+        ppid=${2:-}
+        case "$child" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        case "$ppid" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        if [ "$ppid" = "$pid" ]; then
+            printf '%s\n' "$child"
+        fi
+    done <<EOF
+$raw
+EOF
+}
+
+# True when this pid is already the sleep binary. Git Bash leaves a shell at
+# $! and the binary is its child; a replacing exec is the binary itself.
+_compat_pid_is_sleep() {
+    local pid=$1 raw line cmd
+    [ -n "$pid" ] || return 1
+    if ps -o comm= -p "$pid" >/dev/null 2>&1; then
+        cmd=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+        case "$cmd" in
+            *sleep*) return 0 ;;
+        esac
+        return 1
+    fi
+    raw=$(ps -l 2>/dev/null) || return 1
+    cmd=
+    while IFS= read -r line; do
+        set -f
+        # shellcheck disable=SC2086
+        set -- $line
+        set +f
+        if [ "${1:-}" = "$pid" ]; then
+            cmd=${line##* }
+            break
+        fi
+    done <<EOF
+$raw
+EOF
+    case "$cmd" in
+        *sleep*) return 0 ;;
+    esac
+    return 1
+}
+
+# `command sleep &` is not the sleep binary on Git Bash. Exec there spawns a
+# child and waits, so $! is a shell and the real sleep is its child. Killing
+# the shell before that child exists orphans the sleep and leaves it holding
+# the caller's stdout. Wait until the child is visible, or until this pid is
+# already the sleep binary, and only then signal it. One extra level covers a
+# sleeper whose child is that shell. A replacing exec has no child.
+_compat_signal_sleep_pid() {
+    local pid=$1 kids child grand tries=0
+    [ -n "$pid" ] || return 0
+    [ "$pid" != "$$" ] || return 0
+    while [ "$tries" -lt 30 ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        kids=$(_compat_child_pids "$pid")
+        if [ -n "$kids" ]; then
+            for child in $kids; do
+                [ "$child" = "$$" ] && continue
+                [ "$child" = "$pid" ] && continue
+                for grand in $(_compat_child_pids "$child"); do
+                    [ "$grand" = "$$" ] && continue
+                    [ "$grand" = "$pid" ] && continue
+                    [ "$grand" = "$child" ] && continue
+                    _compat_signal_pid "$grand"
+                done
+                _compat_signal_pid "$child"
+            done
+            _compat_signal_pid "$pid"
+            return 0
+        fi
+        if _compat_pid_is_sleep "$pid"; then
+            _compat_signal_pid "$pid"
+            return 0
+        fi
+        tries=$((tries + 1))
+    done
+    _compat_signal_pid "$pid"
 }
 
 _compat_stop_probe() {
@@ -132,23 +235,45 @@ _compat_stop_probe() {
 }
 
 # The sleeper is started with monitor mode off, so its group may be the
-# parent's. Never signal that group. Kill the sleep child first, then the
-# shell, both by pid. The shell is our child; the sleep process is not.
+# parent's. Never signal that group.
 _compat_reap_sleeper() {
     local sleeper=$1 sleep_pid=$2
-    # Kill the sleep child first. The shell is blocked in wait on that child.
-    # Signaling the shell and then waiting for it can sit out the rest of the
-    # budget when that signal does not interrupt wait. The shell then sees the
-    # owned flag and exits, and wait reaps it.
-    _compat_signal_pid "$sleep_pid"
-    if [ -n "$sleeper" ]; then
-        _compat_signal_pid "$sleeper"
+    if [ -n "$sleep_pid" ]; then
+        # The pid was published. Kill that sleep first so the shell's wait
+        # returns, then reap the shell.
+        _compat_signal_sleep_pid "$sleep_pid"
+        if [ -n "$sleeper" ]; then
+            _compat_signal_pid "$sleeper"
+            wait "$sleeper" 2>/dev/null || true
+        fi
+        return 0
+    fi
+    # The fifo has not been read yet, so only the shell pid is known. KILL is
+    # not catchable: TERM-then-KILL here would skip the shell's own trap and
+    # leave its sleep child holding the caller's stdout. TERM, let that trap
+    # reap the child, and KILL only if the shell is still alive afterwards.
+    [ -n "$sleeper" ] || return 0
+    [ "$sleeper" != "$$" ] || return 0
+    if kill -0 "$sleeper" 2>/dev/null; then
+        kill -TERM "$sleeper" 2>/dev/null || true
+    fi
+    wait "$sleeper" 2>/dev/null || true
+    if kill -0 "$sleeper" 2>/dev/null; then
+        # The trap did not run. KILL cannot catch, so take the sleep child
+        # of this shell before the shell itself.
+        _compat_signal_sleep_pid "$sleeper"
+        kill -KILL "$sleeper" 2>/dev/null || true
         wait "$sleeper" 2>/dev/null || true
     fi
 }
 
 _compat_cleanup() {
-    local sleeper sleep_pid probe
+    local sleeper sleep_pid probe hold_sleep
+    # A test may be sleeping in the fifo hold. Drop that child so it cannot
+    # keep the caller's stdout open after this shell exits.
+    hold_sleep=${_compat_hold_sleep:-}
+    _compat_hold_sleep=
+    _compat_signal_sleep_pid "$hold_sleep"
     # A sleeper that wakes during cleanup must not kill a pid the parent owns.
     if [ -n "${_compat_owned:-}" ]; then
         : > "$_compat_owned"
@@ -167,19 +292,39 @@ _compat_cleanup() {
 # Sleep is our grandchild. Publish its pid with a printf that opens and closes
 # the fifo itself. Redirecting the whole sleeper onto the fifo leaves that
 # write block-buffered, and the parent then sits in read until the sleep ends.
-# Bash 3.2 runs an inherited EXIT trap inside this subshell; clear it so the
-# trap cannot delete the status file or signal the parent.
+# Bash 3.2 runs an inherited EXIT trap inside this subshell; clear it before
+# installing a trap that reaps only this sleep child.
 _compat_start_sleeper() {
-    local left=$1 probe_pid sleep_pid
+    local left=$1 probe_pid
     probe_pid=${_compat_probe_pid:-}
     rm -f "$_compat_sleep_fifo"
     mkfifo "$_compat_sleep_fifo" 2>/dev/null || return 1
     (
+        # Drop the parent's cleanup first. The trap installed next must not
+        # call it, delete its status files, or signal the parent or the probe.
         trap - EXIT INT TERM
-        sleep "$left" &
-        sleep_pid=$!
-        printf '%s\n' "$sleep_pid" > "$_compat_sleep_fifo"
-        wait "$sleep_pid"
+        _watch_sleep=
+        _reap_watch_sleep() {
+            local pid=${_watch_sleep:-}
+            _watch_sleep=
+            [ -n "$pid" ] || return 0
+            [ "$pid" != "$$" ] || return 0
+            [ "$pid" != "$probe_pid" ] || return 0
+            _compat_signal_sleep_pid "$pid"
+            wait "$pid" 2>/dev/null || true
+        }
+        trap _reap_watch_sleep EXIT
+        trap '_reap_watch_sleep; exit 143' TERM
+        trap '_reap_watch_sleep; exit 130' INT
+        # builtin skips a test's command() or sleep() function. Production
+        # command and sleep are the same binary. The poll interval still calls
+        # sleep, so an exported stub advances only that clock.
+        builtin command sleep "$left" &
+        _watch_sleep=$!
+        _compat_note_pid sleep "$_watch_sleep"
+        printf '%s\n' "$_watch_sleep" > "$_compat_sleep_fifo"
+        wait "$_watch_sleep"
+        _watch_sleep=
         # Parent creates the owned file as soon as it has the probe result.
         # A sleeper that reaches here first is the deadline.
         if [ ! -f "$_compat_owned" ]; then
@@ -189,6 +334,18 @@ _compat_start_sleeper() {
     ) &
     _compat_sleeper_pid=$!
     _compat_note_pid sleeper "$_compat_sleeper_pid"
+    # Test-only. Unset in production. Holds the parent before it learns the
+    # sleep pid, so a signal can arrive in that window. Semantics otherwise
+    # stay the same: the read still publishes that pid before wait returns.
+    if [ -n "${DEER_FLOW_WAIT_PORT_HOLD_FIFO:-}" ]; then
+        : > "$DEER_FLOW_WAIT_PORT_HOLD_FIFO"
+        while [ -e "$DEER_FLOW_WAIT_PORT_HOLD_FIFO" ]; do
+            sleep 1 &
+            _compat_hold_sleep=$!
+            wait "$_compat_hold_sleep" 2>/dev/null || true
+            _compat_hold_sleep=
+        done
+    fi
     IFS= read -r _compat_sleep_pid < "$_compat_sleep_fifo" || _compat_sleep_pid=
     case "$_compat_sleep_pid" in
         ''|*[!0-9]*)
