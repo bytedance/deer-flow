@@ -38,6 +38,40 @@ def test_address_is_public_rejects_host_private_link_local_and_metadata() -> Non
     assert network_proxy.address_is_public("198.18.1.5", allow_synthetic_dns=True)
 
 
+def test_address_is_public_rejects_non_public_ipv4_inside_ipv6_spellings() -> None:
+    # NAT64 (64:ff9b::/96) and IPv4-compatible (::a.b.c.d) spellings report
+    # is_global even when the embedded IPv4 is loopback, private or metadata.
+    for address in (
+        "64:ff9b::a9fe:a9fe",  # 169.254.169.254
+        "64:ff9b::a9fe:a9fe%eth0",  # the same spelling with a zone id
+        "64:ff9b::7f00:1",  # 127.0.0.1
+        "64:ff9b::a00:1",  # 10.0.0.1
+        "64:ff9b::c0a8:102",  # 192.168.1.2
+        "64:ff9b::6464:64c8",  # 100.100.100.200, CGNAT cloud metadata
+        "::169.254.169.254",
+        "::127.0.0.1",
+        "::ffff:169.254.169.254",
+        "::ffff:0:a9fe:a9fe",  # IPv4-translated (SIIT) metadata spelling
+        "2002:a9fe:a9fe::1",
+        "::2",  # IPv4-compatible this-network block, not a unicast target
+        # Python marks 2002::/16 private, so 6to4 stays rejected even when it
+        # carries a public IPv4 target.
+        "2002:808:808::1",
+    ):
+        assert not network_proxy.address_is_public(address)
+    # A NAT64 spelling of a public IPv4 target stays allowed; the prefix
+    # reports is_reserved, so a blanket reserved check would wrongly reject it.
+    assert network_proxy.address_is_public("64:ff9b::808:808")  # 8.8.8.8
+    assert network_proxy.address_is_public("64:ff9b::101:101")  # 1.1.1.1
+    assert network_proxy.address_is_public("::ffff:8.8.8.8")
+    assert network_proxy.address_is_public("::ffff:0:808:808")
+    assert network_proxy.address_is_public("2606:4700:4700::1111")
+    # The Docker Desktop synthetic-DNS exception passes through the embedded
+    # check: 64:ff9b::c612:105 carries 198.18.1.5.
+    assert not network_proxy.address_is_public("64:ff9b::c612:105")
+    assert network_proxy.address_is_public("64:ff9b::c612:105", allow_synthetic_dns=True)
+
+
 def test_policy_denial_and_temporary_or_sandbox_grants(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(network_proxy, "POLICY_DB", tmp_path / "policy.sqlite3")
     monkeypatch.setenv("DEERFLOW_NETWORK_MODE", "allowlist")
@@ -135,6 +169,19 @@ async def test_resolve_public_fails_closed_when_dns_contains_private_answer(monk
         return [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443)),
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 443)),
+        ]
+
+    monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo)
+    assert await network_proxy.resolve_public("example.com", 443) is None
+
+
+@pytest.mark.anyio
+async def test_resolve_public_fails_closed_on_nat64_metadata_answer(monkeypatch) -> None:
+    loop = asyncio.get_running_loop()
+
+    async def fake_getaddrinfo(*_args, **_kwargs):
+        return [
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("64:ff9b::a9fe:a9fe", 443, 0, 0)),
         ]
 
     monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo)
