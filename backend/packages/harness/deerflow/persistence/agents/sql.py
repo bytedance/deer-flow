@@ -21,13 +21,14 @@ import uuid
 from collections.abc import Hashable
 from datetime import UTC, datetime
 
-from sqlalchemy import Engine, create_engine, delete, event, select
+from sqlalchemy import Engine, create_engine, delete, event, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from deerflow.config.agents_config import AgentConfig
 from deerflow.config.paths import get_paths
 from deerflow.persistence.agents.base import (
+    AgentConfigUpdate,
     AgentDeleteOutcome,
     AgentExistsError,
     AgentStore,
@@ -108,6 +109,14 @@ class SqlAgentStore(AgentStore):
         stmt = select(AgentRow).where(AgentRow.user_id == user_id, AgentRow.name == name.lower())
         return session.execute(stmt).scalar_one_or_none()
 
+    def _row_for_update(self, session: Session, name: str, user_id: str) -> AgentRow | None:
+        if session.get_bind().dialect.name == "sqlite":
+            # Reserve the writer before reading; FOR UPDATE is ignored by SQLite.
+            session.execute(text("BEGIN IMMEDIATE"))
+            return self._row(session, name, user_id)
+        stmt = select(AgentRow).where(AgentRow.user_id == user_id, AgentRow.name == name.lower()).with_for_update()
+        return session.execute(stmt).scalar_one_or_none()
+
     def get(self, name: str, *, user_id: str | None = None) -> AgentConfig:
         effective_user = user_id or get_effective_user_id()
         with self._Session() as session:
@@ -162,14 +171,22 @@ class SqlAgentStore(AgentStore):
             # UNIQUE(user_id, name) turns the check-then-write race into a clean conflict.
             raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'") from e
 
-    def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> None:
+    def update(self, name: str, config: AgentConfigUpdate, soul: str | None, *, user_id: str | None = None, require_existing: bool = False) -> None:
         effective_user = user_id or get_effective_user_id()
+
+        def document(row: AgentRow | None) -> dict | None:
+            if not callable(config):
+                return config
+            return config(parse_agent_config(row.config or {}, row.name) if row is not None else None)
+
         with self._Session() as session:
-            row = self._row(session, name, effective_user)
+            row = self._row_for_update(session, name, effective_user)
             if row is not None:
-                self._apply_update(row, config, soul)
+                self._apply_update(row, document(row), soul)
                 session.commit()
                 return
+            if require_existing:
+                raise FileNotFoundError(f"Agent '{name}' not found")
             # Upsert: setup_agent and any first-time write land here. Two
             # concurrent first-time updates (e.g. two setup_agent handshakes) can
             # both see row is None and both insert; UNIQUE(user_id, name) rejects
@@ -180,7 +197,7 @@ class SqlAgentStore(AgentStore):
                 id=uuid.uuid4().hex,
                 user_id=effective_user,
                 name=name.lower(),
-                config=_config_document(config or {}),
+                config=_config_document(document(None) or {}),
                 soul=soul or "",
             )
             session.add(row)
@@ -188,10 +205,10 @@ class SqlAgentStore(AgentStore):
                 session.commit()
             except IntegrityError:
                 session.rollback()
-                existing = self._row(session, name, effective_user)
+                existing = self._row_for_update(session, name, effective_user)
                 if existing is None:
                     raise
-                self._apply_update(existing, config, soul)
+                self._apply_update(existing, document(existing), soul)
                 session.commit()
 
     @staticmethod

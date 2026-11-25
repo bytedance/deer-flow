@@ -8,7 +8,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
 
-from deerflow.config.agents_config import SOUL_FILENAME, validate_agent_name
+from deerflow.config.agents_config import SOUL_FILENAME, AgentConfig, validate_agent_name
 from deerflow.config.paths import get_paths
 from deerflow.knowledge_scope import canonicalize_knowledge_scope
 from deerflow.persistence.agents import get_agent_store
@@ -98,26 +98,26 @@ def setup_agent(
             # different nodes, resolve the same agent. setup is idempotent, so
             # this is an upsert.
             user_id = resolve_runtime_user_id(runtime)
-            config_data: dict = {"name": agent_name}
             store = get_agent_store()
-            try:
-                existing = store.get(agent_name, user_id=user_id)
-            except FileNotFoundError:
-                pass  # First bootstrap has no user-authored label to preserve.
-            else:
-                if existing.knowledge_scope is not None:
-                    config_data["knowledge_scope"] = canonicalize_knowledge_scope(existing.knowledge_scope)
-                if existing.display_name is not None:
-                    config_data["display_name"] = existing.display_name
-                if existing.subagent_policy is not None:
-                    limits = existing.subagent_policy.model_dump(exclude_none=True)
-                    if limits:
-                        config_data["subagent_policy"] = limits
-            if description:
-                config_data["description"] = description
-            if skills is not None:
-                config_data["skills"] = skills
-            store.update(agent_name, config_data, soul, user_id=user_id)
+
+            def build_config(existing: AgentConfig | None) -> dict:
+                config_data: dict = {"name": agent_name}
+                if existing is not None:
+                    if existing.knowledge_scope is not None:
+                        config_data["knowledge_scope"] = canonicalize_knowledge_scope(existing.knowledge_scope)
+                    if existing.display_name is not None:
+                        config_data["display_name"] = existing.display_name
+                    if existing.subagent_policy is not None:
+                        limits = existing.subagent_policy.model_dump(exclude_none=True)
+                        if limits:
+                            config_data["subagent_policy"] = limits
+                if description:
+                    config_data["description"] = description
+                if skills is not None:
+                    config_data["skills"] = skills
+                return config_data
+
+            store.update(agent_name, build_config, soul, user_id=user_id)
         else:
             # Default agent (no agent_name): SOUL.md lives at the global base
             # dir. It is not a custom-agent record, so it stays file-based

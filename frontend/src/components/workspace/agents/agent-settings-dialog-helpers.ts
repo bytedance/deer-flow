@@ -144,10 +144,16 @@ function parseSubagentLimit(
 export function parseAgentSubagentPolicyDraft({
   maxConcurrent,
   maxTotal,
+  maxConcurrentBadInput = false,
+  maxTotalBadInput = false,
 }: {
   maxConcurrent: string;
   maxTotal: string;
+  maxConcurrentBadInput?: boolean;
+  maxTotalBadInput?: boolean;
 }): ParsedAgentSubagentPolicy {
+  if (maxConcurrentBadInput) return { ok: false, error: "max_concurrent" };
+  if (maxTotalBadInput) return { ok: false, error: "max_total" };
   const concurrent = parseSubagentLimit(
     maxConcurrent,
     MAX_AGENT_SUBAGENT_CONCURRENCY,

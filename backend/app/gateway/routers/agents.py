@@ -571,7 +571,7 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
     user_id = get_effective_user_id()
 
     try:
-        agent_cfg = await asyncio.to_thread(load_agent_config, name, user_id=user_id)
+        await asyncio.to_thread(load_agent_config, name, user_id=user_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
     except Exception as e:
@@ -612,18 +612,18 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
         fields_set = body.model_fields_set
         config_changed = bool(fields_set & ({"display_name", "description", "tool_groups", "skills", "mcp_plugins", "knowledge_scope", "allowed_subagents", "subagent_policy"} | set(_MODEL_BEHAVIOR_FIELDS)))
 
-        updated: dict | None = None
-        if config_changed:
+        def _build_updated(current: AgentConfig | None) -> dict:
+            assert current is not None  # require_existing=True
             updated = {
-                "name": agent_cfg.name,
+                "name": current.name,
                 # Explicit null resets to the AgentConfig default; storing None
                 # would make every later load of this agent fail validation.
-                "description": (body.description or "") if "description" in fields_set else agent_cfg.description,
+                "description": (body.description or "") if "description" in fields_set else current.description,
             }
             if "display_name" in fields_set:
                 updated["display_name"] = body.display_name or None
 
-            new_tool_groups = body.tool_groups if "tool_groups" in fields_set else agent_cfg.tool_groups
+            new_tool_groups = body.tool_groups if "tool_groups" in fields_set else current.tool_groups
             if new_tool_groups is not None:
                 updated["tool_groups"] = new_tool_groups
 
@@ -637,20 +637,20 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
             if "skills" in fields_set:
                 new_skills = body.skills
             else:
-                new_skills = agent_cfg.skills
+                new_skills = current.skills
             if new_skills is not None:
                 updated["skills"] = new_skills
 
             # allowed_subagents: None = all, [] = hard deny, list = whitelist.
-            new_allowed_subagents = body.allowed_subagents if "allowed_subagents" in fields_set else agent_cfg.allowed_subagents
+            new_allowed_subagents = body.allowed_subagents if "allowed_subagents" in fields_set else current.allowed_subagents
             if new_allowed_subagents is not None:
                 updated["allowed_subagents"] = new_allowed_subagents
 
             # model / model_settings / thinking_enabled / reasoning_effort:
             # take explicitly-set request fields, else preserve the existing
             # value (issue #4336).
-            _apply_model_behavior(updated, body, existing=agent_cfg)
-            _apply_subagent_policy(updated, body, existing=agent_cfg.subagent_policy)
+            _apply_model_behavior(updated, body, existing=current)
+            _apply_subagent_policy(updated, body, existing=current.subagent_policy)
 
             # Carry forward every top-level AgentConfig field this route does
             # not manage (currently ``github:``, plus any future field added
@@ -660,17 +660,19 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
             # ``github:`` binding — which would otherwise leave the next
             # webhook delivery unable to find the agent in the registry and
             # silently no-op.
-            for key, value in preserve_non_managed_fields(agent_cfg, new_tool_groups=new_tool_groups).items():
+            for key, value in preserve_non_managed_fields(current, new_tool_groups=new_tool_groups).items():
                 updated.setdefault(key, value)
+            return updated
 
         # Persist config (when changed) and/or soul (when provided) off the
-        # event loop. A no-change PATCH commits nothing and re-reads current state.
-        if updated is not None or body.soul is not None:
+        # event loop. Compose partial updates from the store's locked snapshot,
+        # not from the earlier existence/legacy checks.
+        if config_changed or body.soul is not None:
 
             def _update_agent() -> None:
-                get_agent_store().update(name, updated, body.soul, user_id=user_id)
+                get_agent_store().update(name, _build_updated if config_changed else None, body.soul, user_id=user_id, require_existing=True)
 
-            await run_drained_write("Update agent", _update_agent)
+            await run_drained_write("Update agent", _update_agent, (FileNotFoundError,))
 
         logger.info(f"Updated agent '{name}'")
 
@@ -683,6 +685,8 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
 
     except HTTPException:
         raise
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
     except Exception as e:
         logger.error(f"Failed to update agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to update agent")

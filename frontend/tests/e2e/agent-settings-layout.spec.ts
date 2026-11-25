@@ -25,6 +25,7 @@ async function expectInsideViewport(element: Locator) {
 async function openSettings(
   page: Page,
   allowedSubagents: string[] | null = null,
+  subagentPolicy?: { max_concurrent: number; max_total: number },
 ) {
   const agent = {
     name: "test-agent",
@@ -32,6 +33,7 @@ async function openSettings(
     thinking_enabled: true,
     reasoning_effort: "high",
     allowed_subagents: allowedSubagents,
+    subagent_policy: subagentPolicy,
   };
   mockLangGraphAPI(page, { agents: [agent] });
   await page.route("**/api/models", (route) =>
@@ -80,6 +82,40 @@ async function openSettings(
     .click();
   return { dialog, saved: () => saved };
 }
+
+test("an incomplete number cannot clear a saved delegation limit", async ({
+  page,
+}) => {
+  const { dialog, saved } = await openSettings(page, null, {
+    max_concurrent: 4,
+    max_total: 10,
+  });
+  const parallel = dialog.getByRole("spinbutton", {
+    name: "Max parallel task calls per response",
+  });
+  const save = dialog.getByRole("button", { name: "Save", exact: true });
+  const badInput = () =>
+    parallel.evaluate((input: HTMLInputElement) => input.validity.badInput);
+
+  await expect(parallel).toHaveValue("4");
+  await parallel.selectText();
+  await parallel.press("e");
+  await expect(parallel).toHaveValue("");
+  expect(await badInput()).toBe(true);
+
+  await save.click();
+  await expect(
+    page.getByText("Concurrent task calls must be a whole number from 1 to 64"),
+  ).toBeVisible();
+  expect(saved()).toBeUndefined();
+
+  await parallel.press("Backspace");
+  await expect(parallel).toHaveValue("");
+  expect(await badInput()).toBe(false);
+  await save.click();
+  await expect(dialog).toBeHidden();
+  expect(saved()?.subagent_policy).toEqual({ max_concurrent: null });
+});
 
 for (const viewport of [
   { width: 1280, height: 720 },

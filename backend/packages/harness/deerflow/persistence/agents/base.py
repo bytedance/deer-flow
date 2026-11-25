@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import abc
 import logging
-from collections.abc import Hashable
+from collections.abc import Callable, Hashable
 from typing import Any, Literal
 
 from pydantic import ValidationError
@@ -79,6 +79,9 @@ class AgentExistsError(Exception):
     """Raised by :meth:`AgentStore.create` when ``(user_id, name)`` already exists."""
 
 
+type AgentConfigUpdate = dict | Callable[[AgentConfig | None], dict | None] | None
+
+
 class AgentStore(abc.ABC):
     @abc.abstractmethod
     def get(self, name: str, *, user_id: str | None = None) -> AgentConfig:
@@ -126,13 +129,16 @@ class AgentStore(abc.ABC):
         """
 
     @abc.abstractmethod
-    def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> None:
+    def update(self, name: str, config: AgentConfigUpdate, soul: str | None, *, user_id: str | None = None, require_existing: bool = False) -> None:
         """Write an agent's config and/or soul (upsert).
 
         ``config`` / ``soul`` are each independently optional: ``None`` means
         "leave that part unchanged" — the agents router updates config only when
-        a config field changed, and soul only when one was supplied. Creates the
-        record if it does not exist (the ``setup_agent`` / first-write path).
+        a config field changed, and soul only when one was supplied. A callable
+        builds the document from the latest config inside the write lock. It
+        may run twice if an upsert races a create, so keep it free of side effects
+        and slow I/O. ``require_existing`` rejects absent owner-scoped records
+        with ``FileNotFoundError`` rather than recreating a deleted agent.
         """
 
     @abc.abstractmethod

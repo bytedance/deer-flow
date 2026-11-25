@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronRightIcon } from "lucide-react";
-import { useId, useMemo, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -147,12 +147,8 @@ export function AgentSettingsDialog({
       ? String(agent.model_settings.max_tokens)
       : "",
   );
-  const [maxConcurrentSubagents, setMaxConcurrentSubagents] = useState(
-    String(initialSelections.maxConcurrentSubagents ?? ""),
-  );
-  const [maxTotalSubagents, setMaxTotalSubagents] = useState(
-    String(initialSelections.maxTotalSubagents ?? ""),
-  );
+  const maxConcurrentInput = useRef<HTMLInputElement>(null);
+  const maxTotalInput = useRef<HTMLInputElement>(null);
   const [thinking, setThinking] = useState(initialSelections.thinking);
   const [reasoningEffort, setReasoningEffort] = useState(
     initialSelections.reasoningEffort,
@@ -241,9 +237,16 @@ export function AgentSettingsDialog({
       );
       return;
     }
+    // An incomplete number has the same DOM value as an intentional clear.
+    // Read validity at save time, even if the browser didn't emit a change.
+    const concurrentInput = maxConcurrentInput.current;
+    const totalInput = maxTotalInput.current;
+    if (!concurrentInput || !totalInput) return;
     const parsedSubagentPolicy = parseAgentSubagentPolicyDraft({
-      maxConcurrent: maxConcurrentSubagents,
-      maxTotal: maxTotalSubagents,
+      maxConcurrent: concurrentInput.value,
+      maxTotal: totalInput.value,
+      maxConcurrentBadInput: concurrentInput.validity.badInput,
+      maxTotalBadInput: totalInput.validity.badInput,
     });
     if (!parsedSubagentPolicy.ok) {
       toast.error(
@@ -625,17 +628,15 @@ export function AgentSettingsDialog({
                   {t.agents.settingsMaxConcurrentSubagents}
                 </label>
                 <Input
+                  ref={maxConcurrentInput}
                   id={maxConcurrentId}
                   aria-describedby={subagentLimitsHintId}
                   type="number"
                   min={1}
                   max={MAX_AGENT_SUBAGENT_CONCURRENCY}
                   step={1}
-                  value={maxConcurrentSubagents}
+                  defaultValue={initialSelections.maxConcurrentSubagents ?? ""}
                   placeholder={t.agents.settingsSubagentLimitPlaceholder}
-                  onChange={(event) =>
-                    setMaxConcurrentSubagents(event.target.value)
-                  }
                 />
               </div>
               <div className="min-w-0 space-y-1.5">
@@ -643,15 +644,15 @@ export function AgentSettingsDialog({
                   {t.agents.settingsMaxTotalSubagents}
                 </label>
                 <Input
+                  ref={maxTotalInput}
                   id={maxTotalId}
                   aria-describedby={subagentLimitsHintId}
                   type="number"
                   min={1}
                   max={MAX_AGENT_SUBAGENTS_PER_RUN}
                   step={1}
-                  value={maxTotalSubagents}
+                  defaultValue={initialSelections.maxTotalSubagents ?? ""}
                   placeholder={t.agents.settingsSubagentLimitPlaceholder}
-                  onChange={(event) => setMaxTotalSubagents(event.target.value)}
                 />
               </div>
             </div>

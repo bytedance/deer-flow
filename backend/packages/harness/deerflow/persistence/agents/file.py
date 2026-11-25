@@ -31,6 +31,7 @@ from deerflow.config.agents_config import (
     validate_agent_name,
 )
 from deerflow.persistence.agents.base import (
+    AgentConfigUpdate,
     AgentDeleteOutcome,
     AgentExistsError,
     AgentStore,
@@ -38,8 +39,14 @@ from deerflow.persistence.agents.base import (
 )
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.utils.atomic_write import cleanup_failed_atomic_write
+from deerflow.utils.file_lock import advisory_file_lock
 
 logger = logging.getLogger(__name__)
+
+
+def _agent_lock_path(agent_dir: Path) -> Path:
+    # Deleting an agent must not remove the lock other writers are waiting on.
+    return agent_dir.parent / ".locks" / agent_dir.name
 
 
 class FileAgentStore(AgentStore):
@@ -135,35 +142,46 @@ class FileAgentStore(AgentStore):
         # not be shadowed; a per-user dir may be memory-only but still blocks).
         if agent_dir.exists() or paths.agent_dir(name).exists():
             raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'")
-        try:
-            agent_dir.mkdir(parents=True, exist_ok=False)
-        except FileExistsError as e:
-            # A concurrent create passed the existence check above and reached
-            # mkdir first. Surface the router's 409 (via AgentExistsError) rather
-            # than a generic 500 — mirrors SqlAgentStore's IntegrityError path.
-            raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'") from e
-        try:
-            self._write(agent_dir, config, soul)
-        except Exception:
-            # The directory was newly created for this call; a failed write
-            # must not leave an empty/partial agent dir behind.
-            shutil.rmtree(agent_dir, ignore_errors=True)
-            raise
+        with advisory_file_lock(_agent_lock_path(agent_dir)):
+            try:
+                agent_dir.mkdir(parents=True, exist_ok=False)
+            except FileExistsError as e:
+                raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'") from e
+            try:
+                self._write(agent_dir, config, soul)
+            except Exception:
+                shutil.rmtree(agent_dir, ignore_errors=True)
+                raise
 
-    def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> None:
+    def update(self, name: str, config: AgentConfigUpdate, soul: str | None, *, user_id: str | None = None, require_existing: bool = False) -> None:
         name = validate_agent_name(name)
         effective_user = user_id or _ac.get_effective_user_id()
         agent_dir = _ac.get_paths().user_agent_dir(effective_user, name)
-        pre_existing = agent_dir.exists()
-        agent_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            self._write(agent_dir, config, soul)
-        except Exception:
-            # Only clean up a directory this call created — never delete a
-            # pre-existing agent on a failed write.
-            if not pre_existing:
-                shutil.rmtree(agent_dir, ignore_errors=True)
-            raise
+        config_path = agent_dir / "config.yaml"
+        if require_existing and not config_path.exists():
+            raise FileNotFoundError(f"Agent config not found: {config_path}")
+        with advisory_file_lock(_agent_lock_path(agent_dir)):
+            if require_existing and not config_path.exists():
+                raise FileNotFoundError(f"Agent config not found: {config_path}")
+            if callable(config):
+                try:
+                    current = self.get(name, user_id=effective_user)
+                except FileNotFoundError:
+                    if require_existing:
+                        raise
+                    current = None
+                config = config(current)
+            if config is None and soul is None and require_existing:
+                return
+            pre_existing = agent_dir.exists()
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                self._write(agent_dir, config, soul)
+            except Exception:
+                # Only clean up a directory this call created.
+                if not pre_existing:
+                    shutil.rmtree(agent_dir, ignore_errors=True)
+                raise
 
     def delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
         name = validate_agent_name(name)
@@ -171,18 +189,16 @@ class FileAgentStore(AgentStore):
         effective_user = user_id or _ac.get_effective_user_id()
         agent_dir = paths.user_agent_dir(effective_user, name)
         if not agent_dir.exists():
-            # A legacy shared-layout agent is intentionally left in place (the
-            # write path never targets it); report it distinctly.
             return "legacy" if paths.agent_dir(name).exists() else "missing"
-        if not (agent_dir / "config.yaml").is_file():
-            # The directory holds memory/facts data but is not a custom agent
-            # (no config.yaml) — preserve it rather than deleting a user's memory
-            # (#4279). rmtree below would otherwise take the whole tree.
-            return "not-custom-agent"
-        # rmtree removes config.yaml, SOUL.md and the co-located memory.json in
-        # one shot — the historical behaviour.
-        shutil.rmtree(agent_dir)
-        return "deleted"
+        with advisory_file_lock(_agent_lock_path(agent_dir)):
+            if not agent_dir.exists():
+                # The write path never targets the legacy shared layout.
+                return "legacy" if paths.agent_dir(name).exists() else "missing"
+            if not (agent_dir / "config.yaml").is_file():
+                # Do not remove a directory that only holds memory (#4279).
+                return "not-custom-agent"
+            shutil.rmtree(agent_dir)
+            return "deleted"
 
     def signature(self) -> Hashable:
         sig: list[tuple[str, str, float]] = []

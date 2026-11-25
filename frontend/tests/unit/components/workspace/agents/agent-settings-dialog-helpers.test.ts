@@ -83,6 +83,16 @@ describe("parseAgentSubagentPolicyDraft", () => {
     expect(MAX_AGENT_SUBAGENT_CONCURRENCY).toBe(64);
     expect(MAX_AGENT_SUBAGENTS_PER_RUN).toBe(50);
   });
+
+  it("rejects browser number-input badInput instead of treating it as a clear", () => {
+    expect(
+      parseAgentSubagentPolicyDraft({
+        maxConcurrent: "",
+        maxTotal: "9",
+        maxConcurrentBadInput: true,
+      }),
+    ).toEqual({ ok: false, error: "max_concurrent" });
+  });
 });
 
 describe("thinkingEnabledToSelection", () => {

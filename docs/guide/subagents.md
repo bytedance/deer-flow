@@ -400,6 +400,8 @@ limits concurrency. Durable `batch_task` items have their own limits under
 Agent packages carry the configured caps when exported and imported. In
 `PUT /api/agents/{name}`, omitted fields preserve saved values and a `null`
 field clears that cap. Sending `"subagent_policy": null` clears both caps.
+Overlapping updates are merged against the current stored policy, so saving
+one cap does not restore the previous value of an omitted cap.
 If the Agent uses an administrator-granted MCP identity, changing its limits
 updates the Agent definition that the administrator must approve.
 

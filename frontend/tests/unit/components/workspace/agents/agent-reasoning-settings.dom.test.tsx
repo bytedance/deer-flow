@@ -170,6 +170,19 @@ describe("custom agent subagent limits", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(mutateAsync).not.toHaveBeenCalled();
   });
+
+  it("does not clear a saved limit when the number input reports badInput", () => {
+    renderSettings(bounded);
+    const input = screen.getByLabelText(concurrentLabel);
+    Object.defineProperty(input, "validity", {
+      configurable: true,
+      value: { badInput: true },
+    });
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(mutateAsync).not.toHaveBeenCalled();
+  });
 });
 
 describe("custom agent reasoning update isolation", () => {
