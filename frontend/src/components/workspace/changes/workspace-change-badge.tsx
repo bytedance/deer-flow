@@ -20,6 +20,9 @@ import { cn } from "@/lib/utils";
 
 import { WorkspaceChangePanel } from "./workspace-change-panel";
 
+// Runs with more changed files than this start with the inline list collapsed.
+const INLINE_CHANGE_LIST_LIMIT = 3;
+
 export function WorkspaceChangeBadge({
   threadId,
   runId,
@@ -49,7 +52,7 @@ export function WorkspaceChangeBadge({
   }
 
   const files = sortWorkspaceChanges(data.files);
-  const canCollapse = count >= 4 && files.length > 0;
+  const canCollapse = count > INLINE_CHANGE_LIST_LIMIT && files.length > 0;
   const title = t.workspaceChanges.editedTitle(count);
   const titleClassName = "text-foreground text-sm font-semibold";
   const fileList = (
@@ -88,7 +91,7 @@ export function WorkspaceChangeBadge({
                   {title}
                   <ChevronRightIcon
                     aria-hidden="true"
-                    className="size-4 shrink-0 group-data-[state=open]/changes:rotate-90"
+                    className="size-4 shrink-0 transition-transform group-data-[state=open]/changes:rotate-90"
                   />
                 </CollapsibleTrigger>
               ) : (
