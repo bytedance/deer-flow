@@ -318,7 +318,7 @@ def test_reject_policy_enforces_capacity_and_transfers_warm_slots(monkeypatch: p
         assert caught.value.details["active"] == 1
         assert caught.value.details["replicas"] == 1
         assert caught.value.details["retryable"] is True
-        assert caught.value.details["retry_after_seconds"] == 5
+        assert caught.value.details["retry_after_seconds"] == OpenSandboxProvider.CAPACITY_RETRY_AFTER_SECONDS
         assert len(sdk.create_calls) == 1
 
         provider.release(first_id)
@@ -404,6 +404,44 @@ def test_reject_policy_releases_capacity_after_create_failure(monkeypatch: pytes
         with pytest.raises(RuntimeError, match="synthetic create failure"):
             provider.acquire("thread-1")
         assert provider.acquire("thread-2")
+        assert len(sdk.create_calls) == 2
+    finally:
+        provider.shutdown()
+
+
+def test_reject_policy_keeps_a_reclaimed_warm_slot_counted_until_registration(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, sdk = _install(monkeypatch, config={"replicas": 1, "overflow_policy": "reject"})
+    competing: list[BaseException] = []
+    prepare = provider._prepare_new_skill_view
+
+    def prepare_then_compete(sandbox, *, thread_id, user_id):
+        prepare(sandbox, thread_id=thread_id, user_id=user_id)
+        if thread_id == "thread-1" and sdk.create_calls and not competing:
+            # The reclaimed sandbox has left the warm pool but is not active yet.
+            try:
+                provider.acquire("thread-2")
+            except SandboxCapacityExceededError as exc:
+                competing.append(exc)
+
+    try:
+        provider.release(provider.acquire("thread-1"))
+        monkeypatch.setattr(provider, "_prepare_new_skill_view", prepare_then_compete)
+        assert provider.acquire("thread-1")
+        assert len(competing) == 1
+        assert competing[0].details["reserved"] == 1
+        assert len(sdk.create_calls) == 1
+        assert provider._reserved_creates == set()
+    finally:
+        provider.shutdown()
+
+
+def test_burst_policy_warns_that_opensandbox_keeps_the_soft_cap(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="deerflow.community.opensandbox.provider"):
+        provider, sdk = _install(monkeypatch, config={"replicas": 1, "overflow_policy": "burst"})
+    try:
+        assert "overflow_policy 'burst' is E2B-only" in caplog.text
+        provider.acquire("thread-1")
+        provider.acquire("thread-2")
         assert len(sdk.create_calls) == 2
     finally:
         provider.shutdown()

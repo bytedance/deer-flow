@@ -137,6 +137,9 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
     # or initializing remote can already hold a different view.
     supports_lazy_agent_skill_isolation = True
     _idle_checker_thread_name = "opensandbox-idle-reaper"
+    # Retry hint for overflow_policy: reject. A slot frees when any run releases
+    # its sandbox, so this matches the E2B capacity hint rather than idle_timeout.
+    CAPACITY_RETRY_AFTER_SECONDS = 30.0
     _MAX_SYNC_FILES = 2000
     _MAX_SYNC_TOTAL_BYTES = 512 * 1024 * 1024
     _MAX_SYNC_LISTING_BYTES = 512 * 1024
@@ -215,6 +218,9 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             logger.warning("OpenSandboxProvider: no api_key or domain configured (set sandbox.api_key/sandbox.domain in config.yaml or OPEN_SANDBOX_API_KEY/OPEN_SANDBOX_DOMAIN). The SDK will default to unauthenticated localhost:8080.")
         if _uses_insecure_remote_http(effective_domain, protocol):
             logger.warning("OpenSandboxProvider: remote OpenSandbox domain uses HTTP; use HTTPS to protect credentials and sandbox traffic.")
+        overflow_policy = option("overflow_policy") or "wait"
+        if overflow_policy == "burst":
+            logger.warning("OpenSandboxProvider: overflow_policy 'burst' is E2B-only; OpenSandbox keeps the replicas soft cap. Use 'reject' for a hard cap.")
         # $VARS in config.yaml are already resolved by AppConfig.resolve_env_variables;
         # resolving again would rewrite a secret that itself starts with $.
         environment = dict(option("environment") or {})
@@ -241,7 +247,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             "command_timeout": self._positive_float("bash_command_timeout", option("bash_command_timeout"), DEFAULT_COMMAND_TIMEOUT),
             "environment": environment,
             "replicas": replicas if replicas is not None else self.DEFAULT_REPLICAS,
-            "overflow_policy": option("overflow_policy") or "wait",
+            "overflow_policy": overflow_policy,
             "idle_timeout": idle_timeout if idle_timeout is not None else self.DEFAULT_IDLE_TIMEOUT,
             "resource": resource_option("resource"),
             "resource_requests": resource_option("resource_requests"),
@@ -344,6 +350,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                         destroy_after_unlock = True
                     else:
                         self._sandboxes[sandbox_id] = sandbox
+                        self._reserved_creates.discard(sandbox_id)
                         destroy_after_unlock = False
                 if destroy_after_unlock:
                     self._destroy_quietly(sandbox, context="created during shutdown")
@@ -389,7 +396,9 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         sandbox = self._reclaim_warm_pool(sandbox_id)
         reclaimed = sandbox is not None
         with ExitStack() as stack:
-            if sandbox is None:
+            if reclaimed:
+                stack.callback(self._release_reservation, sandbox_id)
+            else:
                 stack.enter_context(self._create_capacity(sandbox_id))
                 sandbox = self._create_sandbox(sandbox_id, thread_id=thread_id, user_id=user_id)
             try:
@@ -406,6 +415,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 else:
                     self._sandboxes[sandbox_id] = sandbox
                     self._thread_sandboxes[key] = sandbox_id
+                    self._reserved_creates.discard(sandbox_id)
                     destroy_after_unlock = False
             if destroy_after_unlock:
                 self._destroy_quietly(sandbox, context="created during shutdown")
@@ -432,6 +442,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                             warm=len(self._warm_pool),
                             reserved=len(self._reserved_creates),
                             replicas=replicas,
+                            retry_after_seconds=self.CAPACITY_RETRY_AFTER_SECONDS,
                         )
                     warm_id, (warm, _) = min(self._warm_pool.items(), key=lambda item: item[1][1])
                     self._warm_pool.pop(warm_id)
@@ -441,8 +452,11 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 self._destroy_warm_entry(evicted[0], evicted[1], reason="replica_enforcement")
             yield
         finally:
-            with self._lock:
-                self._reserved_creates.discard(sandbox_id)
+            self._release_reservation(sandbox_id)
+
+    def _release_reservation(self, sandbox_id: str) -> None:
+        with self._lock:
+            self._reserved_creates.discard(sandbox_id)
 
     def _create_sandbox(self, sandbox_id: str, *, thread_id: str | None, user_id: str | None) -> OpenSandboxSandbox:
         if self._config["overflow_policy"] != "reject":
@@ -515,6 +529,8 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             removed = self._warm_pool.pop(sandbox_id, None)
             if removed is None:
                 return None
+            # Keep the slot counted until the caller registers or releases it.
+            self._reserved_creates.add(sandbox_id)
         logger.info("Reclaimed warm OpenSandbox %s (remote=%s)", sandbox_id, sandbox.remote_id)
         return removed[0]
 
