@@ -170,10 +170,7 @@ def _same_file(before_file: FileSnapshot, after_file: FileSnapshot) -> bool:
     # status and target must be compared before the size/mtime fallback
     # (#8550). A symlink's content is its target: same target = unchanged.
     if before_file.symlink or after_file.symlink:
-        return (
-            before_file.symlink == after_file.symlink
-            and before_file.symlink_target == after_file.symlink_target
-        )
+        return before_file.symlink == after_file.symlink and before_file.symlink_target == after_file.symlink_target
     if before_file.sha256 is not None and after_file.sha256 is not None:
         return before_file.sha256 == after_file.sha256
     return before_file.size == after_file.size and before_file.mtime_ns == after_file.mtime_ns
