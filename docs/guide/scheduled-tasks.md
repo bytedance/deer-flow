@@ -6,6 +6,9 @@ Editing a one-time task's title or prompt preserves its original execution time,
 
 An unchanged one-time execution time can still be saved within `scheduler.min_once_delay_seconds` of its run. New execution times and reactivated finished tasks must satisfy that minimum delay.
 
+One-time local timestamps saved through chat or the API retain their seconds
+and fractional seconds when the Web UI resolves them in the task's timezone.
+
 Current MVP capabilities:
 
 - Manage tasks at `/workspace/scheduled-tasks`
