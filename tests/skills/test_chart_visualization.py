@@ -155,6 +155,7 @@ def test_http_failure_exits_nonzero(tmp_path):
 def test_batch_keeps_successful_urls_and_still_exits_nonzero(tmp_path):
     spec = [
         {"tool": "generate_not_a_chart"},
+        None,
         {"tool": "generate_spreadsheet", "args": {"data": [{"name": "Ada"}]}},
     ]
     result, calls = _run(tmp_path, spec)
@@ -162,5 +163,6 @@ def test_batch_keeps_successful_urls_and_still_exits_nonzero(tmp_path):
     assert result.returncode == 1
     assert result.stdout == "https://example.test/sheet.png\n"
     assert "Unknown tool 'generate_not_a_chart'" in result.stderr
+    assert "'tool' field missing in spec: null" in result.stderr
     assert len(calls) == 1
     assert json.loads(calls[0]["body"])["type"] == "spreadsheet"

@@ -205,7 +205,7 @@ diagnostics to stderr when generation fails. Callers can check the status before
 presenting audio; an existing MP3 or generated transcript is not proof of success.
 
 The bundled chart-visualization command does the same for an unknown chart tool,
-a spec missing `tool`, or a chart-service HTTP failure. Successful chart URLs,
+a spec missing `tool` (including a `null` entry), or a chart-service HTTP failure. Successful chart URLs,
 including spreadsheets (`generate_spreadsheet`), stay on stdout. A mixed batch
 still prints URLs for the charts that succeeded, then exits with status 1.
 
