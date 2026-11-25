@@ -15,6 +15,7 @@ from uuid import uuid4
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
+from langgraph.errors import GraphRecursionError
 
 from deerflow.runtime.events.store.base import RunEventStoreNotCommittedError
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
@@ -1996,16 +1997,18 @@ class TestIdentifyCaller:
 
 class TestChainErrorCallback:
     @pytest.mark.anyio
-    async def test_on_chain_error_writes_run_error(self, journal_setup):
+    @pytest.mark.parametrize("error", [ValueError("boom"), GraphRecursionError("boom")])
+    async def test_on_chain_error_writes_run_error(self, journal_setup, error):
         j, store = journal_setup
-        j.on_chain_error(ValueError("boom"), run_id=uuid4())
+        j.step_limit_root = uuid4()
+        j.on_chain_error(error, run_id=uuid4())
         await asyncio.sleep(0.05)
         await j.flush()
         events = await store.list_events("t1", "r1")
         error_events = [e for e in events if e["event_type"] == "run.error"]
         assert len(error_events) == 1
         assert "boom" in error_events[0]["content"]
-        assert error_events[0]["metadata"]["error_type"] == "ValueError"
+        assert error_events[0]["metadata"]["error_type"] == type(error).__name__
 
 
 class TestTokenTrackingDisabled:

@@ -21,6 +21,12 @@ for the SDK default.
 - **Deadline tests use execution results.** A `TimeoutError` that only a fake
   raises does not test the contract.
 
+## Agent skill views
+
+Keep eager skill synchronization when the thread's remote is active or its
+acquire is in flight. Read the registry and scope serializer together so the
+remote cannot be published between the two checks.
+
 ## Output synchronization
 
 - **Release mirrors the output files to the host before it parks the client.**

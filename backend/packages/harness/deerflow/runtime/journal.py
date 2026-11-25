@@ -32,7 +32,8 @@ from uuid import UUID, uuid4
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMessage, ToolMessage, messages_from_dict
-from langgraph.types import Command
+from langgraph.errors import GraphRecursionError
+from langgraph.types import Command, StateSnapshot
 
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.skill_usage import MAX_SKILL_SNAPSHOT_CHARS, SKILL_USAGES_KEY
@@ -339,6 +340,7 @@ class RunJournal(BaseCallbackHandler):
         self._producer_lock = threading.Lock()
         self._pending_producer_callbacks = 0
         self._track_tokens = track_token_usage
+        self.step_limit_root: UUID | None = None
         self._flush_threshold = flush_threshold
         self._progress_reporter = progress_reporter
         self._progress_flush_interval = progress_flush_interval
@@ -512,7 +514,20 @@ class RunJournal(BaseCallbackHandler):
         )
         self._flush_sync()
 
-    def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+    def record_step_limit_outcome(self, error: GraphRecursionError, completed: StateSnapshot | None) -> None:
+        """Record the worker's resolved outcome using the usual root callback."""
+        root_id, self.step_limit_root = self.step_limit_root, None
+        if root_id is None:
+            return
+        if completed is None:
+            self.on_chain_error(error, run_id=root_id)
+        else:
+            self.on_chain_end(completed.values, run_id=root_id)
+
+    def on_chain_error(self, error: BaseException, *, run_id: UUID, parent_run_id: UUID | None = None, **kwargs: Any) -> None:
+        # The worker checks its own root checkpoint before recording this one outcome.
+        if run_id == self.step_limit_root and parent_run_id is None and isinstance(error, GraphRecursionError):
+            return
         self._put(
             event_type=RUN_ERROR_EVENT.event_type,
             category=RUN_ERROR_EVENT.category,

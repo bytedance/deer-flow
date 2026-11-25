@@ -131,6 +131,34 @@ saved API error responses and avoids blocking later reads when the optional
 `tool_progress` guard is enabled. Actual read failures and output truncation
 still retain their error or partial-result status.
 
+## Kubernetes sandbox Pod resources
+
+With the AIO Kubernetes provisioner, set `provisioner.sandboxResources` in
+your Helm values to size the sandbox container in each new Pod. For example,
+to raise the memory limit to 4 GiB and the ephemeral storage limit to 2 GiB:
+
+```yaml
+provisioner:
+  sandboxResources:
+    limits:
+      memory: 4Gi
+      ephemeral-storage: 2Gi
+```
+
+Each field can be overridden independently. Helm rejects unknown resource names
+in `requests` and `limits` when rendering the chart. For a standalone provisioner,
+set the corresponding environment variables on the provisioner container.
+
+| Resource | Request variable | Default request | Limit variable | Default limit |
+| --- | --- | --- | --- | --- |
+| `cpu` | `SANDBOX_CPU_REQUEST` | `100m` | `SANDBOX_CPU_LIMIT` | `1000m` |
+| `memory` | `SANDBOX_MEMORY_REQUEST` | `256Mi` | `SANDBOX_MEMORY_LIMIT` | `1Gi` |
+| `ephemeral-storage` | `SANDBOX_EPHEMERAL_STORAGE_REQUEST` | `500Mi` | `SANDBOX_EPHEMERAL_STORAGE_LIMIT` | `500Mi` |
+
+The provisioner checks at startup that each value is a nonnegative Kubernetes
+quantity and each request is at most its limit. The separate Helm value
+`provisioner.resources` sizes the provisioner container itself.
+
 ## Redis Cluster for shared sandbox ownership
 
 Gateways sharing AIO containers or E2B VMs can store ownership leases in Redis
