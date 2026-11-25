@@ -1276,7 +1276,10 @@ class DiscordChannel(Channel):
             headers["Authorization"] = f"Bot {token}"
         chunks: list[bytes] = []
         total = 0
-        async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+        # Constructing AsyncClient loads the CA bundle synchronously (SSLContext.load_verify_locations).
+        # Build it off the event loop so a single attachment cannot stall other gateway work.
+        client = await asyncio.to_thread(httpx.AsyncClient, timeout=httpx.Timeout(20.0))
+        async with client:
             async with client.stream("GET", url, headers=headers) as response:
                 response.raise_for_status()
                 encoding = (response.headers.get("content-encoding") or "").strip().lower()
