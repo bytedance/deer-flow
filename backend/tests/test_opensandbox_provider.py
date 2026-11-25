@@ -687,10 +687,10 @@ def test_opensandbox_skill_projection_locks_readonly_and_unlocks_before_replace(
         commands = [cmd for cmd, _ in sdk.remotes[0].commands.calls]
         stage_cmds = [cmd for cmd in commands if "mkdir -m 700 --" in cmd]
         swap_cmds = [cmd for cmd in commands if "mv --" in cmd and "rmdir --" in cmd]
-        assert stage_cmds and "chmod -R u+w --" in stage_cmds[-1]
+        assert stage_cmds and "chmod -R -- u+w" in stage_cmds[-1]
         assert swap_cmds
-        assert "chmod -R u+w --" in swap_cmds[-1]
-        assert "chmod -R a-w --" in swap_cmds[-1]
+        assert "chmod -R -- u+w" in swap_cmds[-1]
+        assert "chmod -R -- a-w" in swap_cmds[-1]
     finally:
         provider.shutdown()
 

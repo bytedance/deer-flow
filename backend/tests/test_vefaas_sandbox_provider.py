@@ -720,9 +720,9 @@ class TestVeFaaSSandboxProviderLifecycle:
 
             skill_cmds = [cmd for cmd in aio.commands if ".vefaas-stage-" in cmd and "UPLOAD_OK" in cmd]
             assert skill_cmds
-            assert "chmod -R u+w --" in skill_cmds[-1]
-            assert "chmod -R a-w --" in skill_cmds[-1]
-            assert not any("chmod -R a-w" in cmd for cmd in aio.commands if "/mnt/user-data" in cmd)
+            assert "chmod -R -- u+w" in skill_cmds[-1]
+            assert "chmod -R -- a-w" in skill_cmds[-1]
+            assert not any("a-w" in cmd for cmd in aio.commands if "/mnt/user-data" in cmd)
         finally:
             provider.shutdown()
 

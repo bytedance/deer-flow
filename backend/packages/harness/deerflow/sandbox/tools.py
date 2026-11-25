@@ -3562,6 +3562,13 @@ async def _write_file_tool_async(
     placeholder_error = _reject_elision_placeholder_content(content)
     if placeholder_error is not None:
         return placeholder_error
+    try:
+        _reject_readonly_virtual_write_path(path)
+    except PermissionError:
+        return _truncate_write_file_error_detail(
+            f"Error: Permission denied writing to file: {path}",
+            _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS,
+        )
     return await _run_sync_tool_after_async_sandbox_init(write_file_tool.func, runtime, path, content, description, append)
 
 
@@ -3655,6 +3662,10 @@ async def _str_replace_tool_async(
     description: str = "",
     replace_all: bool = False,
 ) -> str:
+    try:
+        _reject_readonly_virtual_write_path(path)
+    except PermissionError:
+        return f"Error: Permission denied accessing file: {path}"
     return await _run_sync_tool_after_async_sandbox_init(
         str_replace_tool.func,
         runtime,

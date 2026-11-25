@@ -629,13 +629,13 @@ def test_sync_agent_skills_replaces_managed_categories(installed, tmp_path: Path
     assert files["/mnt/skills/notes.txt"] == b"unmanaged"
     skill_scripts = [call["argv"][-1] for call in fake.execs if "/mnt/skills" in call["argv"][-1] and "UPLOAD_OK" in call["argv"][-1]]
     assert skill_scripts
-    assert "chmod -R u+w --" in skill_scripts[-1]
+    assert "chmod -R -- u+w" in skill_scripts[-1]
     assert "|| rm -rf --" in skill_scripts[-1]
     assert 'if [ -e "$p" ]; then' in skill_scripts[-1]
-    assert "chmod -R a-w --" in skill_scripts[-1]
-    assert "chown -R root:root --" in skill_scripts[-1]
+    assert "chmod -R -- a-w" in skill_scripts[-1]
+    assert "chown -R -- root:root" in skill_scripts[-1]
     user_data_scripts = [call["argv"][-1] for call in fake.execs if "/mnt/user-data" in call["argv"][-1] and "UPLOAD_OK" in call["argv"][-1]]
-    assert not any("chmod -R a-w" in script for script in user_data_scripts)
+    assert not any("a-w" in script for script in user_data_scripts)
 
 
 @posix_only

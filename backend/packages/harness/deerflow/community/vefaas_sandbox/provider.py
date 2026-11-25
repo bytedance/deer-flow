@@ -1447,9 +1447,9 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             quoted_stage = shlex.quote(staging_dir)
             stage_dirs = " ".join(shlex.quote(f"{staging_dir}/{name}") for name in replace)
             swap_steps = " ".join(
-                (f"chmod -R u+w -- {shlex.quote(f'{dest_root}/{name}')} 2>/dev/null || true; " if read_only else "")
+                (f"chmod -R -- u+w {shlex.quote(f'{dest_root}/{name}')} 2>/dev/null || true; " if read_only else "")
                 + f"rm -rf -- {shlex.quote(f'{dest_root}/{name}')}; mv -- {shlex.quote(f'{staging_dir}/{name}')} {shlex.quote(f'{dest_root}/{name}')};"
-                + (f" chmod -R a-w -- {shlex.quote(f'{dest_root}/{name}')};" if read_only else "")
+                + (f" chmod -R -- a-w {shlex.quote(f'{dest_root}/{name}')};" if read_only else "")
                 for name in replace
             )
             script = (
@@ -1460,8 +1460,8 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 f"{swap_steps} echo UPLOAD_OK )"
             )
         else:
-            unlock_root = f"chmod -R u+w -- {quoted_root} 2>/dev/null || true; " if read_only else ""
-            lock_root = f"chmod -R a-w -- {quoted_root}; " if read_only else ""
+            unlock_root = f"chmod -R -- u+w {quoted_root} 2>/dev/null || true; " if read_only else ""
+            lock_root = f"chmod -R -- a-w {quoted_root}; " if read_only else ""
             script = (
                 f"set +e; ( set -e; trap 'rm -f -- {quoted_tar}' EXIT; "
                 f"if [ -L {quoted_root} ]; then echo 'Refusing symlinked destination' >&2; exit 2; fi; "

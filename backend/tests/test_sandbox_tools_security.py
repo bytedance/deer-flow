@@ -1,3 +1,4 @@
+import asyncio
 import os
 import threading
 from pathlib import Path
@@ -2271,6 +2272,43 @@ def test_non_local_sandbox_blocks_custom_skills_container_path(monkeypatch) -> N
 
     assert write_file_tool.func(runtime=runtime, description="write", path=target, content="tamper") == f"Error: Permission denied writing to file: {target}"
     assert str_replace_tool.func(runtime=runtime, description="replace", path=target, old_str="a", new_str="b") == f"Error: Permission denied accessing file: {target}"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/mnt/skills/public/demo/SKILL.md",
+        "//mnt/skills/custom/my-skill/SKILL.md",
+        "/mnt/user-data/../skills/public/demo/SKILL.md",
+        "/mnt/acp-workspace/result.txt",
+    ],
+)
+def test_non_local_sandbox_async_blocks_readonly_virtual_writes_before_init(monkeypatch, path: str) -> None:
+    calls: list[str] = []
+
+    async def fail_async_init(_rt):
+        calls.append("async_init")
+        raise SandboxError("remote sandbox failed to start")
+
+    def fail_sync_init(_rt):
+        calls.append("sync_init")
+        raise AssertionError("ensure_sandbox_initialized should not be called")
+
+    def fail_auth_scope(_rt):
+        calls.append("auth_scope")
+        raise AssertionError("sandbox_authorization_scope_async should not be entered")
+
+    runtime = SimpleNamespace(state={}, context={"thread_id": "thread-1"}, config={})
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized_async", fail_async_init)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", fail_sync_init)
+    monkeypatch.setattr("deerflow.sandbox.tools.sandbox_authorization_scope_async", fail_auth_scope)
+
+    write_result = asyncio.run(write_file_tool.coroutine(runtime=runtime, description="write", path=path, content="tamper"))
+    replace_result = asyncio.run(str_replace_tool.coroutine(runtime=runtime, description="replace", path=path, old_str="a", new_str="b"))
+
+    assert write_result == f"Error: Permission denied writing to file: {path}"
+    assert replace_result == f"Error: Permission denied accessing file: {path}"
     assert calls == []
 
 
