@@ -1149,6 +1149,8 @@ tools:
   #   #                                    # cannot be enforced end-to-end. Set true ONLY when its outbound network
   #   #                                    # is isolated from private and cloud-metadata networks.
   #   # filter: fit                       # Markdown filter: fit (default) | raw | bm25 | llm
+  #   # max_chars: 4096                   # Output cap in characters (default 4096); a cut page ends with a note.
+  #   #                                    # Above tool_output.externalize_min_chars, output goes to a file instead.
 
   # Web capture tool (uses Browserless /screenshot to render a page as an artifact)
   # Browserless captures JavaScript-heavy pages with a real headless Chrome and
@@ -1754,6 +1756,10 @@ uploads:
   max_files: 10
   max_file_size: 52428800    # 50 MiB
   max_total_size: 104857600  # 100 MiB
+  # nginx cannot read these runtime values. If you raise any of them, raise
+  # client_max_body_size above the new content total plus multipart framing in
+  # docker/nginx/nginx.conf, docker/nginx/nginx.local.conf and the Helm nginx
+  # ConfigMap too.
   # Automatic Office/PDF conversion runs on the backend host before sandbox
   # isolation applies. Keep this disabled unless uploads come from a fully
   # trusted source and you intentionally accept host-side parser risk.

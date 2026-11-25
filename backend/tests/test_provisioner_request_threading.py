@@ -103,6 +103,108 @@ def test_provisioner_threads_shell_capacity_into_sandbox_pod(
     assert env["MAX_SHELL_SESSIONS"] == "13"
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["DISABLE JUPYTER", "1DISABLE", "DISABLE-YUP", "D" * 65, "DISABLE_JUPYTER\n"],
+)
+def test_provisioner_rejects_malformed_environment_keys(provisioner_module, name: str) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-env", environment={name: "true"})
+
+
+def test_provisioner_rejects_unusable_environment_entries(provisioner_module) -> None:
+    from pydantic import ValidationError
+
+    requests = [
+        {f"KEY_{index}": "true" for index in range(33)},
+        {"DISABLE_VNC": "x" * 1025},
+        {"DISABLE_VNC": "true\x00"},
+    ]
+    for environment in requests:
+        with pytest.raises(ValidationError):
+            provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-env", environment=environment)
+
+
+@pytest.mark.parametrize(
+    ("written", "expected"),
+    [
+        ("example$$suffix", "example$$$$suffix"),
+        ("$(POD_NAME)", "$$(POD_NAME)"),
+        ("plain", "plain"),
+    ],
+)
+def test_provisioner_keeps_pod_environment_values_literal(monkeypatch, provisioner_module, written, expected) -> None:
+    """Kubelet expands $(NAME) and collapses $$, so every value is escaped before it is written."""
+    core = _RecordingCoreV1(event_loop_thread_id=-1, ready_after_service_reads={"sandbox-escape": 1})
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+
+    provisioner_module.create_sandbox(
+        provisioner_module.CreateSandboxRequest(
+            sandbox_id="sandbox-escape",
+            thread_id="thread-1",
+            environment={"DISABLE_VNC": written},
+        )
+    )
+
+    pod = core.created_pod_specs["sandbox-escape"]
+    env = {item.name: item.value for item in (pod.spec.containers[0].env or [])}
+    assert env["DISABLE_VNC"] == expected
+
+
+def test_provisioner_threads_operator_environment_into_sandbox_pod(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(
+        event_loop_thread_id=-1,
+        ready_after_service_reads={"sandbox-env": 1},
+    )
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    response = provisioner_module.create_sandbox(
+        provisioner_module.CreateSandboxRequest(
+            sandbox_id="sandbox-env",
+            thread_id="thread-1",
+            environment={"DISABLE_JUPYTER": "true", "DISABLE_CODE_SERVER": "true"},
+        )
+    )
+
+    assert response.status == "Running"
+    pod = fake_core_v1.created_pod_specs["sandbox-env"]
+    env = {item.name: item.value for item in (pod.spec.containers[0].env or [])}
+    assert env["DISABLE_JUPYTER"] == "true"
+    assert env["DISABLE_CODE_SERVER"] == "true"
+
+
+def test_provisioner_keeps_its_own_environment_keys(monkeypatch, provisioner_module) -> None:
+    core = _RecordingCoreV1(event_loop_thread_id=-1, ready_after_service_reads={"sandbox-owned": 1})
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    reserved = {
+        "AIO_BASH_MAX_SESSIONS": "9999",
+        "MAX_SHELL_SESSIONS": "13",
+        "DEERFLOW_LARK_BROKER_URL": "http://spoofed",
+    }
+
+    provisioner_module.create_sandbox(
+        provisioner_module.CreateSandboxRequest(
+            sandbox_id="sandbox-owned",
+            thread_id="thread-1",
+            max_bash_sessions=10,
+            environment={**reserved, "DISABLE_VNC": "true"},
+        )
+    )
+
+    pod = core.created_pod_specs["sandbox-owned"]
+    env = {item.name: item.value for item in (pod.spec.containers[0].env or [])}
+    assert env["AIO_BASH_MAX_SESSIONS"] == "10"
+    # The provisioner only sets the shell limit when the request carries one.
+    assert "MAX_SHELL_SESSIONS" not in env
+    assert "DEERFLOW_LARK_BROKER_URL" not in env
+    assert env["DISABLE_VNC"] == "true"
+
+
 @pytest.mark.parametrize("capacity", [1, 50, 72])
 def test_provisioner_attests_bash_capacity_from_created_and_reused_pod(monkeypatch, provisioner_module, capacity):
     core = _RecordingCoreV1(event_loop_thread_id=-1)
