@@ -18,12 +18,13 @@ import os
 import uuid
 import zipfile
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from dotenv import load_dotenv
 from test_mcp_cache_reconciliation import reconciler  # noqa: F401 - fixture re-export
 
-from deerflow.client import DeerFlowClient, StreamEvent
+from deerflow.client import DeerFlowClient, StreamEvent, _CachedAgent
 from deerflow.config.app_config import AppConfig
 
 # Load .env from project root (for OPENAI_API_KEY etc.)
@@ -356,12 +357,12 @@ class TestLifecycleAndConfig:
     def test_agent_recreation_on_config_change(self, client):
         """Changing thinking_enabled triggers agent recreation (different config key)."""
         list(client.stream("hi"))
-        key1 = client._agent_config_key
+        key1 = client._agent_cache.key
 
         # Stream with a different config override
         client.reset_agent()
         list(client.stream("hi", thinking_enabled=True))
-        key2 = client._agent_config_key
+        key2 = client._agent_cache.key
 
         # thinking_enabled changed: False → True → keys differ
         assert key1 != key2
@@ -370,11 +371,10 @@ class TestLifecycleAndConfig:
         """reset_agent() sets the internal agent to None."""
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
         # Before any call, agent is None
-        assert c._agent is None
+        assert c._agent_cache is None
 
         c.reset_agent()
-        assert c._agent is None
-        assert c._agent_config_key is None
+        assert c._agent_cache is None
 
     def test_plan_mode_config_key(self, e2e_env):
         """plan_mode is part of the config key tuple."""
@@ -713,15 +713,13 @@ class TestConfigManagement:
 
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
         # Simulate a cached agent
-        c._agent = "fake-agent-placeholder"
-        c._agent_config_key = ("a", "b", "c", "d")
+        c._agent_cache = _CachedAgent(("a", "b", "c", "d"), MagicMock(), None)
 
         result = c.update_mcp_config({"test-server": {"enabled": True, "type": "stdio", "command": "echo"}})
         assert "mcp_servers" in result
 
         # Agent should be invalidated
-        assert c._agent is None
-        assert c._agent_config_key is None
+        assert c._agent_cache is None
 
         # File should be written
         written = json.loads(config_file.read_text())
@@ -739,8 +737,7 @@ class TestConfigManagement:
         reload_extensions_config()
 
         c = DeerFlowClient(checkpointer=None, thinking_enabled=False)
-        c._agent = "fake-agent-placeholder"
-        c._agent_config_key = ("a", "b", "c", "d")
+        c._agent_cache = _CachedAgent(("a", "b", "c", "d"), MagicMock(), None)
 
         # Use a real skill name from the public skills directory
         skills = c.list_skills()
@@ -755,8 +752,7 @@ class TestConfigManagement:
         assert written["middlewares"] == ["pkg:Middleware"]
 
         # Agent should be invalidated
-        assert c._agent is None
-        assert c._agent_config_key is None
+        assert c._agent_cache is None
 
     def test_update_skill_nonexistent_raises(self, e2e_env, tmp_path, monkeypatch):
         """update_skill() raises ValueError for nonexistent skill."""

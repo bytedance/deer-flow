@@ -29,6 +29,7 @@ from deerflow.persistence.extension_leases.model import ExtensionExecutionLeaseR
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.login_throttle.model import LoginThrottleRow
 from deerflow.persistence.managed_subagents.model import ManagedSubagentRow
+from deerflow.persistence.mcp_agent_grants.model import McpAgentGrantRow
 from deerflow.persistence.mcp_oauth_tokens.model import McpOAuthTokenRow
 from deerflow.persistence.mcp_tasks.model import McpTaskRow
 from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
@@ -70,6 +71,7 @@ __all__ = [
     "CoordinationTaskRow",
     "FeedbackRow",
     "LoginThrottleRow",
+    "McpAgentGrantRow",
     "McpOAuthTokenRow",
     "McpTaskRow",
     "ManagedSubagentRow",
