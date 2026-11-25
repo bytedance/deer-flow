@@ -63,6 +63,65 @@ def test_sources_require_real_evidence_and_optional_locators() -> None:
     assert source.page is None and source.url is None
 
 
+@pytest.mark.parametrize("positions", [[0], [-1], [True], [1.0], ["1"], [1, 1], [2], [3]])
+def test_retrieval_result_rejects_invalid_evidence_dependencies(positions):
+    with pytest.raises(ValidationError):
+        RetrievalResult.model_validate({"hits": [{"content": "Evidence"}, {"content": "Relation", "depends_on": positions}]})
+
+
+def test_evidence_dependencies_round_trip_without_changing_legacy_hit_shape():
+    legacy_payload = {"hits": [{"content": "Evidence", "source": None, "score": None}]}
+    result = RetrievalResult.model_validate(legacy_payload)
+    assert result.hits[0].depends_on == []
+    assert result.model_dump() == json.loads(result.model_dump_json()) == legacy_payload
+
+    with_relation = RetrievalResult(hits=[*result.hits, RetrievalHit(content="Relation", depends_on=[1])])
+    assert RetrievalResult.model_validate(with_relation.model_dump()) == with_relation
+    assert RetrievalResult.model_validate_json(with_relation.model_dump_json()) == with_relation
+
+
+@pytest.mark.parametrize("has_unrelated_source", [False, True])
+def test_visible_text_without_a_valid_source_cannot_satisfy_a_dependency(has_unrelated_source):
+    source = KnowledgeSource(provider="demo", title="Guide", excerpt="Unrelated excerpt") if has_unrelated_source else None
+    result = RetrievalResult(
+        hits=[
+            RetrievalHit(content="Evidence text", source=source),
+            RetrievalHit(content="Dependent relation", depends_on=[1]),
+            RetrievalHit(content="Independent text mentions result [10]."),
+        ]
+    )
+
+    text, artifact = format_result(result)
+
+    assert "Evidence text" in text
+    assert "Dependent relation" not in text
+    assert "Independent text mentions result [10]." in text
+    assert artifact["knowledge_sources"] == []
+
+
+def test_budget_reserves_space_for_the_complete_evidence_line_and_relation_body():
+    source = KnowledgeSource(provider="demo", title="Guide", excerpt="Evidence")
+    evidence = RetrievalHit(content=source.excerpt, source=source)
+    result = RetrievalResult(hits=[evidence, RetrievalHit(content="abcdefghijk", depends_on=[1])])
+    base, _ = format_result(RetrievalResult(hits=[evidence]))
+    reference = "Evidence: result [1].\n"
+    expected = f"{base}\n\n[2] Unattributed content\n{reference}abcdefg…"
+    chunk_budget = len(reference) + 8
+
+    text, artifact = format_result(result, max_chars_per_chunk=chunk_budget, max_total_chars=len(expected))
+    assert text == expected
+    assert sources_from_messages([{"type": "tool", "content": text, "artifact": artifact}]) == [source]
+
+    text, _ = format_result(result, max_chars_per_chunk=chunk_budget, max_total_chars=len(expected) - 1)
+    assert text.startswith(base)
+    assert "[2]" not in text
+
+    for limit in (len(reference) - 1, len(reference), len(reference) + 1):
+        text, _ = format_result(result, max_chars_per_chunk=limit)
+        assert text.startswith(base)
+        assert "[2]" not in text
+
+
 def test_budget_never_leaves_citations_without_visible_evidence() -> None:
     result = RetrievalResult(hits=[RetrievalHit(content="x" * 500, source=KnowledgeSource(provider="demo", title="Guide", excerpt="x" * 500))])
     for budget in (0, 1, 20, 80, 200, 800):
@@ -230,6 +289,95 @@ def test_gateway_drops_caller_forged_source_artifacts() -> None:
     assert normalize_input({"messages": [raw]})["messages"][0].artifact == {"other": "preserved"}
     assert strip_server_owned_state_metadata({"messages": [raw]})["messages"][0].artifact == {"other": "preserved"}
     assert artifact["knowledge_sources"]  # no mutation of caller data
+
+
+def test_global_budget_preserves_dependencies_when_rebudgeting_a_saved_result():
+    from deerflow.agents.middlewares.tool_output_budget_middleware import _patch_model_messages
+    from deerflow.config.tool_output_config import ToolOutputConfig
+    from deerflow.knowledge.sources import strip_source_artifact
+
+    source = KnowledgeSource(provider="test", title="Original", excerpt="Document evidence. " + "x" * 200)
+    content, artifact = format_result(
+        RetrievalResult(
+            hits=[
+                RetrievalHit(content="Oversized unrelated entry. " + "a" * 650),
+                RetrievalHit(content=source.excerpt, source=source),
+                RetrievalHit(content="Dependent relation", depends_on=[2]),
+                RetrievalHit(content="Independent entry"),
+            ]
+        )
+    )
+    original = ToolMessage(content=content, artifact={**artifact, "other": "kept"}, name="entity_relations_search", tool_call_id="relations")
+    assert strip_source_artifact(original.artifact) == {"other": "kept"}
+
+    (first,) = _patch_model_messages([original], ToolOutputConfig(externalize_min_chars=0, fallback_max_chars=550))
+    assert "Evidence: result [2].\nDependent relation" in first.content
+    assert sources_from_messages([first]) == [source]
+
+    restored = ToolMessage.model_validate_json(first.model_dump_json())
+    (second,) = _patch_model_messages([restored], ToolOutputConfig(externalize_min_chars=0, fallback_max_chars=100))
+    assert len(second.content) <= 100
+    assert "Dependent relation" not in second.content and "Evidence: result [2]" not in second.content
+    assert "[4] Unattributed content\nIndependent entry" in second.content
+    assert second.artifact == {"knowledge_sources_version": 1, "knowledge_sources": [], "other": "kept"}
+    assert "Dependent relation" in restored.content
+    assert sources_from_messages([restored]) == [source]
+
+
+@pytest.mark.parametrize(("initial_limit", "legacy_preview"), [(0, False), (0, True), (50, False)])
+def test_global_budget_preserves_file_backed_retrieval_within_budget(tmp_path, monkeypatch, initial_limit, legacy_preview):
+    from deerflow.agents.middlewares import tool_output_budget_middleware as budget
+    from deerflow.agents.middlewares.tool_transform_meta import tool_content_fingerprint, tool_result_source_digest
+    from deerflow.config.tool_output_config import ToolOutputConfig
+    from deerflow.storage.backends.local_fs import LocalFsBlobStore
+
+    store = LocalFsBlobStore.from_config({"root": str(tmp_path / "blobs")})
+    monkeypatch.setattr(budget, "get_blob_store_if_enabled", lambda: store)
+    source = KnowledgeSource(provider="test", title="Original", excerpt="Evidence " + "x" * 100)
+    content, artifact = format_result(
+        RetrievalResult(
+            hits=[
+                RetrievalHit(content=source.excerpt, source=source),
+                RetrievalHit(content="Dependent relation", depends_on=[1]),
+                RetrievalHit(content="Oversized entry " + "a" * 400),
+            ]
+        )
+    )
+    original = ToolMessage(content=content, artifact=artifact, name="entity_relations_search", tool_call_id="relations")
+    config = ToolOutputConfig(externalize_min_chars=500, fallback_max_chars=initial_limit, preview_head_chars=800, preview_tail_chars=0)
+    preview = budget._patch_tool_message(original, config, str(tmp_path / "outputs"))
+    blob = preview.additional_kwargs[budget.TOOL_OUTPUT_BLOB_KEY]
+    assert tool_result_source_digest(preview) == tool_content_fingerprint(content)
+    (saved_file,) = (tmp_path / "outputs").rglob("*.txt")
+    assert saved_file.read_text(encoding="utf-8") == content
+
+    if initial_limit:
+        assert len(preview.content) <= initial_limit
+        assert blob["virtual_path"] not in preview.content
+        assert sources_from_messages([preview]) == []
+        (replayed,) = budget._patch_model_messages([preview], ToolOutputConfig(externalize_min_chars=0, fallback_max_chars=10))
+        assert len(replayed.content) <= 10
+        assert replayed.additional_kwargs.get(budget.TOOL_OUTPUT_BLOB_KEY) == blob
+        assert tool_result_source_digest(replayed) == tool_content_fingerprint(content)
+        return
+
+    notice = preview.content.rsplit("\n\n", 1)[-1]
+    assert blob["virtual_path"] in notice and "read_file" in notice
+    restored = ToolMessage.model_validate_json(preview.model_dump_json())
+    if legacy_preview:
+        restored.artifact["knowledge_result_layout"].pop("file_notice", None)
+    (replayed,) = budget._patch_model_messages([restored], ToolOutputConfig(externalize_min_chars=0, fallback_max_chars=450))
+    assert len(replayed.content) <= 450
+    assert replayed.content.endswith(notice)
+    assert "Evidence: result [1].\nDependent relation" in replayed.content
+    assert sources_from_messages([replayed]) == [source]
+    assert replayed.additional_kwargs[budget.TOOL_OUTPUT_BLOB_KEY] == blob
+    assert tool_result_source_digest(replayed) == tool_content_fingerprint(content)
+
+    (notice_only,) = budget._patch_model_messages([replayed], ToolOutputConfig(externalize_min_chars=0, fallback_max_chars=len(notice)))
+    assert notice_only.content == notice
+    assert notice_only.additional_kwargs[budget.TOOL_OUTPUT_BLOB_KEY] == blob
+    assert sources_from_messages([notice_only]) == []
 
 
 def test_global_budget_prunes_hidden_evidence_and_orphan_citations() -> None:

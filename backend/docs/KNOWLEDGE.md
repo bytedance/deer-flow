@@ -233,8 +233,24 @@ hits. Per-chunk truncation precedes packing; the remaining total budget does
 not shorten a retained excerpt or change its source ID. Only displayed excerpts
 enter artifacts. Omission notices use leftover space rather than displacing
 complete evidence that fits.
-The global tool-output budget prunes evidence removed by truncation or
-externalization and replaces complete orphan citations with their labels.
+
+A provider can declare a hit's required evidence with `RetrievalHit.depends_on`.
+Use unique, positive integer positions in the original result, counting from
+one. Each position must precede the dependent hit. The formatter keeps the
+original numbering and emits the dependent hit only when all its evidence is
+visible and backed by valid source records in the same artifact. It reserves
+space for the complete evidence reference line within the per-hit character
+budget before truncating the body. A hit that loses a dependency or cannot fit
+with a usable body is omitted as a whole, and later hits remain eligible.
+Empty dependencies are omitted from serialized retrieval results.
+
+The global tool-output budget keeps complete entries when truncating a result
+with evidence dependencies or previewing it after saving the full output.
+A dependent entry stays visible only when all of its cited excerpts and source
+records fit in the same output. File-backed previews reserve space for a complete
+`read_file` notice during initial budgeting and history replay, omitting the notice
+if it exceeds the cap. Replay keeps the stored blob reference. Other results use
+the existing citation pruning.
 Subagents accumulate at most 100 validated sources across values frames before
 terminal publication, surviving compaction. Ordinary `task` forwards only
 sources whose handles appear in the child report, with a bounded evidence
