@@ -544,6 +544,7 @@ def test_pat_runs_policy_admits_exactly_the_mounted_routes():
                 "/api/threads/{thread_id}/runs/{run_id}/inputs",
                 "/api/threads/{thread_id}/runs/{run_id}/inputs/{input_id}",
                 "/api/threads/{thread_id}/runs/{run_id}/inputs/{input_id}/retry",
+                "/api/threads/{thread_id}/runs/{run_id}/tool-approvals/{request_id}",
             }:
                 # Interactive controls remain session-only, without widening
                 # existing PAT scopes or their explicit route allowlist.
@@ -605,6 +606,11 @@ def test_pat_projects_policy_admits_exactly_the_mounted_routes():
         ("GET", "/api/projects/p1/archive"),
         ("GET", "/api/projects/p1/restore"),
         ("POST", "/api/projects/p1/threads"),
+        ("POST", "/api/projects/p1/memory"),
+        ("PUT", "/api/projects/p1/memory"),
+        ("GET", "/api/projects/p1/memory/f1"),
+        ("PATCH", "/api/projects/p1/memory/f1"),
+        ("GET", "/api/projects/p1/memory/f1/promote"),
         # Document-shelf neighbors that must stay default-denied: the bare
         # item read, collection deletes, wrong-method variants of the
         # Slice C routes, and the Slice D trash routes.
@@ -747,27 +753,12 @@ def test_runs_create_only_pat_cannot_use_mutating_multitask_strategy(client):
     assert session_allowed.status_code == 200
 
 
-def test_start_run_gates_mutating_strategies_at_the_choke_point():
-    """The strategy gate lives inside start_run itself — the single choke point
-    every run-creation path (all five HTTP entrypoints plus internal
-    launchers) flows through — so no entry point can bypass it. Mirrored
-    routes prove the middleware path; this anchor proves the choke point."""
-    import inspect
-
-    from app.gateway.services import start_run
-
-    source = inspect.getsource(start_run)
-    assert "require_cancel_permission_if" in source
-    assert "multitask_strategy" in source
-
-
-def test_start_run_gate_denies_create_only_credential_behaviorally():
-    """Behavioral pin on the real start_run (the mirror route and source
-    anchor above prove wiring, but this drives the production choke point
-    itself): a create-only auth context gets 403 for a mutating strategy,
-    and the gate never misfires on "reject" — with no cancel permission at
-    all, the call proceeds past the gate (failing later on missing test
-    wiring, never with a permission 403)."""
+@pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+def test_start_run_gate_denies_create_only_credential_behaviorally(strategy):
+    """Behavioral pin on the real start_run choke point: a create-only auth
+    context gets 403 for every mutating multitask strategy, credentials with
+    runs:cancel pass the gate, and non-cancelling strategies ("reject",
+    "enqueue") never misfire with a permission 403."""
     from fastapi import HTTPException
 
     from app.gateway.authz import AuthContext
@@ -779,22 +770,24 @@ def test_start_run_gate_denies_create_only_credential_behaviorally():
 
     async def _denied():
         with pytest.raises(HTTPException) as exc:
-            await start_run(RunCreateRequest(multitask_strategy="interrupt"), "t1", _request(["runs:create"]))
+            await start_run(RunCreateRequest(multitask_strategy=strategy), "t1", _request(["runs:create"]))
         return exc.value
 
     exc = asyncio.run(_denied())
     assert exc.status_code == 403
     assert exc.detail == "Permission denied: runs:cancel"
 
-    async def _allowed_past_gate():
+    async def _allowed_past_gate(req_body, perms):
         try:
-            await start_run(RunCreateRequest(), "t1", _request([]))
+            await start_run(req_body, "t1", _request(perms))
         except HTTPException as gate_misfire:
-            pytest.fail(f"gate misfired on reject: {gate_misfire.status_code} {gate_misfire.detail}")
+            pytest.fail(f"gate misfired: {gate_misfire.status_code} {gate_misfire.detail}")
         except Exception:
             pass  # expected wiring failure past the gate — the gate let it through
 
-    asyncio.run(_allowed_past_gate())
+    asyncio.run(_allowed_past_gate(RunCreateRequest(multitask_strategy=strategy), ["runs:create", "runs:cancel"]))
+    for non_cancelling in (RunCreateRequest(), RunCreateRequest(multitask_strategy="reject")):
+        asyncio.run(_allowed_past_gate(non_cancelling, []))
 
 
 def test_auth_disabled_mode_ignores_bearer_header(monkeypatch, tmp_path):
@@ -809,3 +802,261 @@ def test_auth_disabled_mode_ignores_bearer_header(monkeypatch, tmp_path):
         response = disabled_client.get("/api/threads/whoami", headers={"Authorization": "Bearer dfp_garbage"})
     assert response.status_code == 200
     assert response.json()["auth_source"] == "auth_disabled"
+
+
+# ── Agent configuration from CI (#8310) ───────────────────────────────────
+
+
+def test_pat_agent_config_policy_admits_exactly_the_deploy_routes():
+    """Agents, scheduled tasks and managed subagents are reachable by PAT
+    only on the routes a deploy pipeline needs, each behind its scope.
+    Derived from the mounted routers, so a new route is denied until it is
+    listed; user-profile, export, import and the tool-group catalog stay
+    session-only even though agents:* guard them for sessions."""
+    from fastapi.routing import APIRoute
+
+    from app.gateway.auth.pat import is_pat_allowed_route, pat_route_scope
+    from app.gateway.routers import agents, scheduled_tasks, subagents
+
+    def concrete(path: str) -> str:
+        return path.replace("{name}", "a1").replace("{task_id}", "s1").replace("{thread_id}", "t1")
+
+    expected = {
+        ("GET", "/api/agents"): "agents:read",
+        ("POST", "/api/agents"): "agents:write",
+        ("GET", "/api/agents/check"): "agents:read",
+        ("GET", "/api/agents/{name}"): "agents:read",
+        ("PUT", "/api/agents/{name}"): "agents:write",
+        ("DELETE", "/api/agents/{name}"): "agents:write",
+        ("GET", "/api/scheduled-tasks"): "schedules:read",
+        ("POST", "/api/scheduled-tasks"): "schedules:write",
+        ("POST", "/api/scheduled-tasks/preview-cron"): "schedules:read",
+        ("GET", "/api/scheduled-tasks/{task_id}"): "schedules:read",
+        ("PATCH", "/api/scheduled-tasks/{task_id}"): "schedules:write",
+        ("DELETE", "/api/scheduled-tasks/{task_id}"): "schedules:write",
+        ("POST", "/api/scheduled-tasks/{task_id}/pause"): "schedules:write",
+        ("POST", "/api/scheduled-tasks/{task_id}/resume"): "schedules:write",
+        ("POST", "/api/scheduled-tasks/{task_id}/trigger"): "schedules:write",
+        ("GET", "/api/scheduled-tasks/{task_id}/runs"): "schedules:read",
+        ("GET", "/api/subagents"): "subagents:read",
+        ("POST", "/api/subagents"): "subagents:write",
+        ("PUT", "/api/subagents/{name}"): "subagents:write",
+        ("DELETE", "/api/subagents/{name}"): "subagents:write",
+    }
+    mounted = set()
+    for router in (agents.router, scheduled_tasks.router, subagents.router):
+        for route in router.routes:
+            if not isinstance(route, APIRoute):
+                continue
+            for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
+                mounted.add((method, route.path))
+                path = concrete(route.path)
+                if (method, route.path) in expected:
+                    assert is_pat_allowed_route(method, path), f"{method} {path} must be PAT-reachable"
+                    assert pat_route_scope(method, path) == expected[(method, route.path)], f"{method} {path}"
+                else:
+                    assert not is_pat_allowed_route(method, path), f"{method} {path} must stay PAT-denied"
+    assert set(expected) <= mounted, "a listed route no longer exists"
+
+    for method, path in [
+        ("POST", "/api/agents/a1"),
+        ("GET", "/api/scheduled-tasks/preview-cron"),
+        ("PATCH", "/api/scheduled-tasks/preview-cron"),
+        ("PUT", "/api/scheduled-tasks/s1"),
+        ("GET", "/api/scheduled-tasks/s1/pause"),
+        ("GET", "/api/subagents/a1"),
+        ("PATCH", "/api/subagents/a1"),
+    ]:
+        assert not is_pat_allowed_route(method, path), f"{method} {path} is not implemented and must stay denied"
+
+
+@pytest.fixture
+def deploy_client(pat_env, tmp_path, monkeypatch):
+    """PAT app with the real agent and managed-subagent routers and the schedule permission checks."""
+    from app.gateway.authz import require_permission
+    from app.gateway.routers import agents, subagents
+    from deerflow.config.agents_api_config import AgentsApiConfig
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.persistence.managed_subagents.file import FileManagedSubagentStore
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setattr(agents, "get_agents_api_config", lambda: AgentsApiConfig(enabled=True))
+    set_app_config(AppConfig(sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider")))
+    store = FileManagedSubagentStore()
+    monkeypatch.setattr(subagents, "get_managed_subagent_store", lambda *_: store)
+
+    app, _repo, engine = pat_env
+
+    @app.get("/api/scheduled-tasks")
+    @require_permission("threads", "read")
+    async def list_tasks(request: Request):
+        return []
+
+    @app.post("/api/scheduled-tasks")
+    @require_permission("threads", "write")
+    @require_permission("runs", "create")
+    async def create_task(request: Request):
+        return {"created": True}
+
+    app.include_router(agents.router)
+    app.include_router(subagents.router)
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        asyncio.run(engine.dispose())
+        reset_app_config()
+
+
+def _bearer(created: dict) -> dict[str, str]:
+    return {"Authorization": f"Bearer {created['token']}"}
+
+
+def test_pat_reads_its_own_identity(deploy_client):
+    created = _create_pat(deploy_client, scopes=["agents:read"])
+    deploy_client.cookies.clear()
+    response = deploy_client.get("/api/v1/auth/me", headers=_bearer(created))
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == "user-1"
+    # Effective permissions are the scope intersection, not the owner's set.
+    assert body["permissions"] == ["agents:read"]
+
+
+def test_pat_agent_scopes_narrow_agent_routes(deploy_client):
+    reader = _create_pat(deploy_client, name="reader", scopes=["agents:read"])
+    writer = _create_pat(deploy_client, name="writer", scopes=["agents:read", "agents:write"])
+    other = _create_pat(deploy_client, name="other", scopes=["threads:read"])
+    deploy_client.cookies.clear()
+
+    assert deploy_client.get("/api/agents", headers=_bearer(reader)).status_code == 200
+    denied = deploy_client.post("/api/agents", headers=_bearer(reader))
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "Permission denied: agents:write"
+    assert deploy_client.post("/api/agents", json={"name": "ci-agent"}, headers=_bearer(writer)).status_code == 201
+    assert deploy_client.get("/api/agents", headers=_bearer(other)).status_code == 403
+    # agents:* guard the user profile for sessions; it stays closed to PATs.
+    profile = deploy_client.get("/api/user-profile", headers=_bearer(writer))
+    assert profile.status_code == 403
+    assert "PAT" in profile.json()["detail"]
+
+
+@pytest.mark.parametrize("name", ["check", "import"])
+@pytest.mark.parametrize(("method", "expected_status"), [("PUT", 200), ("DELETE", 204)])
+def test_pat_agent_mutations_allow_names_shared_by_other_methods(deploy_client, name, method, expected_status):
+    reader = _create_pat(deploy_client, name="reader", scopes=["agents:read"])
+    writer = _create_pat(deploy_client, name="writer", scopes=["agents:read", "agents:write"])
+    deploy_client.cookies.clear()
+
+    created = deploy_client.post("/api/agents", json={"name": name}, headers=_bearer(writer))
+    assert created.status_code == 201, created.text
+
+    path = f"/api/agents/{name}"
+    payload = {"json": {"description": "Updated agent"}} if method == "PUT" else {}
+    denied = deploy_client.request(method, path, headers=_bearer(reader), **payload)
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "Permission denied: agents:write"
+    updated = deploy_client.request(method, path, headers=_bearer(writer), **payload)
+    assert updated.status_code == expected_status, updated.text
+
+    if method == "PUT":
+        assert updated.json()["description"] == "Updated agent"
+    else:
+        response = deploy_client.get("/api/agents/check", params={"name": name}, headers=_bearer(reader))
+        assert response.status_code == 200, response.text
+        assert response.json()["available"] is True
+
+
+def test_pat_schedule_scopes_add_to_run_permissions(deploy_client):
+    full = _create_pat(deploy_client, name="full", scopes=["schedules:read", "schedules:write", "threads:read", "threads:write", "runs:create"])
+    no_runs = _create_pat(deploy_client, name="no-runs", scopes=["schedules:write", "threads:write"])
+    no_schedules = _create_pat(deploy_client, name="no-schedules", scopes=["threads:read", "threads:write", "runs:create"])
+    reader = _create_pat(deploy_client, name="reader", scopes=["schedules:read", "threads:read"])
+    deploy_client.cookies.clear()
+
+    assert deploy_client.post("/api/scheduled-tasks", headers=_bearer(full)).status_code == 200
+    assert deploy_client.get("/api/scheduled-tasks", headers=_bearer(reader)).status_code == 200
+
+    response = deploy_client.post("/api/scheduled-tasks", headers=_bearer(no_runs))
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission denied: runs:create"
+    response = deploy_client.post("/api/scheduled-tasks", headers=_bearer(no_schedules))
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission denied: schedules:write"
+    response = deploy_client.get("/api/scheduled-tasks", headers=_bearer(no_schedules))
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission denied: schedules:read"
+    assert deploy_client.post("/api/scheduled-tasks", headers=_bearer(reader)).status_code == 403
+
+
+_SUBAGENT = {"name": "ci-planner", "description": "Plans work", "system_prompt": "Plan the work."}
+
+
+def test_admin_pat_with_subagents_write_manages_managed_subagents(deploy_client):
+    created = _create_pat(deploy_client, user_id="admin-1", scopes=["subagents:read", "subagents:write"])
+    deploy_client.cookies.clear()
+    headers = _bearer(created)
+
+    response = deploy_client.post("/api/subagents", json=_SUBAGENT, headers=headers)
+    assert response.status_code == 201, response.text
+    response = deploy_client.put("/api/subagents/ci-planner", json={"description": "Plans more"}, headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["description"] == "Plans more"
+
+    catalog = deploy_client.get("/api/subagents", headers=headers)
+    assert catalog.status_code == 200
+    managed = [item for item in catalog.json()["subagents"] if item["name"] == "ci-planner"]
+    assert managed and managed[0]["source"] == "managed"
+    # The opt-in covers the writes only: the catalog still treats the PAT as
+    # a non-admin and withholds prompts.
+    assert managed[0].get("system_prompt") in (None, "")
+
+    assert deploy_client.delete("/api/subagents/ci-planner", headers=headers).status_code == 204
+
+
+def test_subagent_writes_need_both_scope_and_admin_owner(deploy_client):
+    read_only_admin = _create_pat(deploy_client, name="admin-read", user_id="admin-1", scopes=["subagents:read"])
+    non_admin = _create_pat(deploy_client, name="user-write", user_id="user-1", scopes=["subagents:read", "subagents:write"])
+    admin_other_scopes = _create_pat(deploy_client, name="admin-other", user_id="admin-1", scopes=["threads:read", "threads:write", "runs:create", "agents:write"])
+    deploy_client.cookies.clear()
+
+    response = deploy_client.post("/api/subagents", json=_SUBAGENT, headers=_bearer(read_only_admin))
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Permission denied: subagents:write"
+    response = deploy_client.post("/api/subagents", json=_SUBAGENT, headers=_bearer(non_admin))
+    assert response.status_code == 403
+    assert response.json()["detail"] != "Permission denied: subagents:write"
+    assert deploy_client.post("/api/subagents", json=_SUBAGENT, headers=_bearer(admin_other_scopes)).status_code == 403
+    assert deploy_client.get("/api/subagents", headers=_bearer(admin_other_scopes)).status_code == 403
+
+
+def test_subagents_write_scope_does_not_unlock_other_admin_checks(deploy_client):
+    created = _create_pat(deploy_client, user_id="admin-1", scopes=["subagents:write"])
+    deploy_client.cookies.clear()
+    # is_admin_user stays False for every PAT; only routes that opt in with
+    # pat_scope accept the scope, and the route policy keeps the rest closed.
+    assert deploy_client.get("/api/admin-check", headers=_bearer(created)).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_require_admin_user_pat_scope_is_checked_in_the_route_too():
+    """Defense in depth for compositions without the middleware's scoped
+    rule: the route itself needs the scope on the request and an admin owner."""
+    from fastapi import HTTPException
+
+    from app.gateway.deps import require_admin_user
+
+    def request(role: str, scopes: frozenset[str]):
+        return SimpleNamespace(state=SimpleNamespace(auth_source=AUTH_SOURCE_PAT, user=_fake_user(system_role=role), pat_scopes=scopes))
+
+    await require_admin_user(request("admin", frozenset({"subagents:write"})), detail="no", pat_scope="subagents:write")
+    for role, scopes, pat_scope in [
+        ("admin", frozenset(), "subagents:write"),
+        ("user", frozenset({"subagents:write"}), "subagents:write"),
+        ("admin", frozenset({"subagents:write"}), None),
+    ]:
+        with pytest.raises(HTTPException) as exc:
+            await require_admin_user(request(role, scopes), detail="no", pat_scope=pat_scope)
+        assert exc.value.status_code == 403

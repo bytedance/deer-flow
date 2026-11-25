@@ -62,6 +62,9 @@ docker/
 skills/
 frontend/.next
 frontend/node_modules
+# Frontend unit tests can import fixtures outside frontend/ (for example, examples/),
+# so exclude them from the frontend-only Docker build context.
+frontend/tests
 backend/.venv
 backend/htmlcov
 backend/.coverage

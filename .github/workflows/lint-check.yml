@@ -6,10 +6,33 @@ on:
   pull_request:
     branches: [ '*' ]
 
+concurrency:
+  group: lint-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
+  changes:
+    # Path scoping lives in scripts/ci_changed_scopes.py so every workflow reads
+    # one rule set. It fails open: pushes and CI config changes run every scope.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      backend: ${{ steps.scopes.outputs.backend }}
+      frontend: ${{ steps.scopes.outputs.frontend }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # The PR merge commit and its first parent, the base branch tip.
+          fetch-depth: 2
+
+      - name: Detect changed scopes
+        id: scopes
+        run: python3 scripts/ci_changed_scopes.py --event "${{ github.event_name }}" >> "$GITHUB_OUTPUT"
+
   agent-guidance:
     runs-on: ubuntu-latest
     steps:
@@ -38,6 +61,17 @@ jobs:
           --after "${{ github.sha }}"
           --github-annotations
 
+  frontend-scope-reads:
+    # Not gated on a scope: the PR that makes frontend code read a new path
+    # outside the frontend scope may only run frontend jobs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check frontend reads stay inside the frontend scope
+        run: python3 scripts/ci_changed_scopes.py --check-frontend-reads
+
   label-declarations:
     runs-on: ubuntu-latest
     steps:
@@ -52,6 +86,8 @@ jobs:
         run: python scripts/check_label_declarations.py
 
   lint-backend:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -81,6 +117,8 @@ jobs:
         run: make lint
 
   lint-frontend:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

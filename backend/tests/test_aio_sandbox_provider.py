@@ -104,10 +104,12 @@ def test_bash_command_timeout_rejects_non_finite_values(value):
         SandboxConfig(bash_command_timeout=value)
 
 
-def test_register_created_sandbox_forwards_configured_command_timeout(tmp_path):
+@pytest.mark.parametrize("bash_capacity", [1, 50])
+def test_register_created_sandbox_forwards_configured_command_timeout(tmp_path, bash_capacity):
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = _make_provider(tmp_path)
     provider._config["command_timeout"] = 42
+    provider._config["max_bash_sessions"] = bash_capacity
     provider._warm_pool = {}
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}
@@ -123,6 +125,7 @@ def test_register_created_sandbox_forwards_configured_command_timeout(tmp_path):
         base_url="http://sandbox",
         request_headers=info.request_headers,
         default_command_timeout=42,
+        max_bash_sessions=bash_capacity,
         lark_cli_broker=False,
     )
 
@@ -176,7 +179,7 @@ def test_backend_checks_runtime_minimum_without_overriding_image_default(monkeyp
     monkeypatch.setattr(local_mod.LocalContainerBackend, "_detect_runtime", lambda _self: "docker")
     backend = provider._create_backend()
     if remote:
-        payload = {"sandbox_id": "example", "sandbox_url": "http://sandbox:8080", "max_shell_sessions": persisted_capacity}
+        payload = {"sandbox_id": "example", "sandbox_url": "http://sandbox:8080", "max_shell_sessions": persisted_capacity, "max_bash_sessions": 50}
 
         def get(url, **_kwargs):
             data = {"sandboxes": [payload]} if url.endswith("/api/sandboxes") else payload
@@ -203,6 +206,57 @@ def test_backend_checks_runtime_minimum_without_overriding_image_default(monkeyp
     listed = backend.list_running()
     assert len(listed) == 1
     assert listed[0].requires_replacement is (persisted_capacity < 9)
+
+
+@pytest.mark.parametrize("remote", [False, True], ids=["docker", "provisioner"])
+def test_backend_generated_capacity_stays_out_of_the_forwarded_map(monkeypatch, remote):
+    """The provisioner scores its entry budget against operator keys, so owned keys stop at the provider."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    app_config = SimpleNamespace(
+        sandbox=SandboxConfig(
+            use="deerflow.community.aio_sandbox:AioSandboxProvider",
+            container_prefix="sandbox",
+            provisioner_url="http://provisioner:8002" if remote else None,
+            environment={"DISABLE_JUPYTER": "true"},
+        ),
+        stream_bridge=None,
+        subagent_runtime=SimpleNamespace(max_running=12),
+    )
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: app_config)
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = provider._load_config()
+    assert provider._config["environment"]["AIO_BASH_MAX_SESSIONS"] == "50"
+    assert provider._config["environment"]["MAX_SHELL_SESSIONS"] == "13"
+
+    backend = provider._create_backend()
+
+    if remote:
+        assert backend._environment == {"DISABLE_JUPYTER": "true"}
+        assert backend._max_shell_sessions == 13
+    else:
+        assert backend._environment["MAX_SHELL_SESSIONS"] == "13"
+        assert backend._environment["AIO_BASH_MAX_SESSIONS"] == "50"
+
+
+def test_provisioner_backend_rejects_an_unusable_environment_at_startup(monkeypatch):
+    """A map the provisioner would refuse must fail where the operator can see the setting name."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    app_config = SimpleNamespace(
+        sandbox=SandboxConfig(
+            use="deerflow.community.aio_sandbox:AioSandboxProvider",
+            container_prefix="sandbox",
+            provisioner_url="http://provisioner:8002",
+            environment={f"OPERATOR_{index}": "true" for index in range(33)},
+        ),
+        stream_bridge=None,
+        subagent_runtime=SimpleNamespace(max_running=3),
+    )
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: app_config)
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = provider._load_config()
+
+    with pytest.raises(ValueError, match=r"sandbox\.environment carries 33 entries; the provisioner applies at most 32"):
+        provider._create_backend()
 
 
 def test_load_config_rejects_shell_capacity_below_subagent_runtime(monkeypatch):

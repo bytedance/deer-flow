@@ -17,7 +17,24 @@ Prepare the Python environment before running analyses. Install the required pac
 python -m pip install duckdb openpyxl
 ```
 
-If either package is missing, the script exits with a setup instruction; it does not invoke an installer or modify the environment. DuckDB's existing spatial-extension setup for loading files is unchanged.
+If either package is missing, the script exits with a setup instruction; it does not invoke an installer or modify the environment. DuckDB's spatial extension is initialized only for `.xlsx` input. CSV and legacy `.xls` analysis do not install or load it, so they can run offline with an empty extension cache.
+
+Legacy Excel 97–2003 (`.xls`) workbooks additionally require:
+
+```bash
+python -m pip install pandas xlrd
+```
+
+These optional packages are loaded only for `.xls` input. A missing package produces
+an explicit setup instruction. Legacy workbooks are read sheet by sheet with pandas'
+xlrd engine, preserving cell values (including literal `NA` strings and leading
+zeros in text identifiers) and treating empty cells as nulls. Columns with
+incompatible cell types, such as a date and a number, are stored as text with
+nulls preserved. Compatible numeric types still produce numeric columns.
+Completely empty sheets are skipped. The `.xlsx` reader
+continues to use openpyxl and DuckDB's spatial extension. A legacy workbook that
+cannot be opened is reported and skipped so remaining inputs can still be
+analyzed. The command fails if no input produces a table.
 
 ## Core Capabilities
 

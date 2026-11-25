@@ -19,6 +19,53 @@ const entry = {
 const extension = { apiVersion: 1, module: entry.module };
 const code = "export default {apiVersion: 1, module: 'bookmarks.v1'};";
 
+test("accepts bounded exact-extension artifact renderers", async () => {
+  rs.spyOn(globalThis, "fetch").mockResolvedValue(new Response(code));
+  const loaded = {
+    ...extension,
+    artifactPreviews: [
+      {
+        id: "office",
+        extensions: ["xlsx", "docx"],
+        mount: () => ({ dispose: () => undefined }),
+      },
+    ],
+  };
+  expect(
+    (
+      await loadFrontendExtensions([entry], async () => ({ default: loaded }))
+    )[0]?.extension,
+  ).toEqual(loaded);
+});
+
+for (const renderers of [
+  {},
+  [{ id: "bad", extensions: [".xlsx"], mount: () => undefined }],
+  [{ id: "bad", extensions: ["XLSX"], mount: () => undefined }],
+  [{ id: "bad", extensions: [], mount: () => undefined }],
+  [{ id: "bad", extensions: ["xlsx"] }],
+  Array.from({ length: 2 }, () => ({
+    id: "duplicate",
+    extensions: ["xlsx"],
+    mount: () => undefined,
+  })),
+  Array.from({ length: 17 }, (_, n) => ({
+    id: `renderer-${n}`,
+    extensions: ["xlsx"],
+    mount: () => undefined,
+  })),
+]) {
+  test(`rejects invalid artifact previews ${JSON.stringify(renderers)}`, async () => {
+    rs.spyOn(globalThis, "fetch").mockResolvedValue(new Response(code));
+    const loaded = { ...extension, artifactPreviews: renderers };
+    const result = await loadFrontendExtensions([entry], async () => ({
+      default: loaded,
+    }));
+    expect(result[0]?.extension).toBeUndefined();
+    expect(result[0]?.error).toBeTruthy();
+  });
+}
+
 beforeEach(() => {
   config.backend = "";
   rs.spyOn(console, "warn").mockImplementation(() => undefined);

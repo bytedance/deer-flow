@@ -71,6 +71,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+SAFETY_CAPPED_STOP_REASON = "safety_capped"
+# Stamped on the AIMessage this guard rewrote; consumers import it, not the literal.
+SAFETY_TERMINATION_MARKER = "safety_termination"
+
 
 _USER_FACING_MESSAGE = (
     "The model provider stopped this response with a safety-related signal "
@@ -218,7 +222,7 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         # made a shallow copy, but downstream model_copy still references
         # it). Then stamp the observability record.
         kwargs = dict(getattr(cleared, "additional_kwargs", None) or {})
-        kwargs["safety_termination"] = {
+        kwargs[SAFETY_TERMINATION_MARKER] = {
             "detector": termination.detector,
             "reason_field": termination.reason_field,
             "reason_value": termination.reason_value,
@@ -392,10 +396,10 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         # alongside loop_capped / token_capped (#4176).
         ctx = getattr(runtime, "context", None)
         if isinstance(ctx, dict):
-            ctx["stop_reason"] = "safety_capped"
+            ctx["stop_reason"] = SAFETY_CAPPED_STOP_REASON
         # Re-observing a terminal message must not replace its original
         # suppression record or emit another event. Still stamp this runtime.
-        if not tool_calls and not content_is_blank and (last.additional_kwargs or {}).get("safety_termination"):
+        if not tool_calls and not content_is_blank and (last.additional_kwargs or {}).get(SAFETY_TERMINATION_MARKER):
             return None
         patched = self._build_suppressed_message(last, termination)
 

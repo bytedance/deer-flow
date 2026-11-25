@@ -2,12 +2,16 @@
 
 import json
 import logging
+from functools import partial
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
 
 import deerflow.community.jina_ai.jina_client as jina_client_module
+from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, normalize_tool_message
+from deerflow.community.jina_ai import tools as jina_tools
 from deerflow.community.jina_ai.jina_client import JinaClient
 from deerflow.community.jina_ai.tools import (
     _coerce_bool,
@@ -247,6 +251,21 @@ async def test_crawl_includes_api_key_when_set(jina_client, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_crawl_uses_the_anonymous_tier_when_env_holds_the_template_placeholder(jina_client, monkeypatch):
+    """A fresh ``make config`` leaves ``JINA_API_KEY=your-jina-api-key``; sending it makes every fetch a 401."""
+    captured_headers = {}
+
+    async def mock_post(self, url, **kwargs):
+        captured_headers.update(kwargs.get("headers", {}))
+        return httpx.Response(200, text="ok", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+    monkeypatch.setenv("JINA_API_KEY", "your-jina-api-key")
+    assert await jina_client.crawl("https://example.com") == "ok"
+    assert "Authorization" not in captured_headers
+
+
+@pytest.mark.anyio
 async def test_crawl_warns_once_when_api_key_missing(jina_client, monkeypatch, caplog):
     """Test that the missing API key warning is logged only once."""
     jina_client_module._api_key_warned = False
@@ -282,6 +301,32 @@ async def test_crawl_no_auth_header_without_api_key(jina_client, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_web_fetch_screens_target_before_post(monkeypatch, caplog):
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content)["url"])
+        return httpx.Response(200, text="<html><body><p>Public article.</p></body></html>")
+
+    client = partial(httpx.AsyncClient, transport=httpx.MockTransport(respond))
+    monkeypatch.setattr(jina_client_module, "httpx", SimpleNamespace(AsyncClient=client))
+    monkeypatch.setattr("deerflow.community.jina_ai.tools.get_app_config", lambda: SimpleNamespace(get_tool_config=lambda _: None))
+    monkeypatch.setattr("socket.getaddrinfo", lambda *args, **kwargs: pytest.fail("Hosted fetch must leave DNS to the provider"))
+    monkeypatch.setenv("JINA_API_KEY", "synthetic-test-key")
+    caplog.set_level(logging.DEBUG, logger="deerflow.community.jina_ai")
+
+    result = await web_fetch_tool.ainvoke({"url": "https://jina-test-marker.localhost/article"})
+    assert requests == []
+    assert result.startswith("Error:")
+    assert "jina-test-marker" not in result
+    assert "jina-test-marker" not in caplog.text
+
+    url = "https://reader.example.com/articles/a%2Fb?view=full&tag=a%20b"
+    assert "Public article." in await web_fetch_tool.ainvoke({"url": url})
+    assert requests == [url]
+
+
+@pytest.mark.anyio
 async def test_web_fetch_tool_returns_error_on_crawl_failure(monkeypatch):
     """Test that web_fetch_tool short-circuits and returns the error string when crawl fails."""
 
@@ -295,6 +340,87 @@ async def test_web_fetch_tool_returns_error_on_crawl_failure(monkeypatch):
     result = await web_fetch_tool.ainvoke("https://example.com")
     assert result.startswith("Error:")
     assert "429" in result
+
+
+@pytest.fixture
+def install_jina_fetch_transport(monkeypatch):
+    def install(handle, **options):
+        local_httpx = SimpleNamespace(
+            AsyncClient=lambda **kwargs: httpx.AsyncClient(transport=httpx.MockTransport(handle), **kwargs),
+            ConnectError=httpx.ConnectError,
+            ConnectTimeout=httpx.ConnectTimeout,
+        )
+        monkeypatch.setattr(jina_client_module, "httpx", local_httpx)
+        monkeypatch.delenv("JINA_API_KEY", raising=False)
+        config = SimpleNamespace(model_extra={"max_retries": 2, **options})
+        monkeypatch.setattr(jina_tools, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda _: config))
+
+    return install
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("http_status", "body", "expected_status", "expected_category"),
+    [
+        (401, '{"code":401,"status":40103,"name":"AuthenticationRequiredError"}', "error", "auth"),
+        (429, "Rate limited", "error", "rate_limited"),
+        (200, "<html><body><p>401 AuthenticationRequiredError explained</p></body></html>", "success", None),
+    ],
+)
+async def test_web_fetch_tool_preserves_jina_http_failure_status(install_jina_fetch_transport, http_status, body, expected_status, expected_category):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(http_status, text=body)
+
+    install_jina_fetch_transport(handle)
+    url = "https://example.com"
+    message = await web_fetch_tool.ainvoke({"type": "tool_call", "name": "web_fetch", "id": "fetch-1", "args": {"url": url}})
+    assert len(requests) == 1
+    assert str(requests[0].url) == "https://r.jina.ai/"
+    meta = normalize_tool_message(message).additional_kwargs[TOOL_META_KEY]
+    assert (meta["status"], meta["error_type"]) == (expected_status, expected_category)
+    if expected_status == "error":
+        assert message.artifact["deerflow_http_response"]["status_code"] == http_status
+    if http_status == 401:
+        assert "JINA_API_KEY" in message.content
+        assert message.content == await web_fetch_tool.ainvoke({"url": url})
+    if http_status == 200:
+        assert message.artifact is None
+        assert "401 AuthenticationRequiredError explained" in message.content
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("status", "category"), [(200, "unknown"), (401, "auth")])
+async def test_tool_response_limit_retains_http_status(install_jina_fetch_transport, status, category):
+    class OversizedResponse(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            yield b"provider-body:" + b"x" * 256
+            pytest.fail("web_fetch continued reading after reaching the response limit")
+
+        async def aclose(self):
+            self.closed = True
+
+    stream = OversizedResponse()
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(status, stream=stream)
+
+    install_jina_fetch_transport(handle, max_response_bytes=256)
+    message = await web_fetch_tool.ainvoke({"type": "tool_call", "name": "web_fetch", "id": "fetch-1", "args": {"url": "https://example.com"}})
+
+    assert stream.closed and len(requests) == 1
+    assert message.content.startswith("Error: Jina API response exceeds max_response_bytes (256)")
+    assert "provider-body" not in message.content
+    meta = normalize_tool_message(message).additional_kwargs[TOOL_META_KEY]
+    assert (meta["status"], meta["error_type"]) == ("error", category)
+    assert message.artifact["deerflow_http_response"]["status_code"] == status
+    assert ("JINA_API_KEY" in message.content) == (status == 401)
 
 
 @pytest.mark.anyio

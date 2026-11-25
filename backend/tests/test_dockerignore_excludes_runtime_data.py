@@ -192,6 +192,12 @@ def test_build_inputs_are_still_included(build_input: str) -> None:
     assert not _is_excluded(patterns, build_input), f"{build_input} is needed by the build but is excluded"
 
 
+def test_frontend_unit_tests_are_excluded_from_build_context() -> None:
+    patterns = _ignore_patterns()
+    path = "frontend/tests/unit/core/extensions/bookmarks.test.ts"
+    assert _is_excluded(patterns, path), f"{path} imports examples/ outside the frontend Docker build context"
+
+
 @pytest.mark.parametrize(
     "name",
     [".env", ".env.local", ".env.production", *sorted(extension_manager._SENSITIVE_FILENAMES), *(f"secret{suffix}" for suffix in sorted(extension_manager._SENSITIVE_SUFFIXES))],

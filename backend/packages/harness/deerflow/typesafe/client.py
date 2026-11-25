@@ -43,6 +43,7 @@ import math
 import re
 import time
 from collections.abc import AsyncIterable, Callable, Iterable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 
 import httpx
@@ -55,6 +56,7 @@ from deerflow.typesafe.errors import (
     CAUSE_TRANSPORT,
     TypeSafeError,
 )
+from deerflow.utils.file_io import await_drained
 
 QUESTION_NOUL = "noul"
 QUESTION_CHOICE = "choice"
@@ -290,7 +292,7 @@ class TypeSafeClient:
             async with asyncio.timeout(self._connection.deadline_seconds):
                 deadline_at = time.monotonic() + self._connection.deadline_seconds
                 transport = None if self._transport_factory is None else self._transport_factory()
-                async with httpx.AsyncClient(timeout=self._connection.timeout, transport=transport) as client:
+                async with await _open_async_client(timeout=self._connection.timeout, transport=transport) as client:
                     for attempt in range(1, self._connection.max_attempts + 1):
                         self._check_budget(deadline_at)
                         try:
@@ -424,6 +426,23 @@ class TypeSafeClient:
 
     async def _async_sleep_before_retry(self, attempt: int, deadline_at: float) -> None:
         await asyncio.sleep(min(self._connection.retry_backoff * 2 ** (attempt - 1), self._remaining(deadline_at)))
+
+
+async def _open_async_client(*, timeout: float, transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None) -> httpx.AsyncClient:
+    """Load TLS trust off-loop and close any client built after cancellation."""
+    construction = asyncio.create_task(asyncio.to_thread(httpx.AsyncClient, timeout=timeout, transport=transport))
+    try:
+        return await asyncio.shield(construction)
+    except asyncio.CancelledError:
+
+        async def close_late_client() -> None:
+            client = await construction
+            await client.aclose()
+
+        # Preserve the original cancellation even if construction or close fails.
+        with suppress(Exception, asyncio.CancelledError):
+            await await_drained(close_late_client())
+        raise
 
 
 def _read_bounded(response: httpx.Response, check_budget: Callable[[], None]) -> bytes:

@@ -307,6 +307,25 @@ class TestEnsureAndDeleteWithUserId:
             paths.delete_thread_dir("t1", user_id="u1")
         assert paths.thread_dir("t1", user_id="u1").exists()
 
+    def test_delete_thread_dir_uses_extended_length_path(self, paths: Paths, monkeypatch):
+        """``shutil.rmtree`` receives the path resolved through ``extended_length_path``.
+
+        The fix for the ``MAX_PATH`` deletion failure is a single line: resolve
+        the thread directory through ``extended_length_path`` before removing it.
+        That call is a no-op on POSIX, so this pins the wiring by patching the
+        resolver to return a marker and asserting ``shutil.rmtree`` receives it.
+        """
+        from deerflow.config import paths as paths_module
+
+        marker = object()
+        monkeypatch.setattr(paths_module, "extended_length_path", lambda _path: marker)
+        received = []
+        monkeypatch.setattr(paths_module.shutil, "rmtree", lambda path, *args, **kwargs: received.append(path))
+
+        paths.ensure_thread_dirs("t1", user_id="u1")
+        paths.delete_thread_dir("t1", user_id="u1")
+        assert received == [marker]
+
     def test_ensure_thread_dirs_legacy_still_works(self, paths: Paths):
         paths.ensure_thread_dirs("t1")
         assert paths.sandbox_work_dir("t1").is_dir()

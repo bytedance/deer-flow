@@ -5,8 +5,10 @@ arguments indefinitely until the recursion limit kills the run.
 
 Detection strategy:
   1. After each model response, hash the tool calls (name + args).
-  2. Track recent hashes in a sliding window.
-  3. If the same hash appears >= warn_threshold times, queue a
+  2. Reconcile the preceding batch with its results, then track call/result
+     fingerprints in a sliding window. A pending call uses its last observed
+     result; changed successful results count separately, including file versions.
+  3. If the same fingerprint appears >= warn_threshold times, queue a
      "you are repeating yourself — wrap up" warning for the current
      thread/run. The warning is **injected at the next model call** (in
      ``wrap_model_call``) as a ``HumanMessage`` appended to the message
@@ -31,11 +33,16 @@ Why the warning is injected at ``wrap_model_call`` instead of
   list and the warning is appended at the end — pairing intact, no
   ``AIMessage`` semantics are mutated.
 
+Tool-name frequency is tracked as an observability metric only. Reaching its
+warn or hard-limit threshold records an INFO event and never changes model
+messages or control flow. This keeps the metric useful for cost and workload
+analysis without treating legitimate batch work as a loop.
+
 Queued warnings are intentionally transient. If a run ends before the
 next model request drains a queued warning, ``after_agent`` drops it
 instead of carrying it into a later invocation for the same thread. The
-hard-stop path still forces termination when the configured safety limit
-is reached.
+hash-based hard-stop path still forces termination when the configured safety
+limit is reached.
 
 Detection histories and warning-suppression state are scoped by
 ``(thread_id, run_id)`` because one compiled graph can serve many runs for
@@ -64,17 +71,18 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import posixpath
 import threading
 import uuid
 from collections import Counter, OrderedDict, defaultdict, deque
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares._bounded_dict import BoundedDict
@@ -82,7 +90,11 @@ from deerflow.agents.middlewares.audit_context import (
     LOOP_DETECTION_RECORDER_CONTEXT_KEY,
     resolve_audit_recorder,
 )
+from deerflow.agents.middlewares.model_response import is_empty_stop_response
+from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
+from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
+from deerflow.agents.middlewares.tool_transform_meta import tool_content_fingerprint, tool_result_source_digest
 from deerflow.runtime.events.catalog import MIDDLEWARE_LOOP_DETECTION_TAG
 
 if TYPE_CHECKING:
@@ -90,13 +102,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Reserved by the Gateway for checkpoints written by the frequency-cap policy.
+LOOP_CAP_STATE_KEY = "loop_cap"
+
 # Defaults — can be overridden via constructor
 _DEFAULT_WARN_THRESHOLD = 3  # inject warning after 3 identical calls
 _DEFAULT_HARD_LIMIT = 5  # force-stop after 5 identical calls
 _DEFAULT_WINDOW_SIZE = 20  # track last N tool calls
 _DEFAULT_MAX_TRACKED_THREADS = 100  # LRU limit for tracked thread/run scopes
-_DEFAULT_TOOL_FREQ_WARN = 30  # warn after 30 calls to the same tool type
-_DEFAULT_TOOL_FREQ_HARD_LIMIT = 50  # force-stop after 50 calls to the same tool type
+_DEFAULT_TOOL_FREQ_WARN = 30  # record a metric after 30 calls to one tool type
+_DEFAULT_TOOL_FREQ_HARD_LIMIT = 50  # record a second metric after 50 calls
 _MAX_PENDING_WARNINGS_PER_RUN = 4
 # Stands in for ``read_file``'s omitted ``end_line`` in a call key: the read
 # runs to the last line, which is not the same window as any numbered bound.
@@ -106,8 +121,11 @@ _OPEN_ENDED_READ = "end"
 # payload (``update_agent``/``setup_agent`` persist it; MCP tools such as
 # ``create_issue`` send it), so it stays in the key.
 _UI_NARRATION_TOOLS = frozenset({"bash", "ls", "glob", "grep"})
+_FILE_WRITE_TOOLS = frozenset({"write_file", "str_replace"})
+_ERROR_RESULT_HASH = "error"
 
 type _RunScopeKey = tuple[str, str | None]
+type _ObservationKey = tuple[str, str | None]
 
 # Deeply nested args cannot be serialized for a key; they collapse to one opaque key.
 _UNSERIALIZABLE_ARGS = "<unserializable>"
@@ -177,7 +195,7 @@ def _normalized_read_range(args: dict) -> tuple[int, int | None]:
     approximate range overlap, and the approximation was erasing the offset that
     distinguishes the two. An exact window still catches the loop this layer
     exists for — the same read emitted over and over — and a loop that jitters
-    its bounds is what Layer 2's per-tool frequency window covers.
+    its bounds remains observable through the per-tool frequency metric.
     """
     start_line = _coerce_line_number(args.get("start_line"))
     end_line = _coerce_line_number(args.get("end_line"))
@@ -243,6 +261,100 @@ def _hash_tool_calls(tool_calls: list[dict]) -> str:
     return hashlib.md5(blob.encode()).hexdigest()[:12]
 
 
+@dataclass(frozen=True, slots=True)
+class _CallObservation:
+    """Bounded process state; result fingerprints are never persisted or logged."""
+
+    call_hash: str
+    message_id: str | None
+    result_hash: str | None = None
+    written_paths: frozenset[str] = frozenset()
+
+    @property
+    def key(self) -> _ObservationKey:
+        return self.call_hash, self.result_hash
+
+
+def _tool_result_hash(result: ToolMessage) -> str | None:
+    """Fingerprint successful data, ignoring receipt IDs and diagnostic churn."""
+    metadata = result.additional_kwargs if isinstance(result.additional_kwargs, dict) else {}
+    meta = metadata.get(TOOL_META_KEY)
+    # Repeated failures are not progress, even if diagnostics or classifications
+    # change. Read structured producer status, never infer errors from prose.
+    if result.status == "error" or (isinstance(meta, dict) and meta.get("status") == "error"):
+        return _ERROR_RESULT_HASH
+
+    # Ranged reads may return identical lines while the rest of a file changes.
+    # Consume the gate's existing full-file version without importing its I/O code.
+    read_mark = metadata.get("deerflow_read_mark")
+    version = None
+    if isinstance(read_mark, dict):
+        path, digest = read_mark.get("path"), read_mark.get("hash")
+        if isinstance(path, str) and path and isinstance(digest, str) and len(digest) == 64 and all(char in "0123456789abcdefABCDEF" for char in digest):
+            version = (path, digest.lower())
+    # Compare the data the tool returned, not per-call bytes around it: a budget
+    # replacement names a per-call externalized file, and converted content
+    # blocks (every MCP result) carry a fresh random block id.
+    source_digest = tool_result_source_digest(result)
+    try:
+        data = source_digest if source_digest is not None else tool_content_fingerprint(result.content)
+        blob = json.dumps((data, version), sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError, RecursionError):
+        return None
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def _tool_file_path(tool_call: dict) -> str | None:
+    args, _ = _normalize_tool_call_args(tool_call.get("args", {}))
+    path = args.get("path")
+    return posixpath.normpath(path) if isinstance(path, str) and path else None
+
+
+def _previous_observation(messages: Sequence) -> _CallObservation | None:
+    """Read only the preceding response's results, pairing reused IDs per turn."""
+    for index in range(len(messages) - 2, -1, -1):
+        message = messages[index]
+        if not isinstance(message, AIMessage):
+            continue
+        if not message.tool_calls or not isinstance(message.id, str) or not message.id:
+            return None
+        observation = _CallObservation(_hash_tool_calls(message.tool_calls), message.id)
+        occurrences = pair_tool_call_results(messages[index:-1])
+        # Unaddressable calls and incomplete batches cannot establish progress.
+        ids = [call.get("id") for call in message.tool_calls]
+        if len(occurrences) != len(ids) or any(not isinstance(call_id, str) or not call_id for call_id in ids) or len(set(ids)) != len(ids):
+            return observation
+        outcomes = []
+        written_paths: set[str] = set()
+        for occurrence in occurrences:
+            result = occurrence.result
+            if result is None:
+                continue
+            result_hash = _tool_result_hash(result)
+            if result_hash is None:
+                continue
+            call = occurrence.tool_call
+            outcomes.append((_hash_tool_calls([call]), result_hash))
+            if result.status == "success" and result_hash != _ERROR_RESULT_HASH and call.get("name") in _FILE_WRITE_TOOLS:
+                path = _tool_file_path(call)
+                if path is not None:
+                    written_paths.add(path)
+        result_hash = hashlib.sha256(json.dumps(sorted(outcomes)).encode()).hexdigest() if len(outcomes) == len(ids) else None
+        return replace(observation, result_hash=result_hash, written_paths=frozenset(written_paths))
+    return None
+
+
+def _predict_result_hash(history: Sequence[_CallObservation], call_hash: str, read_paths: set[str]) -> str | None:
+    for entry in reversed(history):
+        # A completed write can invalidate an older read result. Let the next
+        # read see the file and keep the completed observations for counting.
+        if not read_paths.isdisjoint(entry.written_paths):
+            return None
+        if entry.call_hash == call_hash:
+            return entry.result_hash
+    return None
+
+
 # Warn-level messages ask the agent to wrap up, but must not make it drop work
 # it was asked to persist: a subagent whose task names an output file would
 # otherwise stop *all* tool calls, including the write that delivers its
@@ -268,11 +380,7 @@ _WRAP_UP_INSTRUCTIONS = (
 
 _WARNING_MSG = "[LOOP DETECTED] You are repeating the same tool calls. Stop repeating them and wrap up now. " + _WRAP_UP_INSTRUCTIONS
 
-_TOOL_FREQ_WARNING_MSG = "[LOOP DETECTED] You have called {tool_name} {count} times without producing a final answer. Stop calling {tool_name} and wrap up now. " + _WRAP_UP_INSTRUCTIONS
-
 _HARD_STOP_MSG = "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far."
-
-_TOOL_FREQ_HARD_STOP_MSG = "[FORCED STOP] Tool {tool_name} called {count} times — exceeded the per-tool safety limit. Producing final answer with results collected so far."
 
 
 @dataclass(frozen=True)
@@ -281,7 +389,7 @@ class _LoopDecision:
 
     message: str
     action: Literal["warn", "hard_stop"]
-    detection_layer: Literal["identical_call_set", "tool_frequency"]
+    detection_layer: Literal["identical_call_set"]
     tool_names: tuple[str, ...]
     count: int
     threshold: int
@@ -307,22 +415,18 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         max_tracked_threads: Maximum number of thread/run scopes to track before
             evicting the least recently used. The configuration name is retained
             for compatibility. Default: 100.
-        tool_freq_warn: Maximum number of same-tool-type calls within a
-            sliding window of ``_tool_freq_window`` before injecting a
-            frequency warning. Catches cross-file read loops that
-            hash-based detection misses. Default: 30 (within a window
-            of 50).
-        tool_freq_hard_limit: Maximum number of same-tool-type calls within
-            a sliding window of ``_tool_freq_window`` before forcing a
-            stop. Default: 50 (within a window of 50).
+        tool_freq_warn: Number of same-tool-type calls within a sliding window
+            before recording the first frequency metric. It never injects a
+            warning or changes control flow. Default: 30.
+        tool_freq_hard_limit: Number of same-tool-type calls within a sliding
+            window before recording the second frequency metric. It never
+            forces a stop. Default: 50.
         tool_freq_overrides: Per-tool overrides for frequency thresholds,
             keyed by tool name. Each value is a ``(warn, hard_limit)`` tuple
             that replaces ``tool_freq_warn`` / ``tool_freq_hard_limit`` for
             that specific tool. Tools not listed here fall back to the global
-            thresholds. Useful for raising limits on intentionally
-            high-frequency tools (e.g. ``bash`` in batch pipelines) without
-            weakening protection on all other tools. Default: ``None``
-            (no overrides).
+            thresholds. Overrides tune metric reporting for tools with
+            different normal workloads. Default: ``None`` (no overrides).
     """
 
     def __init__(
@@ -344,17 +448,10 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         self.tool_freq_hard_limit = tool_freq_hard_limit
         self._default_tool_freq_thresholds = (tool_freq_warn, tool_freq_hard_limit)
         self._tool_freq_overrides: dict[str, tuple[int, int]] = tool_freq_overrides or {}
-        # Layer 2's windowed frequency count can never exceed the deque length,
-        # so the deque MUST be at least as long as the largest hard limit it is
-        # compared against — otherwise the hard-stop branch is dead code. Do NOT
-        # reuse Layer 1's ``window_size`` (which is unrelated and defaults below
-        # the freq thresholds, e.g. 20 < hard 50); size the frequency window to
-        # the largest hard limit in play (global + every per-tool override) so a
-        # tight burst can actually reach it while spread-out calls still decay
-        # out of the window. Warn thresholds are intentionally excluded: a sane
-        # config enforces warn <= hard (covered by sizing to hard), and a misconfig
-        # with warn > hard would hard-stop first anyway, so an unreachable warn
-        # is harmless and must not inflate the window.
+        # Layer 2's windowed frequency metrics must be able to reach their
+        # configured thresholds. Do not reuse Layer 1's ``window_size`` when it
+        # is smaller than a frequency threshold; the metric would otherwise be
+        # impossible to report for a tight burst.
         self._tool_freq_window = max(
             self.window_size,
             self.tool_freq_hard_limit,
@@ -368,8 +465,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         # after_agent releases normal invocations and the cap bounds abnormal ones.
         self._fallback_run_ids: OrderedDict[int, tuple[object, str]] = OrderedDict()
         self._max_fallback_run_ids = max(1, self.max_tracked_threads * 2)
-        self._history: OrderedDict[_RunScopeKey, list[str]] = OrderedDict()
-        self._warned: dict[_RunScopeKey, set[str]] = defaultdict(set)
+        self._history: OrderedDict[_RunScopeKey, list[_CallObservation]] = OrderedDict()
+        self._warned: dict[_RunScopeKey, set[_ObservationKey]] = defaultdict(set)
         # Windowed per-tool-type frequency: recent tool names per run scope,
         # trimmed to ``window_size`` so the count decays instead of growing
         # monotonically (replaces the old monotonic ``_tool_freq`` integer).
@@ -380,11 +477,10 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         # globally, so the scan would cost 1000 per call for every tool; Counter
         # increments on append and decrements on popleft.
         self._tool_name_counter: defaultdict[_RunScopeKey, Counter[str]] = defaultdict(Counter)
-        # Per-run set of tool names already warned about in Layer 2, so a
-        # frequency warning is enqueued once rather than on every subsequent
-        # call. Cleared per name when the windowed count decays back below the
-        # warn threshold, mirroring the hash-layer ``_warned`` pruning.
-        self._tool_freq_warned: dict[_RunScopeKey, set[str]] = defaultdict(set)
+        # Per-run set of (tool, metric) pairs already reported in Layer 2.
+        # A metric is reported once per burst and re-armed when the windowed
+        # count decays below its threshold.
+        self._tool_freq_reported: dict[_RunScopeKey, set[tuple[str, str]]] = defaultdict(set)
         # Per-thread/run queue of warnings to inject at the next model call.
         # Populated by ``after_model`` (detection) and drained by
         # ``wrap_model_call`` (injection); see module docstring.
@@ -405,6 +501,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
 
     def release_policy_parameters(self) -> dict[str, object]:
         return {
+            "repetition_key": "call_and_result_v1",
+            "read_prediction": "refresh_after_successful_write",
             "warn_threshold": self.warn_threshold,
             "hard_limit": self.hard_limit,
             "window_size": self.window_size,
@@ -412,6 +510,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             "tool_freq_warn": self.tool_freq_warn,
             "tool_freq_hard_limit": self.tool_freq_hard_limit,
             "tool_freq_overrides": self._tool_freq_overrides,
+            "frequency_action": "observe_only",
         }
 
     @classmethod
@@ -528,7 +627,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             self._warned.pop(evicted_key, None)
             self._tool_name_history.pop(evicted_key, None)
             self._tool_name_counter.pop(evicted_key, None)
-            self._tool_freq_warned.pop(evicted_key, None)
+            self._tool_freq_reported.pop(evicted_key, None)
             self._drop_pending_warning_key_locked(evicted_key)
             logger.debug(
                 "Evicted loop tracking for thread/run scope (LRU)",
@@ -583,14 +682,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     ) -> _LoopDecision | None:
         """Track tool calls and check for loops.
 
-        Two detection layers:
-          1. **Hash-based** (existing): catches identical tool call sets.
-          2. **Frequency-based** (new): catches the same *tool type* being
-             called many times with varying arguments (e.g. ``read_file``
-             on 40 different files).
+        The hash-based layer catches repeated call sets with unchanged results.
+        Tool-name frequency is tracked alongside it as an observation metric;
+        it cannot create a warning or hard-stop decision.
 
         Returns:
-            A structured decision when a warning or hard stop is triggered.
+            A structured decision when the hash-based detector triggers.
         """
         messages = state.get("messages", [])
         if not messages:
@@ -600,15 +697,20 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         if getattr(last_msg, "type", None) != "ai":
             return None
 
-        tool_calls = getattr(last_msg, "tool_calls", None)
-        if not tool_calls:
-            return None
-
         scope_key = self._run_scope_key(runtime)
         thread_id, run_id = scope_key
-        call_hash = _hash_tool_calls(tool_calls)
+        previous = _previous_observation(messages)
+        tool_calls = getattr(last_msg, "tool_calls", None)
+        call_hash = _hash_tool_calls(tool_calls) if tool_calls else ""
+        read_paths = {path for call in tool_calls or () if call.get("name") == "read_file" and (path := _tool_file_path(call)) is not None}
 
         with self._lock:
+            history = self._history.get(scope_key)
+            if history and previous is not None and history[-1].message_id == previous.message_id and history[-1].call_hash == previous.call_hash:
+                history[-1] = previous
+            if not tool_calls:
+                return None
+
             # Touch / create entry (move to end for LRU)
             if scope_key in self._history:
                 self._history.move_to_end(scope_key)
@@ -617,17 +719,25 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 self._evict_if_needed()
 
             history = self._history[scope_key]
-            history.append(call_hash)
+            # The current tools have not run. Predict their outcome from the
+            # most recent matching batch, then settle it on the next response.
+            # This preserves warning/stop timing for stagnant calls while a new
+            # successful outcome separates prior observations instead of resetting
+            # the entire budget (so repeated result cycles still accumulate).
+            result_hash = _predict_result_hash(history, call_hash, read_paths)
+            message_id = last_msg.id if isinstance(last_msg.id, str) and last_msg.id else None
+            observation = _CallObservation(call_hash, message_id, result_hash)
+            history.append(observation)
             if len(history) > self.window_size:
                 history[:] = history[-self.window_size :]
 
             warned_hashes = self._warned.get(scope_key)
             if warned_hashes is not None:
-                warned_hashes.intersection_update(history)
+                warned_hashes.intersection_update(entry.key for entry in history)
                 if not warned_hashes:
                     self._warned.pop(scope_key, None)
 
-            count = history.count(call_hash)
+            count = sum(entry.key == observation.key for entry in history)
             tool_names = [str(tc.get("name") or "?") for tc in tool_calls]
 
             # --- Layer 1: hash-based (identical call sets) ---
@@ -652,12 +762,10 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 )
 
             # Warnings admit the whole batch, so they must not skip frequency
-            # accounting or hide a later hard limit. Keep one candidate (hash
-            # warnings retain priority over frequency warnings) until every
-            # admitted call has been checked. Only the selected warning is
-            # marked/logged; a hard stop may supersede it below.
+            # accounting. Keep one hash-warning candidate until every admitted
+            # call has been checked. Only the selected warning is marked/logged.
             warning: _LoopDecision | None = None
-            if count >= self.warn_threshold and call_hash not in self._warned.get(scope_key, set()):
+            if count >= self.warn_threshold and observation.key not in self._warned.get(scope_key, set()):
                 warning = _LoopDecision(
                     message=_WARNING_MSG,
                     action="warn",
@@ -667,100 +775,63 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                     threshold=self.warn_threshold,
                 )
 
-            # --- Layer 2: per-tool-type frequency (windowed) ---
+            # --- Layer 2: per-tool-type frequency (windowed observation) ---
+            # Count tool names for cost/workload metrics, but never turn this
+            # signal into a model warning or a hard stop. Legitimate batch work
+            # can use one tool repeatedly with different arguments.
             tool_name_history = self._tool_name_history[scope_key]
             name_counter = self._tool_name_counter[scope_key]
+            reported_metrics = self._tool_freq_reported[scope_key]
             for tc in tool_calls:
                 name = tc.get("name", "")
                 if not name:
                     continue
-                # Windowed counting: append the name and trim to the frequency
-                # window (>= the largest threshold) so the count can reach the
-                # warn/hard limits on a tight burst yet still decay for
-                # spread-out calls. A mirrored Counter gives O(1) freq_count
-                # even when a per-tool override inflates the window globally.
                 tool_name_history.append(name)
                 name_counter[name] += 1
                 while len(tool_name_history) > self._tool_freq_window:
                     old = tool_name_history.popleft()
-                    c = name_counter[old] - 1
-                    if c <= 0:
+                    count = name_counter[old] - 1
+                    if count <= 0:
                         del name_counter[old]
                     else:
-                        name_counter[old] = c
-                    old_warn = self._tool_freq_overrides.get(old, self._default_tool_freq_thresholds)[0]
-                    if c < old_warn:
-                        # Any tool can evict an older name from the shared
-                        # window. Rearm that name as soon as its burst decays,
-                        # even when the current call belongs to another tool.
-                        self._tool_freq_warned[scope_key].discard(old)
-                freq_count = name_counter.get(name, 0)
+                        name_counter[old] = count
+                    old_warn, old_hard = self._tool_freq_overrides.get(old, self._default_tool_freq_thresholds)
+                    if count < old_warn:
+                        reported_metrics.discard((old, "warn"))
+                    if count < old_hard:
+                        reported_metrics.discard((old, "hard_limit"))
 
+                freq_count = name_counter[name]
                 eff_warn, eff_hard = self._tool_freq_overrides.get(name, self._default_tool_freq_thresholds)
-
-                if freq_count >= eff_hard:
-                    logger.error(
-                        "Tool frequency hard limit reached — forcing stop",
-                        extra={
-                            "thread_id": thread_id,
-                            "run_id": run_id,
-                            "tool_name": name,
-                            "count": freq_count,
-                        },
-                    )
-                    return _LoopDecision(
-                        message=_TOOL_FREQ_HARD_STOP_MSG.format(tool_name=name, count=freq_count),
-                        action="hard_stop",
-                        detection_layer="tool_frequency",
-                        tool_names=(name,),
-                        count=freq_count,
-                        threshold=eff_hard,
-                    )
-
-                if freq_count >= eff_warn:
-                    freq_warned = self._tool_freq_warned[scope_key]
-                    if warning is None and name not in freq_warned:
-                        warning = _LoopDecision(
-                            message=_TOOL_FREQ_WARNING_MSG.format(tool_name=name, count=freq_count),
-                            action="warn",
-                            detection_layer="tool_frequency",
-                            tool_names=(name,),
-                            count=freq_count,
-                            threshold=eff_warn,
+                for metric, threshold in (("warn", eff_warn), ("hard_limit", eff_hard)):
+                    metric_key = (name, metric)
+                    if freq_count >= threshold and metric_key not in reported_metrics:
+                        logger.info(
+                            "Tool frequency metric reached",
+                            extra={
+                                "thread_id": thread_id,
+                                "run_id": run_id,
+                                "tool_name": name,
+                                "count": freq_count,
+                                "metric": metric,
+                                "threshold": threshold,
+                                "action": "observe_only",
+                            },
                         )
-                else:
-                    # Windowed count decayed below the warn threshold; allow a
-                    # future burst of this tool to warn again.
-                    self._tool_freq_warned[scope_key].discard(name)
+                        reported_metrics.add(metric_key)
 
             if warning is not None:
-                if warning.detection_layer == "identical_call_set":
-                    self._warned[scope_key].add(call_hash)
-                    logger.warning(
-                        "Repetitive tool calls detected — injecting warning",
-                        extra={
-                            "thread_id": thread_id,
-                            "run_id": run_id,
-                            "call_hash": call_hash,
-                            "count": warning.count,
-                            "tools": list(warning.tool_names),
-                        },
-                    )
-                else:
-                    warned_name = warning.tool_names[0]
-                    # Later calls in this batch may already have decayed this
-                    # burst. Do not suppress the next burst with a stale mark.
-                    if name_counter.get(warned_name, 0) >= warning.threshold:
-                        self._tool_freq_warned[scope_key].add(warned_name)
-                    logger.warning(
-                        "Tool frequency warning — too many calls to same tool type",
-                        extra={
-                            "thread_id": thread_id,
-                            "run_id": run_id,
-                            "tool_name": warned_name,
-                            "count": warning.count,
-                        },
-                    )
+                self._warned[scope_key].add(observation.key)
+                logger.warning(
+                    "Repetitive tool calls detected — injecting warning",
+                    extra={
+                        "thread_id": thread_id,
+                        "run_id": run_id,
+                        "call_hash": call_hash,
+                        "count": warning.count,
+                        "tools": list(warning.tool_names),
+                    },
+                )
             return warning
 
     @staticmethod
@@ -920,11 +991,12 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         return warnings
 
     def _restore_pending_warnings(self, runtime: Runtime, warnings: list[str]) -> None:
-        """Requeue warnings taken for a model call that raised.
+        """Requeue warnings taken for a model call that raised or came back empty.
 
         LLMErrorHandlingMiddleware sits outside this middleware and retries a
-        failed call by running this wrap again, so the retry must still find
-        the warning. It would not be queued again: it is already marked warned.
+        failed call, or an empty stop response, by running this wrap again, so
+        the retry must still find the warning. It would not be queued again: it
+        is already marked warned.
         """
         if not warnings:
             return
@@ -963,10 +1035,13 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     ) -> ModelCallResult:
         warnings = self._drain_pending_warnings(request.runtime)
         try:
-            return handler(self._inject_warnings(request, warnings))
+            response = handler(self._inject_warnings(request, warnings))
         except Exception:
             self._restore_pending_warnings(request.runtime, warnings)
             raise
+        if is_empty_stop_response(response):
+            self._restore_pending_warnings(request.runtime, warnings)
+        return response
 
     @override
     async def awrap_model_call(
@@ -976,10 +1051,13 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     ) -> ModelCallResult:
         warnings = self._drain_pending_warnings(request.runtime)
         try:
-            return await handler(self._inject_warnings(request, warnings))
+            response = await handler(self._inject_warnings(request, warnings))
         except Exception:
             self._restore_pending_warnings(request.runtime, warnings)
             raise
+        if is_empty_stop_response(response):
+            self._restore_pending_warnings(request.runtime, warnings)
+        return response
 
     def reset(self, thread_id: str | None = None) -> None:
         """Clear tracking state. If thread_id given, clear only that thread."""
@@ -990,7 +1068,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                     self._warned,
                     self._tool_name_history,
                     self._tool_name_counter,
-                    self._tool_freq_warned,
+                    self._tool_freq_reported,
                 ):
                     for key in list(mapping):
                         if key[0] == thread_id:
@@ -1008,7 +1086,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 self._warned.clear()
                 self._tool_name_history.clear()
                 self._tool_name_counter.clear()
-                self._tool_freq_warned.clear()
+                self._tool_freq_reported.clear()
                 self._pending_warnings.clear()
                 self._pending_warning_touch_order.clear()
                 self._stop_reason.clear()

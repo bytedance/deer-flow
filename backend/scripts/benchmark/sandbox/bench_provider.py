@@ -231,6 +231,36 @@ def _make_boxlite_provider(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]
     return provider, sandbox_attrs
 
 
+# Keep benchmark inputs and public profile labels limited to the AIO service switches.
+_AIO_SERVICE_FLAGS = ("DISABLE_BROWSER", "DISABLE_CODE_SERVER", "DISABLE_JUPYTER", "DISABLE_MCP_BROWSER", "DISABLE_NODEJS_REPL", "DISABLE_VNC")
+
+
+def _aio_service_environment() -> dict[str, str]:
+    import yaml
+
+    from deerflow.config.app_config import AppConfig
+
+    # Importing app_config loads the dotenv file that can select the benchmark YAML.
+    config_path = os.getenv("DEER_FLOW_CONFIG_PATH")
+    if not config_path:
+        return {}
+    with AppConfig.resolve_config_path(config_path).open(encoding="utf-8") as stream:
+        config = yaml.safe_load(stream)
+    if config is None:
+        return {}
+    if not isinstance(config, dict) or not isinstance(sandbox := config.get("sandbox", {}), dict):
+        raise ValueError("Expected a config mapping with a sandbox mapping")
+    environment = sandbox.get("environment", {})
+    if not isinstance(environment, dict):
+        raise ValueError("sandbox.environment must be a mapping")
+
+    flags = {key: AppConfig.resolve_env_variables(environment[key]) for key in _AIO_SERVICE_FLAGS if key in environment}
+    for key, value in flags.items():
+        if value not in ("true", "false"):
+            raise ValueError(f"sandbox.environment.{key} must be 'true' or 'false' for the AIO benchmark")
+    return flags
+
+
 def _make_aio_provider(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
     """Create an AioSandboxProvider with stub config."""
     from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
@@ -290,7 +320,13 @@ def _make_opensandbox_provider(config: dict[str, Any]) -> tuple[Any, dict[str, A
             # The runner calls this after release. Reuse the provider's owner of
             # identity removal instead of separately editing its three maps.
             with self._acquire_serializer.hold(sandbox_id):
-                self._invalidate_sandbox(sandbox_id, reason="benchmark_no_warmpool")
+                with self._lock:
+                    sandbox = self._sandboxes.get(sandbox_id)
+                    if sandbox is None:
+                        warm_entry = self._warm_pool.get(sandbox_id)
+                        sandbox = warm_entry[0] if warm_entry is not None else None
+                if sandbox is not None:
+                    self._invalidate_sandbox(sandbox, reason="benchmark_no_warmpool")
             self._check_cleanup()
 
         def shutdown(self) -> None:
@@ -562,7 +598,11 @@ def _write_results(results: list[BenchResult], output_path: Path, config_used: d
         result.image = config_used.get("image")
     with output_path.open("a", encoding="utf-8") as stream:
         for result in results:
-            stream.write(json.dumps(asdict(result), ensure_ascii=False) + "\n")
+            row = asdict(result)
+            if result.provider == "aio-docker":
+                environment = config_used.get("environment", {})
+                row["aio_service_profile"] = ",".join(f"{key}={environment[key]}" for key in _AIO_SERVICE_FLAGS if key in environment) or "image-defaults"
+            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def _run_scenario(
@@ -781,6 +821,9 @@ def main(argv: list[str] | None = None) -> int:
         # Never discover/clean containers belonging to a user's regular stack.
         "container_prefix": f"deerflow-bench-{args.run_id}",
     }
+
+    if args.provider == "aio-docker":
+        config["environment"] = _aio_service_environment()
 
     factory = PROVIDER_FACTORIES[args.provider]
     provider, config_used = factory(config)

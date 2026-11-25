@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_current_user, get_feedback_repo, get_run_store
+from deerflow.persistence.feedback import FeedbackAlreadyExistsError
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
@@ -133,14 +134,20 @@ async def create_feedback(
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found in thread {thread_id}")
 
     feedback_repo = get_feedback_repo(request)
-    return await feedback_repo.create(
-        run_id=run_id,
-        thread_id=thread_id,
-        rating=body.rating,
-        user_id=user_id,
-        message_id=body.message_id,
-        comment=body.comment,
-    )
+    try:
+        return await feedback_repo.create(
+            run_id=run_id,
+            thread_id=thread_id,
+            rating=body.rating,
+            user_id=user_id,
+            message_id=body.message_id,
+            comment=body.comment,
+        )
+    except FeedbackAlreadyExistsError:
+        raise HTTPException(
+            status_code=409,
+            detail="Feedback already exists for this run; use PUT to update it",
+        ) from None
 
 
 @router.get("/{thread_id}/runs/{run_id}/feedback", response_model=list[FeedbackResponse])

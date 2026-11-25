@@ -76,7 +76,12 @@ class WeKnoraProvider:
     def _bindings(self, context: KnowledgeRequestContext) -> list[_Binding]:
         bindings = []
         for space in self.settings.spaces:
-            if context.user_id not in space.user_ids or (space.agent_names is not None and context.agent_name not in space.agent_names):
+            if space.access_mode == "users":
+                user_allowed = context.user_id in (space.user_ids or ())
+            else:
+                # Older harness contexts lack this field; deny shared access instead of raising AttributeError.
+                user_allowed = bool(context.user_id) and getattr(context, "authenticated_user_id", None) == context.user_id
+            if not user_allowed or (space.agent_names is not None and context.agent_name not in space.agent_names):
                 continue
             key = os.getenv(space.api_key_env, "").strip()
             if not key or not key.isascii() or any(ord(char) < 33 or ord(char) == 127 for char in key):

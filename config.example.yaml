@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 64
+config_version: 68
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -1010,6 +1010,18 @@ tools:
   #   # mode: 0                      # Optional: 0=web, 1=VR, 2=mixed
   #   # api_key: $TENCENTCLOUD_WSA_APIKEY  # Optional explicit env-var reference
 
+  # Web search tool (DeepSeek server-side search, requires DEEPSEEK_API_KEY)
+  # Replace the active web_search entry with this provider.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.deepseek.tools:web_search_tool
+  #   api_key: $DEEPSEEK_API_KEY
+  #   model: deepseek-flash
+  #   thinking: false               # true enables multi-step thinking search
+  #   max_results: 5                # Returned sources, capped at 50
+  #   timeout_seconds: 180          # Includes server-side search and reasoning
+  #   max_tokens: 8192
+
   # Web search tool (uses Exa, requires EXA_API_KEY)
   # - name: web_search
   #   group: web
@@ -1061,6 +1073,17 @@ tools:
   #   # search_depth: basic         # basic reads the result pages, snippets returns snippets only
   #   contents_max_characters: 2000 # per-result content cap; 0 disables it
   #   # api_key: $SOFYA_API_KEY     # Optional explicit env-var reference
+
+  # Web search tool (uses SpecStream, requires SPECSTREAM_API_KEY)
+  # SpecStream answers from the live web: ranked results with a snippet each, plus a
+  # direct answer when the sources agree on one. Sign up at https://specstream.ai to get a key.
+  # Note: set SPECSTREAM_API_KEY in your environment before starting the app.
+  # Avoid putting literal API keys in config.yaml; use the $VAR form instead.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.specstream.tools:web_search_tool
+  #   max_results: 5
+  #   # api_key: $SPECSTREAM_API_KEY  # Optional explicit env-var reference
 
   # Web search tool (uses You.com; YDC_API_KEY optional)
   # You.com runs its own web index and returns extracted page snippets rather
@@ -1126,6 +1149,8 @@ tools:
   #   #                                    # cannot be enforced end-to-end. Set true ONLY when its outbound network
   #   #                                    # is isolated from private and cloud-metadata networks.
   #   # filter: fit                       # Markdown filter: fit (default) | raw | bm25 | llm
+  #   # max_chars: 4096                   # Output cap in characters (default 4096); a cut page ends with a note.
+  #   #                                    # Above tool_output.externalize_min_chars, output goes to a file instead.
 
   # Web capture tool (uses Browserless /screenshot to render a page as an artifact)
   # Browserless captures JavaScript-heavy pages with a real headless Chrome and
@@ -1295,6 +1320,15 @@ tools:
   #   use: deerflow.community.sofya.tools:web_fetch_tool
   #   # api_key: $SOFYA_API_KEY
 
+  # Web fetch tool (uses SpecStream, requires SPECSTREAM_API_KEY)
+  # Returns the page as markdown. Also reads PDF, Word and Excel files.
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry above before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.specstream.tools:web_fetch_tool
+  #   # api_key: $SPECSTREAM_API_KEY
+
   # Web fetch tool (uses Unbrowse, requires UNBROWSE_API_KEY)
   # Returns the page as markdown. Fetches over plain HTTP when that is enough and
   # falls back to a hosted cloud browser for pages that need JavaScript.
@@ -1377,9 +1411,7 @@ tools:
     group: file:write
     use: deerflow.sandbox.tools:str_replace_tool
 
-  # Bash execution tool
-  # Active only when using an isolated shell sandbox or when
-  # sandbox.allow_host_bash: true explicitly opts into host bash.
+  # Bash execution tool. Select an isolated sandbox provider to use it.
   - name: bash
     group: bash
     use: deerflow.sandbox.tools:bash_tool
@@ -1395,9 +1427,8 @@ tools:
 
 tool_search:
   enabled: false
-  # When tool_search is enabled, PR1 MCP routing metadata can auto-promote
-  # matching deferred MCP tool schemas before a model call. This is the maximum
-  # number of matched schemas promoted per model call. Valid range: 1..5.
+  # Legacy compatibility setting (1..5). Routing keywords are advisory only;
+  # deferred schemas are exposed by explicit tool_search selection.
   auto_promote_top_k: 3
 
 # ============================================================================
@@ -1497,10 +1528,29 @@ input_polish:
 
 
 # ============================================================================
+# Optional Voice Input (Speech-to-Text)
+# ============================================================================
+# Omit this block (or set voice_input: null) to hide the microphone in the UI.
+# Requires an OpenAI-compatible POST /audio/transcriptions endpoint and a model
+# that accepts the browser's recording format (WebM/Opus, MP4 or Ogg/Opus).
+# The base URL and key stay on the Gateway; audio is sent only after recording.
+# voice_input:
+#   base_url: https://speech.example.com/v1
+#   model: your-transcription-model
+#   api_key: $VOICE_INPUT_API_KEY  # Optional for services without authentication.
+#   language: zh                 # Optional; omit to detect the spoken language.
+#   max_audio_bytes: 10485760     # 10 MiB; must not exceed the provider's limit.
+#   max_duration_seconds: 120    # Browser recording limit.
+#   timeout_seconds: 60          # Total provider request timeout (1–120 seconds).
+
+
+# ============================================================================
 # Loop Detection Configuration
 # ============================================================================
 # Detect and interrupt repeated identical tool-call loops.
-# Frequency thresholds are safety limits for repeated use of the same tool type.
+# Frequency thresholds are windowed observability metrics for repeated use of a
+# tool type. They log burst counts and never stop a run; use token, time, call,
+# or cost budgets when work needs a hard ceiling.
 
 loop_detection:
   enabled: true
@@ -1511,10 +1561,8 @@ loop_detection:
   max_tracked_threads: 100
   tool_freq_warn: 30
   tool_freq_hard_limit: 50
-  # Per-tool overrides for tool_freq_warn / tool_freq_hard_limit. Values can be
-  # higher or lower than the global defaults. Commonly used to raise thresholds
-  # for high-frequency tools like bash in batch workflows (e.g. RNA-seq pipelines)
-  # without weakening protection on every other tool.
+  # Per-tool overrides for the two frequency metrics. Values can be higher or
+  # lower than the global thresholds for tools with different normal workloads.
   # tool_freq_overrides:
   #   bash:
   #     warn: 150
@@ -1636,13 +1684,13 @@ projects:
   # Days a trashed project document stays recoverable before the retention
   # sweep may purge it permanently (range: 1-3650).
   trash_retention_days: 30
-  # Best-effort per-document LLM summaries on the shelf (default off). When
+  # Best-effort per-document LLM summaries on the shelf (default on). When
   # enabled, each newly uploaded/promoted document gets a one-line generated
   # description rendered into the injected <documents> index and returned by
   # the documents API. Generation failures leave the summary empty and never
   # affect uploads. Rendering of already-stored summaries stays on even when
   # generation is disabled.
-  summaries_enabled: false
+  summaries_enabled: true
   # Hard UTF-8 write-time cap for a generated summary (range: 64-1024).
   summary_max_bytes: 256
   # Optional model override for summary generation; unset uses the default
@@ -1708,6 +1756,10 @@ uploads:
   max_files: 10
   max_file_size: 52428800    # 50 MiB
   max_total_size: 104857600  # 100 MiB
+  # nginx cannot read these runtime values. If you raise any of them, raise
+  # client_max_body_size above the new content total plus multipart framing in
+  # docker/nginx/nginx.conf, docker/nginx/nginx.local.conf and the Helm nginx
+  # ConfigMap too.
   # Automatic Office/PDF conversion runs on the backend host before sandbox
   # isolation applies. Keep this disabled unless uploads come from a fully
   # trusted source and you intentionally accept host-side parser risk.
@@ -1725,16 +1777,12 @@ uploads:
 # ============================================================================
 # Sandbox Configuration
 # ============================================================================
-# Choose between local sandbox (direct execution), Docker-based AIO sandbox,
+# Choose between local file tools, Docker-based AIO sandbox,
 # or BoxLite micro-VM sandbox
 # Option 1: Local Sandbox (Default)
-# Executes commands directly on the host machine
+# Serves workspace file operations
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
-  # Host bash execution is disabled by default because LocalSandboxProvider is
-  # not a secure isolation boundary for shell access. Enable only for fully
-  # trusted, single-user local workflows.
-  allow_host_bash: false
   # For AioSandboxProvider only: overlap likely sandbox work with the first
   # model call. It is disabled by default and ignored by other providers.
   prewarm: false
@@ -1854,6 +1902,7 @@ sandbox:
 #   # An explicit value is allowed but must be at least max_running + 1.
 #   # environment:
 #   #   MAX_SHELL_SESSIONS: "13"  # Example for subagent_runtime.max_running: 12
+#   #   AIO_BASH_MAX_SESSIONS: "50"  # Separate Bash pool; excess env calls wait (cancellable)
 #   #   NODE_ENV: production
 #   #   DEBUG: "false"
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
@@ -1892,6 +1941,9 @@ sandbox:
 #   # ownership:
 #   #   type: redis                  # required for multi-instance / load-balanced
 #   #   redis_url: redis://redis:6379/0
+#   #   redis_mode: standalone       # use cluster for Redis Cluster (database 0)
+#   #   # redis_cluster_nodes:       # optional extra discovery seeds in cluster mode
+#   #   #   - redis-1:6379
 #   #   renewal_interval_seconds: 30 # how often an owner refreshes its leases
 #   #   ttl_multiplier: 4            # lease TTL = interval x this (min 2, so a
 #   #                                # single missed renewal cannot expire a live
@@ -1901,8 +1953,9 @@ sandbox:
 #   #   key_prefix: deerflow:sandbox:owner
 #   #
 #   # NOTE: the redis ownership store is fail-closed, matching the stream bridge's
-#   # fail-hard policy. Redis.from_url is lazy so a down Redis does not block
-#   # startup, but a sandbox whose ownership cannot be published is not handed out
+#   # fail-hard policy. Standalone Redis connects on first use. Cluster mode
+#   # discovers the topology at provider startup and requires a reachable seed.
+#   # A sandbox whose ownership cannot be published is not handed out
 #   # — acquiring raises instead. The alternative (proceed unowned) is exactly the
 #   # #4206 cross-instance kill. Run Redis with HA / a restart policy.
 #   #
@@ -1992,11 +2045,64 @@ sandbox:
 #   # request_timeout: 30             # finite positive management API request timeout seconds
 #   # ready_timeout: 30               # finite positive create/readiness timeout seconds
 #   # use_server_proxy: false         # proxy execd/file traffic through server
+#   # secure_access: false            # per-sandbox endpoint token; needs Kubernetes + ingress gateway mode
+#   # resource: {cpu: "2", memory: 4Gi}          # sandbox limits; omitted = SDK default 1 CPU / 2Gi
+#   # resource_requests: {cpu: "1", memory: 2Gi} # sandbox requests; omitted = server default
 #   # sandbox_timeout: 14400          # finite non-negative remote lifetime seconds; 0 = explicit cleanup
 #   # bash_command_timeout: 600       # default remote command timeout seconds
 #   # replicas: 3                     # active + warm cap per gateway process
 #   # idle_timeout: 600               # warm seconds before destroy; 0 disables
 #   # environment:                    # create-time and per-command defaults
+#   #   PYTHONUNBUFFERED: "1"
+
+# Option 7: boxd machine Sandbox
+# Runs each sandbox as an isolated boxd machine (an Ubuntu microVM). Released
+# machines stay in an in-process warm pool and are reclaimed only by the same
+# user/thread. Requires the optional SDK: pip install "deerflow-harness[boxd]".
+# sandbox:
+#   use: deerflow.community.boxd_sandbox:BoxdSandboxProvider
+#   # boxd_api_key: $BOXD_API_KEY     # falls back to the BOXD_API_KEY env var
+#   # org: my-org                     # optional; the key's own org when omitted
+#   # region: fra                     # optional; fra or nyc
+#   # vcpu: 2                         # optional; 1, 2, 4 or 8 (memory 4G, 8G, 16G or 32G follows)
+#   # from_snapshot: my-snapshot      # optional; start machines from a prepared snapshot
+#   # auto_suspend_timeout: 300       # optional; idle seconds before a machine goes to standby
+#   # ready_timeout: 120              # seconds to wait for a new machine to boot
+#   # name_prefix: deer-flow-         # machine names are <prefix><scope>-<random suffix>
+#   # replicas: 3                     # active + warm cap per gateway process
+#   # idle_timeout: 600               # warm seconds before the machine is deleted; 0 disables
+#   # environment:                    # merged into every command's environment
+#   #   PYTHONUNBUFFERED: "1"
+
+# Option 8: BytePlus veFaaS Cloud Sandbox
+# Provisions managed All-in-One Sandbox instances via BytePlus Function Service
+# (veFaaS) OpenAPI (Version=2024-06-06) and reuses AioSandbox for the data plane.
+# Requires no extra cloud SDK dependency (uses httpx + SigV4 directly).
+# sandbox:
+#   use: deerflow.community.vefaas_sandbox:VeFaaSSandboxProvider
+#   vefaas:
+#     region: ap-southeast-1
+#     endpoint: https://vefaas.ap-southeast-1.byteplusapi.com
+#     function_id: $BYTEPLUS_VEFAAS_SANDBOX_APP_ID
+#     sandbox_base_url: $BYTEPLUS_VEFAAS_SANDBOX_BASE_URL   # unified domain or https://{sandbox_id}.example.com
+#     access_key_env: BYTEPLUS_ACCESS_KEY_ID
+#     secret_key_env: BYTEPLUS_SECRET_ACCESS_KEY
+#     # session_token_env: BYTEPLUS_SESSION_TOKEN           # optional STS temporary credentials
+#     # sandbox_access_token: $BYTEPLUS_VEFAAS_SANDBOX_ACCESS_TOKEN  # optional APIG data-plane token
+#     # cpu_milli: 1000                                     # 250..16000
+#     # memory_mb: 2048                                     # 512..131072
+#     # timeout_minutes: 60                                 # 3..1440
+#     # ready_timeout: 60                                   # seconds to wait for Running + HTTP readiness
+#     # tos_mount:                                          # optional per-thread scoped TOS mount
+#     #   enabled: false
+#     #   bucket: $BYTEPLUS_TOS_BUCKET
+#     #   prefix: deerflow-user-data
+#   # replicas: 3                     # active + warm soft cap per gateway process
+#   # idle_timeout: 600               # warm seconds before KillSandbox; 0 disables
+#   # bash_command_timeout: 600       # default remote command timeout seconds
+#   # ownership:
+#   #   type: redis                   # required for multi-worker gateways sharing one veFaaS app
+#   # environment:
 #   #   PYTHONUNBUFFERED: "1"
 
 # ============================================================================
@@ -2009,6 +2115,10 @@ sandbox:
 # shared by ordinary `task` calls and durable batches. Waiting work is async;
 # queued subagents do not occupy a scheduler thread.
 subagent_runtime:
+  # Optional history for ordinary task delegates under a persistent parent
+  # graph. Currently supports only file-backed SQLite checkpoint storage.
+  # Restart Gateway after changing; independent of run_events.backend.
+  checkpoint_enabled: false
   max_running: 3
   max_queued: 64
   admission_policy: queue       # queue or reject when all slots are occupied
@@ -2128,6 +2238,35 @@ verification:
   judge_model_name: null
 
 # ============================================================================
+# HITL tool approval
+# ============================================================================
+# Pause high-risk tool calls for human approval before execution.
+# enabled=false (default) leaves all behavior unchanged.
+# The deployment policy covers writes and unknown tools, including MCP.
+# non_interactive: deny | allow is a legacy Ask-mode root-run override.
+# Auto uncertainty still denies unattended execution. Interactive children
+# wait through the parent-owned approval channel within their execution deadline.
+# Approval is not authorization: read_before_write, guardrails, and sandbox
+# authorization still apply after approval ("approve to try executing").
+hitl_approval:
+  enabled: false
+  tools: []  # Extra tools to review, including otherwise trusted read tools.
+  default_mode: ask  # ask | auto | full; independent of reasoning mode
+  allowed_modes: [ask, auto]  # Operator ceiling for client selections.
+  review_unknown_tools: true  # Includes extension, personal and platform MCP tools.
+  allow_tools: []
+  deny_tools: []  # Mandatory in every mode.
+  always_ask_tools: []  # Cannot use automatic review or thread grants.
+  reviewer_model: null  # Existing model profile; null reuses the execution model.
+  reviewer_timeout_seconds: 30
+  reviewer_max_input_bytes: 65536
+  max_payload_bytes: 524288
+  child_approval_timeout_seconds: 300
+  non_interactive: deny
+  # Maximum matching tool calls in one approval batch; 0 disables the count limit.
+  max_actions: 32
+
+# ============================================================================
 # ACP Agents Configuration
 # ============================================================================
 # Configure external ACP-compatible agents for the built-in `invoke_acp_agent` tool.
@@ -2164,6 +2303,23 @@ verification:
 #     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
 #     # env:                             # Optional: inject environment variables into the agent subprocess
 #     #   OPENAI_API_KEY: $OPENAI_API_KEY  # $VAR resolves from host environment
+#
+#   pi:
+#     # Pi coding agent through the community ACP adapter (`pi-acp`).
+#     # Requires Node.js 22+ and pi 0.81.0+. Install both in the Gateway environment:
+#     # npm install --global @earendil-works/pi-coding-agent pi-acp
+#     # Configure pi's model provider/API key for the Gateway user.
+#     # For interactive sign-in, start `pi` and run `/login` in its terminal UI.
+#     command: pi-acp
+#     args: []
+#     # Alternatively, fetch the adapter on demand (requires network access):
+#     # command: npx
+#     # args: ["-y", "pi-acp"]
+#     description: Pi coding agent for repository tasks and code generation
+#     # Pi performs filesystem and shell operations directly; auto_approve_permissions
+#     # only handles ACP permission requests and is not a sandbox. Isolate untrusted tasks.
+#     # auto_approve_permissions: false  # Set to true only for trusted tasks
+#     # timeout_seconds: 1800            # Abort + kill the subprocess if it doesn't respond in time
 
 # ============================================================================
 # Skills Configuration
@@ -2288,7 +2444,7 @@ summarization:
   # Set to null to skip trimming (not recommended for very long conversations)
   trim_tokens_to_summarize: 15564
 
-  # Custom summary prompt template (null = use default LangChain prompt)
+  # Custom summary prompt template (null = use DeerFlow's built-in prompt)
   # The prompt should guide the model to extract important context
   summary_prompt: null
 
@@ -2432,10 +2588,9 @@ memory:
   # Backend-private config (a dict), passed verbatim to the backend __init__.
   # Each backend self-interprets it (DeerMem parses it into DeerMemConfig).
   #
-  # OpenViking example (replace this DeerMem backend_config block when
-  # manager_class is openviking). This first official-adapter integration uses
-  # one credential-bound OpenViking USER key for one DeerFlow user and supports
-  # middleware mode only. Use owner_user_id: default when DeerFlow auth is off.
+  # OpenViking single-user example (replace this DeerMem backend_config block
+  # when manager_class is openviking; supports middleware mode only). Use
+  # owner_user_id: default when DeerFlow auth is off.
   #
   # backend_config:
   #   base_url: http://openviking:1933
@@ -2456,6 +2611,26 @@ memory:
   #     injection_query: >-
   #       user profile preferences important entities events ongoing goals
   #       constraints and prior decisions
+  #
+  # OpenViking multi-user / multi-tenant isolation example (api_key mode,
+  # middleware mode only; mutually exclusive with owner_user_id/api_key_env):
+  #
+  # backend_config:
+  #   base_url: http://openviking:1933
+  #   user_credentials:
+  #     alice:
+  #       api_key_env: OPENVIKING_API_KEY_ALICE
+  #       tenant_id: acme # optional; derives tenant-isolated v2 session IDs
+  #     bob:
+  #       api_key_env: OPENVIKING_API_KEY_BOB
+  #       tenant_id: globex
+  #   # Or resolve credentials dynamically (optionally paired with user_credentials
+  #   # or injected programmatically via host_hooks["credential_provider"]):
+  #   # credential_provider: my_company.openviking_auth:VaultCredentialProvider
+  #   # credential_provider_config: {}
+  #   client_pool:              # multi-user mode only
+  #     max_clients: 64         # LRU cap (1..4096)
+  #     idle_ttl_seconds: 900.0 # null disables idle TTL eviction
   #
   # For a host-installed OpenViking used by Docker DeerFlow, set base_url to
   # http://host.docker.internal:1933 and allow_insecure_http: true. The bundled
@@ -2513,6 +2688,8 @@ memory:
     eviction_access_half_life_days: 30
     eviction_correction_reserved_fraction: 0.10
     eviction_correction_reserved_max: 10
+    eviction_reserved_categories: [correction] # hybrid-v1 only: categories eligible for the reserved slots above (default: ["correction"])
+    eviction_decay_exempt_categories: [] # hybrid-v1 only: categories exempt from confirmation freshness time-decay (default: [])
     eviction_audit_max_entries: 200 # metadata-only events per user/agent scope; 0 disables
     max_injection_tokens: 2000 # Maximum tokens for memory injection
     # Token counting strategy for memory-injection budgeting:
@@ -2813,7 +2990,7 @@ run_events:
   #         database trigger after an offline cutover.
   # Restart-required; strict requires database.backend: postgres and backend: db.
   # Stop every Gateway, activate the database policy, then restart all with the
-  # matching cutover ID. See README.md#configuration for the offline cutover.
+  # matching cutover ID. See docs/guide/configuration.md for the offline cutover.
   producer_fencing: "off"
   # producer_cutover_id: deployment-2026-10-27
 
@@ -2905,6 +3082,26 @@ scheduler:
   recursion_limit: 1000
 
 # ============================================================================
+# Per-user browser OAuth for a deployment MCP service is configured in the
+# matching extensions_config.json server via user_oauth. See backend/docs/MCP_SERVER.md.
+
+# Per-agent MCP credentials (opt-in, deployment-managed HTTP servers only).
+# Bindings stay operator-owned here; set agent_auth: true on the matching
+# extensions_config.json server. See backend/docs/MCP_SERVER.md for the digest
+# command, GitOps rollouts, and durable-task revocation behavior.
+mcp_agent_auth: {}
+# mcp_agent_auth:
+#   research-tickets:
+#     server: ticketing
+#     agent: research-bot
+#     owners: ["member-user-id"]  # Explicit IDs; one list may cover shared copies.
+#     definition_digests: ["<approved 64-character SHA-256 digest>"]
+#     oauth:
+#       grant_type: client_credentials
+#       token_url: https://idp.example/realms/work/protocol/openid-connect/token
+#       client_id: research-bot
+#       client_secret: $RESEARCH_BOT_CLIENT_SECRET
+
 # Long-running MCP Tasks Configuration
 # ============================================================================
 # Durable runtime for ordinary MCP submit/status/cancel task toolsets. It is
@@ -3672,6 +3869,15 @@ authorization:
 # See examples/deerflow-extension-example for a package that exercises all five.
 #
 # plugins:
+#   - name: workspace-search
+#     package: deerflow-extension-workspace-search
+#     use: deerflow_workspace_search:install
+#     table_prefix: extension_workspace_search_
+#     enabled: true
+#     # Install examples/deerflow-extension-workspace-search first; restart Gateway.
+#     # SQLite/Postgres reuse the application database. Memory deployments use:
+#     config:
+#       path: .deer-flow/workspace-search.db
 #   - name: example                       # PEP 621 entry-point name
 #     package: deerflow-extension-example # Python distribution managed by uv
 #     use: deerflow_extension_example:install

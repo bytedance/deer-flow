@@ -381,6 +381,108 @@ async def test_seal_requires_drain_and_current_owner(evidence):
 
 
 @pytest.mark.asyncio
+async def test_waiting_for_input_run_seals_drained_evidence(evidence):
+    _sf, events, runs, reader = evidence
+    await put_run(
+        runs,
+        status="waiting_for_input",
+        owner_worker_id="worker",
+        lease_expires_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+    )
+    journal = RunJournal("r", "t-r", events, user_id="alice")
+    journal.record_middleware("hitl", name="hitl", hook="after_model", action="pause", changes={})
+    receipt = await journal.finish_evidence()
+
+    assert await runs.seal_evidence("r", owner_worker_id="worker", receipt=receipt) is True
+    snapshot = await reader.get_snapshot(thread_id="t-r", run_id="r")
+    assert snapshot.status == "waiting_for_input"
+    assert snapshot.seal_state == "sealed"
+    assert snapshot.event_count == 1
+    await journal.close()
+
+
+@pytest.mark.asyncio
+async def test_answered_ack_lets_paused_worker_finish_committed_terminal(evidence):
+    import asyncio
+    from contextlib import suppress
+
+    from deerflow.config.run_ownership_config import RunOwnershipConfig
+    from deerflow.runtime import RunManager, RunStatus
+    from deerflow.runtime.events.terminal import confirm_terminal_event
+
+    _sf, events, runs, reader = evidence
+    manager = RunManager(
+        store=runs,
+        worker_id="owner",
+        run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=30, grace_seconds=0),
+    )
+    paused = await manager.create_or_reject(
+        "t-answered",
+        user_id="alice",
+        metadata={"hitl_approval": {"request_id": "approval-1"}},
+        evidence_origin="interactive",
+        evidence_agent_id="lead_agent",
+    )
+    await manager.set_status(paused.run_id, RunStatus.waiting_for_input)
+    journal = RunJournal(paused.run_id, paused.thread_id, events, user_id="alice")
+    journal.record_middleware("hitl", name="hitl", hook="after_model", action="pause", changes={})
+    original_put_if_absent = events.put_if_absent
+    terminal_committed, release_terminal = asyncio.Event(), asyncio.Event()
+
+    async def commit_then_hold_terminal(*args, **kwargs):
+        result = await original_put_if_absent(*args, **kwargs)
+        terminal_committed.set()
+        await release_terminal.wait()
+        return result
+
+    async def finalize_paused_worker():
+        status = manager.terminal_event_status(paused)
+        assert status == RunStatus.waiting_for_input.value
+
+        async def confirm_terminal():
+            confirmation = await confirm_terminal_event(
+                events,
+                thread_id=paused.thread_id,
+                run_id=paused.run_id,
+                status=status,
+                user_id=paused.user_id,
+                authorized=lambda: manager.terminal_event_status(paused) == status,
+            )
+            assert confirmation.confirmed
+
+        receipt = await journal.finish_evidence(before_receipt=confirm_terminal)
+        assert receipt is not None
+        assert await manager.seal_completed_evidence(paused.run_id, receipt) is True
+        await manager.update_run_completion(paused.run_id, status=status, total_tokens=17, message_count=2)
+
+    events.put_if_absent = commit_then_hold_terminal
+    worker = asyncio.create_task(finalize_paused_worker())
+    paused.task = worker
+    try:
+        await asyncio.wait_for(terminal_committed.wait(), 1)
+        assert await manager.mark_approval_answered(paused.thread_id) is not None
+        assert paused.status == RunStatus.success
+        release_terminal.set()
+        await asyncio.wait_for(worker, 1)
+    finally:
+        release_terminal.set()
+        if not worker.done():
+            worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker
+        events.put_if_absent = original_put_if_absent
+        await journal.close()
+
+    assert manager.terminal_event_status(paused) == RunStatus.success.value
+    snapshot = await reader.get_snapshot(thread_id=paused.thread_id, run_id=paused.run_id)
+    assert snapshot.status == RunStatus.success.value
+    assert snapshot.seal_state == "sealed"
+    answered = await runs.get(paused.run_id, user_id="alice")
+    assert answered["total_tokens"] == 17
+    assert answered["message_count"] == 2
+
+
+@pytest.mark.asyncio
 async def test_proven_not_committed_flush_never_issues_seal_and_close_can_retry():
     from deerflow.runtime.events.store.base import RunEventStoreNotCommittedError
 
@@ -445,8 +547,8 @@ async def test_expired_lease_cannot_seal(evidence):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", ["success", "error", "interrupted", "timeout"])
-async def test_terminal_unsealed_crash_recovery_advances_discovery(evidence, status):
+@pytest.mark.parametrize("status", ["success", "error", "interrupted", "timeout", "waiting_for_input"])
+async def test_unsealed_crash_recovery_advances_discovery(evidence, status):
     from deerflow.runtime.runs.manager import RunManager
 
     sf, events, runs, reader = evidence

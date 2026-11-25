@@ -2,7 +2,12 @@ import { expect, test } from "@playwright/test";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
 
-for (const shape of ["array", "webz", "webz-malformed"] as const) {
+for (const shape of [
+  "array",
+  "webz",
+  "webz-malformed",
+  "deepseek-citations",
+] as const) {
   test(`search source links from ${shape} results survive reload`, async ({
     page,
   }) => {
@@ -23,14 +28,31 @@ for (const shape of ["array", "webz", "webz-malformed"] as const) {
       });
       results.push({ title: "Invalid URL", url: 42 });
     }
+    if (shape === "deepseek-citations") {
+      results[0] = {
+        source_id: 1,
+        title: "Renewable energy news",
+        url: "https://example.com/news",
+        snippet: "Matching passage",
+      };
+    }
     const payload =
       shape === "array"
         ? results
-        : {
-            query: "renewable energy",
-            returned_results: results.length,
-            results,
-          };
+        : shape === "deepseek-citations"
+          ? {
+              query: "renewable energy",
+              total_results: results.length,
+              results,
+              answer: "Matching passage",
+              citations: [{ excerpt: "Matching passage", source_ids: [1] }],
+              truncated: false,
+            }
+          : {
+              query: "renewable energy",
+              returned_results: results.length,
+              results,
+            };
     mockLangGraphAPI(page, {
       threads: [
         {

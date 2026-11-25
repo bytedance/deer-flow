@@ -1343,13 +1343,49 @@ class TestChat:
         """The CLI and chat must agree on interleaved deltas and metadata-only events."""
         from deerflow.tui.cli import _RunOutcome
 
-        with patch.object(client, "stream", return_value=iter(events)):
-            assert client.chat("q", thread_id="t-shared-answer") == expected
+        with patch.object(client, "stream", return_value=iter(events)) as stream:
+            assert client.chat("q", thread_id="t-shared-answer", thinking_enabled=True) == expected
+        stream.assert_called_once_with("q", thread_id="t-shared-answer", thinking_enabled=True)
 
         outcome = _RunOutcome()
         for event in events:
             outcome.observe(event)
         assert outcome.answer() == expected
+
+    def test_uses_stream_bound_to_another_client(self, client, mock_app_config):
+        from langchain.agents import create_agent
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+        with patch("deerflow.client.get_app_config", return_value=mock_app_config):
+            delegate = DeerFlowClient()
+
+        outer_model = FakeMessagesListChatModel(responses=[AIMessage(content="OUTER MODEL")])
+        delegate_model = FakeMessagesListChatModel(responses=[AIMessage(content="DELEGATE MODEL")])
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", create_agent(model=outer_model, state_schema=ThreadState)),
+            patch.object(delegate, "_ensure_agent"),
+            patch.object(delegate, "_agent", create_agent(model=delegate_model, state_schema=ThreadState)),
+            patch.object(client, "stream", delegate.stream),
+        ):
+            assert client.chat("q", thread_id="t-delegated-stream") == "DELEGATE MODEL"
+
+    def test_uses_wrapper_around_bound_stream(self, client):
+        from langchain.agents import create_agent
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+        from wrapt import FunctionWrapper
+
+        model = FakeMessagesListChatModel(responses=[AIMessage(content="answer")])
+        graph = create_agent(model=model, state_schema=ThreadState)
+        wrapper = MagicMock(side_effect=lambda wrapped, instance, args, kwargs: wrapped(*args, **kwargs))
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", graph),
+            patch.object(client, "stream", FunctionWrapper(client.stream, wrapper)),
+        ):
+            assert client.chat("q", thread_id="t-wrapped-stream") == "answer"
+
+        wrapper.assert_called_once()
 
     def test_returns_last_message(self, client):
         """chat() returns the last AI message text."""
@@ -1397,11 +1433,13 @@ class TestChat:
         with (
             patch.object(client, "_ensure_agent"),
             patch.object(client, "_agent", graph),
+            patch.object(client, "_serialize_message", wraps=client._serialize_message) as serialize_message,
         ):
             result = client.chat("q", thread_id="t-loop-stop")
 
         assert result.startswith("Checking again.")
         assert "[FORCED STOP]" in result
+        serialize_message.assert_not_called()
 
     def test_empty_response(self, client):
         """chat() returns empty string if no AI message produced."""
@@ -1529,7 +1567,7 @@ class TestClientMcpSelection:
             config["metadata"] = {"existing": "preserved", "mcp_plugins": ["installation-B"]}
             client._ensure_agent(config)
             keys.append(client._agent_config_key)
-            assert config["metadata"] == {"existing": "preserved", "mcp_plugins": selection}
+            assert config["metadata"] == {"existing": "preserved", "mcp_plugins": selection, "tool_groups": None}
 
             # Changing the saved config takes effect only after reset_agent().
             mcp_client.load_config.return_value = AgentConfig(name="researcher", mcp_plugins=["installation-B"])
@@ -1543,6 +1581,172 @@ class TestClientMcpSelection:
 
 
 class TestEnsureAgent:
+    @pytest.mark.parametrize(
+        ("selection", "saved_model", "when_thinking_disabled"),
+        [
+            ("agent", "agent-model", None),
+            ("constructor", "agent-model", None),
+            ("request", "agent-model", None),
+            ("global", "agent-model", None),
+            ("agent", "", None),
+            ("agent", "retired-profile", None),
+            ("constructor", "retired-profile", None),
+            ("request", "retired-profile", None),
+            ("invalid-constructor", "agent-model", None),
+            ("invalid-request", "agent-model", None),
+            pytest.param("agent", "agent-model", {"max_tokens": 16}, id="thinking-disabled-lower-budget"),
+            pytest.param("agent", "agent-model", {"max_tokens": None}, id="thinking-disabled-uncapped"),
+        ],
+    )
+    def test_named_agent_model_profile_reaches_provider(self, client, tmp_path, monkeypatch, selection, saved_model, when_thinking_disabled):
+        import httpx
+
+        from deerflow.config.app_config import AppConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+
+        paths = Paths(tmp_path)
+        monkeypatch.setattr("deerflow.config.paths._paths", paths)
+        agent_dir = paths.user_agent_dir("test-user", "researcher")
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "config.yaml").write_text(
+            f"name: researcher\nmodel: {json.dumps(saved_model)}\nmodel_settings:\n  temperature: 0.7\n  max_tokens: 32\n",
+            encoding="utf-8",
+        )
+        requests = []
+
+        def respond(request):
+            requests.append(json.loads(request.content))
+            chunk = {"id": "chatcmpl-profile", "choices": [{"index": 0, "delta": {"content": "Done"}, "finish_reason": "stop"}]}
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
+
+        with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
+            app_config = AppConfig(
+                models=[
+                    {
+                        "name": name,
+                        "use": "langchain_openai:ChatOpenAI",
+                        "model": name,
+                        "api_key": "offline-placeholder",
+                        "http_client": transport,
+                        "use_responses_api": False,
+                        "temperature": 0.2,
+                        "max_tokens": 64,
+                        "supports_thinking": True,
+                        "when_thinking_disabled": when_thinking_disabled,
+                    }
+                    for name in ("global-default", "agent-model", "explicit-model")
+                ],
+                tools=[{"name": "write_file", "group": "file:write", "use": "deerflow.sandbox.tools:write_file_tool"}],
+                sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            )
+            app_config.tool_search.enabled = False
+            monkeypatch.setattr("deerflow.config.app_config._app_config", app_config)
+            monkeypatch.setattr("deerflow.config.app_config._app_config_is_custom", True)
+            client._app_config = app_config
+            client._agent_name = None if selection == "global" else "researcher"
+            client._model_name = "explicit-model" if selection == "constructor" else "unknown-explicit" if selection == "invalid-constructor" else None
+            overrides = {"model_name": "explicit-model"} if selection == "request" else {"model_name": "unknown-explicit"} if selection == "invalid-request" else {}
+            if when_thinking_disabled is not None:
+                overrides["thinking_enabled"] = False
+            # Keep saved configuration, the real graph, model factory and SDK;
+            # isolate prompt/middleware work unrelated to model selection.
+            with (
+                patch("deerflow.client.build_middlewares", return_value=[]),
+                patch("deerflow.client.apply_prompt_template", return_value="Answer briefly."),
+                patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+                patch.object(ExtensionsConfig, "from_file", return_value=ExtensionsConfig()),
+                patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+            ):
+                if selection.startswith("invalid-"):
+                    with pytest.raises(ValueError, match="unknown-explicit"):
+                        client.chat("Hello", thread_id="model-profile", user_id="test-user", **overrides)
+                    assert requests == []
+                    return
+                assert client.chat("Hello", thread_id="model-profile", user_id="test-user", **overrides) == "Done"
+                assert client.chat("Again", thread_id="model-profile", user_id="test-user", **overrides) == "Done"
+
+        expected_model = "explicit-model" if selection in {"constructor", "request"} else "global-default" if selection == "global" or saved_model in {"", "retired-profile"} else "agent-model"
+        expected_max_tokens = 64 if selection == "global" else 32
+        if when_thinking_disabled is not None:
+            expected_max_tokens = when_thinking_disabled["max_tokens"]
+        assert len(requests) == 2
+        for request in requests:
+            assert request["model"] == expected_model
+            assert request["temperature"] == (0.2 if selection == "global" else 0.7)
+            write_file = next(tool["function"] for tool in request["tools"] if tool["function"]["name"] == "write_file")
+            budget_notes = [line for line in write_file["description"].splitlines() if line.startswith("PER-RESPONSE BUDGET:")]
+            if expected_max_tokens is None:
+                assert "max_completion_tokens" not in request
+                assert not budget_notes
+            else:
+                assert request["max_completion_tokens"] == expected_max_tokens
+                assert len(budget_notes) == 1
+                assert budget_notes[0].startswith(f"PER-RESPONSE BUDGET: your output limit is {expected_max_tokens} tokens")
+
+    @pytest.mark.parametrize(
+        ("groups", "expected"),
+        [(None, {"read_file", "write_file"}), ([], set()), (["file:read"], {"read_file"})],
+    )
+    def test_named_agent_tool_groups_reach_model_and_delegation(self, client, tmp_path, monkeypatch, groups, expected):
+        import httpx
+        from langchain_openai import ChatOpenAI
+
+        from deerflow.config.app_config import AppConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+
+        paths = Paths(tmp_path)
+        monkeypatch.setattr("deerflow.config.paths._paths", paths)
+        agent_dir = paths.user_agent_dir("test-user", "researcher")
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "config.yaml").write_text(json.dumps({"name": "researcher", "tool_groups": groups}), encoding="utf-8")
+        app_config = AppConfig(
+            models=[],
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            tools=[
+                {"name": "read_file", "group": "file:read", "use": "deerflow.sandbox.tools:read_file_tool"},
+                {"name": "write_file", "group": "file:write", "use": "deerflow.sandbox.tools:write_file_tool"},
+            ],
+        )
+        app_config.tool_search.enabled = False
+        monkeypatch.setattr("deerflow.config.app_config._app_config", app_config)
+        monkeypatch.setattr("deerflow.config.app_config._app_config_is_custom", True)
+        client._app_config = app_config
+        client._agent_name = "researcher"
+        requests = []
+
+        def respond(request):
+            requests.append(json.loads(request.content))
+            chunk = {"id": "chatcmpl-groups", "choices": [{"index": 0, "delta": {"content": "Done"}, "finish_reason": "stop"}]}
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
+
+        # Retain saved config loading, tool assembly, graph execution and SDK
+        # serialization. Prompt/middleware assembly is unrelated to selection.
+        with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
+            model = ChatOpenAI(model="offline", api_key="offline-placeholder", http_client=transport, use_responses_api=False)
+            with (
+                patch("deerflow.client.create_chat_model", return_value=model),
+                patch("deerflow.client.build_middlewares", return_value=[]),
+                patch("deerflow.client.apply_prompt_template", return_value="Answer briefly."),
+                patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+                patch.object(ExtensionsConfig, "from_file", return_value=ExtensionsConfig()),
+                patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+            ):
+                client._ensure_agent(client._get_runnable_config("group-test"), context={"user_id": "test-user"})
+                with patch.object(client._agent, "stream", wraps=client._agent.stream) as stream:
+                    assert client.chat("Hello", thread_id="group-test", user_id="test-user") == "Done"
+                    assert client.chat("Again", thread_id="group-test", user_id="test-user") == "Done"
+                (agent_dir / "config.yaml").write_text(json.dumps({"name": "researcher", "tool_groups": ["file:write"]}), encoding="utf-8")
+                client.reset_agent()
+                assert client.chat("Refresh", thread_id="group-test", user_id="test-user") == "Done"
+
+        assert len(requests) == 3
+        for request, selected in zip(requests, [expected, expected, {"write_file"}], strict=True):
+            names = {item["function"]["name"] for item in request["tools"]}
+            assert names & {"read_file", "write_file"} == selected
+            assert "present_files" in names  # Built-ins retain their existing policy.
+        for call in stream.call_args_list:
+            assert call.kwargs["config"]["metadata"]["tool_groups"] == groups
+
     @pytest.mark.parametrize(
         ("agent_name", "agent_config", "expected_memory_enabled"),
         [
@@ -1976,6 +2180,7 @@ class TestEnsureAgent:
             True,
             None,
             None,
+            None,
             "full",
             10,
             get_effective_user_id(),
@@ -2156,7 +2361,7 @@ class TestEnsureAgent:
 
         routing_arg = mock_build_middlewares.call_args.kwargs.get("mcp_routing_middleware")
         assert isinstance(routing_arg, McpRoutingMiddleware)
-        assert routing_arg._matched_names({"messages": [HumanMessage(content="show orders")]}) == ["postgres_query"]
+        assert routing_arg._matched_names({"messages": [HumanMessage(content="show orders")]}) == []
 
     def test_mcp_routing_middleware_absent_when_tool_search_disabled(self, client, mock_app_config):
         """No routing middleware is built on the embedded path when tool_search is off."""
@@ -3084,6 +3289,147 @@ class TestMemoryManagement:
 
         assert "config" in result
         assert "data" in result
+
+
+class TestNamedAgentMemoryManagement:
+    """A named client must manage the same bucket its agent reads and writes.
+
+    ``MemoryMiddleware`` and the memory tools both pass ``agent_name``, so
+    leaving it out of the management calls wrote facts to the user's default
+    bucket while the agent looked in its own — the fact was stored but never
+    recalled (#8142).
+    """
+
+    @pytest.fixture
+    def named_client(self, client):
+        client._agent_name = "buyer"
+        return client
+
+    def test_get_memory_reads_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.get_memory.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.get_memory()
+        assert mock_mgr.get_memory.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_reload_memory_reads_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.reload_memory.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.reload_memory()
+        assert mock_mgr.reload_memory.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_reload_memory_fallback_reads_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.reload_memory.side_effect = NotImplementedError("reload not supported")
+        mock_mgr.get_memory.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.reload_memory()
+        assert mock_mgr.get_memory.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_import_memory_writes_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.import_memory.return_value = {"version": "1.0", "facts": []}
+        imported = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.import_memory(imported)
+        assert mock_mgr.import_memory.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_clear_memory_clears_only_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.clear_memory.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.clear_memory()
+        assert mock_mgr.clear_memory.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_create_memory_fact_writes_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.create_fact.return_value = ({"version": "1.0", "facts": []}, "fact_new")
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.create_memory_fact("My preferred office paper size is A5.", category="preference")
+        assert mock_mgr.create_fact.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_delete_memory_fact_targets_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.delete_fact.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.delete_memory_fact("fact_123")
+        assert mock_mgr.delete_fact.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_update_memory_fact_targets_the_agent_bucket(self, named_client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.update_fact.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            named_client.update_memory_fact("fact_123", "Use A4")
+        assert mock_mgr.update_fact.call_args.kwargs["agent_name"] == "buyer"
+
+    def test_backend_that_ignores_agent_scope_refuses_the_call(self, named_client):
+        """Noop-style backends accept ``agent_name`` and return normally while
+        ignoring it, so forwarding the scope alone would report success while
+        editing the user's default bucket. The capability flag must stop the
+        call before the backend sees it."""
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = False
+        mock_mgr.get_memory.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            with pytest.raises(NotImplementedError):
+                named_client.get_memory()
+            with pytest.raises(NotImplementedError):
+                named_client.create_memory_fact("anything")
+        mock_mgr.get_memory.assert_not_called()
+        mock_mgr.create_fact.assert_not_called()
+
+    def test_backend_without_the_flag_refuses_the_call(self, named_client):
+        """A backend that predates the capability flag never advertises it."""
+        mock_mgr = MagicMock(spec=["get_memory", "create_fact"])
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            with pytest.raises(NotImplementedError):
+                named_client.reload_memory()
+        mock_mgr.get_memory.assert_not_called()
+
+    def test_unnamed_client_keeps_the_default_bucket(self, client):
+        mock_mgr = MagicMock()
+        mock_mgr.supports_agent_scoped_management = True
+        mock_mgr.get_memory.return_value = {"version": "1.0", "facts": []}
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            client.get_memory()
+        assert "agent_name" not in mock_mgr.get_memory.call_args.kwargs
+
+
+class TestNamedAgentMemoryScopeEndToEnd:
+    """Write through a named client, read back through the agent's own path."""
+
+    def test_fact_written_by_named_client_is_in_the_agents_bucket(self, mock_app_config, tmp_path):
+        from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
+        from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+        manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+        token = set_current_user(SimpleNamespace(id="alice"))
+        try:
+            with patch("deerflow.client.get_app_config", return_value=mock_app_config):
+                named = DeerFlowClient(agent_name="buyer")
+            with patch("deerflow.agents.memory.get_memory_manager", return_value=manager):
+                named.create_memory_fact("My preferred office paper size is A5.", category="preference")
+
+                # The agent's own path: MemoryMiddleware injects through
+                # get_context(agent_name=...), so a fact it cannot see there is
+                # never recalled.
+                agent_context = manager.get_context("alice", agent_name="buyer")
+                default_bucket = manager.get_memory(user_id="alice")
+
+            assert "A5" in agent_context
+            assert default_bucket["facts"] == []
+        finally:
+            reset_current_user(token)
+            manager.close()
 
 
 # ---------------------------------------------------------------------------

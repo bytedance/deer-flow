@@ -25,6 +25,10 @@ PAT_RANDOM_BYTES = 32
 # automation does not turn every request into a database write.
 PAT_LAST_USED_WRITE_INTERVAL_SECONDS = 300.0
 
+# PAT-only scopes: not route permissions, so a session caller never needs
+# them; a PAT reaches the routes they guard only while holding them.
+PAT_ROUTE_SCOPES: frozenset[str] = frozenset({"schedules:read", "schedules:write", "subagents:read", "subagents:write"})
+
 PAT_ALLOWED_SCOPES: frozenset[str] = frozenset(
     {
         "threads:read",
@@ -36,16 +40,24 @@ PAT_ALLOWED_SCOPES: frozenset[str] = frozenset(
         "projects:read",
         "projects:write",
         "projects:delete",
+        # Deploying agent configuration from CI (#8310). agents:* are route
+        # permissions (``@require_permission``); schedules:* and subagents:*
+        # are PAT_ROUTE_SCOPES, enforced by _PAT_SCOPED_ROUTE_RULES below.
+        "agents:read",
+        "agents:write",
+        "schedules:read",
+        "schedules:write",
+        "subagents:read",
+        "subagents:write",
     }
 )
 
-# Deliberately NOT in PAT_ALLOWED_SCOPES: the route permissions "memory:read",
-# "memory:write", "agents:read", and "agents:write" exist in authz
-# (they guard the memory/agent routers), but PATs stay on the thread/run
-# lifecycle only — _PAT_ROUTE_RULES default-denies the memory/agent routes
-# for PAT callers regardless of scopes, so admitting these scopes would not
-# even reach those routes. Opening them to PATs is a product decision that
-# must change all three of: this set, _PAT_ROUTE_RULES, and the API docs.
+# Deliberately NOT in PAT_ALLOWED_SCOPES: the route permissions "memory:read"
+# and "memory:write" exist in authz (they guard the memory router), but
+# _PAT_ROUTE_RULES default-denies the memory routes for PAT callers regardless
+# of scopes. Opening a router to PATs must change all three of: this set,
+# the route rules, and the API docs. ``agents:*`` open only /api/agents, not
+# /api/user-profile, which the same permissions guard for sessions.
 
 PAT_MAX_NAME_LENGTH = 128
 
@@ -54,9 +66,8 @@ PAT_MAX_NAME_LENGTH = 128
 # ``request.state.auth.permissions`` (``@require_permission``). Authenticated
 # mutation routes without that decorator — memory deletion, agent creation,
 # credential switching, channel configuration — would otherwise accept a
-# PAT holding a single read scope. A route is reachable by PAT only when it
-# is explicitly listed here, and only together with the thread/run lifecycle
-# the v1 scopes govern; everything else answers 403 regardless of scopes.
+# PAT holding a single read scope. PAT callers can reach only the routes
+# explicitly listed in this table or the scoped table below.
 _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
     (frozenset({"POST"}), re.compile(r"^/api/threads$")),
     (frozenset({"POST"}), re.compile(r"^/api/threads/search$")),
@@ -77,6 +88,9 @@ _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
     (frozenset({"GET", "PATCH", "DELETE"}), re.compile(r"^/api/projects/[^/]+$")),
     (frozenset({"POST"}), re.compile(r"^/api/projects/[^/]+/(archive|restore)$")),
     (frozenset({"GET"}), re.compile(r"^/api/projects/[^/]+/threads$")),
+    (frozenset({"GET", "PATCH"}), re.compile(r"^/api/projects/[^/]+/memory$")),
+    (frozenset({"DELETE"}), re.compile(r"^/api/projects/[^/]+/memory/[^/]+$")),
+    (frozenset({"POST"}), re.compile(r"^/api/projects/[^/]+/memory/[^/]+/promote$")),
     # Project document shelf (Phase 2 Slice B): enumerated per implemented
     # route — list/upload on the collection, content and trash on the item.
     (frozenset({"GET", "POST"}), re.compile(r"^/api/projects/[^/]+/documents$")),
@@ -124,6 +138,32 @@ _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
     (frozenset({"GET"}), re.compile(r"^/api/runs/[^/]+/(messages|feedback)$")),
 )
 
+# Routes a PAT reaches only while holding the named scope, on top of any
+# ``@require_permission`` check the route already has (#8310). Scheduled-task
+# routes keep their threads:* / runs:create checks, so a token without run
+# rights cannot schedule runs; the managed-subagent writes additionally stay
+# admin-only (``require_admin_user(..., pat_scope="subagents:write")``).
+_PAT_SCOPED_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str], str], ...] = (
+    # Own identity, so automation can confirm which account it acts as.
+    # Every PAT holds at least one scope; this route needs none of them.
+    (frozenset({"GET"}), re.compile(r"^/api/v1/auth/me$"), ""),
+    (frozenset({"GET"}), re.compile(r"^/api/agents$"), "agents:read"),
+    (frozenset({"POST"}), re.compile(r"^/api/agents$"), "agents:write"),
+    (frozenset({"GET"}), re.compile(r"^/api/agents/[^/]+$"), "agents:read"),
+    # The literal check (GET) and import (POST) actions use different methods.
+    (frozenset({"PUT", "DELETE"}), re.compile(r"^/api/agents/[^/]+$"), "agents:write"),
+    (frozenset({"GET"}), re.compile(r"^/api/scheduled-tasks$"), "schedules:read"),
+    (frozenset({"POST"}), re.compile(r"^/api/scheduled-tasks$"), "schedules:write"),
+    (frozenset({"POST"}), re.compile(r"^/api/scheduled-tasks/preview-cron$"), "schedules:read"),
+    (frozenset({"GET"}), re.compile(r"^/api/scheduled-tasks/(?!preview-cron$)[^/]+$"), "schedules:read"),
+    (frozenset({"PATCH", "DELETE"}), re.compile(r"^/api/scheduled-tasks/(?!preview-cron$)[^/]+$"), "schedules:write"),
+    (frozenset({"POST"}), re.compile(r"^/api/scheduled-tasks/[^/]+/(pause|resume|trigger)$"), "schedules:write"),
+    (frozenset({"GET"}), re.compile(r"^/api/scheduled-tasks/[^/]+/runs$"), "schedules:read"),
+    (frozenset({"GET"}), re.compile(r"^/api/subagents$"), "subagents:read"),
+    (frozenset({"POST"}), re.compile(r"^/api/subagents$"), "subagents:write"),
+    (frozenset({"PUT", "DELETE"}), re.compile(r"^/api/subagents/[^/]+$"), "subagents:write"),
+)
+
 _BASE62_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 
@@ -134,7 +174,20 @@ def is_pat_allowed_route(method: str, path: str) -> bool:
     redirect-style twin resolve identically.
     """
     normalized = path.rstrip("/") or "/"
-    return any(method in methods and pattern.match(normalized) for methods, pattern in _PAT_ROUTE_RULES)
+    return any(method in methods and pattern.match(normalized) for methods, pattern in _PAT_ROUTE_RULES) or pat_route_scope(method, path) is not None
+
+
+def pat_route_scope(method: str, path: str) -> str | None:
+    """Return the scope a PAT needs for *method* + *path* beyond its route permissions.
+
+    ``None`` means the route has no scoped rule; ``""`` means it is admitted
+    for every valid PAT.
+    """
+    normalized = path.rstrip("/") or "/"
+    for methods, pattern, scope in _PAT_SCOPED_ROUTE_RULES:
+        if method in methods and pattern.match(normalized):
+            return scope
+    return None
 
 
 @functools.cache
