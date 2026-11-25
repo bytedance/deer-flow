@@ -26,7 +26,9 @@ requests are blocked. The page rechecks availability on return and every
 
 Links to copied output files may include a query or fragment, such as
 `report.pdf#page=3`. These suffixes are retained on the shared file URL;
-the file itself must still appear in the snapshot's artifact manifest.
+the file itself must still appear in the snapshot's artifact manifest. Inline
+images retain these suffixes too, including SVG view fragments such as
+`charts.svg#detail`; external images remain blocked.
 
 ![A public read-only conversation snapshot](assets/sharing/share-preview.png)
 

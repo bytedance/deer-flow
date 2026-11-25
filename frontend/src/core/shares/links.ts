@@ -32,7 +32,8 @@ export function resolveShareArtifact(
   return artifacts.find((artifact) => artifact.path === normalized.join("/"));
 }
 
-export function sharedLink(
+/** Only copied snapshot files may become image resources. */
+export function sharedArtifactLink(
   href: string,
   token: string,
   artifacts: SharedArtifact[],
@@ -43,6 +44,17 @@ export function sharedLink(
     return (
       shareArtifactURL(token, artifact.path) + (/[?#].*$/.exec(href)?.[0] ?? "")
     );
+  return undefined;
+}
+
+export function sharedLink(
+  href: string,
+  token: string,
+  artifacts: SharedArtifact[],
+  basePath = "",
+) {
+  const copied = sharedArtifactLink(href, token, artifacts, basePath);
+  if (copied) return copied;
   try {
     const url = new URL(href);
     if (
