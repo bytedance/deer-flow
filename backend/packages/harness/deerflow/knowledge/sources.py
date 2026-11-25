@@ -51,14 +51,18 @@ def strip_source_artifact(artifact: Any) -> Any:
     return artifact
 
 
+def _prune_citations(content: str, allowed: set[str]) -> str:
+    pattern = r"\[citation:((?:\\.|[^\]\\])*)\]\(#knowledge-source-([a-f0-9]{32})\)"
+    return re.sub(pattern, lambda match: match[0] if match[2] in allowed else match[1], content)
+
+
 def prune_sources(content: str, artifact: Any) -> tuple[str, Any]:
     """Budget transformations retain only evidence still visible to the model."""
     if not isinstance(artifact, Mapping) or artifact.get("knowledge_sources_version") != ARTIFACT_VERSION:
         return content, artifact
     sources = sources_from_messages([{"type": "tool", "content": content, "artifact": artifact}])
     allowed = {source.id for source in sources}
-    pattern = r"\[citation:((?:\\.|[^\]\\])*)\]\(#knowledge-source-([a-f0-9]{32})\)"
-    content = re.sub(pattern, lambda match: match[0] if match[2] in allowed else match[1], content)
+    content = _prune_citations(content, allowed)
     if "retrieval_sources" in artifact:
         return content, {**artifact, "retrieval_sources": [source.model_dump(mode="json", exclude_none=True) for source in sources]}
     return content, {**artifact, **source_artifact(sources)}
@@ -214,6 +218,37 @@ def budget_dependent_result(content: str, artifact: Any, max_chars: int, *, file
             if source is not None:
                 retained_evidence.add(entry.position)
                 retained_sources[source.id] = source
+
+    # Cleaning an excerpt changes its source ID; repeat to remove citations to
+    # superseded IDs too. Each changing pass removes at least one destination.
+    while True:
+        allowed = set(retained_sources)
+        sources: dict[str, KnowledgeSource] = {}
+        cleaned_entries, cleaned_layout = [], []
+        retained_evidence = set()
+        used = 0
+        for text, entry in zip(entries, retained_layout, strict=True):
+            if not retained_evidence.issuperset(entry["depends_on"]):
+                continue
+            evidence_line = _evidence_line(entry["depends_on"])
+            body = _prune_citations(text.split("\n", 1)[1][len(evidence_line) :], allowed).strip()
+            if not body:
+                continue
+            source = retained_sources.get(entry["source_id"])
+            if source is not None:
+                source = KnowledgeSource.model_validate({**source.model_dump(exclude={"id"}), "excerpt": body})
+                sources[source.id] = source
+                retained_evidence.add(entry["position"])
+            text = f"[{entry['position']}] {citation(source) if source else 'Unattributed content'}\n{evidence_line}{body}"
+            start = used + (2 if cleaned_entries else 0)
+            used = start + len(text)
+            cleaned_entries.append(text)
+            cleaned_layout.append(entry | {"start": start, "end": used, "source_id": source.id if source else None})
+        entries, retained_layout = cleaned_entries, cleaned_layout
+        stable = sources == retained_sources
+        retained_sources = sources
+        if stable:
+            break
 
     text = "\n\n".join(entries)
     separator = "\n\n" if text else ""

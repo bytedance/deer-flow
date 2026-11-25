@@ -383,6 +383,86 @@ def test_global_budget_preserves_file_backed_retrieval_within_budget(tmp_path, m
     assert sources_from_messages([notice_only]) == []
 
 
+@pytest.mark.parametrize("file_backed", [False, True])
+def test_dependent_budget_reconciles_inline_citations_on_replay(tmp_path, file_backed):
+    from deerflow.agents.middlewares.tool_output_budget_middleware import _patch_tool_message
+    from deerflow.config.tool_output_config import ToolOutputConfig
+    from deerflow.knowledge.sources import citation
+
+    omitted = KnowledgeSource(provider="test", title="Original evidence", excerpt="Long evidence. " + "x" * 600)
+    report = KnowledgeSource(provider="test", title="Saved report", excerpt="Report cites " + citation(omitted))
+    short = KnowledgeSource(provider="test", title="Short evidence", excerpt="Short independent evidence.")
+    content, artifact = format_result(
+        RetrievalResult(
+            hits=[
+                RetrievalHit(content=omitted.excerpt, source=omitted),
+                RetrievalHit(content=report.excerpt, source=report),
+                RetrievalHit(content=short.excerpt, source=short),
+                RetrievalHit(content="Independent relation", depends_on=[3]),
+            ]
+        )
+    )
+    original = ToolMessage(content=content, artifact=artifact, name="entity_relations_search", tool_call_id="inline")
+    config = ToolOutputConfig(externalize_min_chars=1 if file_backed else 0, fallback_max_chars=800 if file_backed else 460, preview_head_chars=460, preview_tail_chars=0)
+    projected = _patch_tool_message(original, config, str(tmp_path) if file_backed else None)
+    sources = sources_from_messages([projected])
+    assert [source.title for source in sources] == [report.title, short.title]
+    assert sources[0].excerpt == "Report cites Original evidence"
+    assert sources[0].id != report.id
+    assert omitted.id not in projected.content and report.id not in projected.content
+    assert citation(sources[0]) in projected.content
+    assert "Independent relation" in projected.content
+    assert tool_result_source_digest(projected) == tool_content_fingerprint(content)
+
+    restored = ToolMessage.model_validate_json(projected.model_dump_json())
+    replayed = _patch_tool_message(restored, ToolOutputConfig(externalize_min_chars=0, fallback_max_chars=len(projected.content) - 1), None)
+    assert sources_from_messages([replayed]) == sources
+    assert "Independent relation" in replayed.content
+    assert tool_result_source_digest(replayed) == tool_content_fingerprint(content)
+    assert original.content == content and original.artifact == artifact
+
+
+@pytest.mark.parametrize("empty_report", [False, True])
+def test_dependent_budget_cleans_cascading_citations_and_empty_evidence(empty_report):
+    from deerflow.agents.middlewares.tool_output_budget_middleware import _patch_tool_message
+    from deerflow.config.tool_output_config import ToolOutputConfig
+    from deerflow.knowledge.sources import citation
+
+    omitted = KnowledgeSource(provider="test", title="Omitted", excerpt="x" * 1600)
+    kept = KnowledgeSource(provider="test", title="Kept", excerpt="Independent evidence")
+    report_body = f"[citation:](#knowledge-source-{omitted.id})" if empty_report else f"Report cites {citation(omitted)} and {citation(kept)}"
+    report = KnowledgeSource(provider="test", title="Report", excerpt=report_body)
+    summary = KnowledgeSource(provider="test", title="Summary", excerpt="Summary cites " + citation(report))
+    content, artifact = format_result(
+        RetrievalResult(
+            hits=[
+                RetrievalHit(content=omitted.excerpt, source=omitted),
+                RetrievalHit(content=kept.excerpt, source=kept),
+                RetrievalHit(content=report.excerpt, source=report),
+                RetrievalHit(content=summary.excerpt, source=summary),
+                RetrievalHit(content="Dependent relation cites " + citation(summary), depends_on=[2, 3, 4]),
+                RetrievalHit(content="Independent relation", depends_on=[2]),
+            ]
+        ),
+        max_chars_per_chunk=2000,
+    )
+    original = ToolMessage(content=content, artifact=artifact, tool_call_id="cascade")
+    projected = _patch_tool_message(original, ToolOutputConfig(externalize_min_chars=0, fallback_max_chars=900), None)
+    sources = sources_from_messages([projected])
+    assert [source.title for source in sources] == ([kept.title, summary.title] if empty_report else [kept.title, report.title, summary.title])
+    assert sources[0] == kept
+    assert sources[-1].excerpt == "Summary cites Report"
+    assert all(source.id not in projected.content for source in (omitted, report, summary))
+    assert ("Dependent relation" in projected.content) is not empty_report
+    if not empty_report:
+        assert sources[1].excerpt == f"Report cites Omitted and {citation(kept)}"
+    restored = ToolMessage.model_validate_json(projected.model_dump_json())
+    replayed = _patch_tool_message(restored, ToolOutputConfig(externalize_min_chars=0, fallback_max_chars=len(projected.content) - 1), None)
+    assert sources_from_messages([replayed]) == sources
+    assert ("Dependent relation" in replayed.content) is not empty_report
+    assert len(replayed.content) < len(projected.content) <= 900
+
+
 def test_global_budget_prunes_hidden_evidence_and_orphan_citations() -> None:
     from deerflow.agents.middlewares.tool_output_budget_middleware import _patch_tool_message
     from deerflow.config.tool_output_config import ToolOutputConfig

@@ -249,8 +249,10 @@ with evidence dependencies or previewing it after saving the full output.
 A dependent entry stays visible only when all of its cited excerpts and source
 records fit in the same output. File-backed previews reserve space for a complete
 `read_file` notice during initial budgeting and history replay, omitting the notice
-if it exceeds the cap. Replay keeps the stored blob reference. Other results use
-the existing citation pruning.
+if it exceeds the cap. Replay keeps the stored blob reference. Inline citations
+whose evidence was omitted or changed become plain labels; affected source IDs
+and entry offsets are rebuilt so replay validates the displayed excerpts.
+Other results use the existing citation pruning.
 Subagents accumulate at most 100 validated sources across values frames before
 terminal publication, surviving compaction. Ordinary `task` forwards only
 sources whose handles appear in the child report, with a bounded evidence
