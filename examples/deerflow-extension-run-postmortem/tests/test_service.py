@@ -116,3 +116,38 @@ async def test_max_events_is_bounded(max_events: int):
         await service.postmortem(thread_id="t1", run_id="r1", max_events=max_events)
 
     assert excinfo.value.code == "BAD_REQUEST"
+
+
+class TwoRunEvidence:
+    """Per-run snapshots and event pages keyed by snapshot ref."""
+
+    def __init__(self) -> None:
+        self.snapshots = {
+            "base": CompletedRunSnapshot(snapshot_ref="snap-base", thread_id="t1", run_id="base", owner_id="alice", status="success", seal_state="sealed", event_count=1),
+            "head": CompletedRunSnapshot(snapshot_ref="snap-head", thread_id="t1", run_id="head", owner_id="alice", status="error", seal_state="sealed", event_count=2),
+        }
+        self.pages = {
+            "snap-base": CompletedRunEventPage(items=(event(1, "run.start"),)),
+            "snap-head": CompletedRunEventPage(items=(event(1, "run.start"), event(2, "run.error"))),
+        }
+
+    async def list_changed_runs(self, *, cursor: str | None = None, limit: int = 200) -> RunPage:
+        return RunPage(items=())
+
+    async def get_snapshot(self, *, thread_id: str, run_id: str, limits: EvidenceLimits = EvidenceLimits()) -> CompletedRunSnapshot:
+        return self.snapshots[run_id]
+
+    async def read_events(self, *, snapshot_ref: str, cursor: str | None = None, limits: EvidenceLimits = EvidenceLimits()) -> CompletedRunEventPage:
+        return self.pages[snapshot_ref]
+
+
+async def test_comparison_reads_both_runs():
+    service = PostmortemService()
+    await service.start(ExtensionRuntimeDeps(completed_run_evidence=TwoRunEvidence()))
+
+    comparison = await service.comparison(thread_id="t1", base_run_id="base", head_run_id="head")
+
+    assert comparison.base.status == "success"
+    assert comparison.head.status == "error"
+    assert comparison.status_changed is True
+    assert [metric.name for metric in comparison.metrics][:2] == ["events", "user_messages"]

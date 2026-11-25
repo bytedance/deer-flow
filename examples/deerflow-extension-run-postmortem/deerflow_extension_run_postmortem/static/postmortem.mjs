@@ -25,6 +25,22 @@ const WORDS = {
       `Scanned ${scanned} run records without reaching the end; the newest run could not be confirmed. Enter the run ID manually.`,
     showing: (shown, total) => `Showing ${shown} of ${total} events`,
     showMore: (count) => `Show ${count} more events`,
+    baseRun: "Base run ID",
+    compare: "Compare with a base run",
+    comparison: "Comparison",
+    added: "added",
+    resolved: "resolved",
+    counter: "Counter",
+    delta: "Δ",
+    metrics: {
+      events: "Events",
+      user_messages: "User messages",
+      assistant_messages: "Assistant messages",
+      tool_results: "Tool results",
+      tool_failures: "Tool failures",
+      subagents_started: "Subagents started",
+      subagents_ended: "Subagents ended",
+    },
     verdict: "Verdict",
     anomalies: "Anomalies",
     none: "None detected in the retained evidence.",
@@ -66,6 +82,22 @@ const WORDS = {
       `只扫描了 ${scanned} 条运行记录，未到末尾，无法确认最新一次；请手动填写运行 ID。`,
     showing: (shown, total) => `已显示 ${shown} / ${total} 条事件`,
     showMore: (count) => `再显示 ${count} 条`,
+    baseRun: "基线运行 ID",
+    compare: "与基线运行对比",
+    comparison: "对比",
+    added: "新增",
+    resolved: "已解决",
+    counter: "计数",
+    delta: "变化",
+    metrics: {
+      events: "事件数",
+      user_messages: "用户消息",
+      assistant_messages: "助手消息",
+      tool_results: "工具结果",
+      tool_failures: "工具失败",
+      subagents_started: "子代理启动",
+      subagents_ended: "子代理结束",
+    },
     verdict: "结论",
     anomalies: "异常",
     none: "在保留的证据中未发现异常。",
@@ -169,6 +201,12 @@ export function mount(root, context) {
     placeholder: "run id",
     "aria-label": t.run,
   });
+  const baseRunInput = el("input", {
+    type: "text",
+    maxlength: "256",
+    placeholder: "base run id",
+    "aria-label": t.baseRun,
+  });
   const maxInput = el("input", {
     type: "number",
     min: "1",
@@ -191,6 +229,10 @@ export function mount(root, context) {
     class: "pm-primary",
     text: t.generate,
   });
+  const compareButton = el("button", {
+    type: "button",
+    text: t.compare,
+  });
   const statusLine = el("p", { class: "pm-status", role: "status" });
   const errorLine = el("p", { class: "pm-error", role: "alert" });
 
@@ -206,12 +248,17 @@ export function mount(root, context) {
     text: t.download,
     disabled: "disabled",
   });
+  const comparePanel = el("div", { class: "pm-report", hidden: "hidden" });
+  const compareVerdict = el("p", { class: "pm-verdict" });
+  const compareAnomalies = el("ul", { class: "pm-list" });
+  const compareBody = el("tbody");
 
   const form = el("form", { class: "pm-form" }, [
     el("label", { class: "pm-field" }, [el("span", { text: t.thread }), threadInput]),
     el("label", { class: "pm-field" }, [el("span", { text: t.run }), runInput]),
+    el("label", { class: "pm-field" }, [el("span", { text: t.baseRun }), baseRunInput]),
     el("label", { class: "pm-field" }, [el("span", { text: t.maxEvents }), maxInput]),
-    el("div", { class: "pm-actions" }, [latestButton, generateButton]),
+    el("div", { class: "pm-actions" }, [latestButton, generateButton, compareButton]),
   ]);
 
   page.append(
@@ -221,6 +268,7 @@ export function mount(root, context) {
     statusLine,
     errorLine,
     report,
+    comparePanel,
   );
   report.append(
     verdict,
@@ -235,6 +283,21 @@ export function mount(root, context) {
     caveats,
     el("div", { class: "pm-actions" }, [downloadButton]),
   );
+  comparePanel.append(
+    el("h3", { text: t.comparison }),
+    compareVerdict,
+    el("h3", { text: t.anomalies }),
+    compareAnomalies,
+    el("table", {}, [
+      el("tr", {}, [
+        el("th", { text: t.counter }),
+        el("th", { text: "Base" }),
+        el("th", { text: "Head" }),
+        el("th", { text: t.delta }),
+      ]),
+      compareBody,
+    ]),
+  );
   root.replaceChildren(style, page);
 
   const setStatus = (text) => {
@@ -246,6 +309,7 @@ export function mount(root, context) {
   const setBusy = (busy) => {
     latestButton.disabled = busy;
     generateButton.disabled = busy;
+    compareButton.disabled = busy;
     downloadButton.disabled = busy || !pending;
   };
   const payloadFor = () => {
@@ -363,10 +427,73 @@ export function mount(root, context) {
 
   const clearReport = () => {
     report.hidden = true;
+    comparePanel.hidden = true;
     pending = null;
     timelineEntries = [];
     renderedRows = 0;
     setBusy(false);
+  };
+
+  const renderCompare = (data) => {
+    comparePanel.hidden = false;
+    compareVerdict.textContent = data.verdict || "";
+    compareAnomalies.replaceChildren();
+    for (const code of data.anomalies_added || []) {
+      compareAnomalies.append(el("li", { text: `+ ${code}` }));
+    }
+    for (const code of data.anomalies_removed || []) {
+      compareAnomalies.append(el("li", { text: `− ${code}` }));
+    }
+    if (!compareAnomalies.childElementCount) {
+      compareAnomalies.append(el("li", { text: t.none }));
+    }
+    compareBody.replaceChildren();
+    for (const metric of data.metrics || []) {
+      compareBody.append(
+        el("tr", {}, [
+          el("td", { text: t.metrics[metric.name] || metric.name }),
+          el("td", { class: "pm-seq", text: String(metric.base) }),
+          el("td", { class: "pm-seq", text: String(metric.head) }),
+          el("td", {
+            class: "pm-seq",
+            text: `${metric.delta > 0 ? "+" : ""}${metric.delta}`,
+          }),
+        ]),
+      );
+    }
+  };
+
+  const compare = async () => {
+    const payload = payloadFor();
+    const base = baseRunInput.value.trim();
+    if (!payload.thread_id || !payload.run_id || !base) {
+      setStatus(t.missing);
+      return;
+    }
+    setError("");
+    setStatus(t.loading);
+    setBusy(true);
+    try {
+      const data = await context.callBackend("compare", {
+        thread_id: payload.thread_id,
+        base_run_id: base,
+        head_run_id: payload.run_id,
+        max_events: payload.max_events,
+      });
+      if (!alive()) return;
+      if (!data || data.not_found) {
+        comparePanel.hidden = true;
+        setStatus(t.notFound);
+        return;
+      }
+      renderCompare(data);
+      setStatus("");
+    } catch {
+      if (!alive()) return;
+      setError(t.failed);
+    } finally {
+      if (alive()) setBusy(false);
+    }
   };
 
   const generate = async () => {
@@ -466,6 +593,7 @@ export function mount(root, context) {
   };
   form.addEventListener("submit", onSubmit);
   latestButton.addEventListener("click", () => void loadLatest());
+  compareButton.addEventListener("click", () => void compare());
   downloadButton.addEventListener("click", () => void download());
 
   return {

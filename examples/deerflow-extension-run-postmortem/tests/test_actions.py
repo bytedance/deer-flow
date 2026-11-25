@@ -158,3 +158,32 @@ async def test_an_unscanned_feed_never_reports_an_older_run_as_latest():
 
     assert result == {"run": None, "complete": False, "scanned": 3}
     assert evidence.run_calls == [None, "c2", "c3"]
+
+
+async def test_compare_action_returns_the_delta():
+    evidence = FakeEvidence(snapshots={"base": snapshot(run_id="base"), "head": snapshot(run_id="head", status="error")})
+    _, actions = await service_with(evidence)
+
+    result = await actions_by_name(actions)["compare"]({"thread_id": "t1", "base_run_id": "base", "head_run_id": "head"}, user("alice"))
+
+    assert result["base_run_id"] == "base"
+    assert result["head_run_id"] == "head"
+    assert result["status_changed"] is True
+    assert result["metrics"]
+    assert "verdict" in result
+
+
+async def test_compare_action_hides_a_run_the_caller_does_not_own():
+    evidence = FakeEvidence(snapshots={"base": snapshot(run_id="base"), "head": snapshot(run_id="head", owner="bob")})
+    _, actions = await service_with(evidence)
+
+    result = await actions_by_name(actions)["compare"]({"thread_id": "t1", "base_run_id": "base", "head_run_id": "head"}, user("alice"))
+
+    assert result == {"not_found": True}
+
+
+async def test_compare_action_requires_both_run_ids():
+    _, actions = await service_with(FakeEvidence())
+
+    with pytest.raises(ValueError):
+        await actions_by_name(actions)["compare"]({"thread_id": "t1", "base_run_id": "r1"}, user("alice"))

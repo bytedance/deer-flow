@@ -4,9 +4,17 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from deerflow_extension_api import CompletedRunEvent, CompletedRunSnapshot
 
-from deerflow_extension_run_postmortem.postmortem import build_postmortem, render_markdown, to_dict
+from deerflow_extension_run_postmortem.postmortem import (
+    build_postmortem,
+    compare_postmortems,
+    comparison_to_dict,
+    render_comparison_markdown,
+    render_markdown,
+    to_dict,
+)
 
 
 def event(seq: int, event_type: str, category: str, content) -> CompletedRunEvent:
@@ -149,3 +157,59 @@ def test_prose_starting_with_error_is_not_a_tool_failure():
 
     assert prose_only.tool_failures == 0
     assert marker_only.tool_failures == 1
+
+
+def test_comparison_reports_what_changed_between_two_runs():
+    base = build_postmortem(
+        snapshot(run_id="base", event_count=2),
+        [event(1, "run.start", "trace", {}), event(2, "llm.human.input", "message", {"content": "go"})],
+    )
+    head = build_postmortem(
+        snapshot(run_id="head", status="error", event_count=5),
+        [
+            event(1, "run.start", "trace", {}),
+            event(2, "llm.human.input", "message", {"content": "go"}),
+            event(3, "llm.tool.result", "message", {"name": "read_file", "content": "Error: missing"}),
+            event(4, "run.error", "error", {"message": "boom"}),
+            event(5, "run.delivery", "outputs", {"satisfied": False, "presented": 0, "produced_paths": ["x"]}),
+        ],
+    )
+
+    comparison = compare_postmortems(base, head)
+
+    assert comparison.status_changed is True
+    assert comparison.delivery_changed is True
+    assert comparison.anomalies_added == ("delivery_incomplete", "run_failed", "run_or_model_errors", "tool_failures")
+    assert comparison.anomalies_removed == ()
+    assert comparison.new_event_types == ("llm.tool.result", "run.delivery", "run.error")
+    metrics = {metric.name: metric for metric in comparison.metrics}
+    assert metrics["events"].delta == 3
+    assert metrics["tool_failures"].delta == 1
+    assert "new anomalies" in comparison.verdict
+
+    data = comparison_to_dict(comparison)
+    assert data["base_run_id"] == "base"
+    assert data["head_run_id"] == "head"
+    assert {"name": "tool_failures", "base": 0, "head": 1, "delta": 1} in data["metrics"]
+
+    markdown = render_comparison_markdown(comparison)
+    assert markdown.startswith("# Run comparison — `t1`")
+    assert "| tool_failures | 0 | 1 | +1 |" in markdown
+
+
+def test_comparison_reports_resolved_anomalies():
+    base = build_postmortem(snapshot(run_id="base", status="error", event_count=1), [event(1, "run.error", "error", {"message": "boom"})])
+    head = build_postmortem(snapshot(run_id="head", event_count=1), [event(1, "run.start", "trace", {})])
+
+    comparison = compare_postmortems(base, head)
+
+    assert comparison.anomalies_removed == ("run_failed", "run_or_model_errors")
+    assert "resolved anomalies" in comparison.verdict
+
+
+def test_comparison_refuses_runs_from_different_threads():
+    base = build_postmortem(snapshot(run_id="a"), [])
+    other = build_postmortem(snapshot(thread_id="t2", run_id="b"), [])
+
+    with pytest.raises(ValueError):
+        compare_postmortems(base, other)

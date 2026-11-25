@@ -53,7 +53,7 @@ def test_install_registers_one_service_and_its_router(monkeypatch):
     assert [getattr(router, "prefix", "") for _, router in loaded.routers] == [PREFIX]
     ((_, plugin),) = loaded.plugins
     assert plugin.namespace == "community.run-postmortem"
-    assert [action.name for action in plugin.backend] == ["latest", "report", "markdown"]
+    assert [action.name for action in plugin.backend] == ["latest", "report", "markdown", "compare"]
     assets = load_browser_assets(plugin.frontend)
     assert assets.entry == "static/postmortem.mjs"
     assert assets.module == "run-postmortem.v1"
