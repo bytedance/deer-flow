@@ -371,7 +371,7 @@ class _BoundAgentRuns:
 
         async with self._request("runs:create") as request:
             try:
-                worker, frozen, project_id, saved_settings = await request.app.state.coordination_workers.repo.admission(self._user_id, task_id, execution_id)
+                worker, frozen, project_id, saved_settings, channel_origin = await request.app.state.coordination_workers.repo.admission(self._user_id, task_id, execution_id)
             except TaskNotFound as exc:
                 raise AgentRunError(404, "Worker task unavailable") from exc
             except TaskConflict as exc:
@@ -395,6 +395,8 @@ class _BoundAgentRuns:
                 context=context,
                 on_disconnect="continue",
             )
+            if channel_origin is not None:
+                request.state.run_origin = make_origin("im_channel", provider=channel_origin["provider"])
             request.state.coordination_execution_id = execution_id
             request.state.coordination_grant_id = grant_id
             coordinator_factory = None

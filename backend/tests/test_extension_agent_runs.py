@@ -803,7 +803,7 @@ async def worker_gateway(runtime, tmp_path):
     runs, state, request, entered, _ = runtime
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'workers.db'}")
     await bootstrap_schema(engine, backend="sqlite")
-    factory = async_sessionmaker(engine)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory.begin() as session:
         session.add(UserRow(id=str(request.state.user.id), email=request.state.user.email))
     state.run_store = RunRepository(factory)
@@ -1483,3 +1483,154 @@ async def test_bound_channel_grant_is_invalid_after_reconnect_and_owner_can_reau
     assert (await client.put(f"{url}/authorization")).raise_for_status().json()["authorization_required"] is False
     assert (await client.delete(f"{url}/authorization")).status_code == 204
     assert (await client.get(url)).json()["authorization_required"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delivery", ["retry", "rebind", "mute"])
+async def test_feishu_private_task_receipt_and_proactive_delivery(worker_gateway, monkeypatch, tmp_path, delivery):
+    import asyncio
+    import json
+    import threading
+    from datetime import UTC, datetime, timedelta
+    from uuid import uuid4
+
+    import lark_oapi as lark
+    from langchain_core.messages import AIMessage, ToolMessage
+    from langchain_core.outputs import ChatGeneration, LLMResult
+    from langgraph.types import Command
+    from lark_oapi.api.im import v1
+    from sqlalchemy import select
+
+    from app.channels.feishu import FeishuChannel
+    from app.channels.service import ChannelService
+    from app.channels.store import JsonChannelStore
+    from app.scheduler.notification_delivery import NotificationDeliveryWorker
+    from deerflow.config.paths import get_paths
+    from deerflow.persistence.notification_deliveries import NotificationDeliveryRepository
+    from deerflow.persistence.notification_deliveries.model import NotificationDeliveryRow
+    from deerflow.persistence.user.im_notifications import ImNotificationPreferencesRepository
+
+    client, _, state, entered, owner = worker_gateway
+    tasks = state.coordination_workers
+    connections = tasks._connections
+    binding = dict(owner_user_id=owner, provider="feishu", external_account_id="ou_test", workspace_id="oc_private", metadata={"chat_id": "oc_private", "chat_type": "p2p"})
+    connection = await connections.upsert_connection(**binding)
+    sessions = connections.session_factory
+    preferences = ImNotificationPreferencesRepository(sessions)
+    outbox = NotificationDeliveryRepository(sessions)
+    channels = ChannelService(connection_repo=connections, require_bound_identity=True, store=JsonChannelStore(tmp_path / "im.json"), dispatch_coordination_task=tasks.dispatch_bound_channel)
+    channel = FeishuChannel(channels.bus, {"connection_repo": connections})
+    channel._main_loop = loop = asyncio.get_running_loop()
+    channel._running = True
+    channel._thread = Mock()
+    channel._open_threadsafe_future_intake()
+    channel._api_client = lark.Client.builder().app_id(f"cli_{uuid4().hex}").app_secret("synthetic-test-value").build()
+    for name in ("CreateMessage", "ReplyMessage", "PatchMessage", "CreateMessageReaction", "CreateFile"):
+        for suffix in ("Request", "RequestBody"):
+            setattr(channel, f"_{name}{suffix}", getattr(v1, f"{name}{suffix}"))
+    channel._Emoji = v1.Emoji
+    channels.bus.subscribe_outbound(channel._on_outbound)
+
+    sent, uploads, receipts = [], [], asyncio.Queue()
+    loop_thread = threading.get_ident()
+    rejected = False
+
+    def transport(method, url, *, data, params, **kwargs):
+        nonlocal rejected
+        assert threading.get_ident() != loop_thread
+        payload = {}
+        code = 0
+        if url.endswith("/tenant_access_token/internal"):
+            return SimpleNamespace(status_code=200, headers={}, content=b'{"code":0,"tenant_access_token":"test-token","expire":7200}')
+        if url.endswith("/files"):
+            uploads.append(data.to_string())
+            payload = {"file_key": f"file-{len(uploads)}"}
+        elif url.endswith("/messages") and (body := json.loads(data)).get("uuid"):
+            assert params == [("receive_id_type", "chat_id")]
+            sent.append(body)
+            if body["msg_type"] == "file" and not rejected:
+                rejected = True
+                code = 230020
+        elif url.endswith(("/reply", "/messages")) or method == "PATCH":
+            body = json.loads(data)
+            text = "\n".join(element.get("content", "") for element in json.loads(body["content"])["elements"])
+            if text.startswith("Task ID: "):
+                loop.call_soon_threadsafe(receipts.put_nowait, text)
+            payload = {"message_id": "om_ack"}
+        return SimpleNamespace(status_code=200, headers={}, content=json.dumps({"code": code, "msg": "test", "data": payload}).encode())
+
+    monkeypatch.setattr("lark_oapi.core.http.transport.requests.request", transport)
+
+    async def produce(prompt, runtime):
+        outputs = get_paths().sandbox_outputs_dir(runtime.context["thread_id"], user_id=owner)
+        await asyncio.to_thread(outputs.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread((outputs / "report.txt").write_bytes, f"artifact:{prompt}".encode())
+        journal = runtime.context["__run_journal"]
+        journal._remember_current_run_tool_calls(AIMessage(content="", tool_calls=[{"id": "present", "name": "present_files", "args": {}}]), caller="lead_agent")
+        journal.on_tool_end(Command(update={"artifacts": ["/mnt/user-data/outputs/report.txt"], "messages": [ToolMessage("Presented", tool_call_id="present")]}), run_id=uuid4())
+        journal.on_llm_end(LLMResult(generations=[[ChatGeneration(message=AIMessage(content=f"<think>private reasoning</think>Result: {prompt}"))]]), run_id=uuid4())
+
+    state.present_worker_report = produce
+    model = Mock()
+    model.bind_tools.return_value.ainvoke = AsyncMock(
+        return_value=AIMessage(content="", tool_calls=[{"name": "submit_task_decision", "id": "plan", "args": {"tasks": [{"key": "one", "objective": "wait"}, {"key": "two", "objective": "finish"}]}}])
+    )
+    monkeypatch.setattr("app.gateway.coordinator_agent.create_chat_model", lambda **_: model)
+    monkeypatch.setattr("app.gateway.coordination_workers.RECOVERY_INTERVAL", 0.05)
+
+    message = SimpleNamespace(chat_id="oc_private", message_id="om_start", chat_type="p2p", message_type="text", content=json.dumps({"text": "/task start Write a report"}))
+    event = SimpleNamespace(event=SimpleNamespace(message=message, sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="ou_test"))))
+
+    def worker():
+        return NotificationDeliveryWorker(
+            delivery_repo=outbox,
+            resolve_channel=lambda _: channel,
+            resolve_connections=connections.list_connections,
+            resolve_notification_preferences=preferences.get,
+            read_coordination_artifact=tasks.repo.read_artifact,
+        )
+
+    await channels.manager.start()
+    tasks.start_recovery()
+    try:
+        await asyncio.to_thread(channel._on_message, event)
+        ack = await asyncio.wait_for(receipts.get(), 5)
+        task_id = ack.splitlines()[0].removeprefix("Task ID: ")
+        await asyncio.wait_for(entered.wait(), 5)
+        await worker().run_once(now=datetime.now(UTC))
+        assert sent == uploads == []
+        state.release_worker.set()
+        final = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+        assert "channel_origin" not in final["task"]
+        assert len(final["children"]) == 2
+        planner = await state.run_store.get(final["execution"]["run_id"], user_id=owner)
+        assert planner["metadata"]["deerflow_origin"] == {"kind": "im_channel", "provider": "feishu"}
+
+        if delivery == "rebind":
+            await connections.disconnect_connection(connection_id=connection["id"], owner_user_id=owner)
+            await connections.upsert_connection(**binding)
+        if delivery == "mute":
+            await preferences.patch(owner, {"feishu": False})
+        await worker().run_once(now=datetime.now(UTC))
+        if delivery != "retry":
+            assert sent == uploads == []
+            return
+
+        await worker().run_once(now=datetime.now(UTC) + timedelta(minutes=2))
+        assert all(body["receive_id"] == "oc_private" for body in sent)
+        cards = [body for body in sent if body["msg_type"] == "interactive"]
+        files = [body for body in sent if body["msg_type"] == "file"]
+        (card,) = cards
+        first_attempt, other_file, retry = files
+        content = card["content"]
+        assert task_id in content and "Result: wait" in content and "Result: finish" in content
+        assert "private reasoning" not in content
+        assert retry["uuid"] == first_attempt["uuid"] != other_file["uuid"]
+        assert len(uploads) == 3 and all(b"report.txt" in upload for upload in uploads)
+        assert {text for text in (b"artifact:wait", b"artifact:finish") if any(text in upload for upload in uploads)} == {b"artifact:wait", b"artifact:finish"}
+        async with sessions() as session:
+            statuses = await session.scalars(select(NotificationDeliveryRow.status).filter_by(source_kind="coordination_task"))
+            assert list(statuses) == ["sent"] * 3
+    finally:
+        state.release_worker.set()
+        await channels.manager.stop()

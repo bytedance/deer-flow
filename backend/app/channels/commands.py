@@ -8,6 +8,8 @@ required.
 
 from __future__ import annotations
 
+FEISHU_TASK_COMMAND = "/task"
+
 KNOWN_CHANNEL_COMMANDS: frozenset[str] = frozenset(
     {
         "/agent",

@@ -13,7 +13,8 @@ from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.persistence.coordination.model import CoordinationInputRow, CoordinationTaskRow, TaskStatus
+from deerflow.persistence.coordination.model import TASK_NOTIFICATION_SOURCE, CoordinationInputRow, CoordinationTaskRow, TaskStatus
+from deerflow.persistence.notification_deliveries import NotificationDeliveryRepository
 from deerflow.utils.time import coerce_iso
 
 _OPEN = {TaskStatus.QUEUED, TaskStatus.RUNNING}
@@ -92,6 +93,7 @@ class CoordinationTaskRepository:
         depends_on: Sequence[str] = (),
         coordinator: bool = False,
         run_settings: dict[str, int | bool] | None = None,
+        channel_origin: dict[str, str] | None = None,
     ) -> dict:
         """Create a task once. Dependencies refer to previously created siblings."""
         _request_id(request_id)
@@ -99,6 +101,8 @@ class CoordinationTaskRepository:
             raise ValueError("Task objective is required")
         if coordinator and parent_id is not None:
             raise TaskConflict("Only a root task can use a Coordinator")
+        if channel_origin is not None and not coordinator:
+            raise TaskConflict("Only a Coordinator task can have a messaging origin")
         dependencies = sorted(set(depends_on))
         saved_run_settings = dict(run_settings) if run_settings else None
         async with self._write() as session:
@@ -114,6 +118,7 @@ class CoordinationTaskRepository:
                 depends_on=dependencies,
                 coordinator=True if coordinator else None,
                 run_settings=saved_run_settings,
+                channel_origin=channel_origin,
             )
             existing = await session.scalar(select(CoordinationTaskRow).filter_by(owner_id=owner_id, request_id=request_id))
             if existing is None:
@@ -239,6 +244,7 @@ class CoordinationTaskRepository:
             if task.latest_input_seq != covered_input_seq:
                 raise TaskConflict("Result does not cover the current task inputs")
             await self._finish_locked(session, task, outcome, result_ref)
+            await self._enqueue_completion(session, task)
             return _snapshot(task)
 
     @staticmethod
@@ -257,6 +263,28 @@ class CoordinationTaskRepository:
         task.status = outcome
         task.result_ref = result_ref
         _touch(task)
+
+    async def _enqueue_completion(self, session, task, *, results=(), artifacts=()) -> None:
+        origin = task.channel_origin
+        if origin is None:
+            return
+        outbox = NotificationDeliveryRepository(self._sessions)
+        fields = {
+            "source_kind": TASK_NOTIFICATION_SOURCE,
+            "event": task.status,
+            "provider": origin["provider"],
+            "target": origin["account_id"],
+            "owner_user_id": task.owner_id,
+        }
+        payload = {"task_id": task.id, "origin": origin}
+        await outbox.enqueue_in_session(session, source_key=task.id, payload={**payload, "results": list(results), "attachment_count": len(artifacts)}, **fields)
+        for worker_task_id, artifact_id in artifacts:
+            await outbox.enqueue_in_session(
+                session,
+                source_key=f"{task.id}:{artifact_id}",
+                payload={**payload, "worker_task_id": worker_task_id, "artifact_id": artifact_id},
+                **fields,
+            )
 
     async def _subtree(self, session: AsyncSession, task: CoordinationTaskRow) -> list[CoordinationTaskRow]:
         rows = (await session.scalars(select(CoordinationTaskRow).filter_by(owner_id=task.owner_id, root_id=task.root_id))).all()
@@ -299,6 +327,7 @@ class CoordinationTaskRepository:
                 if row.status == TaskStatus.CANCELLING:
                     row.status = TaskStatus.CANCELLED
                     _touch(row)
+                    await self._enqueue_completion(session, row)
             return _snapshot(task)
 
     async def _confirm_stopped(self, session, rows):
