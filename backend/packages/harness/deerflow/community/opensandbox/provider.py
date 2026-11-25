@@ -132,8 +132,8 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
     needs_upload_permission_adjustment = True
     supports_agent_skill_isolation = True
     # acquire() installs the thread's prepared skill view on new and warm
-    # remotes, so a fresh policy-scoped run needs no eager acquire. An active
-    # remote is reused as is: holds_active_thread_sandbox() keeps that eager.
+    # remotes, so a fresh policy-scoped run can defer acquisition. An active
+    # or initializing remote can already hold a different view.
     supports_lazy_agent_skill_isolation = True
     _idle_checker_thread_name = "opensandbox-idle-reaper"
     _MAX_SYNC_FILES = 2000
@@ -311,12 +311,16 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         logger.warning("Invalidating OpenSandbox %s after terminal failure: %s", sandbox_id, reason)
         self._destroy_quietly(sandbox, context="terminal failure")
 
-    def holds_active_thread_sandbox(self, thread_id: str, *, user_id: str | None) -> bool:
-        # acquire() returns an active remote after renew() without installing
-        # the run's prepared skill view, so that case must stay eager.
+    def requires_eager_agent_skill_sync(self, thread_id: str, *, user_id: str | None) -> bool:
+        sandbox_id = self._sandbox_id(thread_id, user_id or "")
         with self._lock:
             existing = self._thread_sandboxes.get(self._thread_key(thread_id, user_id))
-            return existing is not None and existing in self._sandboxes
+            if existing is not None and existing in self._sandboxes:
+                return True
+            # An acquire can already be uploading an older view before the
+            # remote enters the active registry. Read both under the registry
+            # lock so publication cannot fall between these checks.
+            return self._acquire_serializer.has_pending(sandbox_id)
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         with self._lock:

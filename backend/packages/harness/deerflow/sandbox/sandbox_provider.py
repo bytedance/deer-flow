@@ -30,13 +30,12 @@ class SandboxProvider(ABC):
 
     _signal_handlers_deferred = False
 
-    def holds_active_thread_sandbox(self, thread_id: str, *, user_id: str | None) -> bool:
-        """Whether a lazy acquire for this thread would reuse an already active remote.
+    def requires_eager_agent_skill_sync(self, thread_id: str, *, user_id: str | None) -> bool:
+        """Whether this scope needs eager synchronization on a lazy provider.
 
-        A provider whose acquire installs the prepared skill view only on new
-        or warm remotes returns True here, so a policy-scoped run that starts
-        while another operation (an upload) holds the thread's remote keeps the
-        eager acquire and strict ``sync_agent_skills``.
+        Providers can require eager acquisition and strict ``sync_agent_skills``
+        when an active or initializing remote could reuse an older skill view.
+        This lookup reads only in-memory state.
         """
         return False
 

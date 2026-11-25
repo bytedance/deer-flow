@@ -82,11 +82,11 @@ model request.
 
 With lazy initialization, a fresh AIO or OpenSandbox run prepares its
 authorized Agent skill view without acquiring a sandbox until a sandbox-backed
-tool needs one; OpenSandbox installs that view when the tool acquires the
-remote. Existing sandbox state, or a thread remote that is already active,
-still requires eager policy rebinding; other
-upload-based providers still acquire and synchronize skills eagerly. Explicit sandbox
-prewarming remains a separate opt-in behavior.
+tool needs one. OpenSandbox installs that view when the tool acquires the
+remote. A run with existing sandbox state still rebinds eagerly. OpenSandbox
+also synchronizes eagerly when another operation holds or is initializing the
+thread's remote. Other upload-based providers acquire and synchronize skills
+eagerly. Explicit sandbox prewarming remains a separate opt-in behavior.
 
 Per-thread isolated execution with virtual path translation:
 
