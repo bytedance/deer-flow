@@ -1,5 +1,6 @@
 import importlib
 import re
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -10,6 +11,7 @@ from langchain.agents.middleware import wrap_tool_call
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Command
 
 from deerflow.agents.factory import create_deerflow_agent
@@ -159,6 +161,111 @@ async def test_checkpoint_replay_under_new_run_returns_original_batch(batch_serv
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("lost_receipt", [True, False], ids=["unconfirmed-replay", "later-response"])
+@pytest.mark.parametrize("run_id", ["original-run", None], ids=["gateway-key", "sdk-key"])
+async def test_upgrade_recovers_legacy_checkpoint_without_duplicate_batches(batch_service, monkeypatch, tmp_path, lost_receipt, run_id):
+    service, repository = batch_service
+    config = {"configurable": {"thread_id": "thread-1"}}
+    context = {"user_id": "user-1", "run_id": run_id}
+    checkpoint_path = str(tmp_path / "legacy-checkpoints.sqlite")
+    create_batch = repository.create_batch
+
+    async def write_legacy_batch(**kwargs):
+        kwargs.pop("submission_digest", None)
+        kwargs["submission_key"] = f"{kwargs['run_id'] or kwargs['thread_id']}:{kwargs['tool_call_id']}"
+        return await create_batch(**kwargs)
+
+    @wrap_tool_call
+    async def legacy_tool_call(request, handler):
+        receipt = _message(await handler(request))
+        assert receipt.status == "success"
+        if lost_receipt:
+            raise RuntimeError("Lost legacy receipt before checkpoint")
+        return Command(update={"messages": [receipt]})
+
+    with monkeypatch.context() as legacy:
+        legacy.setattr(repository, "create_batch", write_legacy_batch)
+        async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
+            graph = create_agent(
+                model=_ScriptedModel(messages=iter([_dispatch(1), AIMessage(content="Done")])),
+                tools=tool_module.bind_batch_tools(service),
+                checkpointer=saver,
+                middleware=[legacy_tool_call],
+            )
+            if lost_receipt:
+                with pytest.raises(RuntimeError, match="Lost legacy receipt before checkpoint"):
+                    await graph.ainvoke({"messages": [HumanMessage("Submit first job")]}, config, context=context)
+            else:
+                await graph.ainvoke({"messages": [HumanMessage("Submit first job")]}, config, context=context)
+
+    [original] = await repository.list_by_thread("thread-1", user_id="user-1")
+    responses = [AIMessage(content="Done")] if lost_receipt else [_dispatch(2), AIMessage(content="Done")]
+    async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
+        graph = create_agent(model=_ScriptedModel(messages=iter(responses)), tools=tool_module.bind_batch_tools(service), checkpointer=saver)
+        if lost_receipt:
+            state = await graph.ainvoke(None, config, context={**context, "run_id": "resumed-run"})
+            [receipt] = [message for message in state["messages"] if isinstance(message, ToolMessage)]
+            assert receipt.status == "error"
+            assert "Batch submission conflict" in receipt.content
+            assert await repository.list_by_thread("thread-1", user_id="user-1") == [original]
+            claimed = await repository.claim_items(now=datetime.now(UTC), lease_owner="worker", lease_seconds=60, limit=10)
+            assert [item["batch_id"] for item in claimed] == [original["id"]]
+        else:
+            checkpoint_state = (await graph.aget_state(config)).values
+            runtime = SimpleNamespace(state=checkpoint_state, context=context, config=config)
+            tools = {tool.name: tool for tool in tool_module.bind_batch_tools(service)}
+            arguments = dict(title="Job 1", items=[BatchTaskItem(key="job-1", prompt="Do job 1")], subagent_type="general-purpose", runtime=runtime, tool_call_id="call_0")
+            replayed = _message(await tools["batch_task"].coroutine(**arguments))
+            assert replayed.additional_kwargs["subagent_batch_id"] == original["id"]
+            changed = _message(await tools["batch_task"].coroutine(**(arguments | {"title": "Changed"})))
+            assert changed.status == "error"
+            assert "Batch submission conflict" in changed.content
+            state = await graph.ainvoke({"messages": [HumanMessage("Submit another job")]}, config, context=context)
+            first, second = [message for message in state["messages"] if isinstance(message, ToolMessage)]
+            assert first.additional_kwargs["subagent_batch_id"] == original["id"]
+            assert second.status == "success"
+            assert second.additional_kwargs["subagent_batch_id"] != original["id"]
+            assert len(await repository.list_by_thread("thread-1", user_id="user-1")) == 2
+
+
+@pytest.mark.asyncio
+async def test_sdk_submits_with_a_repository_using_the_original_signature(batch_service):
+    _, repository = batch_service
+
+    class LegacyRepository:
+        def __getattr__(self, name):
+            return getattr(repository, name)
+
+        async def create_batch(self, *, batch_id, user_id, thread_id, run_id, tool_call_id, submission_key, title, subagent_type, items, max_live_items, max_running_items, max_attempts, execution_spec, continuation=None):
+            return await repository.create_batch(
+                batch_id=batch_id,
+                user_id=user_id,
+                thread_id=thread_id,
+                run_id=run_id,
+                tool_call_id=tool_call_id,
+                submission_key=submission_key,
+                title=title,
+                subagent_type=subagent_type,
+                items=items,
+                max_live_items=max_live_items,
+                max_running_items=max_running_items,
+                max_attempts=max_attempts,
+                execution_spec=execution_spec,
+                continuation=continuation,
+            )
+
+    app_config = AppConfig(sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"}, subagent_batches=SubagentBatchesConfig(enabled=True))
+    async with SubagentRuntime.from_app_config(app_config, batch_repository=LegacyRepository()) as runtime:
+        model = _ScriptedModel(messages=iter([_dispatch(1), AIMessage(content="Done")]))
+        graph = create_deerflow_agent(model, features=RuntimeFeatures(subagent=True, sandbox=False, loop_detection=False), subagent_runtime=runtime, checkpointer=InMemorySaver())
+        state = await graph.ainvoke({"messages": [HumanMessage("Submit a job")]}, {"configurable": {"thread_id": "thread-1"}}, context={"user_id": "user-1"})
+        [receipt] = [message for message in state["messages"] if isinstance(message, ToolMessage)]
+        assert receipt.status == "success", receipt.content
+        [batch] = await repository.list_by_thread("thread-1", user_id="user-1")
+        assert receipt.additional_kwargs["subagent_batch_id"] == batch["id"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("thread_incarnation", "expected_present"),
     [
@@ -224,7 +331,8 @@ async def test_batch_task_is_explicit_idempotent_submission(
     if expected_present:
         assert request.execution_spec[THREAD_INCARNATION_CONTEXT_KEY] is thread_incarnation
     assert message.additional_kwargs["subagent_batch_id"] == "subagent-batch-1"
-    assert "running independently" in message.content
+    assert message.additional_kwargs["subagent_batch_status"] == "queued"
+    assert "Current status: queued" in message.content
 
 
 @pytest.mark.asyncio

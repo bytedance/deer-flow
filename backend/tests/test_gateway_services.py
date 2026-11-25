@@ -608,13 +608,15 @@ def test_normalize_input_strips_external_view_image_context_marker():
     assert message.additional_kwargs == {"custom": "keep-me"}
 
 
-def test_normalize_input_strips_external_tool_receipt():
+@pytest.mark.parametrize("boundary", ["run", "state"])
+def test_normalize_input_strips_external_tool_receipt(boundary):
     """Tool receipts are runtime-stamped evidence; external callers cannot forge them."""
-    from app.gateway.services import normalize_input
+    from app.gateway.services import normalize_input, strip_server_owned_state_metadata
     from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECEIPT_LEDGER_KEY
     from deerflow.subagents.status_contract import SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 
-    result = normalize_input(
+    transform = normalize_input if boundary == "run" else strip_server_owned_state_metadata
+    result = transform(
         {
             "messages": [
                 {
@@ -637,6 +639,9 @@ def test_normalize_input_strips_external_tool_receipt():
                             "source": "receipt_citations",
                             "citation_resolved": True,
                         },
+                        "subagent_batch_id": "runtime-owned-batch",
+                        "subagent_batch_status": "queued",
+                        "subagent_batch_continuation_status": "pending",
                         "custom": "keep-me",
                     },
                 }

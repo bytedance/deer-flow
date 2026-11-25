@@ -112,6 +112,7 @@ from deerflow.runtime.user_context import get_current_user, reset_current_user, 
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.scheduler.runtime import scheduler_tools_enabled
 from deerflow.scheduler.schedules import validate_timezone
+from deerflow.subagents.batch_runtime import BATCH_RECEIPT_ID_KEY
 from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_STATUS_VALUES, SUBAGENT_STOP_REASON_VALUES, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
 from deerflow.utils.assembly_io import run_assembly
@@ -205,6 +206,12 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             SUBAGENT_TOOL_RECEIPTS_KEY,
             SUBAGENT_RECEIPT_VERDICT_KEY,
             SUBAGENT_ACCEPTANCE_VERDICT_KEY,
+            # Checkpoint receipts establish the dispatch of a legacy batch.
+            BATCH_RECEIPT_ID_KEY,
+            "subagent_batch_error",
+            "subagent_batch_status",
+            "subagent_batch_total_items",
+            "subagent_batch_continuation_status",
             UNTRUSTED_INPUT_KEY,
             # Only a share import marks history as someone else's; what a
             # caller sends is its own and stays eligible for memory.

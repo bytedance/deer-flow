@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -16,6 +17,7 @@ from deerflow.persistence.engine import close_engine, get_engine, get_session_fa
 from deerflow.persistence.subagent_batches import SubagentBatchRepository
 from deerflow.persistence.subagent_batches.model import SubagentBatchDependencyRow, SubagentBatchItemRow, SubagentBatchRow
 from deerflow.persistence.subagent_batches.sql import BatchSubmissionConflictError
+from deerflow.subagents.batch_runtime import BatchDispatchReceipts, BatchSubmitRequest
 
 _MISSING = object()
 
@@ -658,6 +660,58 @@ async def test_legacy_batch_remains_readable_by_original_id(submission_repo) -> 
     assert await repo.get_batch("batch-1", user_id="user-1") == original
     items = await repo.list_items("batch-1", user_id="user-1", include_prompt=True)
     assert [(item["item_key"], item["prompt"]) for item in items] == [("item-0", "Process 0")]
+
+
+@pytest.mark.asyncio
+async def test_legacy_receipt_checks_request_and_thread_scope(submission_repo) -> None:
+    repo = submission_repo
+    items = [{"key": "one", "prompt": "Read"}, {"key": "two", "prompt": "Summarize", "depends_on": ["one"]}]
+    spec = {THREAD_INCARNATION_CONTEXT_KEY: "incarnation-1"}
+    legacy = await repo.create_batch(
+        batch_id="legacy-batch",
+        user_id="user-1",
+        thread_id="thread-1",
+        run_id="old-run",
+        tool_call_id="call-1",
+        submission_key="old-run:call-1",
+        title="Records",
+        subagent_type="general-purpose",
+        items=items,
+        max_live_items=2,
+        max_running_items=1,
+        max_attempts=1,
+        execution_spec=spec,
+    )
+    request = BatchSubmitRequest(
+        user_id="user-1",
+        thread_id="thread-1",
+        run_id="new-run",
+        tool_call_id="call-1",
+        submission_key="batch-v1:dispatch",
+        title="Records",
+        subagent_type="general-purpose",
+        items=items,
+        max_live_items=None,
+        max_running_items=None,
+        execution_spec=spec,
+        dispatch_receipts=BatchDispatchReceipts(current=frozenset({legacy["id"]}), previous=frozenset()),
+    )
+
+    async def find(submission):
+        return await repo.find_submission(submission, title=submission.title, submission_digest="digest")
+
+    assert await find(request) == legacy
+    assert await find(replace(request, user_id="another-owner")) is None
+    assert await find(replace(request, thread_id="another-thread")) is None
+    assert await find(replace(request, execution_spec={THREAD_INCARNATION_CONTEXT_KEY: "incarnation-2"})) is None
+    earlier_receipt = frozenset({legacy["id"]})
+    assert await find(replace(request, dispatch_receipts=BatchDispatchReceipts(current=frozenset(), previous=earlier_receipt))) is None
+    with pytest.raises(BatchSubmissionConflictError):
+        await find(replace(request, dispatch_receipts=BatchDispatchReceipts(current=earlier_receipt, previous=earlier_receipt)))
+    with pytest.raises(BatchSubmissionConflictError):
+        await find(replace(request, execution_spec={}))
+    with pytest.raises(BatchSubmissionConflictError):
+        await find(replace(request, items=[items[0], {**items[1], "depends_on": []}]))
 
 
 @pytest.mark.asyncio

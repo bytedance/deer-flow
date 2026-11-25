@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import socket
@@ -328,6 +329,30 @@ class SubagentBatchService:
             )
 
     async def submit(self, request: BatchSubmitRequest) -> dict[str, Any]:
+        continuation = None
+        if request.continuation:
+            if self._prepare_continuation is None or self._dispatch_continuation is None:
+                raise ValueError("Automatic follow-up requires an authorized Gateway runtime")
+            continuation = await self._prepare_continuation(request)
+
+        title = request.title.strip()[:256] or "Subagent batch"
+        create_batch = self._repository.create_batch
+        # SDK adapters shipped before digests may have the original signature
+        # or forward **kwargs to it. Pass the new keyword only on explicit opt-in.
+        try:
+            digest_parameter = inspect.signature(create_batch).parameters.get("submission_digest")
+        except (TypeError, ValueError):
+            digest_parameter = None
+        submission_fields = {}
+        if digest_parameter is not None and digest_parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+            digest = await run_assembly(_submission_digest, request, title)
+            submission_fields["submission_digest"] = digest
+            find_submission = getattr(self._repository, "find_submission", None)
+            if callable(find_submission):
+                existing = await find_submission(request, title=title, submission_digest=digest)
+                if existing is not None:
+                    return existing
+
         total = len(request.items)
         if total < 1 or total > self._config.max_items_per_batch:
             raise ValueError(f"Batch item count must be between 1 and {self._config.max_items_per_batch}")
@@ -342,14 +367,7 @@ class SubagentBatchService:
             raise ValueError(f"max_running_items must be between 1 and {self._config.max_running_items_per_batch}")
         if max_running > max_live:
             raise ValueError("max_running_items must not exceed max_live_items")
-        continuation = None
-        if request.continuation:
-            if self._prepare_continuation is None or self._dispatch_continuation is None:
-                raise ValueError("Automatic follow-up requires an authorized Gateway runtime")
-            continuation = await self._prepare_continuation(request)
-        title = request.title.strip()[:256] or "Subagent batch"
-        submission_digest = await run_assembly(_submission_digest, request, title)
-        return await self._repository.create_batch(
+        return await create_batch(
             batch_id=f"subagent-batch-{uuid.uuid4().hex}",
             user_id=request.user_id,
             thread_id=request.thread_id,
@@ -363,7 +381,7 @@ class SubagentBatchService:
             max_running_items=max_running,
             max_attempts=self._config.max_attempts,
             execution_spec=request.execution_spec,
-            submission_digest=submission_digest,
+            **submission_fields,
             **({"continuation": continuation} if continuation is not None else {}),
         )
 

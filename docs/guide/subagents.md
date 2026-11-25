@@ -326,15 +326,23 @@ Ordinary `task` delegation and explicit durable `batch_task` execution share the
 Each model response can submit its own batch even when the provider reuses a
 tool-call ID. If a checkpoint replays the same submission with the same
 request, `batch_task` returns the original batch ID, including after a run
-change. Replaying that submission with different work returns a submission
-conflict and leaves the original batch intact.
+change or a reduction in the limits for new batches. Replaying that submission
+with different work returns a submission conflict. The receipt reports the
+stored batch and automatic follow-up statuses. If a failed or cancelled source
+run cancelled the batch, replay leaves it cancelled. The user can explicitly
+request a new batch in a later turn. A new submission goes through the current
+authorization and capacity checks.
 
 Existing batches remain available for lookup, execution, and management by
-their original IDs. If the older version stored a batch before the parent
-run checkpoint saved its receipt, resuming that call after the upgrade can
-submit another batch. Before switching versions, let those submissions finish
-and checkpoint their receipts. Check for an existing batch before resuming
-any submission whose receipt is unconfirmed.
+their original IDs. Older versions keyed submissions by tool-call ID and run
+ID, or by thread ID in SDK graphs without a run ID. After an upgrade, a
+checkpoint receipt paired with the original model response can recover the
+old ID if the stored request matches. If an older
+batch may belong to the resumed call and the checkpoint cannot establish its
+origin, `batch_task` returns a submission conflict. Inspect the batches on the
+thread to find any work already stored. A later model response can reuse the
+same tool-call ID when the checkpoint attributes the old batch to an earlier
+dispatch.
 
 Queued requests finish removing their queue entry and returning any transferred
 slot before cancellation propagates. The cleanup waits for the capacity lock
@@ -376,6 +384,11 @@ async with runtime:
 ```
 
 `SubagentRuntime.stop()` waits for its owned batch service to finish before propagating caller cancellation, including repeated cancellation. This drain has no timeout; repository operations and child cleanup must terminate. If service shutdown also fails or is cancelled, the first caller cancellation is preserved with the service failure as its cause.
+
+Custom SDK repositories can keep their original `create_batch` signature. The
+built-in SQL repository verifies submission digests and resolves replays before
+applying new batch limits. Adapters can opt into this behavior by declaring the
+`submission_digest` keyword on `create_batch` and implementing `find_submission`.
 
 Gateway run finalization also retains ownership through caller cancellation: it finishes terminal persistence, stream completion, and resource cleanup before propagating the interruption. Backend I/O must terminate or enforce its own timeout. Gateway shutdown includes workers still finalizing after their terminal status commits; an expired shutdown drain budget is logged and does not cancel their outstanding writes.
 

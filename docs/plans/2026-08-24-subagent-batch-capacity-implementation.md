@@ -175,16 +175,19 @@ nonempty message ID.
 The parent row stores an internal digest of the normalized title, subagent
 type, ordered items with prompts, acceptance criteria and dependencies,
 explicit limits, and follow-up prompt. Equivalent replays return the original
-batch ID. A different digest returns a submission conflict. Execution and
+batch ID and current stored statuses. A different digest returns a submission
+conflict. Replay checks the current authorization and applies capacity limits
+only to new batches. A cancelled batch can be submitted again in a fresh
+dispatch after the user explicitly requests it. Execution and
 authorization snapshots and resolved configuration defaults are independent
 of the digest. The parent, items, and dependencies commit atomically.
 
-Existing rows remain accessible by their original IDs. New submissions use
-the message-scoped key exclusively, so an unacknowledged submission written
-with the previous key can be duplicated by replay across an upgrade. Let
-in-flight submissions checkpoint their receipts before switching versions
-and inspect existing batches before resuming unconfirmed calls. Item keys
-must be unique within a batch and survive retries.
+Existing rows remain accessible by their original IDs. During upgrade replay,
+a receipt in the checkpoint can tie a legacy run-scoped row to its model
+response. The stored request must also match. If the checkpoint pairs a row
+with an earlier response, a new response may reuse that call ID. Ambiguous
+legacy rows cause a submission conflict before any new batch is written.
+Item keys must be unique within a batch and survive retries.
 
 Execution is **at least once**, not exactly once. An external side effect can complete immediately before a worker crashes and before DeerFlow commits the result. Batch items therefore must be read-only or use their stable item key as an idempotency key at the external system.
 

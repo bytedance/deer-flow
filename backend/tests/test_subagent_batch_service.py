@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -286,6 +287,45 @@ async def test_submit_replays_the_original_receipt_with_new_run_and_defaults(sub
         assert stored.run_id == "run-1"
         assert stored.continuation_json == {"run_id": "run-1", "prompt": "Present results"}
     assert "execution_spec" not in replay
+
+
+@pytest.mark.asyncio
+async def test_submit_replays_before_enforcing_reduced_capacity(submission_repo, tmp_path) -> None:
+    items = [{"key": "one", "prompt": "Read"}, {"key": "two", "prompt": "Summarize"}]
+    request = _request(items=items, max_live_items=2, max_running_items=2)
+    original = await _submission_service(submission_repo).submit(request)
+    await close_engine()
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    reopened = SubagentBatchRepository(get_session_factory())
+    restarted = _submission_service(
+        reopened,
+        max_items_per_batch=1,
+        default_max_live_items=1,
+        default_max_running_items=1,
+        max_live_items_per_batch=1,
+        max_running_items_per_batch=1,
+    )
+    assert await restarted.submit(_request(items=items, max_live_items=2, max_running_items=2, run_id="replayed")) == original
+    with pytest.raises(BatchSubmissionConflictError):
+        await restarted.submit(_request(items=items[::-1], max_live_items=2, max_running_items=2))
+    with pytest.raises(ValueError, match="Batch item count"):
+        await restarted.submit(_request(items=items, submission_key="new-submission"))
+    assert await reopened.list_by_thread("thread-1", user_id="user-1") == [original]
+
+
+@pytest.mark.asyncio
+async def test_replay_requires_current_followup_authority(submission_repo) -> None:
+    request = _request(continuation="Present results")
+    await _submission_service(submission_repo).submit(request)
+    service = SubagentBatchService(
+        repository=submission_repo,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+        prepare_continuation=AsyncMock(side_effect=PermissionError("Follow-up authority was revoked")),
+        dispatch_continuation=AsyncMock(),
+    )
+    with pytest.raises(PermissionError, match="Follow-up authority was revoked"):
+        await service.submit(replace(request, run_id="replayed"))
 
 
 @pytest.mark.asyncio

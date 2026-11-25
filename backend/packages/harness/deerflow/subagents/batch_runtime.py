@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, NotRequired, Protocol, TypedDict
 
 BATCH_CONTINUATION_NAMESPACE = "native-subagent-batches"
+BATCH_RECEIPT_ID_KEY = "subagent_batch_id"
 
 
 def batch_continuation_key(batch_id: str) -> str:
@@ -18,6 +19,14 @@ class BatchItemInput(TypedDict):
     prompt: str
     acceptance_criteria: NotRequired[list[str] | None]
     depends_on: NotRequired[list[str]]
+
+
+@dataclass(frozen=True)
+class BatchDispatchReceipts:
+    """Persisted receipt IDs paired with their dispatch in the graph state."""
+
+    current: frozenset[str]
+    previous: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -36,6 +45,7 @@ class BatchSubmitRequest:
     continuation: str | None = None
     continuation_authority: Any = None
     continuation_context: dict[str, Any] | None = None
+    dispatch_receipts: BatchDispatchReceipts | None = None
 
 
 class SubagentBatchSubmitter(Protocol):

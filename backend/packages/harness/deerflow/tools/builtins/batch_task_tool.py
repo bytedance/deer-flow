@@ -13,7 +13,7 @@ from typing import Annotated, Any, cast
 
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 from langchain.tools import InjectedToolCallId, tool
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
 from pydantic import BaseModel, Field, StrictInt
 
@@ -27,6 +27,8 @@ from deerflow.mcp_scope import (
 )
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.subagents.batch_runtime import (
+    BATCH_RECEIPT_ID_KEY,
+    BatchDispatchReceipts,
     BatchItemInput,
     BatchSubmitRequest,
     SubagentBatchSubmitter,
@@ -126,11 +128,13 @@ def _result(tool_call_id: str, *, content: str, batch: dict[str, Any] | None = N
     if batch is not None:
         metadata.update(
             {
-                "subagent_batch_id": batch["id"],
+                BATCH_RECEIPT_ID_KEY: batch["id"],
                 "subagent_batch_status": batch["status"],
                 "subagent_batch_total_items": batch["total_items"],
             }
         )
+        if batch.get("continuation_status") is not None:
+            metadata["subagent_batch_continuation_status"] = batch["continuation_status"]
     return Command(
         update={
             "messages": [
@@ -155,6 +159,23 @@ def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -
     return [name for name in child if name in allowed]
 
 
+def _dispatch_receipts(state: object, dispatch: AIMessage, tool_call_id: str) -> BatchDispatchReceipts:
+    messages = state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
+    previous, current = set(), set()
+    receipts = None
+    for message in messages or ():
+        if isinstance(message, AIMessage):
+            calls = [call for call in message.tool_calls or () if isinstance(call, dict) and call.get("id") == tool_call_id]
+            receipts = (current if message is dispatch else previous) if len(calls) == 1 and calls[0].get("name") == "batch_task" else None
+        elif not isinstance(message, ToolMessage):
+            receipts = None
+        elif receipts is not None and message.name == "batch_task" and message.tool_call_id == tool_call_id and message.status == "success":
+            batch_id = message.additional_kwargs.get(BATCH_RECEIPT_ID_KEY)
+            if isinstance(batch_id, str):
+                receipts.add(batch_id)
+    return BatchDispatchReceipts(current=frozenset(current), previous=frozenset(previous))
+
+
 @tool("batch_task", parse_docstring=True)
 async def batch_task(
     runtime: Runtime,
@@ -174,6 +195,8 @@ async def batch_task(
     This tool returns a batch
     identifier immediately; it never inserts thousands of results into the lead
     agent context. Use ``batch_status`` for a compact progress snapshot.
+    A replay can report a previously cancelled batch. Submit cancelled work as
+    a fresh call only when the user explicitly requests a new submission.
 
     Each item may carry ``acceptance_criteria`` using the same deterministic
     checks as ``task``: ``file:<path> exists|non-empty``, ``file_written:<path>``,
@@ -214,7 +237,8 @@ async def batch_task(
     context = runtime.context if runtime is not None and isinstance(runtime.context, dict) else {}
     if context.get(THREAD_INCARNATION_METADATA_GUARD_KEY) is True:
         runtime_thread_incarnation(runtime)
-    dispatch = find_tool_call_message(getattr(runtime, "state", None), tool_call_id)
+    state = getattr(runtime, "state", None)
+    dispatch = find_tool_call_message(state, tool_call_id)
     if not tool_call_id or dispatch is None or not isinstance(dispatch.id, str) or not dispatch.id.strip():
         return _result(tool_call_id, content="Batch submission requires an originating model message with an ID.", error=True)
     if sum(isinstance(call, dict) and call.get("id") == tool_call_id for call in dispatch.tool_calls) != 1:
@@ -245,7 +269,6 @@ async def batch_task(
     user_id = resolve_runtime_user_id(runtime)
     continuation_context = None
     if continuation:
-        state = getattr(runtime, "state", None)
         goal = state.get("goal") if isinstance(state, dict) else None
         continuation_context = {
             "goal": {key: goal.get(key) for key in ("created_at", "status", "objective")} if isinstance(goal, dict) else None,
@@ -295,19 +318,23 @@ async def batch_task(
                 continuation=continuation,
                 continuation_authority=context.get(AGENT_RUNS_CONTEXT_KEY) if continuation else None,
                 continuation_context=continuation_context if continuation else None,
+                dispatch_receipts=_dispatch_receipts(state, dispatch, tool_call_id),
             )
         )
     except Exception as exc:
         return _result(tool_call_id, content=f"Batch submission failed: {exc}", error=True)
-    return _result(
-        tool_call_id,
-        batch=batch,
-        content=(
-            f"Batch {batch['id']} accepted with {batch['total_items']} items. It is running independently and survives Gateway restarts. "
-            + ("The requested follow-up is scheduled after completion; this turn can finish without polling. " if continuation else "Use batch_status for progress. ")
-            + "Do not launch ordinary task calls for these items."
-        ),
-    )
+    status = batch["status"]
+    followup_status = batch.get("continuation_status")
+    content = f"Batch {batch['id']} has {batch['total_items']} items. Current status: {status}. "
+    if followup_status is not None:
+        content += f"Automatic follow-up status: {followup_status}. "
+    if followup_status in ("pending", "dispatching"):
+        content += "This turn can finish without polling. "
+    if status == "cancelled":
+        content += "Submit a fresh batch_task call only if the user explicitly requests a new submission."
+    else:
+        content += "Use batch_status to inspect progress. Do not launch ordinary task calls for these items."
+    return _result(tool_call_id, batch=batch, content=content, error=status == "cancelled")
 
 
 @tool("batch_status", parse_docstring=True)
