@@ -43,16 +43,17 @@ data:
         # API clients do not reliably follow cross-host redirects, and some drop
         # Authorization when they do. OAuth browser handoffs still redirect so
         # their state cookies are available on the canonical host (#6156).
+        # API docs keep the caller's host so they match the server they document.
         # Keep the OAuth exceptions ahead of the broader API regex.
         map $uri $loopback_redirect_scope {
-            default                             "1";
+            default                              "1";
             "~^/api/v1/auth/(?:oauth|callback)/" "1";
             "~^/api/mcp/user-oauth/callback"     "1";
             "~^/api/"                            "";
             "~^/health"                          "";
-            "~^/docs"                            "";
-            "~^/redoc"                           "";
-            "~^/openapi\.json"                  "";
+            "~^/docs(?:/oauth2-redirect)?$"      "";
+            "~^/redoc$"                          "";
+            "~^/openapi\.json"                   "";
         }
 
         # Safe methods only: redirecting an API POST would strand clients that
