@@ -563,8 +563,7 @@ def test_client_ensure_agent_filters_skills_by_authorization(monkeypatch):
     client._checkpoint_channel_mode = "full"
     client._checkpoint_snapshot_frequency = None
     client._middlewares = []
-    client._agent = None
-    client._agent_config_key = None
+    client._agent_cache = None
     client._checkpointer = object()
 
     config = RunnableConfig(configurable={"user_id": "user-123", "user_role": "user"})
@@ -616,8 +615,7 @@ def test_client_ensure_agent_noop_when_authorization_disabled(monkeypatch):
     client._checkpoint_channel_mode = "full"
     client._checkpoint_snapshot_frequency = None
     client._middlewares = []
-    client._agent = None
-    client._agent_config_key = None
+    client._agent_cache = None
     client._checkpointer = object()
 
     config = RunnableConfig(configurable={"user_id": "user-123", "user_role": "user"})
@@ -908,8 +906,7 @@ def test_client_wires_skill_authorization_into_middleware(monkeypatch):
     client._checkpoint_channel_mode = "full"
     client._checkpoint_snapshot_frequency = None
     client._middlewares = []
-    client._agent = None
-    client._agent_config_key = None
+    client._agent_cache = None
     client._checkpointer = object()
 
     client._ensure_agent(RunnableConfig(configurable={"user_id": "user-123", "user_role": "user"}))
@@ -992,8 +989,7 @@ def test_client_filter_candidates_reuse_catalog_loader(monkeypatch):
     client._checkpoint_channel_mode = "full"
     client._checkpoint_snapshot_frequency = None
     client._middlewares = []
-    client._agent = None
-    client._agent_config_key = None
+    client._agent_cache = None
     client._checkpointer = object()
 
     client._ensure_agent(RunnableConfig(configurable={"user_id": "user-123", "user_role": "user"}))
@@ -1175,8 +1171,7 @@ def test_client_skill_surface_uses_one_effective_user(monkeypatch):
     client._checkpoint_channel_mode = "full"
     client._checkpoint_snapshot_frequency = None
     client._middlewares = []
-    client._agent = None
-    client._agent_config_key = None
+    client._agent_cache = None
     client._checkpointer = object()
 
     client._ensure_agent(RunnableConfig(configurable={"user_role": "user"}))
