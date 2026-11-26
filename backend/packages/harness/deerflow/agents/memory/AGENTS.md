@@ -98,6 +98,7 @@ client or the real storage, because the payload shape is the contract.
 - **A failed rebuild keeps the last good client**, retried per model set with a
   rate limit. An explicit `backend_config.model` is never replaced, and an armed
   manager keeps its client until a restart.
+- **One config read per re-arm** — digest and client come from the same snapshot.
 
 ## Injection
 

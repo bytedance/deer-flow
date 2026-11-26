@@ -911,17 +911,24 @@ def _host_default_should_keep_hidden_message(additional_kwargs: Any) -> bool:
     return read_human_input_response(additional_kwargs) is not None
 
 
-def _build_host_llm() -> Any:
+def _build_host_llm(app_config: Any = None) -> Any:
     """Build the host's default chat model, raising when it cannot be built.
 
     The raising variant exists so the re-arm path can tell "no usable model" from
     "built fine": ``_host_default_llm`` folds every failure into ``None``, which
     the startup path wants (a missing model is a config state, not a crash) but
     which would let a failed rebuild look like a successful one.
+
+    ``app_config`` is the snapshot the caller already digested, when it has one.
+    The client must describe the same catalog as the signature it will be
+    published under: reading the config a second time here lets an edit land in
+    between, so a catalog that goes A -> B -> A installs B's client under A's
+    digest and the revalidation cannot tell. ``None`` = let the factory read the
+    current config (the startup path, which has no signature to agree with).
     """
     from deerflow.models import create_chat_model
 
-    return create_chat_model(name=None)
+    return create_chat_model(name=None, app_config=app_config)
 
 
 def _host_default_llm() -> Any:
@@ -1125,15 +1132,29 @@ def _effective_connection_signature(cfg: Any) -> dict[str, Any]:
     return signature
 
 
-def _model_set_signature() -> tuple[str, ...] | None:
-    """Digest of each merged model entry, or ``None`` when it cannot be read.
+def _model_set_signature(app_config: Any) -> tuple[str, ...]:
+    """Digest of each merged model entry in ``app_config``.
 
     Hashes the whole ``ModelConfig`` the factory consumes (display metadata
     excluded), so every input that can change the built client invalidates the
     signature: endpoint keys (``api_base``, ``base_url``, ``openai_api_base``),
     provider extras, sampling settings and the credential. Only the digest is
-    kept -- the raw key never enters the signature or a log line. Reading the
-    merged app config can fail -- a managed catalog that cannot be decrypted
+    kept -- the raw key never enters the signature or a log line. Takes the
+    snapshot instead of reading it, so the caller can build from the same one.
+    """
+    signature = []
+    for model in app_config.models:
+        settings = model.model_dump(mode="json", exclude={"display_name", "description", "aliases"})
+        signature.append(hashlib.sha256(json.dumps(settings, sort_keys=True, default=str).encode("utf-8")).hexdigest())
+    return tuple(signature)
+
+
+def _read_model_set() -> tuple[Any, tuple[str, ...]] | None:
+    """Read the merged app config once and digest the model entries in it.
+
+    Returns ``(app_config, signature)``; the caller builds the client from that
+    same ``app_config``, so the digest and the client cannot describe different
+    catalogs. Reading can fail -- a managed catalog that cannot be decrypted
     raises -- and this runs on the memory call path, so a failure degrades to
     ``None`` instead of propagating: the same invariant
     ``_effective_connection_signature`` holds.
@@ -1141,14 +1162,28 @@ def _model_set_signature() -> tuple[str, ...] | None:
     try:
         from deerflow.config import get_app_config
 
-        signature = []
-        for model in get_app_config().models:
-            settings = model.model_dump(mode="json", exclude={"display_name", "description", "aliases"})
-            signature.append(hashlib.sha256(json.dumps(settings, sort_keys=True, default=str).encode("utf-8")).hexdigest())
-        return tuple(signature)
+        app_config = get_app_config()
+        return app_config, _model_set_signature(app_config)
     except Exception:  # noqa: BLE001 - the refresh is best-effort, memory is not
         logger.warning("Could not read the merged model set; skipping the host memory model refresh", exc_info=True)
         return None
+
+
+def _record_model_failure(key: object, manager: MemoryManager) -> None:
+    """Record a failed re-arm for ``key``, but only for the live manager.
+
+    A catalog read or build can outlive ``reset_memory_manager()``: it then
+    finishes after the replacement instance exists. Publishing the deadline
+    anyway would make that replacement -- which may be looking at an already
+    readable catalog -- skip its own re-arm for a full window. Validate under
+    the same lock the successful install uses; a retired manager's failure is
+    its own and dies with it.
+    """
+    global _memory_model_failure
+    with _manager_lock:
+        if manager is not _memory_manager:
+            return
+        _memory_model_failure = (key, time.monotonic() + _MODEL_REBUILD_RETRY_SECONDS)
 
 
 def _refresh_llm_for_reloaded_models(manager: MemoryManager) -> None:
@@ -1188,10 +1223,11 @@ def _refresh_llm_for_reloaded_models(manager: MemoryManager) -> None:
         # rather than on every memory call (each read is a failed decrypt plus a
         # traceback). Checked before the read, because the read is what fails.
         return
-    signature = _model_set_signature()
-    if signature is None:
-        _memory_model_failure = (_UNREADABLE, time.monotonic() + _MODEL_REBUILD_RETRY_SECONDS)
+    read = _read_model_set()
+    if read is None:
+        _record_model_failure(_UNREADABLE, manager)
         return
+    app_config, signature = read
     if not signature:
         # No model configured yet. Not throttled: a model added from Settings
         # must be picked up on the very next lookup, which is the whole point.
@@ -1200,7 +1236,10 @@ def _refresh_llm_for_reloaded_models(manager: MemoryManager) -> None:
         return
     build_error: Exception | None = None
     try:
-        llm = _build_host_llm()
+        # Same snapshot the digest came from: a second read could return a
+        # different catalog and the published signature would not describe the
+        # client behind it.
+        llm = _build_host_llm(app_config)
     except Exception as exc:  # noqa: BLE001 - a broken entry must not fail every memory call
         llm = None
         build_error = exc
@@ -1211,7 +1250,7 @@ def _refresh_llm_for_reloaded_models(manager: MemoryManager) -> None:
             "Failed to build the host memory model for the configured model set; keeping the previous model and retrying on a later call",
             exc_info=build_error,
         )
-        _memory_model_failure = (signature, time.monotonic() + _MODEL_REBUILD_RETRY_SECONDS)
+        _record_model_failure(signature, manager)
         return
     with _manager_lock:
         if manager is not _memory_manager:
@@ -1222,13 +1261,14 @@ def _refresh_llm_for_reloaded_models(manager: MemoryManager) -> None:
         if _memory_model_armed_signature == signature:
             # Another thread armed this same model set while we were building.
             return
-        if _model_set_signature() != signature:
+        current = _read_model_set()
+        if current is None or current[1] != signature:
             # The config moved on while this client was being built; drop it and
             # let the next lookup build for whatever is current.
             return
         manager.refresh_llm(llm)
         _memory_model_armed_signature = signature
-    _memory_model_failure = None
+        _memory_model_failure = None
     logger.info("Memory host model armed after a model-config change (%d model(s) available)", len(signature))
 
 
