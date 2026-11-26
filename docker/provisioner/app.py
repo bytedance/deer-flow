@@ -1452,6 +1452,7 @@ def create_sandbox(req: CreateSandboxRequest):
                 raise HTTPException(status_code=500, detail=f"Could not verify existing sandbox shell capacity: {exc}") from exc
 
     # ── Create Pod ───────────────────────────────────────────────────
+    pod_created = False
     try:
         core_v1.create_namespaced_pod(
             K8S_NAMESPACE,
@@ -1468,6 +1469,7 @@ def create_sandbox(req: CreateSandboxRequest):
                 environment=req.environment,
             ),
         )
+        pod_created = True
         logger.info(f"Created Pod {_pod_name(sandbox_id)}")
     except ApiException as exc:
         if exc.status != 409:  # 409 = AlreadyExists
@@ -1479,11 +1481,14 @@ def create_sandbox(req: CreateSandboxRequest):
         logger.info(f"Created Service {_svc_name(sandbox_id)}")
     except ApiException as exc:
         if exc.status != 409:
-            # Roll back the Pod on failure
-            try:
-                core_v1.delete_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
-            except ApiException:
-                pass
+            # Roll back only the Pod this request created. On a 409 Pod race
+            # the Pod belongs to the concurrent creator; deleting it would
+            # tear down a sandbox another Gateway is waiting on.
+            if pod_created:
+                try:
+                    core_v1.delete_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
+                except ApiException:
+                    pass
             raise HTTPException(status_code=500, detail=f"Service creation failed: {exc.reason}")
 
     # ── Wait until the Service has a usable access URL ───────────────

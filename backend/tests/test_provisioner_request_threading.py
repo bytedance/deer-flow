@@ -272,6 +272,90 @@ def test_bash_capacity_already_exists_race_reads_winning_pod(monkeypatch, provis
     assert core.created_pods == []
 
 
+def test_service_failure_after_pod_already_exists_keeps_concurrent_creators_pod(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    # The fast path misses the Service, the Pod create loses the race to a
+    # concurrent creator (409), then the Service create fails for an unrelated
+    # reason. The Pod belongs to the winner; rolling it back would tear down
+    # a sandbox another Gateway is waiting on.
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: None)
+    monkeypatch.setattr(core, "create_namespaced_pod", MagicMock(side_effect=ApiException(status=409)))
+    monkeypatch.setattr(core, "create_namespaced_service", MagicMock(side_effect=ApiException(status=500)))
+    delete_pod = MagicMock()
+    monkeypatch.setattr(core, "delete_namespaced_pod", delete_pod)
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-raced"))
+    assert error.value.status_code == 500
+    assert "Service creation failed" in error.value.detail
+    assert core.created_pods == []
+    delete_pod.assert_not_called()
+
+
+def test_pod_creation_failure_reports_without_rollback(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: None)
+    monkeypatch.setattr(core, "create_namespaced_pod", MagicMock(side_effect=ApiException(status=500)))
+    create_service = MagicMock()
+    monkeypatch.setattr(core, "create_namespaced_service", create_service)
+    delete_pod = MagicMock()
+    monkeypatch.setattr(core, "delete_namespaced_pod", delete_pod)
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-pod-failed"))
+    assert error.value.status_code == 500
+    assert "Pod creation failed" in error.value.detail
+    assert core.created_pods == []
+    create_service.assert_not_called()
+    delete_pod.assert_not_called()
+
+
+def test_service_failure_rolls_back_the_pod_this_request_created(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: None)
+    monkeypatch.setattr(core, "create_namespaced_service", MagicMock(side_effect=ApiException(status=500)))
+    delete_pod = MagicMock()
+    monkeypatch.setattr(core, "delete_namespaced_pod", delete_pod)
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-own-pod"))
+    assert error.value.status_code == 500
+    assert "Service creation failed" in error.value.detail
+    assert core.created_pods == ["sandbox-own-pod"]
+    delete_pod.assert_called_once_with("sandbox-sandbox-own-pod", provisioner_module.K8S_NAMESPACE)
+
+
+def test_double_already_exists_race_reads_winner_without_rollback(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    reads = iter([None, "http://sandbox"])
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: next(reads))
+    monkeypatch.setattr(core, "create_namespaced_pod", MagicMock(side_effect=ApiException(status=409)))
+    monkeypatch.setattr(core, "create_namespaced_service", MagicMock(side_effect=ApiException(status=409)))
+    delete_pod = MagicMock()
+    monkeypatch.setattr(core, "delete_namespaced_pod", delete_pod)
+    response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
+    assert response.status == "Running"
+    assert core.created_pods == []
+    delete_pod.assert_not_called()
+
+
+def test_service_already_exists_keeps_the_pod_this_request_created(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1, ready_after_service_reads={"sandbox-svc-raced": 1})
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    # This request wins the Pod race but loses the Service race. The winner's
+    # Service selects the Pod by sandbox-id label, so the fresh Pod is adopted
+    # and must not be rolled back.
+    core.service_sandboxes.add("sandbox-svc-raced")
+    monkeypatch.setattr(core, "create_namespaced_service", MagicMock(side_effect=ApiException(status=409)))
+    delete_pod = MagicMock()
+    monkeypatch.setattr(core, "delete_namespaced_pod", delete_pod)
+    response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-svc-raced"))
+    assert response.status == "Running"
+    assert core.created_pods == ["sandbox-svc-raced"]
+    delete_pod.assert_not_called()
+
+
 def test_broker_request_without_image_cannot_mount_credentials(monkeypatch, provisioner_module):
     core = _RecordingCoreV1(event_loop_thread_id=-1)
     monkeypatch.setattr(provisioner_module, "core_v1", core)
