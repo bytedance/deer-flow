@@ -158,6 +158,33 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
     assert refresh_calls == [("refresh", "default")]
 
 
+def test_install_skill_archive_with_a_skill_md_directory_returns_400(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    (skills_root / "custom").mkdir(parents=True)
+    archive = tmp_path / "dir-skill.skill"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("dir-skill/SKILL.md/notes.md", "# Notes\n")
+
+    from deerflow.config.paths import Paths
+
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    storage = UserScopedSkillStorage("default", host_path=str(skills_root))
+    monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: storage)
+    monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
+
+    app = _make_test_app(SimpleNamespace())
+    with TestClient(app) as client:
+        response = client.post("/api/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/dir-skill.skill"})
+
+    # Before the fix this was a 500 whose detail carried the host temp path.
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid skill: SKILL.md must be a file"
+    assert not _user_custom_dir(tmp_path, "default").joinpath("dir-skill").exists()
+
+
 def test_upload_skill_archive_installs_without_thread_workspace(monkeypatch, tmp_path):
     installed_paths: list[Path] = []
     refresh_calls: list[str] = []
