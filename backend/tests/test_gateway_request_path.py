@@ -28,8 +28,8 @@ from deerflow.config.authorization_config import AuthorizationConfig
 def _default_route_authorization_config(monkeypatch):
     """Keep minimal middleware apps independent of a repository config.yaml."""
     monkeypatch.setattr(
-        "app.gateway.authz._get_route_authorization_config",
-        lambda: AuthorizationConfig(),
+        "app.gateway.authz._get_route_access_config",
+        lambda: (AuthorizationConfig(), True),
     )
 
 

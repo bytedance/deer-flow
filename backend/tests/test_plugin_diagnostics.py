@@ -21,7 +21,7 @@ SECRET = "fixture-private-key"
 @pytest.fixture
 def diagnostics_client(monkeypatch):
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "")
-    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: AuthorizationConfig())
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", lambda: (AuthorizationConfig(), True))
     monkeypatch.setattr("deerflow.extensions._runtime_diagnostics", [])
     users = {role: SimpleNamespace(id=role, system_role=role, needs_setup=False, token_version=0) for role in ("admin", "user")}
 

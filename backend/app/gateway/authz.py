@@ -48,7 +48,6 @@ from fastapi import HTTPException, Request
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest, Principal
 from deerflow.authz.runtime import construct_authorization_provider, resolve_authorization_provider, resolve_authorization_provider_spec
-from deerflow.config.app_config import peek_loaded_app_config as _peek_loaded_app_config
 from deerflow.config.authorization_config import AuthorizationConfig
 
 if TYPE_CHECKING:
@@ -193,35 +192,36 @@ def _make_test_request_stub() -> Any:
     return SimpleNamespace(state=SimpleNamespace(), cookies={}, _deerflow_test_bypass_auth=True)
 
 
-def _get_route_authorization_config() -> AuthorizationConfig:
-    """Return the hot-reloaded authorization config for this request.
+def _get_route_access_config() -> tuple[AuthorizationConfig, bool]:
+    """Return route authorization and the skill gate from one AppConfig snapshot.
 
-    Falls back to a disabled config when AppConfig is not available (e.g. test
-    environments without a config.yaml), preserving legacy all-permissions behavior.
+    Falls back to disabled authorization and skill management when AppConfig is
+    unavailable (e.g. test environments without a config.yaml). This preserves
+    legacy route permissions without opening the newer management surface.
     ``get_app_config()`` stats and hashes ``config.yaml`` and
     ``extensions_config.json`` on every call, so async request paths use
-    :func:`_route_authorization_config_async`, and call the synchronous
-    helpers that read it (``resolve_model_authorization``,
-    ``resolve_skill_authorization``, ``authorize_model_use``,
-    ``authorize_sandbox_for_request``) through ``asyncio.to_thread``.
+    :func:`_route_access_config_async`, and call the synchronous helpers that
+    read it (``resolve_model_authorization``, ``resolve_skill_authorization``,
+    ``authorize_model_use``, ``authorize_sandbox_for_request``) through
+    ``asyncio.to_thread``.
     """
     from deerflow.config.app_config import get_app_config
 
     try:
-        return get_app_config().authorization
+        config = get_app_config()
+        return config.authorization, bool(config.skills.management_enabled)
     except (FileNotFoundError, RuntimeError):
-        return AuthorizationConfig()
+        return AuthorizationConfig(), False
 
 
-async def _route_authorization_config_async() -> AuthorizationConfig:
-    """Off-loop :func:`_get_route_authorization_config` for async request paths."""
-    return await asyncio.to_thread(_get_route_authorization_config)
+def _get_route_authorization_config() -> AuthorizationConfig:
+    """Return the hot-reloaded authorization config for synchronous route checks."""
+    return _get_route_access_config()[0]
 
 
-def _skill_management_enabled() -> bool:
-    """Read the deployment gate from the AppConfig loaded just above."""
-    config = _peek_loaded_app_config()
-    return bool(config and config.skills.management_enabled)
+async def _route_access_config_async() -> tuple[AuthorizationConfig, bool]:
+    """Off-loop :func:`_get_route_access_config` for async request paths."""
+    return await asyncio.to_thread(_get_route_access_config)
 
 
 def _apply_skill_management_gate(permissions: list[str], *, enabled: bool) -> list[str]:
@@ -332,8 +332,7 @@ async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[st
     The config is read in a worker: ``AuthMiddleware`` calls this for every
     authenticated request.
     """
-    config = await _route_authorization_config_async()
-    skill_management_enabled = _skill_management_enabled()
+    config, skill_management_enabled = await _route_access_config_async()
     if config.enabled is not True:
         if not is_internal and getattr(user, "system_role", None) == "admin":
             return _apply_skill_management_gate(list(_ALL_PERMISSIONS), enabled=skill_management_enabled)

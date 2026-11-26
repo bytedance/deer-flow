@@ -41,7 +41,7 @@ def test_browser_stream_enforces_write_permission(monkeypatch, role, writable, b
     }
     provider = RbacAuthorizationProvider(roles={"admin": policy, "user": policy})
     config = AuthorizationConfig(enabled=True, fail_closed=True, default_role="user")
-    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", lambda: (config, True))
     monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", lambda _: provider)
     user = SimpleNamespace(id="readonly-demo-owner", system_role=role, oauth_provider=None, oauth_id=None)
     monkeypatch.setattr("app.gateway.deps.get_current_user_from_request", AsyncMock(return_value=user))
@@ -134,7 +134,7 @@ def test_browser_stream_enforces_write_permission(monkeypatch, role, writable, b
 @pytest.mark.parametrize("fail_closed", [True, False])
 async def test_browser_stream_uses_shared_authorization_failure_policy(monkeypatch, failure, fail_closed):
     config = AuthorizationConfig(enabled=True, fail_closed=fail_closed)
-    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", lambda: (config, True))
     decision = AsyncMock(return_value=AuthzDecision(allow=True, reasons=[]))
     if failure == "decision":
         decision.side_effect = RuntimeError("synthetic policy outage")
@@ -174,7 +174,7 @@ async def test_browser_stream_uses_shared_authorization_failure_policy(monkeypat
 @pytest.mark.parametrize("error", [ValueError("synthetic config error"), asyncio.CancelledError()])
 async def test_browser_stream_authorization_setup_error_or_cancellation_never_accepts(monkeypatch, caplog, error):
     monkeypatch.setattr(browser, "_authenticate_ws", AsyncMock(return_value=get_auth_disabled_user()))
-    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", MagicMock(side_effect=error))
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", MagicMock(side_effect=error))
     websocket = MagicMock()
     websocket.headers = {}
     websocket.close = AsyncMock()
@@ -203,7 +203,7 @@ async def test_browser_stream_authorization_setup_error_or_cancellation_never_ac
 @pytest.mark.asyncio
 async def test_browser_stream_rechecks_policy_on_new_connection(monkeypatch):
     config = AuthorizationConfig(enabled=False)
-    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", lambda: (config, True))
     provider = RbacAuthorizationProvider(roles={"admin": {"routes": {"allow": []}}})
     factory = MagicMock(return_value=provider)
     monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", factory)
@@ -228,7 +228,7 @@ async def test_browser_stream_rechecks_policy_on_new_connection(monkeypatch):
 @pytest.mark.asyncio
 async def test_browser_stream_cancellation_during_disconnect_cleanup_releases_session_lease(monkeypatch):
     config = AuthorizationConfig(enabled=False)
-    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", lambda: (config, True))
     user = get_auth_disabled_user()
     monkeypatch.setattr(browser, "_authenticate_ws", AsyncMock(return_value=user))
     monkeypatch.setattr(browser, "_browser_tools_enabled", lambda: True)
@@ -294,7 +294,7 @@ async def test_browser_stream_cancellation_during_disconnect_cleanup_releases_se
 @pytest.mark.asyncio
 async def test_browser_stream_preserves_first_cancellation_across_cleanup_cancellation(monkeypatch):
     config = AuthorizationConfig(enabled=False)
-    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", lambda: (config, True))
     user = get_auth_disabled_user()
     monkeypatch.setattr(browser, "_authenticate_ws", AsyncMock(return_value=user))
     monkeypatch.setattr(browser, "_browser_tools_enabled", lambda: True)

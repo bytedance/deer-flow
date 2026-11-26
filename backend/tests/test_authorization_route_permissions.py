@@ -69,13 +69,13 @@ def _user(**overrides):
     return SimpleNamespace(**values)
 
 
-def _enable_authorization(monkeypatch, provider, *, fail_closed: bool = True) -> None:
+def _enable_authorization(monkeypatch, provider, *, fail_closed: bool = True, skill_management_enabled: bool = True) -> None:
     config = AuthorizationConfig(
         enabled=True,
         fail_closed=fail_closed,
         default_role="user",
     )
-    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", lambda: (config, skill_management_enabled))
     # Bypass the provider cache so each test gets its own provider instance.
     monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", lambda c: provider)
 
@@ -83,7 +83,6 @@ def _enable_authorization(monkeypatch, provider, *, fail_closed: bool = True) ->
 @pytest.fixture(autouse=True)
 def _reset_upgrade_diagnostics(monkeypatch):
     monkeypatch.setattr("app.gateway.authz._route_permission_upgrade_diagnostics", set())
-    monkeypatch.setattr("app.gateway.authz._peek_loaded_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(management_enabled=True)))
 
 
 def test_disabled_authorization_admin_only_set_is_exact():
@@ -98,22 +97,55 @@ def test_skill_management_config_defaults_disabled():
 
 @pytest.mark.asyncio
 async def test_skill_management_deployment_gate_disables_admin_default(monkeypatch):
-    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: AuthorizationConfig(enabled=False))
-    monkeypatch.setattr("app.gateway.authz._peek_loaded_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(management_enabled=False)))
+    config = AuthorizationConfig(enabled=False)
+    skill_management_enabled = False
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", lambda: (config, skill_management_enabled))
 
     disabled = await resolve_route_permissions(_user(system_role="admin"), is_internal=False)
     assert Permissions.SKILLS_MANAGE not in disabled
 
-    monkeypatch.setattr("app.gateway.authz._peek_loaded_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(management_enabled=True)))
+    skill_management_enabled = True
     enabled = await resolve_route_permissions(_user(system_role="admin"), is_internal=False)
     assert Permissions.SKILLS_MANAGE in enabled
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("snapshot_enabled", "cached_enabled", "expected"),
+    [
+        pytest.param(False, True, False, id="newer-revision-must-not-enable-older-snapshot"),
+        pytest.param(True, False, True, id="newer-revision-must-not-disable-older-snapshot"),
+    ],
+)
+async def test_skill_gate_uses_request_app_config_snapshot(monkeypatch, snapshot_enabled, cached_enabled, expected):
+    request_config = SimpleNamespace(
+        authorization=AuthorizationConfig(enabled=False),
+        skills=SimpleNamespace(management_enabled=snapshot_enabled),
+    )
+    cached_config = SimpleNamespace(skills=SimpleNamespace(management_enabled=cached_enabled))
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", MagicMock(return_value=request_config))
+    monkeypatch.setattr("deerflow.config.app_config._app_config", cached_config)
+
+    permissions = await resolve_route_permissions(_user(system_role="admin"), is_internal=False)
+
+    assert (Permissions.SKILLS_MANAGE in permissions) is expected
+
+
+@pytest.mark.asyncio
+async def test_skill_gate_config_read_failure_fails_closed(monkeypatch):
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", MagicMock(side_effect=FileNotFoundError))
+    cached_config = SimpleNamespace(skills=SimpleNamespace(management_enabled=True))
+    monkeypatch.setattr("deerflow.config.app_config._app_config", cached_config)
+
+    permissions = await resolve_route_permissions(_user(system_role="admin"), is_internal=False)
+
+    assert Permissions.SKILLS_MANAGE not in permissions
+
+
+@pytest.mark.asyncio
 async def test_skill_management_deployment_gate_precedes_provider_grants(monkeypatch):
     provider = _RecordingProvider()
-    _enable_authorization(monkeypatch, provider)
-    monkeypatch.setattr("app.gateway.authz._peek_loaded_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(management_enabled=False)))
+    _enable_authorization(monkeypatch, provider, skill_management_enabled=False)
 
     permissions = await resolve_route_permissions(_user(system_role="admin"), is_internal=False)
 
@@ -142,7 +174,7 @@ async def test_skill_management_deployment_gate_precedes_provider_grants(monkeyp
 )
 async def test_route_permissions_disabled_apply_explicit_role_defaults(monkeypatch, role, is_internal, expected):
     config = AuthorizationConfig(enabled=False)
-    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", lambda: (config, True))
     # Bypass cache + ensure provider is never resolved when disabled.
     cached = AsyncMock(side_effect=AssertionError("disabled authorization must not resolve a provider"))
     monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", cached)
@@ -209,7 +241,7 @@ async def test_route_permissions_apply_failure_mode_to_provider_resolution(monke
         fail_closed=fail_closed,
         default_role="user",
     )
-    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", lambda: (config, True))
 
     def fail_cached(c):
         raise ValueError("invalid provider configuration")
@@ -283,13 +315,13 @@ async def test_route_permissions_read_config_in_a_worker_with_the_caller_context
     monkeypatch.setattr(authz_module, "_route_provider_config_id", None)
     monkeypatch.setattr(authz_module, "_route_provider_config_sig", None)
     read_threads: list[int] = []
-    read_config = authz_module._get_route_authorization_config
+    read_config = authz_module._get_route_access_config
 
     def recording_read():
         read_threads.append(threading.get_ident())
         return read_config()
 
-    monkeypatch.setattr(authz_module, "_get_route_authorization_config", recording_read)
+    monkeypatch.setattr(authz_module, "_get_route_access_config", recording_read)
     override = AppConfig(
         sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
         authorization=AuthorizationConfig(

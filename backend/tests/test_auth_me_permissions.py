@@ -99,10 +99,9 @@ def _setup_auth(tmp_path):
 def _default_route_authorization_config(monkeypatch):
     """Keep /me independent of a repository config.yaml (disabled by default)."""
     monkeypatch.setattr(
-        "app.gateway.authz._get_route_authorization_config",
-        lambda: AuthorizationConfig(),
+        "app.gateway.authz._get_route_access_config",
+        lambda: (AuthorizationConfig(), True),
     )
-    monkeypatch.setattr("app.gateway.authz._peek_loaded_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(management_enabled=True)))
 
 
 @pytest.fixture()
@@ -128,7 +127,7 @@ def _initialize_admin(client: TestClient):
 
 def _enable_authorization(monkeypatch, provider) -> None:
     config = AuthorizationConfig(enabled=True, fail_closed=True, default_role="user")
-    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", lambda: (config, True))
     monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", lambda c: provider)
 
 
@@ -143,7 +142,7 @@ def test_me_lists_all_route_permissions_when_authorization_disabled(client):
 
 
 def test_me_omits_skill_management_when_deployment_disables_it(client, monkeypatch):
-    monkeypatch.setattr("app.gateway.authz._peek_loaded_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(management_enabled=False)))
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", lambda: (AuthorizationConfig(), False))
     _initialize_admin(client)
 
     response = client.get("/api/v1/auth/me")

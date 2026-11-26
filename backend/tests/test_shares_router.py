@@ -63,6 +63,7 @@ async def share_app(tmp_path, monkeypatch, request):
     monkeypatch.setattr("app.gateway.auth_middleware.is_auth_disabled", lambda: False)
     monkeypatch.setattr("app.gateway.csrf_middleware.is_auth_disabled", lambda: False)
     monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: AuthorizationConfig())
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", lambda: (AuthorizationConfig(), True))
 
     async def session_user(req):
         user = {"alice": ALICE, "bob": BOB}.get(req.cookies.get("access_token"))
@@ -762,6 +763,7 @@ async def test_fork_continues_under_recipient_run_authority(share_app, monkeypat
     monkeypatch.setattr(app_config, "_app_config", config)
     monkeypatch.setattr(app_config, "_app_config_is_custom", True)
     monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config.authorization)
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", lambda: (config.authorization, False))
     ctx.app.state.project_repo = ProjectRepository(ctx.factory)
     ctx.app.state.stream_bridge = MemoryStreamBridge()
     ctx.app.include_router(thread_runs.router)

@@ -25,7 +25,7 @@ from deerflow.config.authorization_config import AuthorizationConfig
 @pytest.fixture(autouse=True)
 def _isolate_route_authorization(monkeypatch):
     # Existing routing/ownership tests must not inherit local operator policies.
-    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: AuthorizationConfig(enabled=False))
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", lambda: (AuthorizationConfig(enabled=False), True))
 
 
 class _FakeWebSocket:
