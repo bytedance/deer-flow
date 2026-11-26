@@ -510,8 +510,8 @@ repeatedly starting a missing toolchain. A non-zero extraction exit falls back
 only for that document, because malformed or oversized input can fail while
 the toolchain remains healthy. The fallback keeps resolved article links in
 the returned Markdown.
-When extraction returns a whole document, the fallback uses the source HTML
-body consistently with or without a source URL. Calls without a source URL
+When extraction returns a whole document, the fallback parses the source HTML
+and uses its body with or without a source URL. Calls without a source URL
 retain relative link destinations and do not repeat the document title.
 Only explicit document-level wrappers trigger that fallback. An inline SVG
 chart's title or a document-tag example in a comment or script leaves the
