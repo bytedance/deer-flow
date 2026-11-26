@@ -92,6 +92,8 @@ def test_ordinary_tasks_quotes_and_conditional_text_are_not_controls(text):
         "Use the attached model to forecast next month's revenue",
         "Please use a statistical model to explain the results",
         "Use Python 3.11 to run the script",
+        "Use a Bayesian model to estimate customer churn",
+        "Use an ARIMA model to forecast next month's revenue",
         "用回归模型分析这些销售数据",
     ],
 )
@@ -131,6 +133,13 @@ def test_versioned_tool_reference_in_a_task_stays_task_text(text):
 )
 def test_explicitly_named_model_outside_the_catalog_is_unavailable(text):
     result = resolve_model_control(text, [DS, OPUS])
+    assert result["status"] == "unavailable"
+    assert result["model_name"] is None
+
+
+def test_product_tier_after_a_version_is_not_read_as_a_service():
+    # "Serverless" starts with "server"; the exemption must match the whole noun.
+    result = resolve_model_control("Use Qwen v3 Serverless for this turn: summarize the report", [model("chat-default", "Chat Default")])
     assert result["status"] == "unavailable"
     assert result["model_name"] is None
 
