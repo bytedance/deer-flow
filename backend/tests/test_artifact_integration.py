@@ -5,14 +5,18 @@ context -> model references the handle in a later tool call -> resolution
 rewrites it to the real reference at the tool-call boundary.
 """
 
+import asyncio
 import ipaddress
 import json
 import re
+import sys
+from contextlib import asynccontextmanager
 from pathlib import PurePosixPath
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
+import acp
 import httpx
 import pytest
 from _agent_e2e_helpers import FakeToolCallingModel
@@ -33,11 +37,15 @@ from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.agents.thread_state import ThreadState
 from deerflow.community.crawl4ai import crawl4ai_client
 from deerflow.community.crawl4ai import tools as crawl4ai_tools
+from deerflow.config import paths as paths_module
+from deerflow.config.acp_config import ACPAgentConfig
+from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.sandbox import sandbox_provider
 from deerflow.sandbox.sandbox import CommandOutput, Sandbox
 from deerflow.sandbox.tools import bash_tool
 from deerflow.tools.artifact_registry import generate_handle
 from deerflow.tools.builtins import view_image_tool
+from deerflow.tools.builtins.invoke_acp_agent_tool import build_invoke_acp_agent_tool
 
 THREAD_ID = "artifact-cycle-thread"
 REAL_REF = "/mnt/user-data/outputs/report.md"
@@ -222,6 +230,46 @@ async def test_missing_image_creates_no_artifact_before_or_after_compaction(tmp_
 
     compacted_request = await _compact_and_check_artifacts(agent, model, config, context, [])
     assert not any("missing.png [available]" in message.content for message in compacted_request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("success", [True, False], ids=["completed-report", "failed-invocation"])
+async def test_acp_report_artifacts_follow_invocation_status_through_compaction(tmp_path, monkeypatch, success):
+    report_url = "https://files.example/report.pdf"
+    report = f"Error: the report describes past failures. Download [{report_url}]"
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(ExtensionsConfig, "from_file", classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})))
+
+    @asynccontextmanager
+    async def spawn_agent_process(client, *_args, **_kwargs):
+        async def prompt(session_id, **_kwargs):
+            await client.session_update(session_id, acp.update_agent_message_text(report))
+            if not success:
+                raise RuntimeError("The ACP connection failed during the prompt.")
+            return acp.schema.PromptResponse(stop_reason="end_turn")
+
+        connection = SimpleNamespace(
+            initialize=AsyncMock(),
+            new_session=AsyncMock(return_value=acp.schema.NewSessionResponse(session_id="session-1")),
+            prompt=prompt,
+        )
+        yield connection, SimpleNamespace(stderr=None, wait=asyncio.Event().wait)
+
+    monkeypatch.setattr(acp, "spawn_agent_process", spawn_agent_process)
+    selected_tool = build_invoke_acp_agent_tool({"test": ACPAgentConfig(command=sys.executable, description="Test ACP agent")})
+    model = _one_tool_model("invoke_acp_agent", {"agent": "test", "prompt": "Generate a report."}, "call_acp")
+    agent = _compacting_agent(model, selected_tool)
+    config = {"configurable": {"thread_id": THREAD_ID}}
+    context = {"thread_id": THREAD_ID}
+
+    result = await agent.ainvoke({"messages": [HumanMessage(content="Generate the report.")]}, config, context=context)
+    message = next(message for message in result["messages"] if isinstance(message, ToolMessage))
+    if success:
+        assert message.content == report
+    expected_status = "success" if success else "error"
+    assert message.status == expected_status
+    await _compact_and_check_artifacts(agent, model, config, context, [report_url] if success else [])
+    assert message.additional_kwargs[TOOL_META_KEY]["status"] == expected_status
 
 
 @pytest.mark.asyncio
