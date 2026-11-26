@@ -402,8 +402,10 @@ schema. Keep that base when rebuilding the graph so resumed threads can reuse
 verified receipts already stored in their checkpoints.
 
 When you pass a custom submitter to `bind_batch_tools`, the request title is
-trimmed of surrounding whitespace and limited to 256 characters. A blank title
-becomes `Subagent batch`.
+trimmed of surrounding whitespace and limited to 256 characters. Whitespace
+exposed at the end by truncation is also removed. A blank title becomes
+`Subagent batch`. Copying the request with a new run ID preserves the
+normalized title so the retry can reuse the original receipt.
 
 Custom SDK repositories can keep their original `create_batch` signature. The
 built-in SQL repository verifies submission digests and resolves replays before

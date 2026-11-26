@@ -290,6 +290,18 @@ async def test_submit_replays_the_original_receipt_with_new_run_and_defaults(sub
 
 
 @pytest.mark.asyncio
+async def test_submit_replays_when_a_copied_title_was_truncated_at_whitespace(submission_repo) -> None:
+    service = _submission_service(submission_repo)
+    prefix = "x" * 255
+    request = _request(title=f"  {prefix} more text  ")
+    original = await service.submit(request)
+
+    assert await service.submit(replace(request, run_id="resumed-run")) == original
+    assert original["title"] == prefix
+    assert await submission_repo.list_by_thread("thread-1", user_id="user-1") == [original]
+
+
+@pytest.mark.asyncio
 async def test_submit_replays_before_enforcing_reduced_capacity(submission_repo, tmp_path) -> None:
     items = [{"key": "one", "prompt": "Read"}, {"key": "two", "prompt": "Summarize"}]
     request = _request(items=items, max_live_items=2, max_running_items=2)

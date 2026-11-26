@@ -166,8 +166,9 @@ class SubagentBatchRepository:
         return await self._with_counts(session, batch)
 
     async def _matches_legacy_request(self, session: AsyncSession, batch: SubagentBatchRow, request: BatchSubmitRequest, title: str) -> bool:
+        # Older submissions could leave trailing whitespace at the title cutoff.
         if (
-            batch.title != title
+            batch.title.rstrip() != title.rstrip()
             or batch.subagent_type != request.subagent_type
             or batch.total_items != len(request.items)
             or (batch.continuation_json or {}).get("prompt") != request.continuation

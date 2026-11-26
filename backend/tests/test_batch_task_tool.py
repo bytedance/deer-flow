@@ -730,7 +730,8 @@ def _explicit_submitter() -> AsyncMock:
     ("raw_title", "expected_title"),
     [
         pytest.param(" \t\n ", "Subagent batch", id="blank"),
-        pytest.param("  " + "a" * 255 + " tail  ", "a" * 255 + " ", id="overlong"),
+        pytest.param("  " + "a" * 257 + "  ", "a" * 256, id="overlong"),
+        pytest.param("  " + "a" * 255 + " tail  ", "a" * 255, id="whitespace-at-cutoff"),
     ],
 )
 async def test_bound_batch_task_normalizes_title_for_explicit_submitter(monkeypatch, raw_title, expected_title) -> None:

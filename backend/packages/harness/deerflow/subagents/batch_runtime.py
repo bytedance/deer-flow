@@ -97,7 +97,7 @@ class BatchSubmitRequest:
     dispatch_receipts: BatchDispatchReceipts | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "title", self.title.strip()[:256] or "Subagent batch")
+        object.__setattr__(self, "title", self.title.strip()[:256].rstrip() or "Subagent batch")
 
 
 class SubagentBatchSubmitter(Protocol):

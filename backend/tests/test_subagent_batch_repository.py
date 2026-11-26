@@ -668,6 +668,7 @@ async def test_legacy_receipt_checks_request_and_thread_scope(submission_repo) -
     repo = submission_repo
     items = [{"key": "one", "prompt": "Read"}, {"key": "two", "prompt": "Summarize", "depends_on": ["one"]}]
     spec = {THREAD_INCARNATION_CONTEXT_KEY: "incarnation-1"}
+    title_prefix = "x" * 255
     legacy = await repo.create_batch(
         batch_id="legacy-batch",
         user_id="user-1",
@@ -675,7 +676,7 @@ async def test_legacy_receipt_checks_request_and_thread_scope(submission_repo) -
         run_id="old-run",
         tool_call_id="call-1",
         submission_key="old-run:call-1",
-        title="Records",
+        title=f"{title_prefix} ",
         subagent_type="general-purpose",
         items=items,
         max_live_items=2,
@@ -689,7 +690,7 @@ async def test_legacy_receipt_checks_request_and_thread_scope(submission_repo) -
         run_id="new-run",
         tool_call_id="call-1",
         submission_key="batch-v1:dispatch",
-        title="Records",
+        title=f"{title_prefix} more text",
         subagent_type="general-purpose",
         items=items,
         max_live_items=None,
@@ -702,6 +703,7 @@ async def test_legacy_receipt_checks_request_and_thread_scope(submission_repo) -
         return await repo.find_submission(submission, title=submission.title, submission_digest="digest")
 
     assert await find(request) == legacy
+    assert await find(replace(request, title=title_prefix)) == legacy
     assert await find(replace(request, user_id="another-owner")) is None
     assert await find(replace(request, thread_id="another-thread")) is None
     assert await find(replace(request, execution_spec={THREAD_INCARNATION_CONTEXT_KEY: "incarnation-2"})) is None
@@ -711,6 +713,8 @@ async def test_legacy_receipt_checks_request_and_thread_scope(submission_repo) -
         await find(replace(request, dispatch_receipts=BatchDispatchReceipts(current=earlier_receipt, previous=earlier_receipt)))
     with pytest.raises(BatchSubmissionConflictError):
         await find(replace(request, execution_spec={}))
+    with pytest.raises(BatchSubmissionConflictError):
+        await find(replace(request, title="Different title"))
     with pytest.raises(BatchSubmissionConflictError):
         await find(replace(request, items=[items[0], {**items[1], "depends_on": []}]))
 
