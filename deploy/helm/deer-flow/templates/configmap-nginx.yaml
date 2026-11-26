@@ -51,8 +51,8 @@ data:
             "~^/api/mcp/user-oauth/callback"     "1";
             "~^/api/"                            "";
             "~^/health"                          "";
-            "~^/docs(?:/oauth2-redirect)?$"      "";
-            "~^/redoc$"                          "";
+            "~^/docs(?:/oauth2-redirect)?/?$"    "";
+            "~^/redoc/?$"                        "";
             "~^/openapi\.json"                   "";
         }
 
