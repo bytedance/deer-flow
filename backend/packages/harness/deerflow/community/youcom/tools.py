@@ -71,6 +71,7 @@ _STATUS_HINTS = {
     402: "You.com credit balance depleted",
     429: "rate limit reached — set YDC_API_KEY for higher limits",
 }
+_FORMAT_ERROR = "You.com returned an unexpected response format"
 
 
 @cache
@@ -129,7 +130,7 @@ def _count_for_request(value: object) -> int:
     )
 
 
-async def _search(api_key: str | None, query: str, count: int) -> dict:
+async def _search(api_key: str | None, query: str, count: int) -> object:
     """GET the keyed endpoint when a key is configured, else the keyless one."""
     headers = {"Accept": "application/json", "User-Agent": await _resolve_user_agent()}
     if api_key:
@@ -142,6 +143,53 @@ async def _search(api_key: str | None, query: str, count: int) -> dict:
         response = await client.get(endpoint, params={"query": query, "count": count}, headers=headers)
     response.raise_for_status()
     return response.json()
+
+
+def _unexpected_format_error(query: str) -> str:
+    return json.dumps({"error": _FORMAT_ERROR, "query": query}, ensure_ascii=False)
+
+
+def _response_results(data: object) -> list[dict] | None:
+    """Return merged web and news result objects, or None when the payload is malformed.
+
+    Missing or null ``results``, ``web``, or ``news`` containers represent an
+    empty search. A wrong-typed container, or a non-empty section holding no
+    object entries, is malformed so a 200-wrapped error page is surfaced as a
+    format error rather than "No results found" — matching the containment rule
+    the sibling bundled providers follow. Non-object entries in an otherwise
+    valid section list are skipped in order and logged by position only.
+    """
+    if not isinstance(data, dict):
+        logger.error("You.com returned an unexpected payload type: %s", type(data).__name__)
+        return None
+    sections = data.get("results")
+    if sections is None:
+        return []
+    if not isinstance(sections, dict):
+        logger.error("You.com returned an unexpected 'results' payload type: %s", type(sections).__name__)
+        return None
+
+    # `count` applies per section, so web + news together can exceed it. Web
+    # results lead; the caller trims the merged list back to what was requested.
+    merged: list[dict] = []
+    for section in ("web", "news"):
+        raw = sections.get(section)
+        if raw is None:
+            continue
+        if not isinstance(raw, list):
+            logger.error("You.com returned an unexpected 'results.%s' payload type: %s", section, type(raw).__name__)
+            return None
+        usable: list[dict] = []
+        for index, item in enumerate(raw):
+            if not isinstance(item, dict):
+                logger.warning("Skipping malformed You.com result entry at results.%s[%d]", section, index)
+                continue
+            usable.append(item)
+        if raw and not usable:
+            logger.error("You.com returned 'results.%s' with no usable result objects", section)
+            return None
+        merged.extend(usable)
+    return merged
 
 
 def _snippet(result: dict) -> str:
@@ -186,23 +234,16 @@ async def web_search_tool(query: str, max_results: int | None = None) -> str:
         if hint:
             message = f"{message} ({hint})"
         return json.dumps({"error": message, "query": query}, ensure_ascii=False)
+    except json.JSONDecodeError:
+        logger.error("You.com returned a non-JSON response")
+        return _unexpected_format_error(query)
     except Exception as e:
         logger.error("You.com search failed: %s: %s", type(e).__name__, e)
         return json.dumps({"error": str(e), "query": query}, ensure_ascii=False)
 
-    if not isinstance(data, dict):
-        logger.error("You.com returned an unexpected payload type: %s", type(data).__name__)
-        return json.dumps(
-            {"error": "You.com returned an unexpected response format", "query": query},
-            ensure_ascii=False,
-        )
-
-    sections = data.get("results")
-    if not isinstance(sections, dict):
-        sections = {}
-    # `count` applies per section, so web + news together can exceed it. Web
-    # results lead; the merged list is trimmed back to what the caller asked for.
-    results = [r for section in ("web", "news") for r in (sections.get(section) or []) if isinstance(r, dict)]
+    results = _response_results(data)
+    if results is None:
+        return _unexpected_format_error(query)
     if not results:
         return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
 
