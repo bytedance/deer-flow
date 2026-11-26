@@ -6,6 +6,7 @@ import {
   render,
   screen,
 } from "@testing-library/react";
+import { useState } from "react";
 
 const mocks = rs.hoisted(() => ({
   inspect: rs.fn(),
@@ -329,5 +330,71 @@ describe("source skill installation", () => {
       await Promise.resolve();
     });
     expect(mocks.invalidate).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not close a reopened dialog when an earlier delete settles", async () => {
+    const onClose = rs.fn();
+
+    function ReopenableInstaller() {
+      const [open, setOpen] = useState(true);
+      if (!open) {
+        return <button onClick={() => setOpen(true)}>Reopen installer</button>;
+      }
+      return (
+        <SkillSourceInstallDialog
+          onClose={() => {
+            onClose();
+            setOpen(false);
+          }}
+          onInstalled={() => undefined}
+        />
+      );
+    }
+
+    mocks.inspect.mockResolvedValue(preview);
+    mocks.install.mockResolvedValue({
+      success: true,
+      skill_name: "demo",
+      message: "Installed",
+      enabled: true,
+    });
+    let finishDelete: () => void = () => undefined;
+    // ES2022 target: Promise.withResolvers is not in the configured libs.
+    mocks.remove.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finishDelete = () => resolve();
+        }),
+    );
+    render(<ReopenableInstaller />);
+    fireEvent.change(screen.getByLabelText(text.sourceLabel), {
+      target: { value: preview.source },
+    });
+    fireEvent.click(screen.getByRole("button", { name: text.sourceInspect }));
+    await screen.findByText(preview.skill_name);
+    fireEvent.click(screen.getByRole("button", { name: text.sourceInstall }));
+    await screen.findByText(text.sourceSuccessTitle);
+    fireEvent.click(screen.getByRole("button", { name: text.deleteSkill }));
+    fireEvent.click(screen.getByRole("button", { name: text.confirmDelete }));
+    const closeButtons = screen.getAllByRole("button", {
+      name: enUS.common.close,
+    });
+    fireEvent.click(closeButtons[closeButtons.length - 1]!);
+    fireEvent.click(screen.getByRole("button", { name: "Reopen installer" }));
+    fireEvent.change(screen.getByLabelText(text.sourceLabel), {
+      target: { value: "owner/repo@new" },
+    });
+    const refreshCount = mocks.invalidate.mock.calls.length;
+
+    await act(async () => {
+      finishDelete();
+      await Promise.resolve();
+    });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(mocks.invalidate).toHaveBeenCalledTimes(refreshCount + 1);
+    expect(
+      screen.getByLabelText<HTMLInputElement>(text.sourceLabel).value,
+    ).toBe("owner/repo@new");
   });
 });

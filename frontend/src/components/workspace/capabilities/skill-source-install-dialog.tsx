@@ -84,6 +84,7 @@ export function SkillSourceInstallDialog({
   const queryClient = useQueryClient();
   const active = useRef<AbortController | null>(null);
   const pendingInstall = useRef<Promise<InstallSkillResponse> | null>(null);
+  const dialogActive = useRef(false);
   const [phase, setPhase] = useState<Phase>("input");
   const [source, setSource] = useState("");
   const [preview, setPreview] = useState<SkillSourcePreview | null>(null);
@@ -108,15 +109,17 @@ export function SkillSourceInstallDialog({
     return true;
   }, [refreshSkills]);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    dialogActive.current = true;
+    return () => {
+      dialogActive.current = false;
       if (!preservePendingInstall()) active.current?.abort();
       active.current = null;
-    },
-    [preservePendingInstall],
-  );
+    };
+  }, [preservePendingInstall]);
 
   const close = () => {
+    dialogActive.current = false;
     if (!preservePendingInstall()) active.current?.abort();
     active.current = null;
     refreshSkills();
@@ -218,7 +221,7 @@ export function SkillSourceInstallDialog({
       await deleteCustomSkill(installedName);
       toast.success(text.skillDeleted);
       refreshSkills();
-      onClose();
+      if (dialogActive.current) onClose();
     } catch (caught) {
       toast.error(
         caught instanceof SkillRequestError && caught.status === 403
