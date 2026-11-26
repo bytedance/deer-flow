@@ -54,7 +54,7 @@ from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results, r
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, normalize_tool_result, stamp_exception_meta
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.sandbox.exceptions import SandboxAuthorizationError
-from deerflow.sandbox.read_file_contract import READ_FILE_EMPTY, READ_FILE_NO_CONTENT_RESULTS, count_file_lines
+from deerflow.sandbox.read_file_contract import READ_FILE_EMPTY, READ_FILE_NO_CONTENT_RESULTS, count_file_lines, is_read_error_text
 from deerflow.sandbox.read_snapshot import ReadSnapshotCapture, capture_read_snapshot
 from deerflow.sandbox.tools import (
     read_current_file_content,
@@ -79,11 +79,6 @@ _PAYLOAD_FIELDS: dict[str, tuple[str, ...]] = {
 # Deterministic for a given payload so repeated model calls keep the same
 # request prefix (prompt caching) instead of drifting.
 _ELIDED_PAYLOAD_TEMPLATE = "[payload elided: {chars} chars; this {tool_name} call was blocked by the read-before-write gate and nothing was written]"
-
-# AIO/E2B-style sandboxes convert read failures (including missing files)
-# into "Error: ..." strings instead of raising. Content with this prefix is
-# treated as "cannot inspect" — the gate fails open and no mark is stamped.
-_UNINSPECTABLE_CONTENT_PREFIX = "Error:"
 
 _BLOCK_MESSAGE = "Error: {tool_name} blocked — {path} already exists ({line_desc}) and you have not read its current version. Any write invalidates earlier reads, so re-read before every modification. {read_hint}"
 
@@ -360,7 +355,7 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         except Exception:
             logger.warning("read-before-write gate could not inspect %r; allowing the write (fail-open)", path, exc_info=True)
             return None
-        if current.startswith(_UNINSPECTABLE_CONTENT_PREFIX):
+        if is_read_error_text(current):
             # Error-string sandbox read channel (AIO/E2B): "missing" and
             # "unreadable" are indistinguishable here, so fail open — creation
             # proceeds and genuine failures surface from the tool itself.
@@ -497,7 +492,7 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         except Exception:
             logger.debug("read-before-write mark skipped for %r: file not hashable", path, exc_info=True)
             return
-        if content.startswith(_UNINSPECTABLE_CONTENT_PREFIX):
+        if is_read_error_text(content):
             logger.debug("read-before-write mark skipped for %r: error-string read channel", path)
             return
         # A custom tool without source evidence can prove a complete read by

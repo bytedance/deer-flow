@@ -13,7 +13,7 @@ from e2b_code_interpreter import Sandbox as E2BClientSandbox
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
 from deerflow.sandbox.download import download_limit, read_download_stream
-from deerflow.sandbox.read_file_contract import split_file_lines
+from deerflow.sandbox.read_file_contract import confirmed_file_text, split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
@@ -248,7 +248,7 @@ class E2BSandbox(Sandbox):
         try:
             content = self._client.files.read(resolved)
             if start_line is None and end_line is None:
-                return content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content or ""
+                return confirmed_file_text(content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content or "")
             text = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content or ""
             lines = split_file_lines(text)
             # Clamp like LocalSandbox.read_file: a negative start would otherwise

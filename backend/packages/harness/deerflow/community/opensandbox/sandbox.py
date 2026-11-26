@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
 from deerflow.sandbox.download import download_limit, read_download_stream
-from deerflow.sandbox.read_file_contract import split_file_lines
+from deerflow.sandbox.read_file_contract import confirmed_file_text, split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
@@ -314,7 +314,7 @@ class OpenSandboxSandbox(Sandbox):
             logger.error("Failed to read OpenSandbox file %s: %s", resolved, exc)
             return f"Error: {exc}"
         if start_line is None and end_line is None:
-            return content or ""
+            return confirmed_file_text(content or "")
         lines = split_file_lines(content or "")
         # Clamp like LocalSandbox.read_file: a negative start would otherwise
         # wrap around through Python's negative-index slicing.

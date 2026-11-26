@@ -59,6 +59,7 @@ from deerflow.sandbox.read_file_contract import (
     READ_FILE_NUMBERED_MAX_LINES,
     READ_FILE_START_LINE_EXCEEDS,
     READ_FILE_TRUNCATION_PREFIX,
+    is_read_error_text,
     split_file_lines,
 )
 from deerflow.sandbox.read_snapshot import read_snapshot_requested, record_read_snapshot
@@ -3439,10 +3440,7 @@ def read_file_tool(
             # derive both that evidence and the ranged/truncated view from it.
             sandbox = ensure_sandbox_initialized(runtime)
             source = _read_file_from_sandbox(runtime, path, sandbox=sandbox)
-            if not isinstance(sandbox, LocalSandbox) and source.startswith("Error:"):
-                # Some remote providers report read failures as text. Never
-                # turn that failure into a range view or version evidence.
-                # LocalSandbox raises failures; its Error: lines are file data.
+            if is_read_error_text(source):
                 return _read_file_failure(runtime, _truncate_read_file_output(source, _read_file_output_max_chars()))
             displayed, status = _format_read_file_snapshot(source, start_line=start_line, end_line=end_line)
             if status == "error":

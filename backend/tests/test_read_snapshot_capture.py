@@ -73,6 +73,35 @@ def _request(path, args=None, call_id="read"):
     return ToolCallRequest(tool_call={"name": "read_file", "args": {"path": path, **(args or {})}, "id": call_id}, tool=None, state=state, runtime=runtime)
 
 
+@pytest.mark.parametrize("provider", ["e2b", "opensandbox"])
+@pytest.mark.parametrize("read_fails", [False, True], ids=["log-content", "provider-failure"])
+def test_remote_ranged_read_distinguishes_file_content_from_provider_failure(monkeypatch, provider, read_fails):
+    from deerflow.community.e2b_sandbox.e2b_sandbox import E2BSandbox
+    from deerflow.community.opensandbox.sandbox import OpenSandboxSandbox
+
+    source = "Error: first operation failed\nrecovered=true\n"
+
+    def read(path):
+        if read_fails:
+            raise OSError("transport unavailable")
+        return source
+
+    client = SimpleNamespace(files=SimpleNamespace(read=read, read_file=read))
+    sandbox = E2BSandbox("remote", client) if provider == "e2b" else OpenSandboxSandbox("remote", client, run_command_opts_cls=dict)
+    monkeypatch.setattr(tools, "ensure_sandbox_initialized", lambda runtime: sandbox)
+    request = _request("/remote/report.log", {"start_line": 2, "end_line": 2})
+    request.runtime.tool_call_id = "read"
+    gate = ReadBeforeWriteMiddleware()
+    result = gate.wrap_tool_call(request, lambda req: tools.read_file_tool.func(runtime=req.runtime, **req.tool_call["args"]))
+    if read_fails:
+        assert result.status == "error"
+        assert READ_MARK_KEY not in result.additional_kwargs
+    else:
+        assert result.status == "success"
+        assert result.content == "recovered=true"
+        assert result.additional_kwargs[READ_MARK_KEY]["hash"] == hashlib.sha256(source.encode()).hexdigest()
+
+
 @pytest.mark.parametrize("line_range", [{}, {"start_line": 1, "end_line": 1}, {"start_line": 99}])
 @pytest.mark.parametrize("error", ["Error: file not found or unreadable", "Error: " + "long remote failure " * 4000], ids=["ordinary-error", "over-output-budget-error"])
 @pytest.mark.parametrize("invocation", ["sync", "async"])

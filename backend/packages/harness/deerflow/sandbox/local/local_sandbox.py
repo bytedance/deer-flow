@@ -24,6 +24,7 @@ from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT, download_limit
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.path_patterns import PATH_START_BOUNDARY, replace_output_path_matches
+from deerflow.sandbox.read_file_contract import confirmed_file_text
 from deerflow.sandbox.sandbox import CommandOutput, Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches, path_matches
 from deerflow.utils.atomic_write import publish_bytes_atomically
@@ -1354,7 +1355,7 @@ class LocalSandbox(Sandbox):
             # silently rewritten — see discussion on PR #1935.
             if resolved_path in self._agent_written_paths:
                 content = self._reverse_resolve_paths_in_output(content)
-            return content
+            return confirmed_file_text(content)
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None

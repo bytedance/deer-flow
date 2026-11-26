@@ -107,4 +107,6 @@ When the read-before-write gate requests a snapshot, derive the displayed range
 and version hash from one complete provider read. Add source line labels only to
 the view, never to the hashed source. Record the final displayed content with
 `record_read_snapshot`; preserve producer status and the no-ID string API.
+Providers that return read failures as text use `confirmed_file_text` on a
+successful full read so a literal `Error:` in a log is preserved as data.
 Tests: `test_read_snapshot_capture.py`, `test_read_mark_snapshot.py`.

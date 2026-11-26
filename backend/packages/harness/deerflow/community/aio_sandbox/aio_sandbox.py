@@ -17,6 +17,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.command_scope import COMMAND_OWNER_ENV, CommandScopeCancelled, command_lock, current_command_scope
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
 from deerflow.sandbox.download import download_limit, read_download_stream
+from deerflow.sandbox.read_file_contract import confirmed_file_text
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
@@ -1221,7 +1222,9 @@ class AioSandbox(Sandbox):
             if end_line is not None:
                 kwargs["end_line"] = max(end_line, 0)
             result = self._client.file.read_file(file=path, **kwargs)
-            return result.data.content if result.data else ""
+            if getattr(result, "success", None) is False:
+                return f"Error: {result.message or 'file not found or unreadable'}"
+            return confirmed_file_text(result.data.content) if result.data else ""
         except ValidationError as e:
             # The server reports read failures (e.g. ENOENT) as an error
             # envelope with ``data: {}``, which cannot satisfy the required

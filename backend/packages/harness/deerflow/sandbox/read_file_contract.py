@@ -20,6 +20,20 @@ READ_FILE_TRUNCATION_PREFIX = "... [truncated:"
 READ_FILE_NUMBERED_MAX_LINES = 40
 
 
+class _ConfirmedFileText(str):
+    """Successful file data that would otherwise look like a legacy provider error."""
+
+
+def confirmed_file_text(content: str) -> str:
+    """Preserve provider success for ambiguous text without copying ordinary files."""
+    return _ConfirmedFileText(content) if content.startswith("Error:") else content
+
+
+def is_read_error_text(content: str) -> bool:
+    """Third-party readers may still return untyped in-band failures."""
+    return content.startswith("Error:") and not isinstance(content, _ConfirmedFileText)
+
+
 def count_file_lines(content: str) -> int:
     """Count file lines as LocalSandbox and read_file's truncation marker see them.
 

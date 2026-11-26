@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, TypeVar
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
 from deerflow.sandbox.download import download_limit
-from deerflow.sandbox.read_file_contract import split_file_lines
+from deerflow.sandbox.read_file_contract import confirmed_file_text, split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
@@ -240,7 +240,7 @@ class BoxliteBox(Sandbox):
             return f"Error: {(r.stderr or '').strip() or 'cannot read file'}"
         content = r.stdout or ""
         if start_line is None and end_line is None:
-            return content
+            return confirmed_file_text(content)
         lines = split_file_lines(content)
         # Clamp like LocalSandbox.read_file: a negative start would otherwise
         # wrap around through Python's negative-index slicing.
