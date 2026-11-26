@@ -101,7 +101,6 @@ class Article:
 
 _BASE_TAG_RE = re.compile(r"<base", re.IGNORECASE)
 _DOCUMENT_WRAPPER_RE = re.compile(r"<(?:html|head|body)\b", re.IGNORECASE)
-_BODY_INNER_RE = re.compile(r"<body[^>]*>(.*)</body>", re.DOTALL | re.IGNORECASE)
 
 
 def _has_document_wrapper(content: str) -> bool:
@@ -236,15 +235,12 @@ class ReadabilityExtractor:
         if not html_content or not str(html_content).strip():
             html_content = "No content could be extracted from this page"
 
-        # Detect whole-document extraction results through explicit document
-        # wrappers; an extracted chart can legitimately contain an SVG title.
-        # When detected, use the resolved
-        # HTML's <body> content so that <a> destinations survive. Apply the
-        # same fallback without a source URL, preserving relative destinations.
+        # A whole-document result needs the source body to retain link markup.
+        # Parse it as HTML so body-like text in the head cannot select the start.
         if html and _has_document_wrapper(html_content):
             logger.info("Readability extraction returned the unextracted document; using HTML body")
-            body_match = _BODY_INNER_RE.search(html)
-            html_content = body_match.group(1) if body_match else html
+            body = BeautifulSoup(html, "html5lib").body
+            html_content = body.decode_contents() if body is not None else html
 
         title = article.get("title")
         if not title or not str(title).strip():
