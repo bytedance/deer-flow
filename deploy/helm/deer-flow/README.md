@@ -467,7 +467,7 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   readiness probe pings this Redis on every check and reports the pod unready
   while it is unreachable, since without the bridge no run can publish, stream
   or be cancelled from a peer pod.
-- **Persistence.** A PVC (`<release>-home`) backs `/app/backend/.deer-flow`
+- **Persistence.** The home PVC backs `/app/backend/.deer-flow`
   (sqlite DB, memory, custom agents, per-thread user-data). The gateway mounts
   it with `subPath: deer-flow` so the layout matches the provisioner's PVC
   user-data mode. Default `ReadWriteOnce`; use `ReadWriteMany` (NFS) on
@@ -683,8 +683,100 @@ helm template deer-flow deploy/helm/deer-flow -n deer-flow -f my-values.yaml | \
 
 ## Uninstall
 
+With home persistence enabled (the default), check the home PVC in Helm's
+stored release manifest **before uninstalling**. Helm reads this manifest to
+decide which resources to delete. If you disabled home persistence, the Gateway
+uses pod-local storage and you can skip the PVC check.
+
+```bash
+helm get manifest deer-flow -n deer-flow | sed -n '/^# Source: .*\/pvc-home\.yaml$/,/^---$/p'
+```
+
+Look for `helm.sh/resource-policy: keep` under `metadata.annotations` and
+note the claim's name and namespace. Older releases, including 2.2.0, can
+delete the claim and its workspace files on uninstall. If the annotation is
+missing, upgrade the existing release using a chart that includes it. From a
+checkout with the fix, this upgrade carries forward the release's configured
+values and picks up the new chart defaults. Run it against the cluster so
+Helm can read the immutable claim template labels on existing PostgreSQL and
+Redis StatefulSets. An offline `helm template` render cannot recover those labels.
+
+```bash
+helm upgrade deer-flow deploy/helm/deer-flow -n deer-flow
+```
+
+After an upgrade, verify that `helm status deer-flow -n deer-flow` reports
+`deployed`. A failed upgrade can already have applied the PVC annotation.
+For a persistent workspace, rerun the manifest check above and confirm it
+shows the keep annotation before running the uninstall command.
+
+### Save the release values and credentials for a reinstall
+
+Before uninstalling, export the installed release's user-supplied values.
+This captures overrides from every `-f` file and `--set` flag, including
+the workspace volume's requested size. The file may contain credentials.
+Create a private file and keep its path for the reinstall.
+
+```bash
+restore_values=$(mktemp "$HOME/deer-flow-values.XXXXXXXX") &&
+  helm get values deer-flow -n deer-flow -o yaml > "$restore_values" &&
+  printf 'Saved release values to %s\n' "$restore_values"
+```
+
+Continue once the export succeeds. If you resized the home PVC directly in
+Kubernetes, update `persistence.home.size` in the saved values to match the
+claim's current storage request.
+
+The bundled PostgreSQL volume keeps its original database password. The app
+also needs its original `DEER_FLOW_CREDENTIALS_KEY` to decrypt saved
+credentials. Helm deletes chart-managed Secrets on uninstall and generates
+new values on install. Preserve both Secrets **before uninstalling** if you
+plan to reopen the workspace.
+
+If you already manage either Secret, keep its existing reference in your values
+file. For the example release with bundled PostgreSQL, use `jq` to copy each
+chart-managed Secret into the same namespace under a new name. The copies
+belong to the operator and survive release removal. For a customized release,
+use the Secret names referenced by the Gateway's `DEER_FLOW_CREDENTIALS_KEY`
+and `DATABASE_URL` environment variables. Confirm each copy succeeds before
+continuing.
+
+```bash
+copy_secret() {
+  kubectl -n deer-flow get secret "$1" -o json |
+    jq --arg name "$2" '{apiVersion, kind, metadata: {name: $name}, type, data}' |
+    kubectl -n deer-flow create -f -
+}
+copy_secret deer-flow-deer-flow-app deer-flow-saved-app
+copy_secret deer-flow-deer-flow-postgres deer-flow-saved-postgres
+```
+
+### Uninstall the release
+
 ```bash
 helm uninstall deer-flow -n deer-flow
-# the PVC is NOT deleted by default — remove it manually if desired:
-kubectl -n deer-flow delete pvc -l app.kubernetes.io/instance=deer-flow
+```
+
+To reopen the workspace, reinstall the same chart version with the same release
+name and namespace. Pass the exported values, then override only the Secret
+references you copied. The example below uses both copies. Omit the
+corresponding `--set-string` line for each Secret you already managed, so its
+exported reference stays in effect. In a new shell, set `restore_values` to
+the path printed at export.
+
+```bash
+helm install deer-flow deploy/helm/deer-flow -f "$restore_values" \
+  --set-string existingAppSecret=deer-flow-saved-app \
+  --set-string postgresql.existingSecret=deer-flow-saved-postgres \
+  -n deer-flow
+```
+
+### Discard the retained workspace
+
+After uninstalling, delete the home claim only if you intend to discard its
+files. With a `Delete` reclaim policy, deleting the claim also removes its
+backing storage. The example release uses the following claim.
+
+```bash
+kubectl -n deer-flow delete pvc deer-flow-deer-flow-home
 ```

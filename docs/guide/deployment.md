@@ -14,6 +14,12 @@ Use the table below as a practical starting point when choosing how to run DeerF
 - Linux plus Docker is the recommended deployment target for a persistent server. macOS and Windows are best treated as development or evaluation environments.
 - If CPU or memory usage stays pinned, reduce concurrent runs first, then move to the next sizing tier.
 
+Before uninstalling a Kubernetes release, check the home PVC retention policy
+if persistence is enabled. To restore the workspace on reinstall, export the
+installed release's user-supplied values and preserve the database credentials
+and the app's credential encryption key. See the
+[Helm uninstall instructions](../../deploy/helm/deer-flow/README.md#uninstall).
+
 ## Option 1: Docker (Recommended)
 
 Requires Docker Desktop / Docker Engine and **Docker Compose v2.24+**
