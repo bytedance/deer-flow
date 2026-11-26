@@ -72,6 +72,11 @@ _STATUS_HINTS = {
     429: "rate limit reached — set YDC_API_KEY for higher limits",
 }
 _FORMAT_ERROR = "You.com returned an unexpected response format"
+_ERROR_ENVELOPE_KEYS = ("detail", "error", "errors", "error_code", "message")
+
+
+class _YoucomDecodeError(Exception):
+    """Raised when a You.com 200 response body cannot be decoded as JSON."""
 
 
 @cache
@@ -142,7 +147,10 @@ async def _search(api_key: str | None, query: str, count: int) -> object:
     async with await asyncio.to_thread(httpx.AsyncClient, timeout=_TIMEOUT_S) as client:
         response = await client.get(endpoint, params={"query": query, "count": count}, headers=headers)
     response.raise_for_status()
-    return response.json()
+    try:
+        return response.json()
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise _YoucomDecodeError from exc
 
 
 def _unexpected_format_error(query: str) -> str:
@@ -153,17 +161,23 @@ def _response_results(data: object) -> list[dict] | None:
     """Return merged web and news result objects, or None when the payload is malformed.
 
     Missing or null ``results``, ``web``, or ``news`` containers represent an
-    empty search. A wrong-typed container, or a non-empty section holding no
-    object entries, is malformed so a 200-wrapped error page is surfaced as a
-    format error rather than "No results found" — matching the containment rule
-    the sibling bundled providers follow. Non-object entries in an otherwise
-    valid section list are skipped in order and logged by position only.
+    empty search, unless the top-level object carries an explicit error
+    envelope field (such as ``detail`` or ``error``). A wrong-typed container,
+    an error envelope, or a non-empty section holding no object entries is
+    malformed so a 200-wrapped error payload is surfaced as a format error
+    rather than "No results found" — matching the containment rule the sibling
+    bundled providers follow. Non-object entries in an otherwise valid section
+    list are skipped in order and logged by position only.
     """
     if not isinstance(data, dict):
         logger.error("You.com returned an unexpected payload type: %s", type(data).__name__)
         return None
     sections = data.get("results")
     if sections is None:
+        error_key = next((key for key in _ERROR_ENVELOPE_KEYS if data.get(key)), None)
+        if error_key is not None:
+            logger.error("You.com returned an error envelope (%s)", error_key)
+            return None
         return []
     if not isinstance(sections, dict):
         logger.error("You.com returned an unexpected 'results' payload type: %s", type(sections).__name__)
@@ -234,7 +248,7 @@ async def web_search_tool(query: str, max_results: int | None = None) -> str:
         if hint:
             message = f"{message} ({hint})"
         return json.dumps({"error": message, "query": query}, ensure_ascii=False)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except _YoucomDecodeError:
         logger.error("You.com returned a non-JSON response")
         return _unexpected_format_error(query)
     except Exception as e:
