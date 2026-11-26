@@ -2,13 +2,31 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
-from typing import Any
+from typing import Any, Literal, cast, get_args
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 
 ORIGINAL_USER_CONTENT_KEY = "original_user_content"
 SUMMARY_MESSAGE_NAME = "summary"
 SUBAGENT_RESULT_MESSAGE_NAME = "subagent-result"
+TOOL_META_KEY = "deerflow_tool_meta"
+
+ToolResultStatus = Literal["success", "error", "partial_success"]
+KNOWN_TOOL_RESULT_STATUSES = get_args(ToolResultStatus)
+
+
+def get_tool_message_status(message: ToolMessage) -> ToolResultStatus:
+    """Read execution status from message fields, giving either error signal priority."""
+    if message.status == "error":
+        return "error"
+    kwargs = message.additional_kwargs
+    meta = kwargs.get(TOOL_META_KEY) if isinstance(kwargs, dict) else None
+    if isinstance(meta, dict):
+        status = meta.get("status")
+        if isinstance(status, str) and status in KNOWN_TOOL_RESULT_STATUSES:
+            return cast(ToolResultStatus, status)
+    return message.status
+
 
 #: Server-owned mark the Gateway stamps on an untrusted caller's message when it
 #: carries a framework marker (``hide_from_ui``, a ``summary`` name) that would

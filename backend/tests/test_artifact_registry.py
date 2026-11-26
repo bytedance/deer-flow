@@ -6,6 +6,7 @@ import pytest
 from langchain_core.messages import ToolMessage
 from langchain_core.messages.content import create_file_block, create_image_block
 
+from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.agents.thread_state import merge_tool_artifacts
 from deerflow.tools.artifact_registry import (
     _detect_refs_in_text,
@@ -359,11 +360,20 @@ def test_resource_links_and_placeholder_text_dedup_same_ref():
     assert entries[1]["display_name"] == "report"
 
 
-def test_extract_from_text_with_path():
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param([{"type": "text", "text": "Report saved to /mnt/user-data/outputs/report.html"}], id="text-block"),
+        pytest.param("Error: Example report at /mnt/user-data/outputs/report.html", id="successful-error-prefix"),
+    ],
+)
+def test_extract_from_text_with_path(content):
     result = ToolMessage(
-        content=[{"type": "text", "text": "Report saved to /mnt/user-data/outputs/report.html"}],
+        content=content,
         tool_call_id="call-3",
         name="mcp_server_analyze",
+        status="success",
+        additional_kwargs={TOOL_META_KEY: {"status": "success"}},
     )
     entries = extract_artifacts_from_result(result, thread_id="thread-1")
     assert len(entries) == 1
@@ -483,25 +493,52 @@ def test_string_content_with_path_captured():
     assert entries[0]["artifact_type"] == "file"
 
 
-def test_detect_refs_in_text_flag_disables_text_scans():
+@pytest.mark.parametrize("status", ["success", "partial_success"])
+def test_detect_refs_in_text_flag_disables_only_text_scans(status):
+    structured_ref = "/mnt/user-data/outputs/structured.csv"
     result = ToolMessage(
         content=[{"type": "text", "text": "Report saved to /mnt/user-data/outputs/report.html"}],
         tool_call_id="call-3c",
         name="mcp_server_analyze",
+        artifact={"structured_content": {"path": structured_ref}},
+        additional_kwargs={TOOL_META_KEY: {"status": status}},
     )
     entries = extract_artifacts_from_result(result, thread_id="thread-1", detect_refs_in_text=False)
-    assert entries == []
+    assert [entry["real_ref"] for entry in entries] == [structured_ref]
 
 
-def test_no_extraction_from_error_result():
+@pytest.mark.parametrize(
+    ("native_status", "tool_meta", "register_refs"),
+    [
+        pytest.param("error", None, False, id="native-error"),
+        pytest.param("success", {"status": "error"}, False, id="normalized-error"),
+        pytest.param("error", {"status": "success"}, False, id="native-error-over-success"),
+        pytest.param("error", {"status": "partial_success"}, False, id="native-error-over-partial-success"),
+        pytest.param("success", {"status": "success"}, True, id="success"),
+        pytest.param("success", {"status": "partial_success"}, True, id="partial-success"),
+        pytest.param("success", None, True, id="missing-meta"),
+        pytest.param("success", [{"status": "error"}], True, id="non-dict-meta"),
+        pytest.param("success", {}, True, id="missing-meta-status"),
+        pytest.param("success", {"status": ["error"]}, True, id="list-meta-status"),
+        pytest.param("success", {"status": {"status": "error"}}, True, id="dict-meta-status"),
+        pytest.param("success", {"status": "unknown"}, True, id="unknown-meta-status"),
+    ],
+)
+def test_extract_artifacts_respects_tool_result_status(native_status, tool_meta, register_refs):
+    structured_ref = "/mnt/user-data/outputs/structured.csv"
+    resource_ref = "https://files.example/resource.pdf"
+    image_ref = "https://files.example/image.png"
+    text_ref = "/mnt/user-data/outputs/text.html"
     result = ToolMessage(
-        content="Error: Tool failed",
+        content=[create_image_block(url=image_ref), {"type": "text", "text": f"Report at {text_ref}"}],
         tool_call_id="call-5",
         name="mcp_server_analyze",
-        status="error",
+        status=native_status,
+        artifact={"structured_content": {"path": structured_ref}, "resource_links": [{"uri": resource_ref}]},
+        additional_kwargs={TOOL_META_KEY: tool_meta} if tool_meta is not None else {},
     )
     entries = extract_artifacts_from_result(result, thread_id="thread-1")
-    assert entries == []
+    assert [entry["real_ref"] for entry in entries] == ([structured_ref, resource_ref, image_ref, text_ref] if register_refs else [])
 
 
 def test_no_extraction_from_plain_text_without_refs():

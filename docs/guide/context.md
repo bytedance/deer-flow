@@ -180,6 +180,8 @@ Tool-result and model-error policies use producer metadata, native exit status, 
 File reads report actual failures and truncation at the producer; producer-stamped successful reads preserve document examples, including text beginning with `Error:`.
 For stamped text results, the model receives a JSON object separating reported execution status from `content`, with whitespace preserved by JSON escaping. Checkpoints and tool receipts retain the original result. This exposes existing status to providers that omit message metadata; it does not validate the document's claims or guarantee the model's final answer.
 
+Artifact capture skips a tool result when either its native or normalized status is `error`. Results marked `partial_success` can register references that pass the usual validation. Text scanning remains controlled by `tool_artifacts.detect_refs_in_text`. Missing or invalid normalized status falls back to the native message status. Existing registry entries follow the usual retention policy.
+
 OpenAI connection and timeout errors use the configured `llm_call.retry_max_attempts` budget (default: three total attempts). Other OpenAI `APIError` failures without usable status or error code receive at most one retry, within that configured ceiling.
 
 Memory extraction preserves short context-dependent replies and durable facts that mention uploads. Keeping these turns can increase extraction batch size and LLM use. The extractor distinguishes lasting user information from transient file availability using conversation context; lexical matches do not confirm a stored fact.

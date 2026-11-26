@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 from langchain_core.messages import ToolMessage
 
 from deerflow.agents.thread_state import ArtifactEntry
+from deerflow.utils.messages import get_tool_message_status
 
 _HANDLE_PREFIX = "art_"
 _HANDLE_LENGTH = 8
@@ -384,7 +385,7 @@ def extract_artifacts_from_result(
     placeholder text the conversion layer wrote for the same link) is kept
     only from the first source, so one resource never gets two handles.
     """
-    if result.status == "error":
+    if get_tool_message_status(result) == "error":
         return []
 
     now = _utc_now_iso()

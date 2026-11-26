@@ -16,13 +16,12 @@ from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_transform_meta import append_tool_transform, read_tool_transforms
 from deerflow.utils.bash_exit import BASH_TOOL_NAMES, bash_exit_status
+from deerflow.utils.messages import KNOWN_TOOL_RESULT_STATUSES, TOOL_META_KEY, ToolResultStatus
 
-TOOL_META_KEY = "deerflow_tool_meta"
 PROGRESS_GUARD_ERROR_TYPE = "blocked_by_progress_guard"
 
-ToolResultStatus = Literal["success", "error", "partial_success"]
 RecommendedNextAction = Literal["continue", "rewrite_query", "try_alternative", "retry_later", "summarize", "stop"]
-TOOL_RESULT_STATUSES = frozenset(get_args(ToolResultStatus)) | {"unknown"}
+TOOL_RESULT_STATUSES = frozenset(KNOWN_TOOL_RESULT_STATUSES) | {"unknown"}
 TOOL_RESULT_NEXT_ACTIONS = frozenset(get_args(RecommendedNextAction)) | {"unknown"}
 
 _ERROR_PREFIX = "Error:"
@@ -65,7 +64,7 @@ def tool_result_for_model(message: ToolMessage) -> ToolMessage:
     if not isinstance(meta, dict):
         return message
     status, source = meta.get("status"), meta.get("source")
-    if not isinstance(status, str) or status not in get_args(ToolResultStatus):
+    if not isinstance(status, str) or status not in KNOWN_TOOL_RESULT_STATUSES:
         return message
     if not isinstance(source, str) or source not in {"tool_return", "exception", "progress_middleware"}:
         return message

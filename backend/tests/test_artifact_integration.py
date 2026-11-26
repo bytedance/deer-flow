@@ -15,6 +15,7 @@ import httpx
 import pytest
 from _agent_e2e_helpers import FakeToolCallingModel
 from langchain.agents import create_agent
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
@@ -23,8 +24,12 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
 from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
 from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.agents.thread_state import ThreadState
 from deerflow.tools.artifact_registry import generate_handle
+from deerflow.tools.builtins import view_image_tool
 
 THREAD_ID = "artifact-cycle-thread"
 REAL_REF = "/mnt/user-data/outputs/report.md"
@@ -42,6 +47,11 @@ class RecordingToolCallingModel(FakeToolCallingModel):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # noqa: ANN001, ANN003
         self.received.append(list(messages))
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+class ArtifactCycleModel(RecordingToolCallingModel):
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # noqa: ANN001, ANN003
         if self.i == 1:
             data = next(m.content for m in messages if m.additional_kwargs.get("durable_context_data"))
             handle = re.search(r"art_[0-9a-f]{8}", data).group()
@@ -70,8 +80,8 @@ def spy_read_file(path: str) -> str:
     return f"contents of {path}"
 
 
-def _cycle_model() -> RecordingToolCallingModel:
-    return RecordingToolCallingModel(
+def _cycle_model() -> ArtifactCycleModel:
+    return ArtifactCycleModel(
         responses=[
             AIMessage(
                 content="",
@@ -128,6 +138,63 @@ def test_handle_projected_into_model_context():
     durable_blocks = [message.content for message in round3 if getattr(message, "additional_kwargs", {}).get("durable_context_data")]
     handle = next(e["handle"] for e in result["tool_artifacts"] if e["tool_call_id"] == "call_make")
     assert any(handle in content for content in durable_blocks), "captured handle never reached the model-facing durable context block"
+
+
+@pytest.mark.asyncio
+async def test_missing_image_creates_no_artifact_before_or_after_compaction(tmp_path):
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    missing_path = "/mnt/user-data/uploads/missing.png"
+    model = RecordingToolCallingModel(
+        responses=[
+            AIMessage(content="", tool_calls=[{"name": "view_image", "args": {"image_path": missing_path}, "id": "call_view", "type": "tool_call"}]),
+            AIMessage(content="The image could not be opened."),
+            AIMessage(content="Ready to continue."),
+        ]
+    )
+    summary = "The first image request finished."
+    agent = create_agent(
+        model=model,
+        tools=[view_image_tool],
+        middleware=[
+            ToolErrorHandlingMiddleware(),
+            ArtifactCaptureMiddleware(),
+            DurableContextMiddleware(),
+            DeerFlowSummarizationMiddleware(
+                model=FakeMessagesListChatModel(responses=[AIMessage(content=summary)]),
+                trigger=("messages", 5),
+                keep=("messages", 2),
+                token_counter=len,
+            ),
+        ],
+        state_schema=ThreadState,
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": THREAD_ID}}
+    context = {"thread_id": THREAD_ID}
+
+    await agent.ainvoke(
+        {"messages": [HumanMessage(content="Open the uploaded image.")], "thread_data": {"uploads_path": str(uploads)}},
+        config,
+        context=context,
+    )
+    before = (await agent.aget_state(config)).values
+    stored_result = next(message for message in before["messages"] if isinstance(message, ToolMessage))
+    model_result = next(message for message in model.received[1] if isinstance(message, ToolMessage))
+    error_text = f"Error: Image file not found: {missing_path}"
+    assert stored_result.content == error_text
+    assert stored_result.additional_kwargs[TOOL_META_KEY]["status"] == "error"
+    assert json.loads(model_result.content) == {TOOL_META_KEY: {"status": "error", "source": "tool_return"}, "content": error_text}
+
+    await agent.ainvoke({"messages": [HumanMessage(content="Continue with the next request.")]}, config, context=context)
+    after = (await agent.aget_state(config)).values
+    compacted_request = model.received[-1]
+    assert after["summary_text"] == summary
+    assert not any(isinstance(message, ToolMessage) for message in [*after["messages"], *compacted_request])
+    assert {
+        "checkpoint_refs": [entry["real_ref"] for checkpoint in (before, after) for entry in checkpoint.get("tool_artifacts", [])],
+        "advertised_after_compaction": any("missing.png [available]" in message.content for message in compacted_request),
+    } == {"checkpoint_refs": [], "advertised_after_compaction": False}
 
 
 @pytest.mark.parametrize(
