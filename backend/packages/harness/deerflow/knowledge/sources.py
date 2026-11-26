@@ -16,6 +16,7 @@ TRUNCATION_MARKER = "… (response truncated)"
 _RESULT_LAYOUT_KEY = "knowledge_result_layout"
 _SOURCE_ARTIFACT_KEYS = frozenset({"knowledge_sources", "knowledge_sources_version", "retrieval_sources", _RESULT_LAYOUT_KEY})
 _ResultPosition = Annotated[int, Field(strict=True, ge=1, le=100)]
+_CITATION_PATTERN = re.compile(r"\[citation:((?:\\.|[^\]\\])*)\]\(#knowledge-source-([a-f0-9]{32})\)")
 
 
 class _ResultEntry(BaseModel):
@@ -31,6 +32,9 @@ class _ResultLayout(BaseModel):
     entries: list[_ResultEntry] = Field(max_length=100)
     # An empty notice denotes a saved file whose path did not fit the budget.
     file_notice: str | None = None
+
+
+_ResultCandidate = tuple[_ResultEntry, str, KnowledgeSource | None]
 
 
 def redact_strings(value: Any, secret: str | None) -> Any:
@@ -52,8 +56,7 @@ def strip_source_artifact(artifact: Any) -> Any:
 
 
 def _prune_citations(content: str, allowed: set[str]) -> str:
-    pattern = r"\[citation:((?:\\.|[^\]\\])*)\]\(#knowledge-source-([a-f0-9]{32})\)"
-    return re.sub(pattern, lambda match: match[0] if match[2] in allowed else match[1], content)
+    return _CITATION_PATTERN.sub(lambda match: match[0] if match[2] in allowed else match[1], content)
 
 
 def prune_sources(content: str, artifact: Any) -> tuple[str, Any]:
@@ -98,8 +101,8 @@ def _content_digest(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
-def _set_result_layout(artifact: dict[str, Any], content: str, entries: list[dict[str, Any]], *, file_notice: str | None = None) -> None:
-    if file_notice is not None or any(entry["depends_on"] for entry in entries):
+def _set_result_layout(artifact: dict[str, Any], content: str, entries: list[dict[str, Any]], *, file_notice: str | None = None, preserve: bool = False) -> None:
+    if preserve or file_notice is not None or any(entry["depends_on"] for entry in entries):
         artifact[_RESULT_LAYOUT_KEY] = {"digest": _content_digest(content), "entries": entries}
         if file_notice is not None:
             artifact[_RESULT_LAYOUT_KEY]["file_notice"] = file_notice
@@ -161,6 +164,65 @@ def format_result(result: RetrievalResult, *, max_chars_per_chunk: int = 800, ma
     return text, artifact
 
 
+def _project_result_entries(candidates: list[_ResultCandidate]) -> tuple[str, list[dict[str, Any]], dict[str, KnowledgeSource]]:
+    """Reconcile one proposed selection without mutating its original excerpts."""
+    source_ids = {entry.position: source.id for entry, _, source in candidates if source is not None}
+    allowed = set(source_ids.values())
+    while True:
+        cleaned = []
+        unchanged_ids: set[str] = set()
+        evidence: set[int] = set()
+        for entry, body, source in candidates:
+            if not evidence.issuperset(entry.depends_on):
+                continue
+            body = _prune_citations(body, allowed).strip()
+            if not body:
+                continue
+            if source is not None:
+                evidence.add(entry.position)
+                if source.excerpt == body:
+                    unchanged_ids.add(source_ids[entry.position])
+            cleaned.append((entry, body, source))
+        stable = unchanged_ids == allowed and cleaned == candidates
+        candidates = cleaned
+        if stable:
+            break
+        # Changed excerpts cannot support their original citation handles.
+        # Only remove handles/entries here; rebuild source IDs once at the end.
+        allowed = unchanged_ids
+
+    entries, layout = [], []
+    retained_sources: dict[str, KnowledgeSource] = {}
+    used = 0
+    for entry, body, source in candidates:
+        if source is not None:
+            if source.excerpt != body:
+                source = KnowledgeSource.model_validate({**source.model_dump(exclude={"id"}), "excerpt": body})
+            retained_sources[source.id] = source
+        text = f"[{entry.position}] {citation(source) if source else 'Unattributed content'}\n{_evidence_line(entry.depends_on)}{body}"
+        start = used + (2 if entries else 0)
+        used = start + len(text)
+        entries.append(text)
+        layout.append(entry.model_dump() | {"start": start, "end": used, "source_id": source.id if source else None})
+    return "\n\n".join(entries), layout, retained_sources
+
+
+def _result_trial(candidate: _ResultCandidate, selected: list[_ResultCandidate], by_position: dict[int, _ResultCandidate], by_source: dict[str, _ResultCandidate]) -> list[_ResultCandidate]:
+    trial = {item[0].position: item for item in selected}
+    required = [candidate]
+    visited: set[int] = set()
+    while required:
+        item = required.pop()
+        if item[0].position in visited:
+            continue
+        visited.add(item[0].position)
+        trial[item[0].position] = item
+        required.extend(by_position[position] for position in item[0].depends_on if position in by_position)
+        if by_source:
+            required.extend(by_source[match[2]] for match in _CITATION_PATTERN.finditer(item[1]) if match[2] in by_source)
+    return sorted(trial.values(), key=lambda item: item[0].position)
+
+
 def budget_dependent_result(content: str, artifact: Any, max_chars: int, *, file_notice: str = "", max_total_chars: int | None = None) -> tuple[str, dict[str, Any]] | None:
     """Project whole retrieval entries and their evidence into a later budget."""
     if not isinstance(artifact, Mapping) or _RESULT_LAYOUT_KEY not in artifact:
@@ -188,19 +250,14 @@ def budget_dependent_result(content: str, artifact: Any, max_chars: int, *, file
         file_notice = ""
     notice_cost = len(file_notice) + 2 if file_notice else 0
     max_chars = min(max_chars, max(0, total_chars - notice_cost))
-    entries: list[str] = []
-    retained_layout: list[dict[str, Any]] = []
-    retained_sources: dict[str, KnowledgeSource] = {}
-    retained_evidence: set[int] = set()
-    used = previous_position = previous_end = 0
+    candidates: list[_ResultCandidate] = []
+    previous_position = previous_end = 0
     if layout is not None:
         available = {source.id: source for source in sources_from_messages([{"type": "tool", "content": content, "artifact": artifact}])}
         for entry in layout.entries:
             if not (entry.position > previous_position and previous_end <= entry.start < entry.end <= len(content)):
                 continue
             previous_position, previous_end = entry.position, entry.end
-            if not retained_evidence.issuperset(entry.depends_on):
-                continue
             text = content[entry.start : entry.end]
             source = available.get(entry.source_id) if entry.source_id is not None else None
             if entry.source_id is not None and source is None:
@@ -209,57 +266,63 @@ def budget_dependent_result(content: str, artifact: Any, max_chars: int, *, file
             prefix = f"[{entry.position}] {label}\n" + _evidence_line(entry.depends_on)
             if not text.startswith(prefix) or (source is not None and text[len(prefix) :] != source.excerpt):
                 continue
-            start = used + (2 if entries else 0)
-            if start + len(text) > max_chars:
+            body = text[len(prefix) :]
+            minimum = body
+            while (pruned := _prune_citations(minimum, set()).strip()) != minimum:
+                minimum = pruned
+            # Even removing every destination cannot make this entry fit.
+            if len(prefix) >= max_chars or len(prefix) + len(minimum) > max_chars:
                 continue
-            entries.append(text)
-            used = start + len(text)
-            retained_layout.append(entry.model_dump() | {"start": start, "end": used})
-            if source is not None:
-                retained_evidence.add(entry.position)
-                retained_sources[source.id] = source
+            candidates.append((entry, body, source))
 
-    # Cleaning an excerpt changes its source ID; repeat to remove citations to
-    # superseded IDs too. Each changing pass removes at least one destination.
-    while True:
-        allowed = set(retained_sources)
-        sources: dict[str, KnowledgeSource] = {}
-        cleaned_entries, cleaned_layout = [], []
-        retained_evidence = set()
-        used = 0
-        for text, entry in zip(entries, retained_layout, strict=True):
-            if not retained_evidence.issuperset(entry["depends_on"]):
+    selected: list[_ResultCandidate] = []
+    positions: set[int] = set()
+    by_position = {item[0].position: item for item in candidates}
+    by_source = {item[2].id: item for item in candidates if item[2] is not None}
+    # Admit the complete valid group when it fits, including entries whose
+    # inline citations and explicit dependencies need each other to survive.
+    text, retained_layout, retained_sources = _project_result_entries(candidates)
+    if len(text) <= max_chars:
+        candidates = []
+    else:
+        text, retained_layout, retained_sources = "", [], {}
+    while candidates:
+        pending = []
+        for candidate in candidates:
+            entry = candidate[0]
+            if entry.position in positions:
                 continue
-            evidence_line = _evidence_line(entry["depends_on"])
-            body = _prune_citations(text.split("\n", 1)[1][len(evidence_line) :], allowed).strip()
-            if not body:
-                continue
-            source = retained_sources.get(entry["source_id"])
-            if source is not None:
-                source = KnowledgeSource.model_validate({**source.model_dump(exclude={"id"}), "excerpt": body})
-                sources[source.id] = source
-                retained_evidence.add(entry["position"])
-            text = f"[{entry['position']}] {citation(source) if source else 'Unattributed content'}\n{evidence_line}{body}"
-            start = used + (2 if cleaned_entries else 0)
-            used = start + len(text)
-            cleaned_entries.append(text)
-            cleaned_layout.append(entry | {"start": start, "end": used, "source_id": source.id if source else None})
-        entries, retained_layout = cleaned_entries, cleaned_layout
-        stable = sources == retained_sources
-        retained_sources = sources
-        if stable:
+            # Usually declared dependencies suffice. An otherwise empty entry
+            # may also need its inline citation's evidence admitted with it.
+            for support in ({}, by_source):
+                trial = _result_trial(candidate, selected, by_position, support)
+                projected, projected_layout, projected_sources = _project_result_entries(trial)
+                projected_positions = {item["position"] for item in projected_layout}
+                if entry.position in projected_positions:
+                    if positions.issubset(projected_positions) and len(projected) <= max_chars:
+                        selected = [item for item in trial if item[0].position in projected_positions]
+                        positions = projected_positions
+                        text, retained_layout, retained_sources = projected, projected_layout, projected_sources
+                    break  # Restoring more links cannot rescue an oversized group.
+            if entry.position not in positions:
+                pending.append(candidate)
+        if len(pending) == len(candidates):
             break
+        # Accepted positions only grow (at most 100). Retry earlier empty or
+        # dependent entries after later evidence makes their citations valid.
+        # Every trial starts from original bodies: restored links and changed
+        # source IDs must fit too, not just the newly admitted entry's text.
+        candidates = pending
 
-    text = "\n\n".join(entries)
     separator = "\n\n" if text else ""
-    if omitted_notice or layout is None or len(entries) < len(layout.entries) or content.endswith(TRUNCATION_MARKER):
+    if omitted_notice or layout is None or len(retained_layout) < len(layout.entries) or content.endswith(TRUNCATION_MARKER):
         remaining = max_chars - len(text) - len(separator)
         if remaining > 0:
             text += separator + TRUNCATION_MARKER[:remaining]
     if file_notice:
         text = f"{text}\n\n{file_notice}" if text else file_notice
     updated.update(source_artifact(retained_sources.values()))
-    _set_result_layout(updated, text, retained_layout, file_notice=file_notice if file_backed else None)
+    _set_result_layout(updated, text, retained_layout, file_notice=file_notice if file_backed else None, preserve=bool(retained_layout))
     return text, updated
 
 

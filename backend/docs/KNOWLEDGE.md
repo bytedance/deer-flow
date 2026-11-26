@@ -252,6 +252,18 @@ records fit in the same output. File-backed previews reserve space for a complet
 if it exceeds the cap. Replay keeps the stored blob reference. Inline citations
 whose evidence was omitted or changed become plain labels; affected source IDs
 and entry offsets are rebuilt so replay validates the displayed excerpts.
+Candidate entries are reconsidered when cleanup frees space. Entries that
+cannot fit even with every citation destination removed are excluded first;
+the remaining valid group is retained in full when it fits. Otherwise, each
+proposed addition includes its declared dependencies and, when needed, the
+source records supporting its inline citations. It rechecks the entire
+selection from its original excerpts, including
+the cost of citations that become valid again. It is accepted only if the
+existing entries and their dependencies remain valid and the complete selection
+fits. Accepted positions only grow, so repeated consideration terminates.
+Projected entries keep their layout for replay even when no dependent relation
+survives. File notices retain their reserved space; truncation markers use only
+leftover space.
 Other results use the existing citation pruning.
 Subagents accumulate at most 100 validated sources across values frames before
 terminal publication, surviving compaction. Ordinary `task` forwards only
