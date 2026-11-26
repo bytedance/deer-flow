@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import threading
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -90,6 +93,63 @@ async def test_upload_endpoint_mounted_provider_does_not_block_event_loop(tmp_pa
     assert result.success is True
     assert result.files[0].filename == "notes.txt"
     assert await asyncio.to_thread(target.read_bytes) == b"hello uploads"
+
+
+async def test_queued_upload_storage_does_not_block_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.gateway.run_input_files import discard_input_files, publish_input_files, stage_input_files
+    from deerflow.config.paths import get_paths
+
+    _reset_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(uploads, "get_sandbox_provider", lambda: _MountedProvider())
+    file = UploadFile(filename="notes.txt", file=BytesIO(b"queued notes"))
+    config = SimpleNamespace()
+    stage_id, staged = await stage_input_files("queued-thread", "owner", [file], config)
+    stage_root, uploads_dir = await asyncio.to_thread(
+        lambda: (
+            get_paths().thread_dir("queued-thread", user_id="owner") / ".queued-uploads",
+            get_uploads_dir("queued-thread", user_id="owner"),
+        )
+    )
+    assert not await asyncio.to_thread(uploads_dir.exists)
+    files = await publish_input_files("queued-thread", "owner", stage_id, staged, request=None, config=config)
+    assert await asyncio.to_thread((uploads_dir / files[0]["filename"]).read_bytes) == b"queued notes"
+    await discard_input_files("queued-thread", "owner", stage_id)
+    assert not await asyncio.to_thread(lambda: any(stage_root.iterdir()))
+
+
+async def test_startup_queued_upload_sweep_does_not_block_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.gateway import run_input_cleanup
+    from app.gateway.app import _run_startup_queued_upload_sweep
+    from app.gateway.run_input_files import QUEUED_UPLOADS_DIR, stage_input_files
+    from deerflow.config.paths import get_paths
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    _reset_paths(tmp_path, monkeypatch)
+    file = UploadFile(filename="notes.txt", file=BytesIO(b"abandoned attachment"))
+    stage_id, _ = await stage_input_files("queued-thread", "owner", [file], SimpleNamespace())
+    stage = await asyncio.to_thread(lambda: get_paths().thread_dir("queued-thread", user_id="owner") / QUEUED_UPLOADS_DIR / stage_id)
+    old = (datetime.now(UTC) - timedelta(days=7)).timestamp()
+    await asyncio.to_thread(os.utime, stage, (old, old))
+
+    event_loop_thread = threading.get_ident()
+    operations = []
+
+    def record_thread(operation):
+        def run(*args):
+            operations.append((operation.__name__, threading.get_ident()))
+            return operation(*args)
+
+        return run
+
+    for operation in (run_input_cleanup._find_stale_stages, run_input_cleanup._remove_stale_stages):
+        monkeypatch.setattr(run_input_cleanup, operation.__name__, record_thread(operation))
+
+    app = SimpleNamespace(state=SimpleNamespace(run_store=MemoryRunStore()))
+    await _run_startup_queued_upload_sweep(app)
+
+    assert not await asyncio.to_thread(stage.exists)
+    assert [name for name, _ in operations] == ["_find_stale_stages", "_remove_stale_stages"]
+    assert all(thread != event_loop_thread for _, thread in operations)
 
 
 async def test_unsafe_filename_is_reported_as_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -36,13 +36,17 @@ Signed-in users' notification toggle, default model, conversation mode, and reas
 In a new chat, the submitted question stays above its streamed reasoning and
 tool steps while the server creates the conversation and confirms the message.
 
-While a Web task is running, choose **Queue** to send text for the next turn or
-**Steer** to update the current work. Native subagents pause at a safe boundary
+While a Web task is running, choose **Queue** to send a message for the next turn or
+**Steer** to update the current work with text. A queued Web chat message can include
+uploaded files. The queue shows their names and makes them available when that
+message's run starts, keeping the original names when available. If publication
+fails, **Send again** reuses the staged files. Removing the message discards them.
+Managed worker updates accept text only. Native subagents pause at a safe boundary
 while the main Agent handles the update; active tool calls finish first. Stop
 keeps the Goal, while explicitly replacing the work can clear it. Unapplied
 messages survive database-backed Gateway restarts and require **Send again**;
 interrupted child side effects are not replayed automatically. Existing execution
-limits still apply. Busy input currently accepts text only.
+limits still apply.
 If a run rejects an update because it has finished, retrying the retained draft
 during the next run targets that run. Uncertain network failures retain the
 original submission identity so retries can reconcile the same accepted input.
