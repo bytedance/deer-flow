@@ -622,22 +622,18 @@ export function onceRunAtInstant(runAt: string, timezone: string): string {
       return value;
     }
   }
-  // Python accepts ±HH, but JavaScript Date requires offset minutes. Match a
-  // timestamp, not a bare date whose trailing day could look like an offset.
-  const shortOffset =
-    /^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)([+-]\d{2})$/.exec(
+  // Reuse the local timestamp grammar for Python's optional seconds and
+  // comma fractions. Browsers need explicit seconds and offset minutes.
+  const local =
+    /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::([0-5]\d))?([.,]\d+)?([+-]\d{2})?$/.exec(
       value,
     );
-  if (shortOffset) {
-    return `${shortOffset[1]}${shortOffset[2]}:00`;
+  if (local?.[5]) {
+    return `${local[1]}T${local[2]}:${local[3] ?? "00"}${local[4]?.replace(",", ".") ?? ""}${local[5]}:00`;
   }
   if (!value || /(?:Z|[+-]\d{2}(?::?\d{2})?)$/i.test(value)) {
     return value;
   }
-  const local =
-    /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::([0-5]\d))?([.,]\d+)?$/.exec(
-      value,
-    );
   if (!local) {
     return value;
   }

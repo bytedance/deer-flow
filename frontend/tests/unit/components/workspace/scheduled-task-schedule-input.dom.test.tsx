@@ -35,7 +35,13 @@ describe("ScheduledTaskScheduleInput", () => {
     },
   );
 
-  test.each(["2026-12-12T09:30:00+08", "2026-12-12T09:30:00+08:00"])(
+  test.each([
+    "2026-12-12T09:30:00+08",
+    "2026-12-12T09:30:00+08:00",
+    "2026-12-12T09:30:00,5+08",
+    "2026-12-12T09:30.5+08",
+    "2026-12-12T09:30,5+08",
+  ])(
     "opens an explicit-offset timestamp without changing its stored spelling: %s",
     (runAt) => {
       const emitted: ScheduleValue[] = [];

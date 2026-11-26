@@ -13,7 +13,10 @@ scheduler interprets as `09:00:00.5` in that timezone.
 
 Stored timestamps with an explicit hour-only UTC offset (for example,
 `2026-12-12T09:30:00+08`) display the same time as `+08:00` in the summary and
-editor. Opening the editor preserves the original stored timestamp spelling.
+editor. This also covers comma fractions and omitted seconds, such as
+`2026-12-12T09:30:00,5+08` and `2026-12-12T09:30.5+08`; both denote
+`2026-12-12T01:30:00.5Z`. Opening the editor preserves the original stored
+timestamp spelling.
 
 Current MVP capabilities:
 
