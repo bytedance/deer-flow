@@ -246,6 +246,11 @@ def test_rendered_helm_extensions_config_is_writable_and_seeded(persistence_enab
         assert volumes["home"]["emptyDir"] == {}
 
 
+def test_default_workspace_pvc_is_kept_on_uninstall() -> None:
+    pvc = _by_kind(_render_chart(), "PersistentVolumeClaim", "-home")
+    assert pvc["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
+
+
 # --- test_helm_image_pull_secrets ---
 
 ALL_WORKLOADS = ("provisioner.enabled=true", "postgresql.enabled=true", "redis.enabled=true")
