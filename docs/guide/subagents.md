@@ -348,8 +348,10 @@ then reuse the tool-call ID after the earlier receipt leaves the conversation.
 For threads compacted before batch IDs were retained, DeerFlow checks the
 current checkpoint's ancestors for the original dispatch and successful
 receipt. With SDK exit durability, the lookup starts at the persisted
-checkpoint selected at the start of the run. If the evidence is unavailable,
-the submission returns a conflict.
+checkpoint selected at the start of the run. A successful submission records
+the verified older batch IDs in its receipt. Later calls reuse that evidence,
+which is retained in the checkpoint when compaction removes the receipt. If
+the evidence is unavailable, the submission returns a conflict.
 
 Queued requests finish removing their queue entry and returning any transferred
 slot before cancellation propagates. The cleanup waits for the capacity lock

@@ -32,6 +32,7 @@ from deerflow.mcp_scope import (
 from deerflow.runtime.checkpoint_history import task_checkpoint_ancestors
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.subagents.batch_runtime import (
+    BATCH_PREVIOUS_RECEIPT_IDS_KEY,
     BATCH_RECEIPT_ID_KEY,
     BatchDispatchReceipts,
     BatchItemInput,
@@ -40,6 +41,7 @@ from deerflow.subagents.batch_runtime import (
     compacted_batch_receipt_ids,
     get_subagent_batch_submitter,
     iter_batch_dispatch_receipts,
+    verified_previous_batch_receipt_ids,
 )
 from deerflow.subagents.registry import get_available_subagent_names, get_subagent_config
 from deerflow.tools.sync import make_sync_tool_wrapper
@@ -133,7 +135,7 @@ def bind_batch_tools(
     return tuple(_bind_batch_tool(tool, provider, app_config) for tool in (batch_task, batch_status, cancel_batch, read_batch_result))
 
 
-def _result(tool_call_id: str, *, content: str, batch: dict[str, Any] | None = None, error: bool = False) -> Command:
+def _result(tool_call_id: str, *, content: str, batch: dict[str, Any] | None = None, error: bool = False, verified_previous: set[str] | None = None) -> Command:
     metadata: dict[str, Any] = {"subagent_batch_error": error}
     if batch is not None:
         metadata.update(
@@ -145,6 +147,10 @@ def _result(tool_call_id: str, *, content: str, batch: dict[str, Any] | None = N
         )
         if batch.get("continuation_status") is not None:
             metadata["subagent_batch_continuation_status"] = batch["continuation_status"]
+        if verified_previous and not error:
+            # Carry the verified IDs with this receipt so parallel tool calls
+            # and SDK graphs with custom state schemas retain their own evidence.
+            metadata[BATCH_PREVIOUS_RECEIPT_IDS_KEY] = sorted(verified_previous)
     return Command(
         update={
             "messages": [
@@ -169,7 +175,15 @@ def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -
     return [name for name in child if name in allowed]
 
 
-async def _confirm_previous_receipts(config: RunnableConfig, execution: ExecutionInfo, thread_id: str, dispatch_id: str | None, tool_call_id: str, candidates: frozenset[str]) -> bool:
+async def _confirm_previous_receipts(
+    config: RunnableConfig,
+    execution: ExecutionInfo,
+    thread_id: str,
+    dispatch_id: str | None,
+    tool_call_id: str,
+    verified_previous: set[str],
+    candidates: frozenset[str],
+) -> bool:
     previous = set()
     try:
         async with asyncio.timeout(_RECEIPT_HISTORY_TIMEOUT_SECONDS):
@@ -182,21 +196,23 @@ async def _confirm_previous_receipts(config: RunnableConfig, execution: Executio
                     if isinstance(issuer.id, str) and issuer.id.strip():
                         previous.add(batch_id)
                 if previous == candidates:
+                    verified_previous.update(previous)
                     return True
     except Exception:
         logger.warning("Could not verify legacy batch receipts in checkpoint history", exc_info=True)
     return False
 
 
-def _dispatch_receipts(runtime: Runtime, thread_id: str, dispatch: AIMessage, tool_call_id: str) -> BatchDispatchReceipts:
+def _dispatch_receipts(runtime: Runtime, thread_id: str, dispatch: AIMessage, tool_call_id: str, verified_previous: set[str]) -> BatchDispatchReceipts:
     state = runtime.state
     messages = state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
     previous, current = compacted_batch_receipt_ids(state), set()
     for issuer, receipt, batch_id in iter_batch_dispatch_receipts(messages or ()):
         if receipt.tool_call_id == tool_call_id:
             (current if issuer is dispatch else previous).add(batch_id)
+            previous.update(verified_previous_batch_receipt_ids(receipt))
     execution = getattr(runtime, "execution_info", None)
-    confirm_previous = partial(_confirm_previous_receipts, runtime.config, execution, thread_id, dispatch.id, tool_call_id) if execution is not None else None
+    confirm_previous = partial(_confirm_previous_receipts, runtime.config, execution, thread_id, dispatch.id, tool_call_id, verified_previous) if execution is not None else None
     return BatchDispatchReceipts(current=frozenset(current), previous=frozenset(previous), confirm_previous=confirm_previous)
 
 
@@ -325,6 +341,7 @@ async def batch_task(
     agent_authority = export_agent_authority(runtime_agent_authority(runtime))
     if agent_authority is not None:
         execution_spec["mcp_agent_auth"] = agent_authority
+    verified_previous: set[str] = set()
     try:
         batch = await submitter.submit(
             BatchSubmitRequest(
@@ -342,7 +359,7 @@ async def batch_task(
                 continuation=continuation,
                 continuation_authority=context.get(AGENT_RUNS_CONTEXT_KEY) if continuation else None,
                 continuation_context=continuation_context if continuation else None,
-                dispatch_receipts=_dispatch_receipts(runtime, str(thread_id), dispatch, tool_call_id),
+                dispatch_receipts=_dispatch_receipts(runtime, str(thread_id), dispatch, tool_call_id, verified_previous),
             )
         )
     except Exception as exc:
@@ -358,7 +375,7 @@ async def batch_task(
         content += "Submit a fresh batch_task call only if the user explicitly requests a new submission."
     else:
         content += "Use batch_status to inspect progress. Do not launch ordinary task calls for these items."
-    return _result(tool_call_id, batch=batch, content=content, error=status == "cancelled")
+    return _result(tool_call_id, batch=batch, content=content, error=status == "cancelled", verified_previous=verified_previous)
 
 
 @tool("batch_status", parse_docstring=True)

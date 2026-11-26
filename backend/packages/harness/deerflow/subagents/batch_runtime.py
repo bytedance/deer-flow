@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 BATCH_CONTINUATION_NAMESPACE = "native-subagent-batches"
 BATCH_RECEIPT_ID_KEY = "subagent_batch_id"
+BATCH_PREVIOUS_RECEIPT_IDS_KEY = "_verified_previous_batch_receipt_ids"
 COMPACTED_BATCH_RECEIPTS_CHANNEL = "compacted_batch_receipt_ids"
 BATCH_SUBMISSION_DIGEST_KEY = "_submission_digest"
 
@@ -37,9 +38,18 @@ def compacted_batch_receipt_ids(state: object) -> set[str]:
     return {value for value in values if isinstance(value, str)} if isinstance(values, list) else set()
 
 
+def verified_previous_batch_receipt_ids(receipt: ToolMessage) -> set[str]:
+    values = receipt.additional_kwargs.get(BATCH_PREVIOUS_RECEIPT_IDS_KEY)
+    return {value for value in values if isinstance(value, str)} if isinstance(values, list) else set()
+
+
 def compacted_batch_receipt_update(state: Mapping[str, Any], removed_messages: Iterable[object]) -> dict[str, list[str]]:
     removed = {id(message) for message in removed_messages}
-    batch_ids = {batch_id for dispatch, receipt, batch_id in iter_batch_dispatch_receipts(state["messages"]) if id(dispatch) in removed and id(receipt) in removed}
+    batch_ids: set[str] = set()
+    for dispatch, receipt, batch_id in iter_batch_dispatch_receipts(state["messages"]):
+        if id(dispatch) in removed and id(receipt) in removed:
+            batch_ids.add(batch_id)
+            batch_ids.update(verified_previous_batch_receipt_ids(receipt))
     if not batch_ids:
         return {}
     # Checkpoint these IDs in the same write that removes the paired messages.

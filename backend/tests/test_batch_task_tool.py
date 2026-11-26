@@ -272,6 +272,19 @@ async def test_upgrade_recovers_legacy_checkpoint_without_duplicate_batches(batc
 
     [original] = await repository.list_by_thread("thread-1", user_id="user-1")
     responses = [AIMessage(content="Done")] if lost_receipt else [_dispatch(2), AIMessage(content="Done")]
+    ancestry_walks = 0
+    if compact_before_upgrade:
+        responses.extend([_dispatch(3), AIMessage(content="Done")])
+        checkpoint_ancestors = tool_module.task_checkpoint_ancestors
+
+        async def count_ancestry_walks(*args, **kwargs):
+            nonlocal ancestry_walks
+            ancestry_walks += 1
+            async for ancestor in checkpoint_ancestors(*args, **kwargs):
+                yield ancestor
+
+        monkeypatch.setattr(tool_module, "task_checkpoint_ancestors", count_ancestry_walks)
+
     middlewares = [summarization()] if compact_history else []
     async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
         graph = create_agent(
@@ -312,6 +325,27 @@ async def test_upgrade_recovers_legacy_checkpoint_without_duplicate_batches(batc
             second_id = second.additional_kwargs["subagent_batch_id"]
             assert {batch["id"] for batch in await repository.list_by_thread("thread-1", user_id="user-1")} == {original["id"], second_id}
             assert [item["item_key"] for item in await repository.list_items(second_id, user_id="user-1")] == ["job-2"]
+            if compact_before_upgrade:
+                assert ancestry_walks == 1
+                state = await graph.ainvoke({"messages": [HumanMessage("Submit a third job")]}, config, context={**context, "run_id": "new-run"}, durability=durability)
+                _, third = [message for message in state["messages"] if isinstance(message, ToolMessage)]
+                assert third.status == "success"
+                assert ancestry_walks == 1
+                third_id = third.additional_kwargs["subagent_batch_id"]
+                assert {batch["id"] for batch in await repository.list_by_thread("thread-1", user_id="user-1")} == {original["id"], second_id, third_id}
+                assert [item["item_key"] for item in await repository.list_items(third_id, user_id="user-1")] == ["job-3"]
+
+                compacting_graph = create_agent(
+                    model=_ScriptedModel(messages=iter([AIMessage(content="Acknowledged")])),
+                    tools=tool_module.bind_batch_tools(service),
+                    checkpointer=saver,
+                    middleware=normalize_middleware_state_schemas([summarization()], checkpoint_mode),
+                    state_schema=schema,
+                )
+                await compacting_graph.ainvoke({"messages": [HumanMessage("Acknowledge the new jobs")]}, config, context=context, durability=durability)
+                compacted = (await compacting_graph.aget_state(config)).values
+                assert not any(isinstance(message, ToolMessage) for message in compacted["messages"])
+                assert set(compacted[COMPACTED_BATCH_RECEIPTS_CHANNEL]) == {original["id"], second_id, third_id}
 
 
 @pytest.mark.asyncio
