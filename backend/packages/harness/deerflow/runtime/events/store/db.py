@@ -11,11 +11,14 @@ import hashlib
 import json
 import logging
 import re
+import sqlite3
 import weakref
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import and_, delete, func, or_, select, text, update
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import TimeoutError as SqlTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
@@ -24,11 +27,30 @@ from deerflow.persistence.run.sql import RunRepository
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.events.message_identity import message_identity
 from deerflow.runtime.events.producer import HistorySeedAuthority, RunEventProducerRejected, current_producer
-from deerflow.runtime.events.store.base import RunEventLifecycleRejected, RunEventStore, SessionAwareRunEventLifecycleGuard
+from deerflow.runtime.events.store.base import RunEventLifecycleRejected, RunEventStore, RunEventStoreNotCommittedError, SessionAwareRunEventLifecycleGuard
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
+
+
+def _is_transient_db_error(exc: Exception) -> bool:
+    if isinstance(exc, DBAPIError):
+        if exc.connection_invalidated:
+            return True
+        exc = exc.orig
+    if isinstance(exc, (ConnectionError, TimeoutError, SqlTimeoutError)):
+        return True
+    if isinstance(exc, sqlite3.Error):
+        # Extended codes (e.g. SQLITE_BUSY_SNAPSHOT) keep the primary code in the low byte.
+        return getattr(exc, "sqlite_errorcode", 0) & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    return getattr(exc, "sqlstate", None) in {
+        "08003",  # connection_does_not_exist
+        "08006",  # connection_failure
+        "40001",  # serialization_failure
+        "40P01",  # deadlock_detected
+        "55P03",  # lock_not_available
+    }
 
 
 def _parse_created_at(value: str | None) -> datetime:
@@ -336,36 +358,44 @@ class DbRunEventStore(RunEventStore):
         user_id = authority.user_id if authority is not None else self._user_id_from_context()
         # All events belong to the same thread (validated above).
         thread_id = events[0]["thread_id"]
-        async with self._get_write_lock(thread_id):
-            async with self._sf() as session:
-                async with session.begin():
-                    await self._admit_events(session, events)
-                    max_seq = await self._max_seq_for_thread(session, thread_id)
-                    seq = max_seq or 0
-                    rows = []
-                    for e in events:
-                        seq += 1
-                        content = e.get("content", "")
-                        category = e.get("category", "trace")
-                        metadata = e.get("metadata")
-                        content, metadata = self._truncate_trace(category, content, metadata)
-                        db_content, metadata = self._content_to_db(content, metadata)
-                        row = RunEventRow(
-                            thread_id=e["thread_id"],
-                            run_id=e["run_id"],
-                            user_id=e.get("user_id", user_id),
-                            event_type=e["event_type"],
-                            category=category,
-                            content=db_content,
-                            content_sha256=hashlib.sha256(db_content.encode("utf-8")).hexdigest(),
-                            event_metadata=metadata,
-                            seq=seq,
-                            created_at=_parse_created_at(e.get("created_at")),
-                        )
-                        session.add(row)
-                        rows.append(row)
-                    await self._raise_seq_watermark(session, thread_id, seq)
-                return [self._row_to_dict(r) for r in rows]
+        commit_started = False
+        try:
+            async with self._get_write_lock(thread_id):
+                async with self._sf() as session:
+                    async with session.begin():
+                        await self._admit_events(session, events)
+                        max_seq = await self._max_seq_for_thread(session, thread_id)
+                        seq = max_seq or 0
+                        rows = []
+                        for e in events:
+                            seq += 1
+                            content = e.get("content", "")
+                            category = e.get("category", "trace")
+                            metadata = e.get("metadata")
+                            content, metadata = self._truncate_trace(category, content, metadata)
+                            db_content, metadata = self._content_to_db(content, metadata)
+                            row = RunEventRow(
+                                thread_id=e["thread_id"],
+                                run_id=e["run_id"],
+                                user_id=e.get("user_id", user_id),
+                                event_type=e["event_type"],
+                                category=category,
+                                content=db_content,
+                                content_sha256=hashlib.sha256(db_content.encode("utf-8")).hexdigest(),
+                                event_metadata=metadata,
+                                seq=seq,
+                                created_at=_parse_created_at(e.get("created_at")),
+                            )
+                            session.add(row)
+                            rows.append(row)
+                        await self._raise_seq_watermark(session, thread_id, seq)
+                        await session.flush()
+                        commit_started = True
+                    return [self._row_to_dict(r) for r in rows]
+        except Exception as exc:
+            if not commit_started and _is_transient_db_error(exc):
+                raise RunEventStoreNotCommittedError(f"DB batch failed before commit: {type(exc).__name__}: {exc}") from exc
+            raise
 
     async def put_if_absent(
         self,

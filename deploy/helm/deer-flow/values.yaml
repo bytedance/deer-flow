@@ -215,6 +215,16 @@ provisioner:
       memory: 512Mi
   # -- AIO-compatible sandbox container image used for sandbox Pods.
   sandboxImage: "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
+  # -- Resource requests and limits for the sandbox container in each new Pod.
+  sandboxResources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+      ephemeral-storage: 500Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+      ephemeral-storage: 500Mi
   # -- Service type for per-sandbox Services. `ClusterIP` (default) exposes
   #    sandboxes only inside the cluster via Service DNS - correct for the
   #    in-cluster gateway and avoids binding the code-execution surface on

@@ -295,14 +295,19 @@ describe("InputBox send gating (runs:create)", () => {
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
   });
 
-  it("keeps the base Submit accessible name when send is not denied", () => {
-    // Mirror of the stop-gating regression: the aria-label must be spread
-    // conditionally, never explicitly-undefined, or it clobbers
-    // PromptInputSubmit's default aria-label="Submit".
-    renderComposer({ onSubmit: rs.fn() });
-
-    const submit = screen.getByRole("button", { name: "Submit" });
-    expect(submit.tagName).toBe("BUTTON");
+  it.each([
+    ["en-US", "Send"],
+    ["zh-CN", "发送"],
+  ] as const)("names the send action in %s", (locale, name) => {
+    document.cookie = `locale=${locale}; path=/`;
+    try {
+      const { container } = renderComposer({ onSubmit: rs.fn(), locale });
+      expect(screen.getByRole("button", { name })).toBe(
+        getSubmitButton(container),
+      );
+    } finally {
+      document.cookie = "locale=; max-age=0; path=/";
+    }
   });
 });
 

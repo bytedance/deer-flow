@@ -54,7 +54,9 @@ make test-blocking-io
 - **Background task calls have no request.** `McpTaskToolCaller` binds the task
   owner's identity for the call and restores the previous value afterwards.
 - **Agent grants are live policy, not run snapshots.** Every protected call
-  rechecks the operator binding even with a cached token. Durable references
+  rechecks the operator binding, and for `grants: runtime` the stored grant
+  (in force only while its recorded agent, server, destination and OAuth client match),
+  even with a cached token. An unreadable grant store denies the call. Durable references
   retain the admitted definition revision; definition rollouts preserve them,
   while grant revocation denies them. See the per-agent section in the MCP guide.
 

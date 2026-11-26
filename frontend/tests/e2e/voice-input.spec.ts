@@ -127,7 +127,7 @@ test("records beside Send, uploads real audio once, then polishes the transcript
   await expect(input).toHaveValue("Task:");
   await expect(page.getByTestId("polish-input-button")).toBeDisabled();
   await expect(
-    page.getByRole("button", { name: "Submit", exact: true }),
+    page.getByRole("button", { name: "Send", exact: true }),
   ).toBeDisabled();
   await input.press("Enter");
   await expect(input).toHaveValue("Task: research energy storage");
@@ -143,7 +143,7 @@ test("records beside Send, uploads real audio once, then polishes the transcript
   await expect(input).toHaveValue("Task: research energy storage");
   const micBox = (await page.getByTestId("voice-input-button").boundingBox())!;
   const sendBox = (await page
-    .getByRole("button", { name: "Submit", exact: true })
+    .getByRole("button", { name: "Send", exact: true })
     .boundingBox())!;
   expect(micBox.x + micBox.width).toBeLessThanOrEqual(sendBox.x);
   expect(sendBox.x - micBox.x).toBeLessThan(65);
