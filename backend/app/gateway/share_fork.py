@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import uuid
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 
 from deerflow_extension_api import AgentRunError
@@ -23,19 +24,22 @@ from deerflow.config.paths import get_paths
 from deerflow.persistence.thread_meta import ThreadMetaStore
 from deerflow.persistence.thread_shares.sql import ThreadShareRepository
 from deerflow.runtime import ConflictError, ThreadOperationKind
+from deerflow.runtime.context_keys import checkpoint_agent_binding_metadata
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_branch_history_seed_events
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.artifact_snapshot import publish_snapshot
 from deerflow.utils.file_io import run_file_io
-from deerflow.utils.messages import IMPORTED_HISTORY_KEY
+from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_KEY, IMPORTED_HISTORY_UNRESOLVED
 
 logger = logging.getLogger(__name__)
 
 #: Thread metadata, written only by this module (the thread routes strip
 #: client copies): the copy's history is fully imported, and its copied
-#: messages carry :data:`IMPORTED_HISTORY_KEY`.
+#: messages carry :data:`IMPORTED_HISTORY_KEY`. Memory capture reads the
+#: thread state's :data:`IMPORTED_HISTORY_CHANNEL`, which branches and
+#: compaction carry; this metadata only finds copies to migrate.
 SHARE_IMPORT_COMPLETE_KEY = "share_import_complete"
 SHARE_IMPORT_HISTORY_MARKED_KEY = "share_import_history_marked"
 
@@ -142,7 +146,7 @@ async def fork_share(request: Request, repo: ThreadShareRepository, token: str, 
                             for artifact in artifacts:
                                 await run_file_io(publish_snapshot, sandbox, artifact["path"], artifact["content"], area="outputs", max_bytes=MAX_SHARE_FILE_BYTES)
                 accessor, config = build_checkpoint_state_mutation_accessor(request, thread_id=thread_id, as_node="branch")
-                await accessor.aupdate(config, {"messages": Overwrite(messages), "title": title, "artifacts": Overwrite([OUTPUT_PREFIX + a["path"] for a in artifacts])}, as_node="branch")
+                await accessor.aupdate(config, {"messages": Overwrite(messages), "title": title, "artifacts": Overwrite([OUTPUT_PREFIX + a["path"] for a in artifacts]), IMPORTED_HISTORY_CHANNEL: "share"}, as_node="branch")
                 events = build_branch_history_seed_events(messages, thread_id=thread_id, run_id_prefix=f"branch-seed-{thread_id}", parent_thread_id=thread_id)
                 await write_history_seed(request, events, reservation=reservation, seed_kind="branch", thread=record)
                 await threads.update_metadata(thread_id, {SHARE_IMPORT_COMPLETE_KEY: True, SHARE_IMPORT_HISTORY_MARKED_KEY: True}, user_id=owner)
@@ -161,59 +165,162 @@ async def fork_share(request: Request, repo: ThreadShareRepository, token: str, 
 async def _imported_message_ids(request: Request, accessor, config: dict) -> set[str] | None:
     """IDs of the history the import wrote as the thread's root checkpoint.
 
-    ``None`` when the root is gone or unreadable: guessing from a later
-    checkpoint would mark the owner's own turns as someone else's.
+    ``None`` when the root is gone or unreadable, including a failed read:
+    guessing from a later checkpoint would mark the owner's own turns as
+    someone else's.
     """
-    tuples = [item async for item in get_checkpointer(request).alist(config)]
-    if not tuples or tuples[-1].parent_config is not None:
+    try:
+        tuples = [item async for item in get_checkpointer(request).alist(config)]
+        if not tuples or tuples[-1].parent_config is not None:
+            return None
+        root_id = tuples[-1].config["configurable"]["checkpoint_id"]
+        snapshot = await accessor.aget({**config, "configurable": {**config["configurable"], "checkpoint_id": root_id}})
+    except Exception:
+        logger.warning("Could not read the import checkpoint of thread %s", sanitize_log_param(config["configurable"].get("thread_id")), exc_info=True)
         return None
-    root_id = tuples[-1].config["configurable"]["checkpoint_id"]
-    snapshot = await accessor.aget({**config, "configurable": {**config["configurable"], "checkpoint_id": root_id}})
     messages = snapshot.values.get("messages") if isinstance(snapshot.values, dict) else None
     ids = {message.id for message in messages or () if getattr(message, "id", None)}
     return ids or None
 
 
-async def ensure_share_import_history_marked(request: Request, thread_id: str, *, threads: ThreadMetaStore | None, metadata_timeout: float) -> None:
-    """Mark the copied history of a share copy imported before marks existed.
+def is_share_copy_metadata(metadata: object) -> bool:
+    """Return whether thread *metadata* records a completed share import."""
+    return isinstance(metadata, Mapping) and metadata.get(SHARE_IMPORT_COMPLETE_KEY) is True
 
-    Migration shim, run before admission like ``ensure_checkpoint_history_seeded``:
-    without it, such a copy's history reaches memory extraction on the owner's
-    next run, also through the pre-compaction flush, which ignores extraction
-    watermarks. Remove it once those copies are no longer an upgrade source.
-    A busy or paused thread is left for a later run, because a checkpoint
-    write would race the active run or replace the pending interrupt. The
-    shim is best effort: a failure is logged and never blocks the run.
+
+def _share_provenance(values: object) -> object:
+    return values.get(IMPORTED_HISTORY_CHANNEL) if isinstance(values, Mapping) else None
+
+
+def _has_share_provenance(values: object) -> bool:
+    """Whether the copied turns in *values* are resolved; an unresolved copy stays eligible for migration."""
+    provenance = _share_provenance(values)
+    return bool(provenance) and provenance != IMPORTED_HISTORY_UNRESOLVED
+
+
+def mark_imported(messages: list, imported: set[str]) -> list:
+    """Return *messages* with the import mark on those whose id is in *imported*."""
+
+    def mark(message):
+        if getattr(message, "id", None) not in imported or message.additional_kwargs.get(IMPORTED_HISTORY_KEY):
+            return message
+        return message.model_copy(update={"additional_kwargs": {**message.additional_kwargs, IMPORTED_HISTORY_KEY: "share"}})
+
+    return [mark(message) for message in messages]
+
+
+async def _read_metadata(threads: ThreadMetaStore, thread_id: str, metadata_timeout: float) -> Mapping:
+    async with asyncio.timeout(metadata_timeout):
+        record = await threads.get(thread_id, user_id=None)
+    metadata = record.get("metadata") if isinstance(record, dict) else None
+    return metadata if isinstance(metadata, Mapping) else {}
+
+
+async def _store_share_provenance(request: Request, thread_id: str, threads: ThreadMetaStore, accessor, config: dict, *, as_node: str = "branch") -> bool:
+    """Mark the copied history and set the state channel at the head.
+
+    The caller holds a checkpoint-write reservation. Returns ``True`` once the
+    copied turns are marked. ``False`` means they are not: a busy or paused
+    head is left for later, because a write would race the active run or
+    replace the pending interrupt; a copy whose import checkpoint cannot be
+    read is recorded as unresolved, so memory capture skips it, and is tried
+    again on a later run.
+    """
+    head = await accessor.aget(config)
+    if head.next or any(task.interrupts for task in head.tasks):
+        return False
+    # Keep the head's agent binding: without it, memory writes for the thread fail closed.
+    update_config = {**config, "metadata": checkpoint_agent_binding_metadata(getattr(head, "metadata", None))}
+    imported = await _imported_message_ids(request, accessor, config)
+    if imported is None:
+        logger.warning("Share copy %s has no readable import checkpoint; memory capture skips it until its copied history can be marked", sanitize_log_param(thread_id))
+        if _share_provenance(head.values) != IMPORTED_HISTORY_UNRESOLVED:
+            await accessor.aupdate(update_config, {IMPORTED_HISTORY_CHANNEL: IMPORTED_HISTORY_UNRESOLVED}, as_node=as_node)
+        return False
+    messages = list(head.values.get("messages") or ())
+    marked = [copy for copy, original in zip(mark_imported(messages, imported), messages, strict=True) if copy is not original]
+    await accessor.aupdate(update_config, {"messages": marked, IMPORTED_HISTORY_CHANNEL: "share"}, as_node=as_node)
+    await threads.update_metadata(thread_id, {SHARE_IMPORT_HISTORY_MARKED_KEY: True}, touch=False, user_id=None)
+    logger.info("Recorded share provenance for copy %s; marked %d copied messages", sanitize_log_param(thread_id), len(marked))
+    return True
+
+
+async def ensure_share_import_history_marked(request: Request, thread_id: str, *, threads: ThreadMetaStore | None, metadata_timeout: float) -> None:
+    """Record share provenance in a copy imported before it was stored in state.
+
+    Migration shim, run before admission like ``ensure_checkpoint_history_seeded``.
+    Copies imported before #8422 lack the message marks, so their history
+    reaches memory extraction; copies imported before the state channel
+    existed lose their provenance once compaction removes the marked
+    messages. Remove the shim once those copies are no longer an upgrade
+    source. A busy or paused thread is left for a later run. Any other failure
+    is logged and retried on a later run, but memory capture reads the
+    provenance from state, so a copy whose state still has none is refused
+    with ``503`` instead of being remembered as an ordinary thread.
     """
     if threads is None:
         return
     try:
-        async with asyncio.timeout(metadata_timeout):
-            record = await threads.get(thread_id, user_id=None)
+        metadata = await _read_metadata(threads, thread_id, metadata_timeout)
     except Exception:
         logger.warning("Could not read metadata of thread %s; its copied share history is checked on a later run", sanitize_log_param(thread_id), exc_info=True)
         return
-    metadata = record.get("metadata") if isinstance(record, dict) else None
-    if not isinstance(metadata, dict) or metadata.get(SHARE_IMPORT_COMPLETE_KEY) is not True or metadata.get(SHARE_IMPORT_HISTORY_MARKED_KEY) is True:
+    if not is_share_copy_metadata(metadata):
         return
+    accessor, config = build_checkpoint_state_mutation_accessor(request, thread_id=thread_id, as_node="branch")
     try:
+        if _has_share_provenance((await accessor.aget(config)).values):
+            return
         async with get_run_manager(request).reserve_thread_operation(thread_id, kind=ThreadOperationKind.checkpoint_write, user_id=get_trusted_internal_owner_user_id(request)):
-            accessor, config = build_checkpoint_state_mutation_accessor(request, thread_id=thread_id, as_node="branch")
-            head = await accessor.aget(config)
-            if head.next or any(task.interrupts for task in head.tasks):
-                return
-            imported = await _imported_message_ids(request, accessor, config)
-            if imported is None:
-                # Recorded as handled anyway, so later runs skip the history scan.
-                logger.warning("Share copy %s has no readable import checkpoint; its copied history stays unmarked", sanitize_log_param(thread_id))
-                imported = set()
-            unmarked = [message for message in head.values.get("messages") or () if getattr(message, "id", None) in imported and not message.additional_kwargs.get(IMPORTED_HISTORY_KEY)]
-            if unmarked:
-                marked = [message.model_copy(update={"additional_kwargs": {**message.additional_kwargs, IMPORTED_HISTORY_KEY: "share"}}) for message in unmarked]
-                await accessor.aupdate(config, {"messages": marked}, as_node="branch")
-            await threads.update_metadata(thread_id, {SHARE_IMPORT_HISTORY_MARKED_KEY: True}, touch=False, user_id=None)
-            logger.info("Marked %d copied messages in share copy %s", len(unmarked), sanitize_log_param(thread_id))
+            await _store_share_provenance(request, thread_id, threads, accessor, config)
     except ConflictError:
         logger.info("Share copy %s is busy; marking its copied history on a later run", sanitize_log_param(thread_id))
-    except Exception:
+    except Exception as exc:
         logger.warning("Could not mark the copied history of share copy %s; retrying on a later run", sanitize_log_param(thread_id), exc_info=True)
+        if not await _state_records_provenance(accessor, config):
+            raise HTTPException(503, "The history of this copied conversation could not be checked; try again") from exc
+
+
+async def _state_records_provenance(accessor, config: dict) -> bool:
+    """Whether the head carries any provenance, resolved or unresolved, for memory capture to read."""
+    try:
+        return bool(_share_provenance((await accessor.aget(config)).values))
+    except Exception:
+        return False
+
+
+async def prepare_share_copy_compaction(request: Request, thread_id: str, accessor, config: dict, *, as_node: str, metadata_timeout: float) -> bool:
+    """Return whether a manual compaction may hand the removed messages to memory.
+
+    Runs under the compaction's checkpoint-write reservation, so a copy that
+    has not been migrated is migrated here first: its unmarked copied turns
+    would otherwise be flushed as the owner's. When the thread's provenance
+    cannot be established, the compaction skips the memory flush.
+    """
+    threads = getattr(request.app.state, "thread_store", None)
+    if threads is None:
+        # Sharing needs a thread store, so this thread is no copy.
+        return True
+    try:
+        metadata = await _read_metadata(threads, thread_id, metadata_timeout)
+        if not is_share_copy_metadata(metadata) or _has_share_provenance((await accessor.aget(config)).values):
+            return True
+        return await _store_share_provenance(request, thread_id, threads, accessor, config, as_node=as_node)
+    except Exception:
+        logger.warning("Could not establish the share provenance of thread %s; compacting without a memory flush", sanitize_log_param(thread_id), exc_info=True)
+        return False
+
+
+async def branch_share_provenance(request: Request, source_metadata: object, source_values: object, source_accessor, source_config: dict) -> tuple[str, set[str]] | None:
+    """Channel value and copied-message IDs for a branch of a copy that has not been migrated.
+
+    ``None`` means the branch inherits the source state unchanged: the source
+    is no copy, or its state already carries resolved provenance, which the
+    branch copies. Otherwise the branch gets the channel and these marks, so
+    it does not depend on the source's next run. A branch is never migrated
+    itself, so unreadable import history leaves it unresolved.
+    """
+    if _has_share_provenance(source_values) or not is_share_copy_metadata(source_metadata):
+        return None
+    imported = await _imported_message_ids(request, source_accessor, source_config)
+    return (IMPORTED_HISTORY_UNRESOLVED, set()) if imported is None else ("share", imported)

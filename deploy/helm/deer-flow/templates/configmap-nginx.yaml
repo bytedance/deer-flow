@@ -183,7 +183,9 @@ data:
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                 proxy_set_header X-Forwarded-Proto $forwarded_proto;
-                client_max_body_size 100M;
+                # Gateway counts file bytes only; leave room for multipart framing.
+                # If uploads.* is raised, raise this ceiling in all maintained nginx configs.
+                client_max_body_size 101M;
                 proxy_request_buffering off;
             }
 
@@ -199,7 +201,9 @@ data:
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                 proxy_set_header X-Forwarded-Proto $forwarded_proto;
-                client_max_body_size 100M;
+                # Gateway counts file bytes only; leave room for multipart framing.
+                # If uploads.* is raised, raise this ceiling in all maintained nginx configs.
+                client_max_body_size 101M;
                 proxy_request_buffering off;
                 proxy_read_timeout 600s;
             }

@@ -16,13 +16,7 @@ This guide walks you through starting DeerFlow App on your local machine using t
 
 ## Prerequisites
 
-Check that all required tools are installed:
-
-```bash
-make check
-```
-
-Required:
+Install Git, Make, and the following tools:
 
 | Tool    | Minimum version    |
 | ------- | ------------------ |
@@ -45,6 +39,14 @@ git clone https://github.com/bytedance/deer-flow.git
 cd deer-flow
 ```
 
+### Check your tools
+
+From the repository root, run:
+
+```bash
+make check
+```
+
 ### Install dependencies
 
 ```bash
@@ -56,8 +58,11 @@ This installs both backend Python dependencies (via `uv`) and frontend Node.js d
 ### Create your config file
 
 ```bash
-cp config.example.yaml config.yaml
+make config
 ```
+
+This creates `config.yaml` from its template and creates the root and frontend
+`.env` files if they are missing.
 
 Then edit `config.yaml` to add at least one model. The minimum change is adding a model under the `models:` section:
 

@@ -30,6 +30,15 @@ class SandboxProvider(ABC):
 
     _signal_handlers_deferred = False
 
+    def requires_eager_agent_skill_sync(self, thread_id: str, *, user_id: str | None) -> bool:
+        """Whether this scope needs eager synchronization on a lazy provider.
+
+        Providers can require eager acquisition and strict ``sync_agent_skills``
+        when an active or initializing remote could reuse an older skill view.
+        This lookup reads only in-memory state.
+        """
+        return False
+
     def _register_signal_handlers(self) -> None:
         """Install process signal handlers for providers that own sandbox resources."""
 

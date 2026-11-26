@@ -34,15 +34,17 @@ log_level: debug # debug | info | warning | error
 
 ## 健康检查
 
-DeerFlow 暴露健康检查端点：
+通过工作区使用的 nginx 地址和端口检查 Gateway（下例使用默认值）。在宿主机上运行这些命令可检查本地进程或 Docker Compose 部署。
 
 ```bash
-# Gateway 健康状态
-curl http://localhost:8001/health
+# Gateway 进程是否响应？
+curl -i http://localhost:2026/health
 
-# 通过 nginx 完整代理链验证
-curl http://localhost:2026/api/models
+# 处理运行请求所需的依赖是否就绪？
+curl -i http://localhost:2026/health/ready
 ```
+
+如果存活检查返回 200、就绪检查返回 503，请查看就绪检查的响应，定位出错的依赖。
 
 ## 升级已有的代码仓库
 

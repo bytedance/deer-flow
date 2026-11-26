@@ -1283,6 +1283,91 @@ def test_feishu_post_with_text_and_top_level_files_extracts_attachments():
         assert mock_make_inbound.call_args[1]["files"] == [{"file_key": "file_inv_a"}, {"file_key": "file_inv_b"}, {"file_key": "file_po"}]
 
 
+def test_feishu_post_keeps_links_and_code_blocks():
+    """Feishu sends a message with a hyperlink or a code block as a post with ``a`` and ``code_block`` elements."""
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    url = "https://docs.python.org/3/library/functions.html#sum"
+    event = _make_post_event(
+        {
+            "title": "",
+            "content": [
+                [{"tag": "text", "text": "Why does this raise TypeError?", "style": []}],
+                [{"tag": "code_block", "language": "PYTHON", "text": 'print(sum(["3"]))\n'}],
+                [{"tag": "text", "text": "See", "style": []}, {"tag": "a", "href": url, "text": url, "style": []}],
+                [
+                    {"tag": "text", "text": "Compare", "style": ["bold"]},
+                    {"tag": "a", "href": "https://example.com/a", "text": "plan A", "style": []},
+                    {"tag": "text", "text": "and", "style": []},
+                    {"tag": "a", "href": "https://example.com/b", "text": "plan B", "style": []},
+                ],
+            ],
+        }
+    )
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+    mock_make_inbound.assert_called_once()
+    assert mock_make_inbound.call_args[1]["text"] == "\n\n".join(
+        [
+            "Why does this raise TypeError?",
+            '```python\nprint(sum(["3"]))\n```',
+            f"See {url}",
+            "Compare [plan A](https://example.com/a) and [plan B](https://example.com/b)",
+        ]
+    )
+    assert mock_make_inbound.call_args[1]["files"] == []
+
+
+@pytest.mark.parametrize(
+    ("element", "expected"),
+    [
+        ({"tag": "a", "href": "https://example.com"}, "https://example.com"),
+        ({"tag": "a", "text": "label only"}, "label only"),
+        ({"tag": "a", "text": "", "href": None}, ""),
+        ({"tag": "a", "text": "[bug] a]b \\", "href": "https://example.com"}, "[\\[bug\\] a\\]b \\\\](https://example.com)"),
+        ({"tag": "a", "text": "Python", "href": "https://en.wikipedia.org/wiki/Python_(language"}, "[Python](<https://en.wikipedia.org/wiki/Python_(language>)"),
+        ({"tag": "code_block", "text": "x = 1"}, "```\nx = 1\n```"),
+        ({"tag": "code_block", "language": "GO", "text": "``` and ````"}, "`````go\n``` and ````\n`````"),
+        ({"tag": "code_block", "language": "bad\nlanguage", "text": "x = 1"}, "```\nx = 1\n```"),
+        ({"tag": "code_block", "language": "PYTHON", "text": " \n"}, ""),
+    ],
+)
+def test_feishu_post_link_and_code_block_edge_cases(element, expected):
+    """A code fence outlasts the code's own backticks; elements without content add nothing."""
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    event = _make_post_event({"content": [[{"tag": "text", "text": "Before"}], [element]]})
+
+    parsed = channel._parse_message_event(event)
+
+    assert parsed is not None
+    assert parsed.text == ("Before\n\n" + expected if expected else "Before")
+
+
+def test_feishu_post_code_block_inside_a_paragraph_starts_on_its_own_line():
+    """A fence only opens a block at the start of a line, so text around the code becomes separate paragraphs."""
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    event = _make_post_event(
+        {
+            "content": [
+                [
+                    {"tag": "text", "text": "Run"},
+                    {"tag": "code_block", "language": "BASH", "text": "make test"},
+                    {"tag": "text", "text": "and see"},
+                    {"tag": "a", "href": "https://example.com/log", "text": "the log"},
+                ]
+            ]
+        }
+    )
+
+    parsed = channel._parse_message_event(event)
+
+    assert parsed is not None
+    assert parsed.text == "Run\n\n```bash\nmake test\n```\n\nand see [the log](https://example.com/log)"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("code", ["bind-code", None])
 async def test_feishu_post_connect_reads_only_the_caption(monkeypatch, code):

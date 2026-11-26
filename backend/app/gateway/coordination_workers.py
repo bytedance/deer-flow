@@ -33,6 +33,7 @@ class CoordinationWorkers:
         self._wakeups = set()
         self._cancellations = {}
         self._recovery = None
+        self._recovery_wakeup = asyncio.Event()
 
     def start_recovery(self):
         self._recovery = asyncio.create_task(self._recover())
@@ -124,6 +125,14 @@ class CoordinationWorkers:
         self.watch(runs, owner, task_id, grant_id)
         return receipt
 
+    async def submit_task_decision(self, owner, task_id, execution_id, run_id, grant_id, tasks):
+        _, current_grant_id = await self.authority(owner, task_id)
+        if grant_id != current_grant_id:
+            raise AgentRunError(403, "Coordinator authorization is no longer current")
+        task_ids = await self.repo.submit_task_decision(owner, task_id, execution_id, run_id, grant_id, tasks)
+        self._recovery_wakeup.set()
+        return task_ids
+
     async def view(self, owner, task_id):
         view = await self.repo.view(owner, task_id)
         required = False
@@ -159,11 +168,15 @@ class CoordinationWorkers:
 
     async def _recover(self):
         while True:
+            self._recovery_wakeup.clear()
             try:
                 await self.recover_once()
             except Exception:
                 logger.exception("Coordination recovery scan failed")
-            await asyncio.sleep(RECOVERY_INTERVAL)
+            try:
+                await asyncio.wait_for(self._recovery_wakeup.wait(), timeout=RECOVERY_INTERVAL)
+            except TimeoutError:
+                pass
 
     async def _admit(self, runs, owner, task_id, turn, grant_id):
         worker, execution, project = turn
@@ -227,8 +240,13 @@ class CoordinationWorkers:
             except TimeoutError:
                 continue
             artifacts = []
+            result_text = None
             status = run.status
-            if run.stop_reason == WORKER_SHUTDOWN or (run.stop_reason == ORPHAN_RECOVERY_STOP_REASON and run.error in (STARTUP_ORPHAN_RECOVERY_ERROR, LEASE_ORPHAN_RECOVERY_ERROR)):
+            restart = run.stop_reason == WORKER_SHUTDOWN or (run.stop_reason == ORPHAN_RECOVERY_STOP_REASON and run.error in (STARTUP_ORPHAN_RECOVERY_ERROR, LEASE_ORPHAN_RECOVERY_ERROR))
+            if "expected_revision" in execution["frozen_input"]:
+                if restart and await self.repo.recover_checkpoint(owner, task_id, execution["id"], run.run_id, None):
+                    continue
+            elif restart:
                 state = await runs.coordination_recovery_checkpoint(thread_id=thread, run_id=run.run_id)
                 if state and state.get("checkpoint_id") and state.get("metadata", {}).get(WORKER_CHECKPOINT_RUN) == run.run_id and state.get("next"):
                     if any(task.get("interrupts") for task in state.get("tasks", [])):
@@ -239,13 +257,18 @@ class CoordinationWorkers:
             elif status == "success" and not run.stop_reason:
                 try:
                     artifacts = await runs.coordination_artifacts(thread_id=thread, run_id=run.run_id)
+                    if execution["frozen_input"].get("collect_result"):
+                        result_text = await runs.coordination_result_text(thread_id=thread, run_id=run.run_id)
                 except AgentRunError as exc:
                     if exc.status_code >= 500:
                         raise
                     status = "delivery_failed"
             elif status == "success":
                 status = "stopped"
-            await self.repo.settle(owner, task_id, execution["id"], run.run_id, status, artifacts)
+            if not await self.repo.settle(owner, task_id, execution["id"], run.run_id, status, artifacts, result_text=result_text):
+                return  # The Coordinator's children are still running.
+            if "expected_revision" in execution["frozen_input"] or execution["frozen_input"].get("collect_result"):
+                self._recovery_wakeup.set()
 
     async def cancel(self, runs, owner, task_id, revision):
         task = await self.repo.request_cancel(owner, task_id, expected_revision=revision)

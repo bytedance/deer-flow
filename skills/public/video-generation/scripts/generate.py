@@ -229,9 +229,12 @@ def _download(url: str, output_file: str, *, gemini_api_key: str = "") -> None:
             url = urljoin(url, location)
             continue
         _require_success(response)
+        content = response.content
+        if not content:
+            raise ValueError("Provider returned an empty video download")
         _ensure_output_dir(output_file)
         with open(output_file, "wb") as f:
-            f.write(response.content)
+            f.write(content)
         return
     raise ValueError("Too many video download redirects")
 

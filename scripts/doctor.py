@@ -485,13 +485,13 @@ def _resolves_to_builtin_openviking(manager_class: str) -> bool:
 def _memory_backend_config_fix(detail: str) -> str | None:
     """Remediation matched to the validator's failure modes; None lets the
     verbatim error speak for itself."""
-    if "USER API key is missing; set" in detail:
-        var = detail.rsplit("set ", 1)[-1].strip().rstrip(".")
+    if "USER API key is missing" in detail and "; set " in detail:
+        var = detail.rsplit("; set ", 1)[-1].strip().rstrip(".")
         return f"Add {var}=<your-key> to your .env file"
     if "Unknown OpenViking backend_config fields" in detail:
         return "Remove the fields named in the error from memory.backend_config, or switch manager_class back"
     if "trusted mode is no longer supported" in detail:
-        return "Use a USER API key (api_key_env) and configure owner_user_id instead of auth_mode/account"
+        return "Use a USER API key and configure owner_user_id, user_credentials, or credential_provider instead of auth_mode/account"
     if "custom HTTP client fields are no longer supported" in detail:
         return "Remove the custom HTTP client fields from memory.backend_config"
     return None
