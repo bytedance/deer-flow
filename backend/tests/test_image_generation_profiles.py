@@ -12,6 +12,7 @@ from deerflow.config.image_generation import (
     ImageGenerationProfile,
     ManagedImageGenerationProfile,
     ManagedImageGenerationProfileStore,
+    bind_image_generation_source,
     resolve_image_generation_profile,
 )
 
@@ -58,6 +59,9 @@ def test_encrypted_profile_revision_secret_and_precedence(store):
         store.save(profile(), expected_revision=first.revision)
 
     disabled = store.save(profile(enabled=False, api_key=None), expected_revision=updated.revision)
+    with bind_image_generation_source("managed"):
+        with pytest.raises(ImageConfigurationError, match="changed"):
+            resolve_image_generation_profile({"GEMINI_API_KEY": "legacy-secret"})
     selected, source, _ = resolve_image_generation_profile({"GEMINI_API_KEY": "legacy-secret"})
     assert (selected.provider.value, source) == ("gemini", "sandbox_environment")
     assert disabled.enabled is False

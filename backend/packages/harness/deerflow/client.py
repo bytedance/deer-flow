@@ -1147,7 +1147,7 @@ class DeerFlowClient:
                 logger.warning("Embedded image model choice could not be validated")
                 needs_choice = False
             if needs_choice and checkpointer is not None:
-                snapshot = CheckpointStateAccessor.bind(self._agent, checkpointer, mode=self._checkpoint_channel_mode).get(checkpoint_config)
+                snapshot = CheckpointStateAccessor.bind(agent, checkpointer, mode=self._checkpoint_channel_mode).get(checkpoint_config)
                 values = snapshot.values or {}
                 prior_messages = tuple(values.get("messages") or ()) if isinstance(values, dict) else ()
                 try:

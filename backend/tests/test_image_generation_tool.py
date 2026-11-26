@@ -65,6 +65,27 @@ async def test_missing_profile_async_returns_before_sandbox_acquisition(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_disabled_bound_profile_async_stops_before_sandbox_acquisition(monkeypatch, tmp_path):
+    from deerflow.config import image_generation as image_config
+    from deerflow.sandbox import tools as sandbox_tools
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    disabled = ManagedImageGenerationProfile(name="web", provider="openai", model="web-image", base_url="https://images.example/v1", api_key="web-secret", enabled=False)
+    monkeypatch.setattr(image_config, "ManagedImageGenerationProfileStore", lambda: SimpleNamespace(list=lambda: [disabled]))
+    settings = config()
+    settings.sandbox.environment = {"IMAGE_GENERATION_PROVIDER": "gemini", "GEMINI_IMAGE_MODEL": "server-image", "GEMINI_API_KEY": "server-secret"}
+    monkeypatch.setattr(image_tool, "get_app_config", lambda: settings)
+
+    async def unexpected_sandbox(*_args, **_kwargs):
+        pytest.fail("sandbox was acquired after the managed profile was disabled")
+
+    monkeypatch.setattr(sandbox_tools, "_run_sync_tool_after_async_sandbox_init", unexpected_sandbox)
+    with image_config.bind_image_generation_source("managed"):
+        result = await image_tool.generate_image_tool.coroutine(SimpleNamespace(context={}), "/mnt/user-data/workspace/prompt.json", "/mnt/user-data/outputs/slide.png")
+    assert "IMAGE_PROFILE_CHANGED" in result
+
+
+@pytest.mark.asyncio
 async def test_async_image_source_resolution_runs_off_event_loop(monkeypatch):
     from deerflow.sandbox import tools as sandbox_tools
 
@@ -349,6 +370,10 @@ def test_managed_container_rejects_legacy_fallback_after_profile_is_disabled(mon
     # The active sandbox is held across calls. Rebinding after the managed
     # profile is disabled erases its revision marker, but not its identity.
     stored[0] = managed.model_copy(update={"enabled": False})
+    with monkeypatch.context() as patch:
+        patch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda _runtime: pytest.fail("sandbox was acquired after the managed profile was disabled"))
+        with image_config.bind_image_generation_source("managed"):
+            assert "IMAGE_PROFILE_CHANGED" in image_tool.generate_image_tool.func(*args)
     selected_profile, source, _ = image_tool.resolve_image_generation_profile(settings.sandbox.environment)
     assert source == "sandbox_environment"
     assert selected_profile.provider.value == "gemini"

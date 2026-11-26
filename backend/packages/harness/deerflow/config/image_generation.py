@@ -42,6 +42,10 @@ class ImageConfigurationError(ValueError):
     pass
 
 
+class ImageProfileChangedError(ImageConfigurationError):
+    """The image source selected for this run is no longer available."""
+
+
 def managed_image_profiles_enabled() -> bool:
     """Deployment-level switch for the web-managed image catalog."""
     value = os.environ.get("DEER_FLOW_MANAGED_IMAGE_PROFILES_ENABLED", "true").strip().lower()
@@ -493,6 +497,8 @@ def resolve_image_generation_profile(
     managed = [item for item in ManagedImageGenerationProfileStore().list() if item.enabled]
     if len(managed) > 1:
         raise ImageConfigurationError("Multiple image profiles are enabled")
+    if _selected_image_source.get() == "managed" and (not managed or not managed[0].usable()):
+        raise ImageProfileChangedError("The selected image profile changed or is unavailable")
     try:
         legacy = legacy_image_profile(raw_environment)
     except ValueError:

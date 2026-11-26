@@ -1,6 +1,7 @@
 import base64
 import runpy
 import sys
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,47 @@ def test_atomic_generation_rejects_invalid_image_without_replacing_output(
 
     assert output.read_bytes() == original
     assert list(tmp_path.iterdir()) == [output]
+
+
+def test_cli_reports_png_checksum_failure_as_invalid_output(
+    tmp_path, monkeypatch, capsys
+):
+    from PIL import Image
+
+    png = BytesIO()
+    Image.new("RGB", (8, 8), "blue").save(png, format="PNG")
+    corrupted = bytearray(png.getvalue())
+    idat_offset = 8 + 4 + 4 + 13 + 4
+    idat_length = int.from_bytes(corrupted[idat_offset : idat_offset + 4], "big")
+    corrupted[idat_offset + 8 + idat_length] ^= 1
+    with Image.open(BytesIO(corrupted)) as image:
+        with pytest.raises(SyntaxError, match="bad header checksum"):
+            image.verify()
+
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("A blue square", encoding="utf-8")
+    output = tmp_path / "slide.png"
+    output.write_bytes(b"previous image")
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "zzzz1234zzzz")
+    encoded = base64.b64encode(corrupted).decode("ascii")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *_args, **_kwargs: FakeResp({"data": [{"b64_json": encoded}]}),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [img.__file__, "--prompt-file", str(prompt), "--output-file", str(output)],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        runpy.run_path(img.__file__, run_name="__main__")
+
+    assert error.value.code == 1
+    assert "IMAGE_GENERATION_INVALID_OUTPUT" in capsys.readouterr().err
+    assert output.read_bytes() == b"previous image"
 
 
 def test_atomic_generation_converts_before_replacing_output(tmp_path, monkeypatch):

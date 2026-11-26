@@ -528,7 +528,7 @@ def generate_image_atomically(
                 )
             with Image.open(temporary) as image:
                 image.verify()
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, SyntaxError) as exc:
             raise InvalidImageOutputError("Provider returned an invalid image") from exc
         os.replace(temporary, output_file)
         return f"Successfully generated image to {output_file}"

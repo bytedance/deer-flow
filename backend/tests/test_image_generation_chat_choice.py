@@ -607,8 +607,7 @@ def _embedded_choice_client(image_choice, monkeypatch, environment=None):
     checkpointer = InMemorySaver()
     agent = create_agent(model=FakeModel(), tools=[ask_clarification_tool, fake_generate_image], middleware=[ClarificationMiddleware()], checkpointer=checkpointer)
     client = DeerFlowClient(checkpointer=checkpointer)
-    client._agent = agent
-    monkeypatch.setattr(client, "_ensure_agent", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(client, "_ensure_agent", lambda *_args, **_kwargs: (agent, None))
     return client, agent, executed
 
 

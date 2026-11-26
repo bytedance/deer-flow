@@ -13,6 +13,7 @@ from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.config.app_config import get_app_config
 from deerflow.config.image_generation import (
     ImageConfigurationError,
+    ImageProfileChangedError,
     bind_image_generation_source,
     effective_image_generation_source,
     image_generation_source_for_run,
@@ -29,6 +30,7 @@ from deerflow.tools.types import Runtime
 
 _IMAGE_SCRIPT = "public/image-generation/scripts/generate.py"
 _OUTPUTS = f"{VIRTUAL_PATH_PREFIX}/outputs/"
+_PROFILE_CHANGED = "Error: IMAGE_PROFILE_CHANGED. The selected image model is no longer available; retry in a new turn."
 
 
 def _image_config_target() -> str:
@@ -103,6 +105,8 @@ def check_image_generation_tool(runtime: Runtime) -> str:
             verified = bool(managed and managed.verified_generation and managed.verified_edit)
             status = "verified for generation and editing" if verified else "configured; image generation and editing have not both been verified"
             return f"Image provider {profile.provider.value}/{profile.model} from {source}: {status}."
+    except ImageProfileChangedError:
+        return _PROFILE_CHANGED
     except (ImageConfigurationError, ValueError, OSError):
         return f"Error: IMAGE_PROVIDER_INVALID_CONFIG. Check {_image_config_target()}."
 
@@ -129,6 +133,8 @@ def generate_image_tool(
     try:
         environment = get_app_config().image_generation_environment
         source = _image_source_for_runtime(runtime, environment)
+    except ImageProfileChangedError:
+        return _PROFILE_CHANGED
     except (ImageConfigurationError, ValueError, OSError):
         return f"Error: IMAGE_PROVIDER_INVALID_CONFIG. Check {_image_config_target()}."
     with bind_image_generation_source(source):
@@ -156,6 +162,8 @@ def _generate_image_with_selected_source(runtime: Runtime, prompt_file: str, out
         if profile is None:
             return f"Error: IMAGE_PROVIDER_NOT_CONFIGURED. Configure an image model in {_image_config_target()}."
         env = profile.command_environment()
+    except ImageProfileChangedError:
+        return _PROFILE_CHANGED
     except (ImageConfigurationError, ValueError, OSError):
         return f"Error: IMAGE_PROVIDER_INVALID_CONFIG. Check {_image_config_target()}."
 
@@ -259,6 +267,8 @@ async def _generate_image_async(runtime: Runtime, prompt_file: str, output_file:
                     return source, f"Error: IMAGE_PROVIDER_NOT_CONFIGURED. Configure an image model in {_image_config_target()}."
                 if not profile.usable():
                     return source, f"Error: IMAGE_PROVIDER_INVALID_CONFIG. The selected image model has no API key. Check {_image_config_target()}."
+        except ImageProfileChangedError:
+            return None, _PROFILE_CHANGED
         except (ImageConfigurationError, ValueError, OSError):
             return None, f"Error: IMAGE_PROVIDER_INVALID_CONFIG. Check {_image_config_target()}."
         return source, None
