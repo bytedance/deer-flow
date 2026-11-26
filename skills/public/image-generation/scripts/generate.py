@@ -267,7 +267,7 @@ def _generate_image_minimax(
         return "MINIMAX_API_KEY is not set"
     prompt = _minimax_prompt(prompt)
     if len(prompt) > MINIMAX_PROMPT_MAX_CHARS:
-        return (
+        raise ValueError(
             f"Prompt is {len(prompt)} characters but MiniMax image-01 accepts at most "
             f"{MINIMAX_PROMPT_MAX_CHARS}. Shorten the prompt to stay within the limit; "
             f"reference images plus a tighter description usually recover the detail."

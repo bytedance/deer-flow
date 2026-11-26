@@ -239,8 +239,9 @@ the same structured JSON regardless of which provider is active. MiniMax `image-
 consumes a single text string, so the MiniMax path itself sends only the JSON `prompt`
 field (the other fields such as `style` / `composition` / `negative_prompt` apply to the
 Gemini path) and enables `prompt_optimizer` so MiniMax expands it server-side. MiniMax
-caps that prompt at 1500 characters; if the `prompt` field is longer, the script returns
-an error instead of calling the API. The Gemini path receives the full structured JSON.
+accepts prompts up to 1500 characters. For longer prompts, the CLI reports the length
+limit on stderr and exits with status 1 before contacting MiniMax or writing the image.
+The Gemini path receives the full structured JSON.
 
 ## Notes
 

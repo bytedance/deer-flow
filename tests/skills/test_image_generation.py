@@ -176,7 +176,10 @@ def test_minimax_extracts_json_prompt_field(monkeypatch, tmp_path):
     assert captured["json"]["prompt_optimizer"] is True
 
 
-def test_minimax_plaintext_prompt_passes_through(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "prompt", ["a red apple on a table", "x" * 1500], ids=["short", "at-limit"]
+)
+def test_minimax_plaintext_prompt_passes_through(monkeypatch, tmp_path, prompt):
     monkeypatch.setenv("MINIMAX_API_KEY", "m")
     captured = {}
 
@@ -191,27 +194,46 @@ def test_minimax_plaintext_prompt_passes_through(monkeypatch, tmp_path):
 
     monkeypatch.setattr(img.requests, "post", fake_post)
     prompt_file = tmp_path / "p.txt"
-    prompt_file.write_text("a red apple on a table", encoding="utf-8")
+    prompt_file.write_text(prompt, encoding="utf-8")
     img.generate_image(str(prompt_file), [], str(tmp_path / "o.jpg"), "1:1")
 
-    assert captured["json"]["prompt"] == "a red apple on a table"
+    assert captured["json"]["prompt"] == prompt
 
 
-def test_minimax_rejects_overlong_prompt_without_calling_api(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "existing", [False, True], ids=["new-output", "existing-output"]
+)
+def test_cli_minimax_rejects_overlong_prompt(monkeypatch, tmp_path, capsys, existing):
     monkeypatch.setenv("MINIMAX_API_KEY", "m")
 
-    def fake_post(url, headers=None, json=None, **kw):  # pragma: no cover
-        raise AssertionError("must not call the API when the prompt is over the limit")
+    def fake_post(*args, **kwargs):
+        pytest.fail("Overlong prompts must be rejected before calling MiniMax")
 
     monkeypatch.setattr(img.requests, "post", fake_post)
     prompt_file = tmp_path / "p.json"
-    prompt_file.write_text('{"prompt": "' + "x" * 1600 + '"}', encoding="utf-8")
+    prompt_file.write_text('{"prompt": "' + "x" * 1501 + '"}', encoding="utf-8")
     out = tmp_path / "o.jpg"
-    msg = img.generate_image(str(prompt_file), [], str(out), "16:9")
+    if existing:
+        out.write_bytes(b"previous image")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [img.__file__, "--prompt-file", str(prompt_file), "--output-file", str(out)],
+    )
 
-    assert "1500" in msg
-    assert "character" in msg.lower()
-    assert not out.exists()
+    with pytest.raises(SystemExit) as error:
+        runpy.run_path(img.__file__, run_name="__main__")
+
+    assert error.value.code == 1
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert "1501 characters" in captured.err
+    assert "at most 1500" in captured.err
+    assert "Shorten the prompt" in captured.err
+    if existing:
+        assert out.read_bytes() == b"previous image"
+    else:
+        assert not out.exists()
 
 
 def test_minimax_creates_nested_output_dir(monkeypatch, tmp_path):
@@ -479,8 +501,9 @@ def test_openai_compatible_empty_download_preserves_output(
     )
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("a red deer", encoding="utf-8")
-    output = tmp_path / "image.png"
+    output = tmp_path / "outputs" / "image.png"
     if existing:
+        output.parent.mkdir()
         output.write_bytes(b"previous image")
 
     with pytest.raises(ValueError, match="empty image"):
@@ -488,7 +511,7 @@ def test_openai_compatible_empty_download_preserves_output(
     if existing:
         assert output.read_bytes() == b"previous image"
     else:
-        assert not output.exists()
+        assert not output.parent.exists()
 
 
 @pytest.mark.parametrize(
@@ -506,8 +529,9 @@ def test_openai_compatible_empty_data_url_preserves_output(
     )
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("a red deer", encoding="utf-8")
-    output = tmp_path / "image.png"
+    output = tmp_path / "outputs" / "image.png"
     if existing:
+        output.parent.mkdir()
         output.write_bytes(b"previous image")
 
     with pytest.raises(ValueError, match="empty image"):
@@ -515,7 +539,7 @@ def test_openai_compatible_empty_data_url_preserves_output(
     if existing:
         assert output.read_bytes() == b"previous image"
     else:
-        assert not output.exists()
+        assert not output.parent.exists()
 
 
 @pytest.mark.parametrize(
