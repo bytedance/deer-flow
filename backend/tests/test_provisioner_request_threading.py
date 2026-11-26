@@ -103,6 +103,42 @@ def test_provisioner_threads_shell_capacity_into_sandbox_pod(
     assert env["MAX_SHELL_SESSIONS"] == "13"
 
 
+def test_sandbox_pod_default_resources(provisioner_module):
+    resources = provisioner_module._build_pod("sandbox-1", "thread-1").spec.containers[0].resources
+    assert resources.requests == {"cpu": "100m", "memory": "256Mi", "ephemeral-storage": "500Mi"}
+    assert resources.limits == {"cpu": "1000m", "memory": "1Gi", "ephemeral-storage": "500Mi"}
+
+
+def test_sandbox_pod_resource_overrides(monkeypatch, request):
+    monkeypatch.setenv("SANDBOX_CPU_REQUEST", "500m")
+    monkeypatch.setenv("SANDBOX_CPU_LIMIT", ".5")
+    monkeypatch.setenv("SANDBOX_MEMORY_REQUEST", "1024Mi")
+    monkeypatch.setenv("SANDBOX_EPHEMERAL_STORAGE_REQUEST", "1e9")
+    monkeypatch.setenv("SANDBOX_EPHEMERAL_STORAGE_LIMIT", "1Gi")
+    module = request.getfixturevalue("provisioner_module")
+    resources = module._build_pod("sandbox-1", "thread-1").spec.containers[0].resources
+    assert resources.requests == {"cpu": "500m", "memory": "1024Mi", "ephemeral-storage": "1e9"}
+    assert resources.limits == {"cpu": ".5", "memory": "1Gi", "ephemeral-storage": "1Gi"}
+
+
+@pytest.mark.parametrize(
+    "variable,value",
+    [
+        ("SANDBOX_CPU_REQUEST", "1001m"),
+        ("SANDBOX_MEMORY_LIMIT", "250M"),
+        ("SANDBOX_EPHEMERAL_STORAGE_REQUEST", "501Mi"),
+        ("SANDBOX_CPU_LIMIT", "NaN"),
+        ("SANDBOX_MEMORY_LIMIT", "1e3Mi"),
+        ("SANDBOX_MEMORY_REQUEST", "-1"),
+        ("SANDBOX_EPHEMERAL_STORAGE_LIMIT", ""),
+    ],
+)
+def test_invalid_sandbox_resources_fail_at_startup(monkeypatch, request, variable, value):
+    monkeypatch.setenv(variable, value)
+    with pytest.raises(RuntimeError, match=variable):
+        request.getfixturevalue("provisioner_module")
+
+
 @pytest.mark.parametrize(
     "name",
     ["DISABLE JUPYTER", "1DISABLE", "DISABLE-YUP", "D" * 65, "DISABLE_JUPYTER\n"],
