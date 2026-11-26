@@ -16,6 +16,7 @@ do not impede pluggability.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import inspect
 import json
@@ -23,6 +24,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from abc import abstractmethod
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -51,6 +53,24 @@ _manager_lock = threading.Lock()
 # rebuild only the judge when memory.prescreen / memory.signal_classification
 # changes. None = no manager built yet (or reset).
 _memory_judge_signature: str | None = None
+# Model set the cached manager's host LLM is armed for. Managed models merge into
+# the app config after the YAML load, so a model added from Settings never edits
+# config.yaml; comparing the merged set lets get_memory_manager() re-arm the host
+# LLM without a restart. Three states, because the gate is the backend's need and
+# not "the config lists no models":
+#   None -> the backend still needs a host model, so the next lookup re-checks;
+#   ()   -> the backend owns a model (or the host model was never its job);
+#   tuple-> armed for this model set, no further checks (a key rotation needs a
+#           restart, which keeps the merged-config read off the per-turn path).
+_memory_model_armed_signature: tuple[str, ...] | None = None
+# Last failed re-arm attempt, keyed by the model set that failed (or _UNREADABLE):
+# (key, monotonic deadline). A broken entry must not rebuild and log a traceback
+# on every memory call, but a *different* model set -- typically the repaired one
+# -- is a new failure surface and is retried on the next lookup instead of waiting
+# out the window.
+_memory_model_failure: tuple[object, float] | None = None
+_UNREADABLE = object()
+_MODEL_REBUILD_RETRY_SECONDS = 60.0
 
 
 def context_query_kwargs(get_context: Callable[..., str], query: str | None) -> dict[str, str | None]:
@@ -566,6 +586,32 @@ class MemoryManager(BaseModel):
         """
         return None
 
+    def needs_host_model(self) -> bool:
+        """Whether the host fallback model would still be used by this backend.
+
+        The re-arm gate: ``get_memory_manager()`` asks this (not "does the merged
+        config list models?") because a deployment can start with a model entry
+        that does not build -- a missing provider package, a typo in ``use`` --
+        and must still recover once that entry is repaired.
+
+        Must stay cheap: a field check, no I/O. It runs on the memory path while
+        a stateful backend still lacks a model. Default ``False``: a backend that
+        owns its model never reads the merged config for this.
+        """
+        return False
+
+    def refresh_llm(self, llm: Any) -> None:
+        """Replace the injected host model after a model-config reload.
+
+        Called by :func:`get_memory_manager` while :meth:`needs_host_model` is
+        true: the backend was built without a usable extraction model (no model
+        configured yet, or an entry that failed to build) and one is available
+        now, so extraction starts working without restarting the process. ``llm``
+        is never ``None``: the caller only arms after a successful build.
+        Default: no-op (a backend that owns its own model ignores it).
+        """
+        return None
+
     # ── Async (speculative) ──────────────────────────────────────────────
     # Interface placeholders so a future async LLM client can override without
     # changing the contract. Defaults delegate to the sync methods (no
@@ -865,6 +911,19 @@ def _host_default_should_keep_hidden_message(additional_kwargs: Any) -> bool:
     return read_human_input_response(additional_kwargs) is not None
 
 
+def _build_host_llm() -> Any:
+    """Build the host's default chat model, raising when it cannot be built.
+
+    The raising variant exists so the re-arm path can tell "no usable model" from
+    "built fine": ``_host_default_llm`` folds every failure into ``None``, which
+    the startup path wants (a missing model is a config state, not a crash) but
+    which would let a failed rebuild look like a successful one.
+    """
+    from deerflow.models import create_chat_model
+
+    return create_chat_model(name=None)
+
+
 def _host_default_llm() -> Any:
     """deer-flow default for DeerMem's ``host_llm`` slot (zero-config extraction).
 
@@ -876,9 +935,7 @@ def _host_default_llm() -> Any:
     crashing startup.
     """
     try:
-        from deerflow.models import create_chat_model
-
-        return create_chat_model(name=None)
+        return _build_host_llm()
     except Exception:  # noqa: BLE001 - no default model is a config state, not a crash
         logger.warning("Could not build host default model for DeerMem memory extraction; memory extraction will be disabled", exc_info=True)
         return None
@@ -1068,6 +1125,113 @@ def _effective_connection_signature(cfg: Any) -> dict[str, Any]:
     return signature
 
 
+def _model_set_signature() -> tuple[str, ...] | None:
+    """Digest of each merged model entry, or ``None`` when it cannot be read.
+
+    Hashes the whole ``ModelConfig`` the factory consumes (display metadata
+    excluded), so every input that can change the built client invalidates the
+    signature: endpoint keys (``api_base``, ``base_url``, ``openai_api_base``),
+    provider extras, sampling settings and the credential. Only the digest is
+    kept -- the raw key never enters the signature or a log line. Reading the
+    merged app config can fail -- a managed catalog that cannot be decrypted
+    raises -- and this runs on the memory call path, so a failure degrades to
+    ``None`` instead of propagating: the same invariant
+    ``_effective_connection_signature`` holds.
+    """
+    try:
+        from deerflow.config import get_app_config
+
+        signature = []
+        for model in get_app_config().models:
+            settings = model.model_dump(mode="json", exclude={"display_name", "description", "aliases"})
+            signature.append(hashlib.sha256(json.dumps(settings, sort_keys=True, default=str).encode("utf-8")).hexdigest())
+        return tuple(signature)
+    except Exception:  # noqa: BLE001 - the refresh is best-effort, memory is not
+        logger.warning("Could not read the merged model set; skipping the host memory model refresh", exc_info=True)
+        return None
+
+
+def _refresh_llm_for_reloaded_models(manager: MemoryManager) -> None:
+    """Re-arm the host LLM while the backend has no usable extraction model.
+
+    The gate is the backend's own state (``needs_host_model``), not "does the
+    merged config list models?". Both halves of the same bug live here: a fresh
+    install starts with no model at all, and a copied config starts with an entry
+    that does not build (a missing provider package, a typo in ``use``). In both
+    cases the backend holds no client and every extraction fails with "no LLM is
+    configured" until the process restarts. A backend that already has a model is
+    left alone: re-checking a key rotation on every memory call would put a
+    merged-config read on the hot path of every turn.
+
+    A failed rebuild is not recorded as armed -- that would gate off the only
+    self-heal path -- but it is rate-limited *per model set*, so a broken entry
+    cannot rebuild and log a traceback on every memory call while a repaired one
+    is retried on the next lookup. The install itself mirrors the judge refresh:
+    publish under the lock, after revalidating, so a config edit during the build
+    cannot install a superseded client.
+    """
+    global _memory_model_armed_signature, _memory_model_failure
+    if not manager.needs_host_model():
+        # Nothing to arm: the backend owns a model (an explicit
+        # `memory.backend_config.model`, or one it armed on an earlier lookup).
+        # Record the closed gate so later lookups stay free. Under the lock, and
+        # only while this manager is still the singleton, so a build that lost a
+        # reset race cannot close the gate for its replacement.
+        with _manager_lock:
+            if manager is not _memory_manager:
+                return
+            _memory_model_armed_signature = ()
+        return
+    failure = _memory_model_failure
+    if failure is not None and failure[0] is _UNREADABLE and time.monotonic() < failure[1]:
+        # A broken catalog is a failure like any other: retry once per window
+        # rather than on every memory call (each read is a failed decrypt plus a
+        # traceback). Checked before the read, because the read is what fails.
+        return
+    signature = _model_set_signature()
+    if signature is None:
+        _memory_model_failure = (_UNREADABLE, time.monotonic() + _MODEL_REBUILD_RETRY_SECONDS)
+        return
+    if not signature:
+        # No model configured yet. Not throttled: a model added from Settings
+        # must be picked up on the very next lookup, which is the whole point.
+        return
+    if failure is not None and failure[0] == signature and time.monotonic() < failure[1]:
+        return
+    build_error: Exception | None = None
+    try:
+        llm = _build_host_llm()
+    except Exception as exc:  # noqa: BLE001 - a broken entry must not fail every memory call
+        llm = None
+        build_error = exc
+    if llm is None:
+        # A missing client is a failure whether the factory raised or resolved to
+        # nothing; only a real exception gets a traceback.
+        logger.error(
+            "Failed to build the host memory model for the configured model set; keeping the previous model and retrying on a later call",
+            exc_info=build_error,
+        )
+        _memory_model_failure = (signature, time.monotonic() + _MODEL_REBUILD_RETRY_SECONDS)
+        return
+    with _manager_lock:
+        if manager is not _memory_manager:
+            # The backend was retired (reset / runtime switch) while this client
+            # was being built; installing it would close the re-arm gate for the
+            # manager that replaced it.
+            return
+        if _memory_model_armed_signature == signature:
+            # Another thread armed this same model set while we were building.
+            return
+        if _model_set_signature() != signature:
+            # The config moved on while this client was being built; drop it and
+            # let the next lookup build for whatever is current.
+            return
+        manager.refresh_llm(llm)
+        _memory_model_armed_signature = signature
+    _memory_model_failure = None
+    logger.info("Memory host model armed after a model-config change (%d model(s) available)", len(signature))
+
+
 def _refresh_judge_for_reloaded_config(manager: MemoryManager) -> None:
     """Rebuild and re-inject the judge when the host judging config changed.
 
@@ -1135,12 +1299,18 @@ def get_memory_manager() -> MemoryManager:
     :func:`reset_memory_manager` to force re-resolution (tests / runtime
     backend switching).
     """
-    global _memory_manager, _memory_judge_signature
+    global _memory_manager, _memory_judge_signature, _memory_model_armed_signature
     if _memory_manager is not None:
         # The manager is built once; refresh only the judge so a hot-reloaded
         # memory.prescreen / memory.signal_classification takes effect (a mode
         # switch must not keep a stale judge deciding or a stale skip persisting).
         _refresh_judge_for_reloaded_config(_memory_manager)
+        # The extraction model is re-armed while the backend still has none: a
+        # deployment that started empty, or with an entry that did not build. An
+        # armed manager keeps its client, so the merged-config read stays off the
+        # per-turn path for everything else.
+        if _memory_model_armed_signature is None:
+            _refresh_llm_for_reloaded_models(_memory_manager)
         return _memory_manager
 
     # deer-flow is multi-threaded: memory injection runs via asyncio.to_thread,
@@ -1174,6 +1344,13 @@ def get_memory_manager() -> MemoryManager:
         # (mode=="tool" requires search) can fire on the factory path too.
         _memory_manager = cls.from_config(backend_config, mode=cfg.mode, **host_hooks)
         _memory_judge_signature = _judging_config_signature(cfg)
+        # Ask the backend, not the config: a model entry that failed to build
+        # leaves the backend without a client even though the config lists one,
+        # and that deployment must stay eligible for the re-arm. Recording the
+        # merged set here would close the gate on the very state being repaired.
+        # `()` closes it for a backend that owns its model (an explicit
+        # `memory.backend_config.model` included) without reading the config.
+        _memory_model_armed_signature = None if _memory_manager.needs_host_model() else ()
         logger.info("Memory manager resolved: %s (manager_class=%r)", cls.__name__, manager_class)
         return _memory_manager
 
@@ -1211,8 +1388,10 @@ def reset_memory_manager() -> None:
     The next :func:`get_memory_manager` call re-reads the config and re-scans
     backends. Use this in tests or when switching backends at runtime.
     """
-    global _memory_manager, _backends_cache, _memory_judge_signature
+    global _memory_manager, _backends_cache, _memory_judge_signature, _memory_model_armed_signature, _memory_model_failure
     with _manager_lock:
         _memory_manager = None
         _backends_cache = None
         _memory_judge_signature = None
+        _memory_model_armed_signature = None
+        _memory_model_failure = None

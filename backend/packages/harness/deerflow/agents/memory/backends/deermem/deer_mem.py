@@ -207,6 +207,37 @@ class DeerMem(MemoryManager):
         """
         self._config.judge = judge
 
+    def needs_host_model(self) -> bool:
+        """Whether extraction still has no model to call.
+
+        Drives the host re-arm: true while no explicit ``model`` is configured
+        (that one always wins) and construction left ``_llm`` empty -- the
+        zero-config install, and the case where the configured model failed to
+        build. A cheap field check: the manager calls it on the memory path.
+        """
+        return not self._config.model.model and self._llm is None
+
+    def refresh_llm(self, llm: Any) -> None:
+        """Replace the host-provided extraction model after a model-config reload.
+
+        An explicitly configured ``memory.backend_config.model`` keeps its own
+        client: the host LLM is only the zero-config fallback, so overwriting it
+        would silently ignore the operator's choice. ``None`` is rejected rather
+        than stored -- unlike the judge, where ``None`` legitimately means "both
+        sides off", a missing extraction model would silently switch extraction
+        off and discard a client that still works.
+
+        The updater holds its own reference for the queued batch, so both move
+        together. ``_config.host_llm`` is a construction-time snapshot (only
+        ``__init__`` reads it) kept in step for observability and tests; the
+        runtime sources are ``_llm`` and the updater's.
+        """
+        if llm is None or self._config.model.model:
+            return
+        self._config.host_llm = llm
+        self._llm = llm
+        self._updater.set_llm(llm)
+
     # ── Write ────────────────────────────────────────────────────────────
     def add(
         self,

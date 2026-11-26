@@ -15,9 +15,11 @@ are independent of order.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import PrivateAttr
 
 from deerflow.agents.memory import (
     MemoryManager,
@@ -198,3 +200,527 @@ def test_deermem_shutdown_flush_drains_a_pending_update() -> None:
     assert deermem._queue.pending_count == 0
     assert mock_updater.update_memory.call_count == 3
     reset_memory_manager()
+
+
+# ── Host model hot-reload ────────────────────────────────────────────────────
+# The manager singleton is built once. A deployment can start before any model
+# is configured (fresh install, model added later from Settings) or with a model
+# entry that does not build (missing provider package, typo in `use`) and must
+# not need a Gateway restart before memory extraction works: the host LLM is
+# re-armed while the backend has none, mirroring the existing judge refresh.
+
+
+class _HostLlmRecordingBackend(MemoryManager):
+    """Minimal backend that records ``refresh_llm`` calls.
+
+    ``host_model_present`` stands in for the backend's own state: ``False`` means
+    it still has no extraction model (a fresh install, or an entry that failed to
+    build) and therefore wants the host fallback.
+    """
+
+    host_model_present: ClassVar[bool] = False
+    _refreshed: list = PrivateAttr(default_factory=list)
+
+    def needs_host_model(self) -> bool:
+        return not self.host_model_present
+
+    def add(self, thread_id, messages, *, agent_name=None, user_id=None, trace_id=None) -> None:
+        return None
+
+    def get_context(self, user_id, *, agent_name=None, thread_id=None, query=None) -> str:
+        return ""
+
+    def refresh_llm(self, llm) -> None:
+        self._refreshed.append(llm)
+
+    @classmethod
+    def from_config(cls, backend_config, *, mode="middleware", **host_hooks):
+        return cls(backend_config=backend_config or {}, mode=mode)
+
+
+def _model_signature(*names: str) -> tuple[str, ...]:
+    """A signature of the same shape ``_model_set_signature()`` produces.
+
+    Monkeypatched into the manager so a test can move the model set without
+    writing a managed catalog; one digest per model entry, as the real function
+    returns.
+    """
+    return tuple(f"digest-{name}" for name in names)
+
+
+def test_manager_rearms_host_llm_when_the_model_set_appears(monkeypatch) -> None:
+    """A model configured after startup must reach memory extraction without a
+    restart: the next manager lookup rebuilds the host LLM and injects it."""
+    from deerflow.agents.memory import manager as manager_module
+
+    set_memory_config(MemoryConfig(manager_class=f"{__name__}:_HostLlmRecordingBackend"))
+    monkeypatch.setattr(manager_module, "_model_set_signature", lambda: ())
+    manager = get_memory_manager()
+    assert manager._refreshed == []
+
+    host_llm = object()
+    monkeypatch.setattr(manager_module, "_build_host_llm", lambda: host_llm)
+    monkeypatch.setattr(manager_module, "_model_set_signature", lambda: _model_signature("deepseek-chat"))
+
+    assert get_memory_manager() is manager
+    assert manager._refreshed == [host_llm]
+
+
+def test_manager_keeps_host_llm_when_the_model_set_is_unchanged(monkeypatch) -> None:
+    """While the deployment still has no model, repeated lookups must not rebuild
+    (or re-inject) the host LLM: the refresh is signature-gated, not
+    unconditional, so an idle no-model deployment does not spin on the factory."""
+    from deerflow.agents.memory import manager as manager_module
+
+    set_memory_config(MemoryConfig(manager_class=f"{__name__}:_HostLlmRecordingBackend"))
+    builds: list[int] = []
+    monkeypatch.setattr(manager_module, "_build_host_llm", lambda: builds.append(1) or object())
+    monkeypatch.setattr(manager_module, "_model_set_signature", lambda: ())
+    manager = get_memory_manager()
+
+    assert get_memory_manager() is manager
+    assert get_memory_manager() is manager
+    assert manager._refreshed == []
+    assert builds == []
+
+
+def test_manager_does_not_rearm_a_manager_that_started_with_a_model(monkeypatch) -> None:
+    """An armed manager keeps its client: a signature comparison on every call
+    would put a merged-config read on the hot path, and a key rotation stays
+    restart-only (an accepted, documented limit)."""
+    from deerflow.agents.memory import manager as manager_module
+
+    set_memory_config(MemoryConfig(manager_class=f"{__name__}:_HostLlmRecordingBackend"))
+    monkeypatch.setattr(_HostLlmRecordingBackend, "host_model_present", True)
+    builds: list[int] = []
+    monkeypatch.setattr(manager_module, "_build_host_llm", lambda: builds.append(1) or object())
+    monkeypatch.setattr(manager_module, "_model_set_signature", lambda: _model_signature("deepseek-chat"))
+    manager = get_memory_manager()
+    assert manager._refreshed == []
+
+    monkeypatch.setattr(manager_module, "_model_set_signature", lambda: _model_signature("deepseek-chat", "second"))
+
+    assert get_memory_manager() is manager
+    assert manager._refreshed == []
+    assert builds == []
+
+
+def test_manager_retries_after_a_failed_host_model_build(monkeypatch) -> None:
+    """A model entry that cannot build a client must not close the self-heal path.
+
+    The failure is not recorded as the armed signature (that would gate the
+    refresh off for the process lifetime), the retry is rate-limited so a
+    permanently broken entry cannot rebuild on every memory call, and repairing
+    the entry re-arms on a later lookup instead of requiring a restart.
+    """
+    from deerflow.agents.memory import manager as manager_module
+
+    set_memory_config(MemoryConfig(manager_class=f"{__name__}:_HostLlmRecordingBackend"))
+    monkeypatch.setattr(manager_module, "_model_set_signature", lambda: ())
+    manager = get_memory_manager()
+
+    signature = _model_signature("deepseek-chat")
+    monkeypatch.setattr(manager_module, "_model_set_signature", lambda: signature)
+
+    def _broken():
+        raise RuntimeError("provider package is not installed")
+
+    monkeypatch.setattr(manager_module, "_build_host_llm", _broken)
+
+    assert get_memory_manager() is manager
+    assert manager._refreshed == []
+    assert manager_module._memory_model_armed_signature is None
+    failure = manager_module._memory_model_failure
+    assert failure is not None
+    assert failure[0] == signature
+    assert failure[1] > 0
+
+    # Still inside the retry window for this same model set: no rebuild, no
+    # second traceback.
+    host_llm = object()
+    monkeypatch.setattr(manager_module, "_build_host_llm", lambda: host_llm)
+    assert get_memory_manager() is manager
+    assert manager._refreshed == []
+
+    # Once the window elapses the repaired entry is picked up without a restart.
+    manager_module._memory_model_failure = (signature, 0.0)
+    assert get_memory_manager() is manager
+    assert manager._refreshed == [host_llm]
+
+
+def test_manager_survives_an_unreadable_model_set(monkeypatch) -> None:
+    """Signature computation runs on the memory call path: when the merged config
+    cannot be read the refresh must degrade, never raise out of
+    ``get_memory_manager()`` (the invariant the judge signature already holds)."""
+    from deerflow.agents.memory import manager as manager_module
+
+    set_memory_config(MemoryConfig(manager_class=f"{__name__}:_HostLlmRecordingBackend"))
+    monkeypatch.setattr(manager_module, "_model_set_signature", lambda: None)
+    manager = get_memory_manager()
+
+    assert get_memory_manager() is manager
+    assert manager._refreshed == []
+    failure = manager_module._memory_model_failure
+    assert failure is not None and failure[0] is manager_module._UNREADABLE
+
+
+def test_deermem_refresh_llm_reaches_the_update_queue(tmp_path, monkeypatch) -> None:
+    """The backend holds the LLM in two places: the manager-facing attribute and
+    the queued updater that actually calls it. A refresh must reach both, or the
+    first extraction after a model change still raises "no LLM is configured"."""
+    import deerflow.config.runtime_paths as runtime_paths
+    from deerflow.agents.memory import manager as manager_module
+
+    monkeypatch.setattr(runtime_paths, "runtime_home", lambda: tmp_path)
+    monkeypatch.setattr(manager_module, "_host_default_llm", lambda: None)
+    set_memory_config(MemoryConfig(manager_class="deermem"))
+    manager = get_memory_manager()
+    assert manager._llm is None
+    assert manager._updater._llm is None
+
+    host_llm = object()
+    manager.refresh_llm(host_llm)
+
+    assert manager._llm is host_llm
+    assert manager._updater._llm is host_llm
+
+
+def test_deermem_refresh_llm_ignores_none(tmp_path, monkeypatch) -> None:
+    """``None`` must never replace a working client: unlike the judge, where it
+    legitimately means "both sides off", a missing extraction model would turn a
+    failed rebuild into silently disabled memory."""
+    import deerflow.config.runtime_paths as runtime_paths
+    from deerflow.agents.memory import manager as manager_module
+
+    monkeypatch.setattr(runtime_paths, "runtime_home", lambda: tmp_path)
+    monkeypatch.setattr(manager_module, "_host_default_llm", lambda: None)
+    set_memory_config(MemoryConfig(manager_class="deermem"))
+    manager = get_memory_manager()
+
+    host_llm = object()
+    manager.refresh_llm(host_llm)
+    manager.refresh_llm(None)
+
+    assert manager._llm is host_llm
+    assert manager._updater._llm is host_llm
+
+
+def test_deermem_refresh_llm_keeps_an_explicitly_configured_model(tmp_path, monkeypatch) -> None:
+    """``memory.backend_config.model`` wins over the host default: the operator's
+    choice must not be replaced by the zero-config fallback on a reload."""
+    from types import SimpleNamespace
+
+    import deerflow.config.runtime_paths as runtime_paths
+    from deerflow.agents.memory import manager as manager_module
+
+    monkeypatch.setattr(runtime_paths, "runtime_home", lambda: tmp_path)
+    monkeypatch.setattr(manager_module, "_host_default_llm", lambda: None)
+    set_memory_config(MemoryConfig(manager_class="deermem"))
+    manager = get_memory_manager()
+
+    first = object()
+    manager.refresh_llm(first)
+    assert manager._llm is first
+
+    manager._config.model = SimpleNamespace(model="gpt-4o")
+    manager.refresh_llm(object())
+
+    assert manager._llm is first
+    assert manager._updater._llm is first
+
+
+def test_model_set_signature_tracks_names_and_credentials(monkeypatch) -> None:
+    """The signature must move when models are added or their connection details
+    change, and stay put otherwise -- it is the only trigger for the refresh."""
+    from types import SimpleNamespace
+
+    from deerflow.agents.memory import manager as manager_module
+    from deerflow.config.model_config import ModelConfig
+
+    def _model(name: str, key: str, *, base_url: str | None = None) -> ModelConfig:
+        settings = {"base_url": base_url} if base_url else {}
+        return ModelConfig(name=name, use="langchain_openai:ChatOpenAI", model="m", api_key=key, **settings)
+
+    def _config(*models):
+        return SimpleNamespace(models=list(models))
+
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: _config())
+    empty = manager_module._model_set_signature()
+    assert empty == ()
+
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: _config(_model("deepseek-chat", "sk-one")))
+    configured = manager_module._model_set_signature()
+    assert configured != empty
+    assert len(configured) == 1
+
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: _config(_model("deepseek-chat", "sk-two")))
+    rotated = manager_module._model_set_signature()
+    assert rotated != configured
+    assert "sk-one" not in "".join(rotated), "the raw credential must never enter the signature"
+
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: _config(_model("other-model", "sk-two")))
+    assert manager_module._model_set_signature() != rotated
+
+
+def test_model_set_signature_tracks_an_endpoint_edit(monkeypatch) -> None:
+    """``base_url`` is the endpoint key the factory actually forwards for the
+    documented OpenAI-compatible providers, while ``api_base`` is canonical only
+    for classes that declare it. An endpoint edit must invalidate the signature,
+    or an in-flight build installs the retired endpoint and closes the gate."""
+    from types import SimpleNamespace
+
+    from deerflow.agents.memory import manager as manager_module
+    from deerflow.config.model_config import ModelConfig
+
+    def _signature(base_url: str) -> tuple[str, ...] | None:
+        model = ModelConfig(name="a", use="langchain_openai:ChatOpenAI", model="m", base_url=base_url, api_key="sk")
+        monkeypatch.setattr("deerflow.config.get_app_config", lambda: SimpleNamespace(models=[model]))
+        return manager_module._model_set_signature()
+
+    first = _signature("https://one.example/v1")
+    assert first
+    assert _signature("https://two.example/v1") != first
+    assert _signature("https://one.example/v1") == first
+
+
+def test_model_set_signature_is_none_when_the_config_cannot_be_read(monkeypatch) -> None:
+    """``get_app_config`` can raise (a managed catalog that cannot be decrypted).
+    The signature is a best-effort cache key, so it degrades to ``None`` instead
+    of taking memory down with it."""
+    from deerflow.agents.memory import manager as manager_module
+
+    def _unreadable():
+        raise ValueError("cannot decrypt the managed model catalog")
+
+    monkeypatch.setattr("deerflow.config.get_app_config", _unreadable)
+
+    assert manager_module._model_set_signature() is None
+
+
+def test_manager_does_not_arm_on_a_build_that_yields_no_client(monkeypatch) -> None:
+    """A builder that resolves to ``None`` is a failed build: arming on it would
+    record a signature with no client behind it and close the retry path."""
+    from deerflow.agents.memory import manager as manager_module
+
+    set_memory_config(MemoryConfig(manager_class=f"{__name__}:_HostLlmRecordingBackend"))
+    monkeypatch.setattr(manager_module, "_model_set_signature", lambda: ())
+    manager = get_memory_manager()
+
+    monkeypatch.setattr(manager_module, "_model_set_signature", lambda: _model_signature("deepseek-chat"))
+    monkeypatch.setattr(manager_module, "_build_host_llm", lambda: None)
+
+    assert get_memory_manager() is manager
+    assert manager._refreshed == []
+    assert manager_module._memory_model_armed_signature is None
+
+
+def test_manager_rearms_when_startup_had_a_model_that_could_not_build(monkeypatch) -> None:
+    """A deployment that starts with a model entry that does not build is the
+    other half of the same bug: the config lists a model, the backend still has
+    no client. The gate asks the backend, not the config, so the repair is
+    picked up without a restart."""
+    from deerflow.agents.memory import manager as manager_module
+
+    set_memory_config(MemoryConfig(manager_class=f"{__name__}:_HostLlmRecordingBackend"))
+    monkeypatch.setattr(manager_module, "_model_set_signature", lambda: _model_signature("broken-entry"))
+    monkeypatch.setattr(manager_module, "_build_host_llm", lambda: None)
+
+    manager = get_memory_manager()
+    # The model set is non-empty, but nothing is armed: the gate must stay open.
+    assert manager_module._memory_model_armed_signature is None
+    assert manager._refreshed == []
+
+    # The operator fixes the entry (a typo in `use`, a missing package); the next
+    # lookup arms the client.
+    host_llm = object()
+    monkeypatch.setattr(manager_module, "_build_host_llm", lambda: host_llm)
+    monkeypatch.setattr(manager_module, "_model_set_signature", lambda: _model_signature("repaired-entry"))
+
+    assert get_memory_manager() is manager
+    assert manager._refreshed == [host_llm]
+
+
+def test_a_changed_model_set_retries_inside_the_failure_window(monkeypatch) -> None:
+    """The retry limit is per model set, not global: a different set is a new
+    failure surface and must be tried at once instead of waiting out the window
+    opened by an earlier, unrelated failure."""
+    from deerflow.agents.memory import manager as manager_module
+
+    set_memory_config(MemoryConfig(manager_class=f"{__name__}:_HostLlmRecordingBackend"))
+    first = _model_signature("first-entry")
+    monkeypatch.setattr(manager_module, "_model_set_signature", lambda: first)
+    monkeypatch.setattr(manager_module, "_build_host_llm", lambda: None)
+
+    manager = get_memory_manager()
+    # The first lookup after the build is what attempts the re-arm.
+    assert get_memory_manager() is manager
+    assert manager._refreshed == []
+    assert manager_module._memory_model_failure[0] == first
+
+    # Same set while the window is open: skipped.
+    assert get_memory_manager() is manager
+    assert manager._refreshed == []
+
+    # A different set does not inherit the window.
+    host_llm = object()
+    monkeypatch.setattr(manager_module, "_build_host_llm", lambda: host_llm)
+    monkeypatch.setattr(manager_module, "_model_set_signature", lambda: _model_signature("second-entry"))
+
+    assert get_memory_manager() is manager
+    assert manager._refreshed == [host_llm]
+    assert manager_module._memory_model_failure is None
+
+
+def test_a_stale_build_does_not_land_after_a_config_change(monkeypatch) -> None:
+    """A client built from a model set that has since changed must be dropped, not
+    installed: the operator may have rolled the edit back while it was building."""
+    import threading
+
+    from deerflow.agents.memory import manager as manager_module
+
+    set_memory_config(MemoryConfig(manager_class=f"{__name__}:_HostLlmRecordingBackend"))
+    monkeypatch.setattr(manager_module, "_model_set_signature", lambda: _model_signature("first"))
+    manager = get_memory_manager()
+
+    building = threading.Event()
+    release = threading.Event()
+
+    def _slow_build():
+        building.set()
+        assert release.wait(5), "the test never released the builder"
+        return object()
+
+    monkeypatch.setattr(manager_module, "_build_host_llm", _slow_build)
+    results: list = []
+    worker = threading.Thread(target=lambda: results.append(get_memory_manager()))
+    worker.start()
+    try:
+        assert building.wait(5), "the builder never started"
+        # The config moves on while the client is being built.
+        monkeypatch.setattr(manager_module, "_model_set_signature", lambda: _model_signature("second"))
+    finally:
+        release.set()
+        worker.join(10)
+
+    assert results == [manager]
+    assert manager._refreshed == []
+    assert manager_module._memory_model_armed_signature is None
+
+
+def test_two_threads_arm_the_same_model_set_once(monkeypatch) -> None:
+    """Concurrent first lookups may each build a client, but exactly one install
+    lands: the revalidation under the lock skips the duplicate."""
+    import threading
+
+    from deerflow.agents.memory import manager as manager_module
+
+    set_memory_config(MemoryConfig(manager_class=f"{__name__}:_HostLlmRecordingBackend"))
+    monkeypatch.setattr(manager_module, "_model_set_signature", lambda: _model_signature("shared"))
+    manager = get_memory_manager()
+
+    rendezvous = threading.Barrier(2, timeout=5)
+
+    def _build():
+        # Both threads are inside the build before either can install.
+        rendezvous.wait()
+        return object()
+
+    monkeypatch.setattr(manager_module, "_build_host_llm", _build)
+    results: list = []
+    workers = [threading.Thread(target=lambda: results.append(get_memory_manager())) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(10)
+
+    assert results == [manager, manager]
+    assert len(manager._refreshed) == 1
+
+
+def test_a_backend_that_owns_its_model_never_reads_the_merged_config(monkeypatch) -> None:
+    """The re-arm costs nothing when the backend has its own model (an explicit
+    ``memory.backend_config.model`` included): the gate is decided from the
+    backend's state, so the merged config is never read for it."""
+    from deerflow.agents.memory import manager as manager_module
+
+    reads: list[int] = []
+    monkeypatch.setattr(manager_module, "_model_set_signature", lambda: reads.append(1) or ())
+    monkeypatch.setattr(_HostLlmRecordingBackend, "host_model_present", True)
+    set_memory_config(MemoryConfig(manager_class=f"{__name__}:_HostLlmRecordingBackend"))
+
+    manager = get_memory_manager()
+    assert get_memory_manager() is manager
+
+    assert reads == []
+    assert manager_module._memory_model_armed_signature == ()
+
+
+def test_a_build_for_a_retired_manager_is_not_published(monkeypatch) -> None:
+    """A build that lost a ``reset_memory_manager()`` race must be dropped: the
+    retired backend no longer serves callers, and arming it would close the gate
+    for the manager that replaced it."""
+    import threading
+
+    from deerflow.agents.memory import manager as manager_module
+
+    set_memory_config(MemoryConfig(manager_class=f"{__name__}:_HostLlmRecordingBackend"))
+    signature = _model_signature("first")
+    monkeypatch.setattr(manager_module, "_model_set_signature", lambda: signature)
+    manager = get_memory_manager()
+
+    building = threading.Event()
+    release = threading.Event()
+    builds = {"count": 0}
+
+    def _slow_build():
+        builds["count"] += 1
+        if builds["count"] == 1:
+            building.set()
+            assert release.wait(5), "the test never released the builder"
+            return object()
+        # The replacement's own first build still has no client.
+        return None
+
+    monkeypatch.setattr(manager_module, "_build_host_llm", _slow_build)
+    results: list = []
+    worker = threading.Thread(target=lambda: results.append(get_memory_manager()))
+    worker.start()
+    try:
+        assert building.wait(5), "the builder never started"
+        reset_memory_manager()
+        replacement = get_memory_manager()
+    finally:
+        release.set()
+        worker.join(10)
+
+    assert results == [replacement]
+    assert manager._refreshed == [], "a retired backend must not be armed"
+    assert manager_module._memory_model_armed_signature is None, "the replacement keeps its gate open"
+
+    # The replacement still arms once a client can be built for it.
+    host_llm = object()
+    monkeypatch.setattr(manager_module, "_build_host_llm", lambda: host_llm)
+    manager_module._memory_model_failure = None
+    assert get_memory_manager() is replacement
+    assert replacement._refreshed == [host_llm]
+
+
+def test_an_unreadable_model_set_is_not_reread_inside_the_retry_window(monkeypatch) -> None:
+    """Reading the merged config is what fails, so the ``_UNREADABLE`` deadline
+    must be honored before the read: a broken catalog is retried once per window,
+    not on every memory call (each attempt is a failed decrypt plus a traceback)."""
+    from deerflow.agents.memory import manager as manager_module
+
+    reads: list[int] = []
+
+    def _unreadable():
+        reads.append(1)
+        return None
+
+    monkeypatch.setattr(manager_module, "_model_set_signature", _unreadable)
+    set_memory_config(MemoryConfig(manager_class=f"{__name__}:_HostLlmRecordingBackend"))
+
+    manager = get_memory_manager()
+    assert get_memory_manager() is manager
+    assert get_memory_manager() is manager
+    assert len(reads) == 1

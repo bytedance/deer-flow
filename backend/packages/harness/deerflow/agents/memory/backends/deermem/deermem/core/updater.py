@@ -905,6 +905,17 @@ class MemoryUpdater:
         # one batch on that thread's next turn.
         self._watermarks: OrderedDict[tuple[str | None, str | None, str | None], tuple[str, ...] | None] = OrderedDict()
 
+    def set_llm(self, llm: Any) -> None:
+        """Swap the extraction model in place after a host model-config reload.
+
+        The queue reuses one updater for every batch, so the model captured at
+        construction must be replaced here as well -- otherwise the next
+        extraction keeps raising "no LLM is configured" even though the backend
+        now holds a client. A plain setter: the backend's ``refresh_llm`` is what
+        refuses ``None``, so a missing model never reaches this call.
+        """
+        self._llm = llm
+
     # ── Data access + fact CRUD (formerly module-level functions; use self._storage) ──
 
     def _save_memory_to_file(
