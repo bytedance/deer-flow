@@ -214,7 +214,7 @@ class RemoteSandboxBackend(SandboxBackend):
                 request is sent.
         """
         self._provisioner_url = provisioner_url.rstrip("/")
-        self._api_key = api_key
+        self._api_key = api_key.strip() if api_key else ""
         self._max_shell_sessions = max_shell_sessions
         self._max_bash_sessions = max_bash_sessions
         self._required_shell_sessions = max(required_shell_sessions, max_shell_sessions or 0)
