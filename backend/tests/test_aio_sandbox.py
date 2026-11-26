@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+from support.scaling import LINEAR_LIMIT, growth
 
 
 class _TeardownFirstScopeLock:
@@ -2835,6 +2836,8 @@ class TestReadFile:
             pytest.param("one two\fx\nthree\n".encode(), 1, 1, "one two\fx", id="unicode-separators"),
             pytest.param(b"one\ntwo\n", 3, None, "", id="past-the-end"),
             pytest.param(b"one\ntwo\n", None, 1, "one", id="end-only"),
+            pytest.param(b"a\n" + b"\r" * 5 + b"x\n", 2, 2, "\r" * 5 + "x", id="cr-run-then-text"),
+            pytest.param(b"a\r\r\r\nb\r\n", 1, 2, "a\nb", id="several-crs-end-a-line"),
         ],
     )
     def test_ranged_read_file_ends_lines_only_at_lf(self, aio_files, stored, start_line, end_line, expected):
@@ -2843,6 +2846,18 @@ class TestReadFile:
 
         assert sandbox.read_file("/mnt/user-data/workspace/f.txt", start_line=start_line, end_line=end_line) == expected
         assert routes.routes == ["/v1/file/download"]
+
+    def test_a_ranged_read_scans_a_run_of_carriage_returns_once(self, aio_files):
+        # A run of "\r" followed by text made the ranged read quadratic in the
+        # length of the run.
+        sandbox, routes = aio_files
+
+        def ranged_read(n: int) -> str:
+            routes.files["/mnt/user-data/workspace/progress.log"] = b"a\n" + b"\r" * n + b"x\n"
+            return sandbox.read_file("/mnt/user-data/workspace/progress.log", start_line=1, end_line=2)
+
+        assert ranged_read(3) == "a\n\r\r\rx"
+        assert growth(ranged_read, 4000) < LINEAR_LIMIT
 
     def test_read_file_reads_paths_outside_user_data(self, aio_files):
         # download_file() refuses paths outside /mnt/user-data; read_file must

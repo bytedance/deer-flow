@@ -18,10 +18,11 @@ from unittest.mock import MagicMock
 import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
+from support.scaling import LINEAR_LIMIT, growth
 
 import deerflow.sandbox.local.local_sandbox as local_sandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
-from deerflow.sandbox.read_file_contract import count_file_lines, split_file_lines
+from deerflow.sandbox.read_file_contract import count_file_lines, slice_file_lines, split_file_lines
 from deerflow.sandbox.tools import _replace_keeping_line_endings, read_current_file_content, str_replace_tool
 
 CRLF_SOURCE = b"first\r\nsecond\r\nthird\r\n"
@@ -235,11 +236,16 @@ def test_str_replace_on_a_mixed_file_still_reports_a_missing_old_str(tmp_path, m
         pytest.param(b"one\rtwo\r\nthree\n", "one\rtwo\nthree", "1\n3", False, b"1\r\n3\n", id="bare-cr-is-text"),
         # Overlapping candidates: matches do not overlap, as with str.replace.
         pytest.param(b"a\r\na\na\r\na\n", "a\na", "b", True, b"b\nb\n", id="no-overlap"),
-        # "\r\n" in old_str comes from a full read and matches only a CRLF;
-        # "\n" matches either ending.
+        # "\r\n" in old_str comes from a full read and matches only a CRLF.
         pytest.param(b"x\ny\nx\r\ny\n", "x\r\ny", "Q", False, b"x\ny\nQ\n", id="crlf-in-old-str-matches-only-crlf"),
         pytest.param(b"a\r\nb\nc\r\n", "a\r\nb\r\nc", "x", False, None, id="crlf-in-old-str-never-matches-lf"),
+        # A snippet with CRLF matches as written or with every line break
+        # spelled CRLF, not with its endings mixed in another way.
         pytest.param(b"a\r\nb\r\nc\r\nd\n", "a\r\nb\nc", "A\nB\nC", False, b"A\r\nB\r\nC\r\nd\n", id="lf-in-old-str-matches-crlf"),
+        pytest.param(b"a\r\nb\r\nc\nd\n", "a\r\nb\nc\nd", "x", False, None, id="mixed-old-str-matches-no-other-mix"),
+        pytest.param(b"a\r\nb\nc\r\nd\n", "b\nc\r\nd", "x", False, b"a\r\nx\n", id="mixed-old-str-matches-as-written"),
+        # A snippet cut from a full read just after a "\r" starts with the LF of a CRLF.
+        pytest.param(b"a\r\n\r\nb\r\n\n", "\n\r\nb\r\n\n", "\nX\n", False, b"a\r\nX\r\n", id="leading-lf-of-a-crlf"),
         # Each line break of new_str keeps the ending of the one it replaces.
         pytest.param(b"a\r\nb\nc\nd\n", "\nb\n", "\nB\n", False, b"a\r\nB\nc\nd\n", id="keeps-each-line-ending"),
         pytest.param(b"a\r\nb\nc\n", "a\nb\n", "a\nx\ny\nb\n", False, b"a\r\nx\ny\nb\nc\n", id="extra-lines-take-the-last-ending"),
@@ -310,9 +316,18 @@ def _reference_replace(content: str, old_str: str, new_str: str, replace_all: bo
     out: list[str] = []
     i = copied = 0
     found = False
+
+    def matches(window: list[str]) -> bool:
+        if "\r\n" not in needle:
+            # A snippet without CRLF: "\n" matches either ending, anything else itself.
+            return all(want == unit or (want == "\n" and unit == "\r\n") for want, unit in zip(needle, window))
+        # A snippet with CRLF matches as written, its first "\n" also as a
+        # CRLF, or with every line break spelled CRLF.
+        as_written = window[1:] == needle[1:] and (window[0] == needle[0] or needle[0] == "\n" == window[0][-1])
+        return as_written or window == ["\r\n" if want == "\n" else want for want in needle]
+
     while i + len(needle) <= len(units):
-        # "\r\n" matches only a CRLF, "\n" either ending, anything else itself.
-        if not all(want == unit or (want == "\n" and unit == "\r\n") for want, unit in zip(needle, units[i : i + len(needle)])):
+        if not matches(units[i : i + len(needle)]):
             i += 1
             continue
         found = True
@@ -390,6 +405,18 @@ def test_a_ranged_read_snippet_is_never_reported_missing(case, data) -> None:
     last = data.draw(st.integers(first, len(lines) - 1))
     snippet = "\n".join(lines[first : last + 1])
     assume(snippet)
+
+    assert _replace_keeping_line_endings(content, snippet, new_str, replace_all) is not None
+
+
+@settings(max_examples=1500, deadline=None)
+@given(_replace_cases(), st.data())
+def test_a_full_read_snippet_is_found_unless_it_splits_a_crlf(case, data) -> None:
+    content, _, new_str, replace_all = case
+    start = data.draw(st.integers(0, len(content)))
+    stop = data.draw(st.integers(start, len(content)))
+    snippet = content[start:stop]
+    assume(snippet and not (snippet.endswith("\r") and content.startswith("\n", stop)))
 
     assert _replace_keeping_line_endings(content, snippet, new_str, replace_all) is not None
 
@@ -476,3 +503,39 @@ def test_grep_does_not_match_the_line_terminator(tmp_path, pattern, literal, exp
     matches, _ = LocalSandbox("t").grep(str(path), pattern, literal=literal)
 
     assert [(match.line_number, match.line) for match in matches] == expected
+
+
+# Each scan must stay linear on input built to defeat it. A run of "\r"
+# followed by text made the old ranged-read regex retry from every "\r" of
+# the run; a CRLF snippet over LF lines made the matcher check every
+# overlapping candidate in full.
+@pytest.mark.parametrize(
+    ("make", "size"),
+    [
+        pytest.param(lambda n: ("a\n" + "\r" * n + "x\n", 1, 2), 2000, id="cr-run-then-text"),
+        pytest.param(lambda n: ("\r" * n + "\nx\n", 1, 2), 2000, id="cr-run-then-lf"),
+        pytest.param(lambda n: ("x\r\r\r" * n + "\n", 1, 1), 2000, id="cr-runs-inside-a-line"),
+        pytest.param(lambda n: ("a\r\r\n" * n, 1, None), 2000, id="lines-ending-in-several-crs"),
+        pytest.param(lambda n: ("a\r\n" * n, 2, None), 2000, id="crlf-lines"),
+    ],
+)
+def test_a_ranged_read_is_linear_in_the_file(make, size) -> None:
+    assert growth(lambda n: slice_file_lines(*make(n)), size) < LINEAR_LIMIT
+
+
+@pytest.mark.parametrize(
+    ("make", "size"),
+    [
+        # Both the file and the snippet grow, so a check of every overlapping
+        # candidate in full grows with their product.
+        pytest.param(lambda n: ("a\n" * 64 * n + "b\r\n", "a\r\n" + "a\n" * n, "x", False), 20, id="crlf-snippet-over-lf-lines"),
+        pytest.param(lambda n: ("\r" + "\na\nb\r" * 50 * n + "\n", "\na\nb\r" * n, "x", False), 20, id="leading-lf-on-every-crlf"),
+        pytest.param(lambda n: ("x\r\n" * 50 * n + "y\n", "x\r\n" * n + "x\r", "x", False), 20, id="trailing-cr-before-every-lf"),
+        pytest.param(lambda n: ("\r" * 100 * n + "\r\nq\n", "\r" * n + "x\n", "x", False), 20, id="ranged-snippet-over-a-cr-run"),
+        pytest.param(lambda n: ("a\r\nb\n" * 50 * n, "a\nb", "A\nB", True), 20, id="replace-all-across-mixed-lines"),
+        pytest.param(lambda n: ("a\r\nb\n" * 50 * n, "a\r\nb\n", "A\nB\n", True), 20, id="replace-all-of-a-mixed-snippet"),
+        pytest.param(lambda n: ("ab\r\n" * 50 * n + "c\n", "b", "b\nc", True), 20, id="lines-inserted-after-many-matches"),
+    ],
+)
+def test_str_replace_matching_is_linear_in_the_file_and_the_snippet(make, size) -> None:
+    assert growth(lambda n: _replace_keeping_line_endings(*make(n)), size) < LINEAR_LIMIT

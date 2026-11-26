@@ -105,7 +105,7 @@ def test_split_file_lines_agrees_with_count_file_lines(content):
 
 @settings(max_examples=3000, deadline=None)
 @given(
-    content=st.lists(st.sampled_from(["a", "\n", "\r", "\r\n", " "]), max_size=20).map("".join),
+    content=st.lists(st.sampled_from(["a", "\n", "\r", "\r\n", "\r\r", "\r\r\n", " "]), max_size=30).map("".join),
     start_line=st.none() | st.integers(-2, 12),
     end_line=st.none() | st.integers(-2, 12),
 )

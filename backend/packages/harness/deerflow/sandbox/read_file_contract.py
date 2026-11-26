@@ -1,6 +1,6 @@
 """Text markers shared by read_file and its display-only consumers."""
 
-import re
+import io
 
 READ_FILE_EMPTY = "(empty)"
 READ_FILE_START_LINE_EXCEEDS = "(start_line exceeds file length)"
@@ -58,9 +58,6 @@ def split_file_lines(content: str) -> list[str]:
     return [line.rstrip("\r") for line in lines]
 
 
-_TRAILING_CRS = re.compile(r"\r+(?=\n)")
-
-
 def _line_start(content: str, line: int, pos: int = 0, at: int = 1) -> int:
     """Offset where 1-indexed ``line`` starts, counting from line ``at`` at ``pos``; -1 past the end."""
     remaining = line - at
@@ -97,4 +94,27 @@ def slice_file_lines(content: str, start_line: int | None = None, end_line: int 
     text = content[begin : stop if stop >= 0 else len(content)]
     if text.endswith("\n"):
         text = text[:-1]
-    return _TRAILING_CRS.sub("", text).rstrip("\r")
+    return _drop_line_end_crs(text).rstrip("\r")
+
+
+def _drop_line_end_crs(text: str) -> str:
+    """Drop every run of ``"\\r"`` that sits directly before a ``"\\n"``.
+
+    Every character is read a fixed number of times, so the time is linear
+    however long a run of ``"\\r"`` is and whatever follows it, and the
+    output is built as one string, never as a list of lines.
+    """
+    # One CR before each LF: the usual CRLF line, handled in C.
+    text = text.replace("\r\n", "\n")
+    if "\r\n" not in text:
+        return text
+    # A line ended in two or more CRs. Each remaining CRLF ends such a run:
+    # cut the run off the text before it and keep the LF.
+    out = io.StringIO()
+    pos = 0
+    while (crlf := text.find("\r\n", pos)) >= 0:
+        out.write(text[pos:crlf].rstrip("\r"))
+        out.write("\n")
+        pos = crlf + 2
+    out.write(text[pos:])
+    return out.getvalue()
