@@ -685,6 +685,17 @@ helm template deer-flow deploy/helm/deer-flow -n deer-flow -f my-values.yaml | \
 
 ```bash
 helm uninstall deer-flow -n deer-flow
-# the PVC is NOT deleted by default — remove it manually if desired:
-kubectl -n deer-flow delete pvc -l app.kubernetes.io/instance=deer-flow
+```
+
+With home persistence enabled (the default), Helm retains the home PVC and its
+workspace data. If your release was installed with an older chart that lacks the
+keep policy, upgrade it to a chart version that includes the policy before
+uninstalling. Helm uses the stored release manifest to decide which resources
+to delete.
+
+To remove the retained home PVC for the example release, delete it explicitly.
+With a `Delete` reclaim policy, this also deletes the backing storage.
+
+```bash
+kubectl -n deer-flow delete pvc deer-flow-deer-flow-home
 ```

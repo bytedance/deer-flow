@@ -244,6 +244,17 @@ def test_rendered_helm_extensions_config_is_writable_and_seeded(persistence_enab
         assert volumes["home"]["persistentVolumeClaim"]["claimName"].endswith("-home")
     else:
         assert volumes["home"]["emptyDir"] == {}
+        assert not any(document["kind"] == "PersistentVolumeClaim" for document in documents)
+
+
+def test_default_home_pvc_is_kept_on_helm_uninstall() -> None:
+    documents = _render_chart()
+    pvc = _by_kind(documents, "PersistentVolumeClaim", "-home")
+    pod_spec = _gateway_deployment(documents)["spec"]["template"]["spec"]
+    home = _named(pod_spec["volumes"], "home")
+
+    assert home["persistentVolumeClaim"]["claimName"] == pvc["metadata"]["name"]
+    assert pvc["metadata"].get("annotations", {}).get("helm.sh/resource-policy") == "keep"
 
 
 # --- test_helm_image_pull_secrets ---
