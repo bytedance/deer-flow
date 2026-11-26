@@ -57,7 +57,7 @@ def split_skill_markdown(content: str) -> tuple[SkillMarkdownParts | None, str |
     frontmatter_text = match.group(1)
     try:
         metadata = yaml.safe_load(frontmatter_text)
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, ValueError) as exc:
         return None, f"Invalid YAML in frontmatter: {exc}"
 
     if not isinstance(metadata, dict):
