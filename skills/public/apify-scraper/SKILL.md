@@ -5,15 +5,20 @@ description: >-
   Facebook, TikTok, YouTube, Google Maps, e-commerce stores, TripAdvisor or
   Booking.com, such as profiles, posts, reels, comments, videos, places,
   products, hotels and reviews. Also use it for bulk structured extraction
-  from one specific website. Do not use it for a single web search or for
-  reading one page; use the web_search and web_fetch tools for those.
+  from one specific website. It needs the apify_actor_start and
+  apify_actor_await tools; when they are not available, do not load it and
+  use web_search and web_fetch instead. Do not use it for a single web search
+  or for reading one page; use the web_search and web_fetch tools for those.
 ---
 
 # Apify Ultimate Scraper Skill
 
 ## Core Rule
 
-This skill needs the `apify_actor_start` and `apify_actor_await` tools. If they are not available, do not try other tools: tell the user to enable the Apify Actor tools in `config.yaml` (see the Apify blocks in `config.example.yaml`) and set `APIFY_API_TOKEN`, then stop.
+This skill needs the `apify_actor_start` and `apify_actor_await` tools. If they are not available:
+
+- If the user asked to use Apify or an Apify Actor, tell them to enable the Apify Actor tools in `config.yaml` (see the Apify blocks in `config.example.yaml`) and set `APIFY_API_TOKEN`, then stop.
+- Otherwise, do the task with `web_search` and `web_fetch`, and ignore the rest of this skill. Do not try to run Actors another way, for example with `bash` or `curl`.
 
 For tasks in the routing table below, use the listed Actor ID and do not call `apify_actor_discover`.
 Read the reference file to get the input template before calling `apify_actor_start`.
