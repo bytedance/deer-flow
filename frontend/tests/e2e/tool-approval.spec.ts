@@ -41,7 +41,7 @@ test("approval mode is independent of reasoning and is sent with the run", async
   await page
     .getByPlaceholder(/how can i assist you/i)
     .fill("Inspect the project");
-  await page.getByRole("button", { name: "Submit", exact: true }).click();
+  await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect
     .poll(() => body)
     .toMatchObject({ context: { tool_approval_mode: "auto" } });

@@ -768,26 +768,23 @@ class SubagentBatchRepository:
             elif action == "cancel" and batch.status not in BATCH_TERMINAL_STATUSES:
                 batch.status = "cancelled"
                 batch.completed_at = now
-                items = list(
-                    (
-                        await session.execute(
-                            select(SubagentBatchItemRow)
-                            .where(
-                                SubagentBatchItemRow.batch_id == batch_id,
-                                SubagentBatchItemRow.status.not_in(ITEM_TERMINAL_STATUSES),
-                            )
-                            .with_for_update()
-                        )
-                    ).scalars()
+                await session.execute(
+                    update(SubagentBatchItemRow)
+                    .where(
+                        SubagentBatchItemRow.batch_id == batch_id,
+                        SubagentBatchItemRow.status.not_in(ITEM_TERMINAL_STATUSES),
+                    )
+                    .values(
+                        status="cancelled",
+                        error="Cancelled by user",
+                        cancel_requested_at=now,
+                        completed_at=now,
+                        updated_at=now,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                    )
+                    .execution_options(synchronize_session=False)
                 )
-                for item in items:
-                    item.cancel_requested_at = now
-                    item.updated_at = now
-                    item.status = "cancelled"
-                    item.error = "Cancelled by user"
-                    item.lease_owner = None
-                    item.lease_expires_at = None
-                    item.completed_at = now
             batch.updated_at = now
             await session.commit()
             return await self._with_counts(session, batch)

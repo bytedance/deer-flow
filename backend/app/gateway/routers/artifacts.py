@@ -309,6 +309,11 @@ def _load_skill_archive_member(actual_skill_path: Path, skill_file_path: str, in
         raise HTTPException(status_code=404, detail=f"Skill file not found: {skill_file_path}")
     if not actual_skill_path.is_file():
         raise HTTPException(status_code=400, detail=f"Path is not a file: {skill_file_path}")
+    # A trailing ".skill/" requests no member at all. Without this guard the
+    # archive lookup's fallback matches the first directory entry (name ends
+    # with "/") and returns its empty body with 200 instead of 404 (#8500).
+    if not internal_path:
+        raise HTTPException(status_code=404, detail=f"No skill archive member requested: {skill_file_path}")
     content = _extract_file_from_skill_archive(actual_skill_path, internal_path)
     if content is None:
         raise HTTPException(status_code=404, detail=f"File '{internal_path}' not found in skill archive")

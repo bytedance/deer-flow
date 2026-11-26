@@ -808,6 +808,7 @@ export const enUS: Translations = {
       },
     ],
     pleaseWaitStreaming: "Please wait for the current response to finish.",
+    send: "Send",
     runInputMode: "Send while working",
     queueMode: "Queue",
     steerMode: "Steer",
