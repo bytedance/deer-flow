@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from deerflow.runtime.events.store.base import RunEventStoreNotCommittedError
 from deerflow.runtime.runs.worker import _SubagentEventBuffer
 
 
@@ -18,7 +19,7 @@ class _BlockingStore:
         self.entered.set()
         await self.release.wait()
         if self.fail:
-            raise RuntimeError("event store write failed")
+            raise RunEventStoreNotCommittedError("event store rejected write")
         self.batches.append([dict(event) for event in events])
         return list(events)
 

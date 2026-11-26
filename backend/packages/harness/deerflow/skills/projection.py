@@ -11,6 +11,7 @@ import shutil
 import stat
 import tempfile
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -33,8 +34,15 @@ except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
     import msvcrt
 
+
+@dataclass(slots=True)
+class _ProcessLockEntry:
+    lock: threading.RLock
+    refcount: int = 0
+
+
 _locks_guard = threading.Lock()
-_process_locks: dict[Path, threading.RLock] = {}
+_process_locks: dict[Path, _ProcessLockEntry] = {}
 _held_projection_locks = threading.local()
 _MANIFEST_VERSION = 1
 _MAX_REBUILD_ATTEMPTS = 2
@@ -98,28 +106,42 @@ def thread_skill_projection_exists(storage: SkillStorage, thread_id: str) -> boo
     return paths.public.parent.exists()
 
 
-def _lock_for(path: Path) -> threading.RLock:
-    resolved = path.resolve()
+@contextmanager
+def _hold_process_lock(key: Path, *, deadline: float | None, check=None) -> Iterator[None]:
     with _locks_guard:
-        return _process_locks.setdefault(resolved, threading.RLock())
+        entry = _process_locks.get(key)
+        if entry is None:
+            entry = _ProcessLockEntry(threading.RLock())
+            _process_locks[key] = entry
+        # Count waiters before releasing the guard so they share one lock with later callers.
+        entry.refcount += 1
+
+    process_lock = entry.lock
+    try:
+        while not process_lock.acquire(timeout=0.05):
+            if check:
+                check()
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("Skill projection lock timeout")
+        try:
+            yield
+        finally:
+            process_lock.release()
+    finally:
+        with _locks_guard:
+            entry.refcount -= 1
+            if entry.refcount == 0 and _process_locks.get(key) is entry:
+                _process_locks.pop(key)
 
 
 @contextmanager
 def _projection_lock(root: Path, *, timeout: float | None = None, check=None) -> Iterator[None]:
     """Serialize projection replacement in-process and across POSIX workers."""
-    import time
-
     lock_path = root.parent / f".{root.name}.projection.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    process_lock = _lock_for(lock_path)
     key = lock_path.resolve()
     deadline = None if timeout is None else time.monotonic() + timeout
-    while not process_lock.acquire(timeout=0.05):
-        if check:
-            check()
-        if deadline is not None and time.monotonic() >= deadline:
-            raise TimeoutError("Skill projection lock timeout")
-    try:
+    with _hold_process_lock(key, deadline=deadline, check=check):
         held = getattr(_held_projection_locks, "paths", None)
         if held is None:
             held = _held_projection_locks.paths = set()
@@ -156,8 +178,6 @@ def _projection_lock(root: Path, *, timeout: float | None = None, check=None) ->
                 else:  # pragma: no cover - Windows
                     lock_file.seek(0)
                     msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-    finally:
-        process_lock.release()
 
 
 def _copy_into_view(source: str, target: str, *, follow_symlinks: bool = True) -> str:

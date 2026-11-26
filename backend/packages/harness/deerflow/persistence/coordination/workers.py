@@ -1,16 +1,19 @@
 """Durable admission, cancellation and result ownership for managed workers."""
 
+from datetime import UTC, datetime
+from hashlib import sha256
 from time import time
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import case, or_, select
+from sqlalchemy.orm import aliased
 
 from deerflow.persistence.coordination.model import CoordinationArtifactRow as Artifact
 from deerflow.persistence.coordination.model import CoordinationAssignmentRow as Assignment
 from deerflow.persistence.coordination.model import CoordinationExecutionRow as Execution
 from deerflow.persistence.coordination.model import CoordinationGrantRow as Grant
 from deerflow.persistence.coordination.model import CoordinationInputRow, CoordinationTaskRow, TaskStatus
-from deerflow.persistence.coordination.sql import CoordinationTaskRepository, TaskConflict, TaskNotFound
+from deerflow.persistence.coordination.sql import CoordinationTaskRepository, TaskConflict, TaskNotFound, _touch
 
 THREAD_PREFIX = "coord-worker-"
 RUN_KEY_PREFIX = "coord-execution:"
@@ -42,14 +45,28 @@ async def bind_admitted_worker(session, thread_id, owner_id, key, run_id, *, gra
         or execution.status != "admitting"
     ):
         raise ConflictError("Managed worker admission no longer matches the task")
-    grant = await session.get(Grant, task_id)
+    grant = await session.get(Grant, await _grant_task_id(session, task))
     # Old tasks and older Gateways have no grant. Once a grant is installed,
     # only its current generation may admit the next Run under the tree lock.
     if grant is not None:
-        if grant.id != grant_id or grant.expires_at <= time() or not await grant_owner_matches(session, owner_id, grant.authority) or not await channel_binding_matches(session, owner_id, grant.channel, lock=True):
+        if not await _grant_matches(session, owner_id, grant, grant_id):
             raise ConflictError("Task run authorization is no longer current")
     execution.run_id = run_id
     execution.status = "running"
+
+
+async def _grant_task_id(session, task):
+    if task.parent_id is not None:
+        root = await session.get(CoordinationTaskRow, task.root_id)
+        if root is None or root.owner_id != task.owner_id:
+            raise TaskNotFound(task.id)
+        if root.coordinator:
+            return root.id
+    return task.id
+
+
+async def _grant_matches(session, owner, grant, grant_id):
+    return grant is not None and grant.id == grant_id and grant.expires_at > time() and await grant_owner_matches(session, owner, grant.authority) and await channel_binding_matches(session, owner, grant.channel, lock=True)
 
 
 async def grant_owner_matches(session, owner, authority):
@@ -77,8 +94,8 @@ async def channel_binding_matches(session, owner, channel, *, lock=False):
 class CoordinationWorkerRepository(CoordinationTaskRepository):
     async def grant(self, owner, task_id):
         async with self._sessions() as session:
-            await self._lookup(session, owner, task_id)
-            row = await session.get(Grant, task_id)
+            task = await self._lookup(session, owner, task_id)
+            row = await session.get(Grant, await _grant_task_id(session, task))
             if row is None or row.expires_at <= time() or not await channel_binding_matches(session, owner, row.channel):
                 return None
             return row.to_dict()
@@ -86,6 +103,8 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
     async def set_grant(self, owner, task_id, grant):
         async with self._write() as session:
             task = await self._lock_tree(session, owner, task_id)
+            if await _grant_task_id(session, task) != task_id:
+                raise TaskConflict("Change authorization on the Coordinator root task")
             if task.status not in (TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.CANCELLING):
                 raise TaskConflict("Task is closed")
             current = await session.get(Grant, task_id)
@@ -102,12 +121,18 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
 
     async def recovery_page(self, after, *, limit=100):
         async with self._sessions() as session:
+            root = aliased(CoordinationTaskRow)
+            grant_task_id = case((root.coordinator.is_(True), root.id), else_=CoordinationTaskRow.id)
             query = (
                 select(CoordinationTaskRow.id, CoordinationTaskRow.owner_id, CoordinationTaskRow.status, CoordinationTaskRow.execution_epoch)
-                .join(Grant, Grant.task_id == CoordinationTaskRow.id)
+                .join(root, (root.id == CoordinationTaskRow.root_id) & (root.owner_id == CoordinationTaskRow.owner_id))
+                .join(Grant, Grant.task_id == grant_task_id)
                 .where(
                     CoordinationTaskRow.id > after,
-                    CoordinationTaskRow.status.in_((TaskStatus.RUNNING, TaskStatus.CANCELLING)),
+                    or_(
+                        CoordinationTaskRow.status.in_((TaskStatus.RUNNING, TaskStatus.CANCELLING)),
+                        root.coordinator.is_(True) & (root.status == TaskStatus.RUNNING) & (CoordinationTaskRow.parent_id == root.id) & (CoordinationTaskRow.status == TaskStatus.QUEUED),
+                    ),
                     Grant.expires_at > time(),
                 )
                 .order_by(CoordinationTaskRow.id)
@@ -158,13 +183,17 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
             execution = await session.scalar(self._latest(task_id))
             result = None
             if execution is not None:
-                result = execution.to_dict(exclude={"frozen_input", "resume_key"})
+                result = execution.to_dict(exclude={"frozen_input", "resume_key", "decision", "result_text"})
                 result["artifacts"] = await self._artifact_refs(session, task_id, execution_id=execution.id)
-            return {
+            view = {
                 "task": task.to_dict(),
                 "assignment": assignment.to_dict() if assignment else None,
                 "execution": result,
             }
+            if task.coordinator:
+                children = await session.scalars(select(CoordinationTaskRow).filter_by(owner_id=owner, parent_id=task_id).order_by(CoordinationTaskRow.created_at, CoordinationTaskRow.id))
+                view["children"] = [{**child.to_dict(), "artifacts_ref": f"/api/coordination/tasks/{child.id}/artifacts"} for child in children]
+            return view
 
     async def admission(self, owner, task_id, execution_id):
         async with self._sessions() as session:
@@ -174,6 +203,62 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
                 raise TaskConflict("Task no longer accepts this execution")
             worker = await session.get(Assignment, (task_id, execution.epoch))
             return worker.to_dict(), execution.frozen_input, task.project_id, task.run_settings
+
+    async def submit_task_decision(self, owner, task_id, execution_id, run_id, grant_id, tasks):
+        if not 1 <= len(tasks) <= 8:
+            raise TaskConflict("A Coordinator decision must contain one to eight tasks")
+        async with self._write() as session:
+            root = await self._lock_tree(session, owner, task_id)
+            execution = await session.scalar(self._latest(task_id))
+            if not root.coordinator or root.status != TaskStatus.RUNNING or execution is None or execution.id != execution_id or execution.run_id != run_id or execution.epoch != root.execution_epoch or execution.status != "running":
+                raise TaskConflict("Coordinator execution is no longer current")
+            grant = await session.scalar(select(Grant).filter_by(task_id=task_id).with_for_update())
+            if not await _grant_matches(session, owner, grant, grant_id):
+                raise PermissionError("Coordinator authorization is no longer current")
+            if execution.decision is not None:
+                if execution.decision["tasks"] != tasks:
+                    raise TaskConflict("This Coordinator decision already has different tasks")
+                return execution.decision["task_ids"]
+            if root.revision != execution.frozen_input["expected_revision"] or root.latest_input_seq != execution.covered_seq:
+                raise TaskConflict("Coordinator decision is based on stale task inputs")
+
+            task_ids = {}
+            children = []
+            assignments = []
+            now = datetime.now(UTC)
+            for item in tasks:
+                key = item["key"]
+                if key in task_ids or any(dep not in task_ids for dep in item["depends_on"]):
+                    raise TaskConflict("Task keys must be unique and dependencies must name earlier tasks")
+                child_id = uuid4().hex
+                durable_key = sha256(f"{execution_id}:{key}".encode()).hexdigest()
+                children.append(
+                    CoordinationTaskRow(
+                        id=child_id,
+                        request_id=f"decision:{durable_key}",
+                        owner_id=owner,
+                        project_id=root.project_id,
+                        root_id=task_id,
+                        parent_id=task_id,
+                        depends_on=[task_ids[dep] for dep in item["depends_on"]],
+                        objective=item["objective"],
+                        run_settings=root.run_settings,
+                        status=TaskStatus.QUEUED,
+                        revision=0,
+                        execution_epoch=0,
+                        latest_input_seq=0,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                assignments.append(Assignment(task_id=child_id, epoch=0, assistant_id=item["assistant_id"], thread_id=THREAD_PREFIX + uuid4().hex))
+                task_ids[key] = child_id
+            session.add_all(children)
+            await session.flush()
+            session.add_all(assignments)
+            execution.decision = {"tasks": tasks, "task_ids": task_ids}
+            _touch(root)
+            return task_ids
 
     async def list_artifacts(self, owner, task_id, *, limit, offset):
         async with self._sessions() as session:
@@ -200,6 +285,14 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
                 if assigned is not None and assigned.assistant_id != assistant_id:
                     raise TaskConflict("Task already has a different worker")
             if task.status == TaskStatus.QUEUED:
+                if worker is not None and task.parent_id is not None and assistant_id is None:
+                    prereqs = await session.scalars(select(CoordinationTaskRow.status).where(CoordinationTaskRow.id.in_(task.depends_on)))
+                    states = list(prereqs)
+                    if any(state in (TaskStatus.FAILED, TaskStatus.CANCELLED) for state in states):
+                        await self._finish_locked(session, task, TaskStatus.FAILED, f"/api/coordination/tasks/{task.id}")
+                        return None
+                    if any(state != TaskStatus.SUCCEEDED for state in states):
+                        return None
                 await self._start_locked(session, task)
             if task.status != TaskStatus.RUNNING:
                 return None
@@ -225,17 +318,28 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
                     messages = list(execution.frozen_input.get("messages", []))
                 else:
                     messages = []
+                if execution is None and task.depends_on:
+                    query = select(Execution.task_id, Execution.result_text).where(Execution.task_id.in_(task.depends_on), Execution.status == "success")
+                    results = dict((await session.execute(query)).all())
+                    for dependency in task.depends_on:
+                        if result := results.get(dependency):
+                            messages.append({"role": "user", "content": f"Result from prerequisite task {dependency}:\n{result[:4000]}"})
                 inputs = await session.scalars(select(CoordinationInputRow).filter_by(task_id=task_id).where(CoordinationInputRow.sequence > previous).order_by(CoordinationInputRow.sequence).limit(8))
                 for item in inputs:
                     messages.append({"role": "user", "content": item.content})
                     previous = item.sequence
+                frozen_input = {"messages": messages}
+                if task.coordinator:
+                    frozen_input["expected_revision"] = task.revision
+                elif task.parent_id is not None and await _grant_task_id(session, task) != task_id:
+                    frozen_input["collect_result"] = True
                 execution = Execution(
                     id=uuid4().hex,
                     task_id=task_id,
                     turn=execution.turn + 1 if execution else 1,
                     epoch=task.execution_epoch,
                     covered_seq=previous,
-                    frozen_input={"messages": messages},
+                    frozen_input=frozen_input,
                     status="admitting",
                 )
                 session.add(execution)
@@ -247,7 +351,7 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
             payload = {"command": {"resume": value}}
             execution = await session.scalar(select(Execution).filter_by(task_id=task_id, resume_key=key))
             if execution is not None:
-                if execution.frozen_input != payload:
+                if execution.frozen_input.get("command") != payload["command"]:
                     raise TaskConflict("Request ID was already used with a different response")
             else:
                 if task.status != TaskStatus.RUNNING:
@@ -261,7 +365,7 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
                     turn=previous.turn + 1,
                     epoch=task.execution_epoch,
                     covered_seq=previous.covered_seq,
-                    frozen_input=payload,
+                    frozen_input={**payload, **({"collect_result": True} if previous.frozen_input.get("collect_result") else {})},
                     status="admitting",
                     resume_key=key,
                 )
@@ -275,7 +379,18 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
             task = await self._lock_tree(session, owner, task_id)
             previous = await session.scalar(self._latest(task_id))
             if task.status != TaskStatus.RUNNING or previous is None or previous.id != execution_id or previous.epoch != task.execution_epoch or previous.status != "running" or previous.run_id != run_id:
-                return
+                return False
+            if task.coordinator and previous.decision is not None:
+                return False
+            if task.coordinator and task.revision != previous.frozen_input["expected_revision"]:
+                return False
+            if task.coordinator:
+                # Replays share the first admission's message IDs, including
+                # for executions that started before a replay key was stored.
+                planner_input_key = previous.frozen_input.get("planner_input_key", RUN_KEY_PREFIX + previous.id)
+                frozen_input = {**previous.frozen_input, "planner_input_key": planner_input_key}
+            else:
+                frozen_input = {"checkpoint_id": checkpoint_id, **({"collect_result": True} if previous.frozen_input.get("collect_result") else {})}
             previous.status = "interrupted"
             session.add(
                 Execution(
@@ -284,32 +399,42 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
                     turn=previous.turn + 1,
                     epoch=previous.epoch,
                     covered_seq=previous.covered_seq,
-                    frozen_input={"checkpoint_id": checkpoint_id},
+                    frozen_input=frozen_input,
                     status="admitting",
                 )
             )
+            return True
 
-    async def settle(self, owner, task_id, execution_id, run_id, status, artifacts):
+    async def settle(self, owner, task_id, execution_id, run_id, status, artifacts, *, result_text=None):
         async with self._write() as session:
             task = await self._lock_tree(session, owner, task_id)
             execution = await session.get(Execution, execution_id)
             if execution is None or execution.task_id != task_id or execution.run_id != run_id or execution.status not in ("running", "admitting"):
-                return
+                return True
             if task.status != TaskStatus.RUNNING or task.execution_epoch != execution.epoch:
-                return
+                return True
+            child_statuses = None
+            if task.coordinator:
+                child_ids = list(execution.decision["task_ids"].values()) if execution.decision is not None else []
+                child_statuses = await self._child_statuses(session, task, child_ids=child_ids)
+                if any(child in (TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.CANCELLING) for child in child_statuses):
+                    return False
+                status = "success" if execution.decision is not None and all(child == TaskStatus.SUCCEEDED for child in child_statuses) else "error"
             for path, digest, content in artifacts:
                 session.add(Artifact(id=uuid4().hex, execution_id=execution.id, path=path, sha256=digest, size=len(content), content=content))
             if status == "waiting_for_input":
                 execution.status = status
-                return
+                return True
             if execution.covered_seq < task.latest_input_seq:
                 execution.status = "superseded"
-                return
+                return True
             worker = await session.get(Assignment, (task_id, task.execution_epoch))
             result_ref = f"/api/threads/{worker.thread_id}/runs/{run_id}/messages" if run_id else None
             outcome = TaskStatus.SUCCEEDED if status == "success" else TaskStatus.FAILED
-            await self._finish_locked(session, task, outcome, result_ref or f"/api/coordination/tasks/{task_id}")
+            await self._finish_locked(session, task, outcome, result_ref or f"/api/coordination/tasks/{task_id}", child_statuses=child_statuses)
             execution.status = status
+            execution.result_text = result_text
+            return True
 
     @staticmethod
     def _admitted_run(task_id, sequence):

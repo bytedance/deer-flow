@@ -214,6 +214,7 @@ def _format_hint(meta: ToolResultMeta) -> str:
     action_map = {
         "rewrite_query": "Try rephrasing your search query with different keywords or approach.",
         "try_alternative": "Consider using a different tool or strategy.",
+        "retry_later": "Wait before retrying. If the failure persists, tell the user to try again later.",
         "summarize": "Consider summarizing your current findings and moving forward.",
         "stop": "Do not retry this operation — it is not recoverable.",
         # Near-duplicate success results: recommended_next_action is "continue" by default,
@@ -225,6 +226,7 @@ def _format_hint(meta: ToolResultMeta) -> str:
         "not_found": "[PROGRESS HINT] The resource was not found repeatedly.",
         "rate_limited": "[PROGRESS HINT] The tool is being rate-limited.",
         "transient": "[PROGRESS HINT] The tool encountered repeated transient failures.",
+        "capacity": "[PROGRESS HINT] Sandbox capacity is temporarily unavailable.",
         "partial_success": "[PROGRESS HINT] The tool has returned incomplete results multiple times.",
         # Jaccard near-duplicate success: the tool is returning the same content repeatedly.
         "success": "[PROGRESS HINT] The tool is returning duplicate results.",

@@ -650,6 +650,60 @@ async def test_worker_seals_after_completion_hook_before_end(evidence, outcome):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("subtasks", "write_outcomes", "producer_state"),
+    [
+        pytest.param(1, ["lost_ack"], "open", id="committed-but-unconfirmed"),
+        pytest.param(1, ["rejected"] * 2, "open", id="retry-pending"),
+        pytest.param(3, ["rejected"] * 3, "open", id="retries-exhausted"),
+        pytest.param(1, ["rejected", "success"], "closed", id="retry-confirmed"),
+    ],
+)
+async def test_worker_closes_producer_only_after_subagent_writes_are_confirmed(evidence, monkeypatch, subtasks, write_outcomes, producer_state):
+    from deerflow.runtime.events.store.base import RunEventStoreNotCommittedError
+    from deerflow.runtime.runs.manager import RunManager
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+    from deerflow.runtime.stream_bridge import MemoryStreamBridge
+
+    _, events, runs, _ = evidence
+    manager = RunManager(store=runs, event_store=events)
+    record = await manager.create("worker-thread", user_id="alice")
+    bridge = MemoryStreamBridge()
+    put_batch = events.put_batch
+    attempts = 0
+
+    async def write(batch):
+        nonlocal attempts
+        if batch[0]["event_type"] != "subagent.end":
+            return await put_batch(batch)
+        attempts += 1
+        outcome = write_outcomes[attempts - 1]
+        if outcome == "rejected":
+            raise RunEventStoreNotCommittedError("rejected before commit")
+        rows = await put_batch(batch)
+        if outcome == "lost_ack":
+            raise OSError("lost acknowledgement after commit")
+        return rows
+
+    class Agent:
+        async def astream(self, *args, **kwargs):
+            for i in range(subtasks):
+                yield "custom", {"type": "task_completed", "task_id": f"child-{i}", "result": "done"}
+            yield "values", {"messages": []}
+
+    monkeypatch.setattr(events, "put_batch", write)
+    await run_agent(bridge, manager, record, ctx=RunContext(checkpointer=None, event_store=events), agent_factory=lambda **kwargs: Agent(), graph_input={}, config={}, stream_modes=["custom", "values"])
+
+    assert attempts == len(write_outcomes)
+    row = await runs.get(record.run_id, user_id="alice")
+    assert row["producer_state"] == producer_state
+    assert row["status"] == "success"
+    assert row["evidence_seal_state"] == "sealed"
+    streamed = [event async for event in bridge.subscribe(record.run_id)]
+    assert streamed[-1].event == "__end__"
+
+
+@pytest.mark.asyncio
 async def test_seal_failure_does_not_change_business_success(evidence, monkeypatch):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
