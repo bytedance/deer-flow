@@ -63,10 +63,7 @@ distinguishes it from a release.
    ```
    [2.1.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.1.0
    ```
-   Start a fresh `## [Unreleased]` section above it for the next cycle. Update
-   [the Chinese changelog](CHANGELOG_zh.md) for the same release. Check that
-   both changelogs cite the same pull requests, cover every merged PR in the
-   release milestone, and define a link for each cited PR.
+   Start a fresh `## [Unreleased]` section above it for the next cycle.
 3. **Commit** the version + changelog changes:
    ```bash
    git add -A
