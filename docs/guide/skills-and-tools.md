@@ -254,6 +254,14 @@ its requested issue limit; the `prs` command remains available for pull requests
 
 Users can explicitly activate an enabled skill for a single turn by starting the request with `/skill-name`, for example `/data-analysis analyze uploads/foo.csv`. DeerFlow loads that skill's `SKILL.md` as hidden current-turn context while leaving the base prompt limited to skill metadata. Slash activation respects disabled skills, custom-agent skill whitelists, and existing channel commands such as `/new` and `/help`.
 
+Administrators can install a `.skill` archive directly from its file card in a
+conversation after the upload completes. Select **Install** beside the attachment;
+opening the file card still previews it. Installation uses the original uploaded
+archive, preserving its `SKILL.md`, scripts, assets, and nested files, and runs the
+same Gateway security review and duplicate-name checks as other skill installs.
+The result appears as a notification; a rejected installation can be retried
+explicitly after the problem is corrected.
+
 Data-analysis Markdown exports escape pipes and backslashes in column names and values, and render cell line breaks as `<br>` so multiline data stays within its table cell.
 
 Data-analysis JSON exports require unique result column names. For joins that

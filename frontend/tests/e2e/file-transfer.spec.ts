@@ -223,3 +223,91 @@ test("uploads retain successful files, cancel one file and retry only the failed
   );
   expect(attempts.filter((name) => name === "success.txt")).toHaveLength(1);
 });
+
+test("installs an uploaded Skill from its chat card with the original path", async ({
+  page,
+}) => {
+  const filename = "分析.skill";
+  const virtualPath = `/mnt/user-data/uploads/${filename}`;
+  mockLangGraphAPI(page, {
+    threads: [
+      {
+        thread_id: threadId,
+        title: "Install uploaded Skill",
+        messages: [
+          {
+            type: "human",
+            id: "upload",
+            content: "Install this Skill package",
+            additional_kwargs: {
+              files: [
+                { filename, size: 512, path: virtualPath, status: "uploaded" },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.addInitScript(() => localStorage.setItem("theme", "light"));
+  let attempts = 0;
+  let release!: () => void;
+  await page.route("**/api/skills/install", async (route) => {
+    attempts++;
+    expect(route.request().postDataJSON()).toEqual({
+      thread_id: threadId,
+      path: virtualPath,
+    });
+    if (attempts === 1) {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await route.fulfill({
+        status: 400,
+        json: { detail: "Archive rejected by security review" },
+      });
+    } else {
+      await route.fulfill({
+        json: {
+          success: true,
+          skill_name: "analysis",
+          message: "Installed analysis",
+        },
+      });
+    }
+  });
+  await page.goto(`/workspace/chats/${threadId}`);
+  const button = page.getByRole("button", {
+    name: `Install ${filename}`,
+    exact: true,
+  });
+  await expect(button).toBeVisible();
+  expect(attempts).toBe(0);
+  await mkdir(qa, { recursive: true });
+  await page.screenshot({
+    path: path.join(qa, "uploaded-skill-light.png"),
+    animations: "disabled",
+  });
+  await button.click();
+  try {
+    await expect(button).toBeDisabled();
+    await expect.poll(() => attempts).toBe(1);
+    await page.evaluate(() => document.documentElement.classList.add("dark"));
+    await page.screenshot({
+      path: path.join(qa, "uploaded-skill-pending-dark.png"),
+      animations: "disabled",
+    });
+  } finally {
+    release?.();
+  }
+  await expect(
+    page.getByText("Archive rejected by security review", { exact: true }),
+  ).toBeVisible();
+  await expect(button).toBeEnabled();
+  await button.click();
+  await expect(
+    page.getByText("Installed analysis", { exact: true }),
+  ).toBeVisible();
+  expect(attempts).toBe(2);
+});

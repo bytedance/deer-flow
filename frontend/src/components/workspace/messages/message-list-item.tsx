@@ -2,6 +2,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 import {
   CheckIcon,
   Loader2Icon,
+  PackageIcon,
   PencilIcon,
   ThumbsDownIcon,
   ThumbsUpIcon,
@@ -12,9 +13,11 @@ import {
   useCallback,
   useId,
   useMemo,
+  useRef,
   useState,
   type ImgHTMLAttributes,
 } from "react";
+import { toast } from "sonner";
 
 import { Loader } from "@/components/ai-elements/loader";
 import {
@@ -35,6 +38,7 @@ import {
   resolveArtifactURL,
   resolveMessageImageURL,
 } from "@/core/artifacts/utils";
+import { useAuth } from "@/core/auth/AuthProvider";
 import {
   type RetrievalSource,
   extractCitationSources,
@@ -54,7 +58,9 @@ import {
   parseSlashSkillReference,
   resolveSlashSkillDisplay,
 } from "@/core/skills";
+import { installSkill, SkillRequestError } from "@/core/skills/api";
 import { useSkills } from "@/core/skills/hooks";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { pathOfThread } from "@/core/threads/utils";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
@@ -818,26 +824,92 @@ function RichFileCard({
   }
 
   return (
-    <button
-      type="button"
-      aria-label={`${file.filename} ${getFileTypeLabel(file.filename)} · ${formatBytes(file.size)}`}
-      onClick={() => {
-        select(file.path!);
-        setOpen(true);
-      }}
-      className="bg-background border-border hover:bg-accent focus-visible:ring-ring flex max-w-64 min-w-40 items-center gap-3 rounded-xl border p-3 text-left transition-colors outline-none focus-visible:ring-2"
-    >
-      <FileTypeIcon filename={file.filename} />
-      <span className="min-w-0">
-        <FileName
-          filename={file.filename}
-          className="text-foreground text-sm font-medium"
-        />
-        <span className="text-muted-foreground mt-1 block text-xs">
-          {getFileTypeLabel(file.filename)} · {formatBytes(file.size)}
+    <div className="flex max-w-64 min-w-40 flex-col gap-1">
+      <button
+        type="button"
+        aria-label={`${file.filename} ${getFileTypeLabel(file.filename)} · ${formatBytes(file.size)}`}
+        onClick={() => {
+          select(file.path!);
+          setOpen(true);
+        }}
+        className="bg-background border-border hover:bg-accent focus-visible:ring-ring flex max-w-64 min-w-40 items-center gap-3 rounded-xl border p-3 text-left transition-colors outline-none focus-visible:ring-2"
+      >
+        <FileTypeIcon filename={file.filename} />
+        <span className="min-w-0">
+          <FileName
+            filename={file.filename}
+            className="text-foreground text-sm font-medium"
+          />
+          <span className="text-muted-foreground mt-1 block text-xs">
+            {getFileTypeLabel(file.filename)} · {formatBytes(file.size)}
+          </span>
         </span>
-      </span>
-    </button>
+      </button>
+      {file.filename.toLowerCase().endsWith(".skill") && (
+        <UploadedSkillInstallButton file={file} threadId={threadId} />
+      )}
+    </div>
+  );
+}
+
+function UploadedSkillInstallButton({
+  file,
+  threadId,
+}: {
+  file: FileInMessage;
+  threadId: string;
+}) {
+  const { t } = useI18n();
+  const { user } = useAuth();
+  const installing = useRef(false);
+  const [isInstalling, setIsInstalling] = useState(false);
+
+  if (user?.system_role !== "admin" || isStaticWebsiteOnly()) return null;
+
+  const handleInstall = async () => {
+    if (installing.current || !file.path) return;
+    installing.current = true;
+    setIsInstalling(true);
+    try {
+      const result = await installSkill({
+        thread_id: threadId,
+        path: file.path,
+      });
+      if (result.success) {
+        toast.success(result.message);
+      } else {
+        toast.error(result.message || t.settings.skills.installFailed);
+      }
+    } catch (error) {
+      console.error("Failed to install uploaded skill:", error);
+      toast.error(
+        error instanceof SkillRequestError && error.isAdminRequired
+          ? t.settings.skills.installAdminRequired
+          : t.settings.skills.installFailed,
+      );
+    } finally {
+      installing.current = false;
+      setIsInstalling(false);
+    }
+  };
+
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      className="self-end"
+      aria-label={`${t.common.install} ${file.filename}`}
+      disabled={isInstalling}
+      onClick={handleInstall}
+    >
+      {isInstalling ? (
+        <Loader2Icon className="size-4 animate-spin" />
+      ) : (
+        <PackageIcon className="size-4" />
+      )}
+      {isInstalling ? t.settings.skills.installingArchive : t.common.install}
+    </Button>
   );
 }
 
