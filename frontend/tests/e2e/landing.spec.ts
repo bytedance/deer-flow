@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 import { mockLangGraphAPI } from "./utils/mock-api";
 
 test.describe("Landing page", () => {
-  test("renders the header, hero, and deerflow:// architecture diagram", async ({
+  test("renders the header, hero, and interactive 3-tier architecture blueprint", async ({
     page,
   }) => {
     await page.goto("/");
@@ -19,10 +19,24 @@ test.describe("Landing page", () => {
       page.locator("main").getByRole("link", { name: /get started/i }),
     ).toBeVisible();
 
-    // Interactive architecture diagram renders deerflow://
+    // Interactive 3-tier Agent Harness Blueprint renders core runtime & modules
     const diagram = page.locator("#architecture");
     await expect(diagram).toBeVisible();
-    await expect(diagram.getByText("deerflow://").first()).toBeVisible();
+    await expect(diagram.getByText("Lead Agent Loop")).toBeVisible();
+    await expect(diagram.getByText("Subagent Orchestrator")).toBeVisible();
+    await expect(diagram.getByText("Models")).toBeVisible();
+    await expect(diagram.getByText("Sandboxes")).toBeVisible();
+    await expect(diagram.getByText("Skills")).toBeVisible();
+    await expect(diagram.getByText("MCP Tools")).toBeVisible();
+
+    const trace = diagram.getByTestId("architecture-trace");
+    await expect(trace).toContainText("skill:deep-research");
+
+    // Switching workflow mode updates the live execution trace
+    const sandboxTab = diagram.getByRole("tab", { name: "Code & Sandbox" });
+    await sandboxTab.click();
+    await expect(sandboxTab).toHaveAttribute("aria-selected", "true");
+    await expect(trace).toContainText("sandbox:exec tests");
   });
 
   test("defaults to light theme and toggles dark mode", async ({ page }) => {
@@ -71,9 +85,27 @@ test.describe("Landing page", () => {
       name: /dismiss announcement/i,
     });
     await expect(dismissButton).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          getComputedStyle(document.documentElement)
+            .getPropertyValue("--df-header-height")
+            .trim(),
+        ),
+      )
+      .toBe("100px");
 
     await dismissButton.click();
     await expect(dismissButton).toBeHidden();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          getComputedStyle(document.documentElement)
+            .getPropertyValue("--df-header-height")
+            .trim(),
+        ),
+      )
+      .toBe("64px");
   });
 
   for (const width of [320, 375, 390]) {

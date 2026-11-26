@@ -590,9 +590,8 @@ html.dark .shiki span {
     serif;
 }
 
-/* 24px architectural dot-matrix canvas (.landing-grid-bg kept as temporary alias) */
-.landing-dot-bg,
-.landing-grid-bg {
+/* 24px architectural dot-matrix canvas */
+.landing-dot-bg {
   background-image: radial-gradient(var(--df-dot) 1px, transparent 1px);
   background-size: 24px 24px;
 }
@@ -608,90 +607,8 @@ html.dark .shiki span {
   animation: df-flow-dash 1.8s linear infinite;
 }
 
-.hero-marquee-mask {
-  -webkit-mask-image: linear-gradient(
-    transparent,
-    #000 14%,
-    #000 86%,
-    transparent
-  );
-  mask-image: linear-gradient(transparent, #000 14%, #000 86%, transparent);
-}
-
-.hero-marquee-mask-x {
-  -webkit-mask-image: linear-gradient(
-    90deg,
-    transparent,
-    #000 10%,
-    #000 90%,
-    transparent
-  );
-  mask-image: linear-gradient(
-    90deg,
-    transparent,
-    #000 10%,
-    #000 90%,
-    transparent
-  );
-}
-
-@keyframes hero-marquee-y {
-  0% {
-    transform: translateY(0);
-  }
-  100% {
-    transform: translateY(-50%);
-  }
-}
-
-@keyframes hero-marquee-x {
-  0% {
-    transform: translateX(0);
-  }
-  100% {
-    transform: translateX(-50%);
-  }
-}
-
-@keyframes hero-beam-pulse {
-  0% {
-    transform: translateX(-100%);
-    opacity: 0;
-  }
-  20% {
-    opacity: 0.9;
-  }
-  80% {
-    opacity: 0.9;
-  }
-  100% {
-    transform: translateX(480%);
-    opacity: 0;
-  }
-}
-
-.hero-marquee-y {
-  animation: hero-marquee-y 26s linear infinite;
-}
-
-.hero-marquee-x {
-  animation: hero-marquee-x 26s linear infinite;
-}
-
-.hero-marquee-mask:hover .hero-marquee-y,
-.hero-marquee-mask-x:hover .hero-marquee-x {
-  animation-play-state: paused;
-}
-
-.hero-beam-pulse {
-  animation: hero-beam-pulse 3.6s ease-in-out infinite;
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .df-flow-dash,
-  .hero-marquee-y,
-  .hero-marquee-x,
-  .hero-beam-pulse {
+  .df-flow-dash {
     animation: none !important;
     transform: none !important;
   }
