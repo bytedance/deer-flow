@@ -401,6 +401,10 @@ from `deerflow.agents.thread_state.BatchReceiptState` in your custom state
 schema. Keep that base when rebuilding the graph so resumed threads can reuse
 verified receipts already stored in their checkpoints.
 
+When you pass a custom submitter to `bind_batch_tools`, the request title is
+trimmed of surrounding whitespace and limited to 256 characters. A blank title
+becomes `Subagent batch`.
+
 Custom SDK repositories can keep their original `create_batch` signature. The
 built-in SQL repository verifies submission digests and resolves replays before
 applying new batch limits. Adapters that forward the execution snapshot to SQL

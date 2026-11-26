@@ -49,10 +49,10 @@ _BROWSER_EVIDENCE_FIELDS = (
 )
 
 
-def _submission_digest(request: BatchSubmitRequest, title: str) -> str:
+def _submission_digest(request: BatchSubmitRequest) -> str:
     """Hash the requested work independently of the run and execution snapshot."""
     payload = {
-        "title": title,
+        "title": request.title,
         "subagent_type": request.subagent_type,
         "items": [
             {
@@ -335,7 +335,6 @@ class SubagentBatchService:
                 raise ValueError("Automatic follow-up requires an authorized Gateway runtime")
             continuation = await self._prepare_continuation(request)
 
-        title = request.title.strip()[:256] or "Subagent batch"
         create_batch = self._repository.create_batch
         # SDK adapters shipped before digests may have the original signature
         # or forward **kwargs to it. Pass the new keyword only on explicit opt-in.
@@ -344,9 +343,9 @@ class SubagentBatchService:
         except (TypeError, ValueError):
             digest_parameter = None
         find_submission = getattr(self._repository, "find_submission", None)
-        digest = await run_assembly(_submission_digest, request, title)
+        digest = await run_assembly(_submission_digest, request)
         if callable(find_submission):
-            existing = await find_submission(request, title=title, submission_digest=digest)
+            existing = await find_submission(request, title=request.title, submission_digest=digest)
             if existing is not None:
                 return existing
 
@@ -380,7 +379,7 @@ class SubagentBatchService:
             run_id=request.run_id,
             tool_call_id=request.tool_call_id,
             submission_key=request.submission_key,
-            title=title,
+            title=request.title,
             subagent_type=request.subagent_type,
             items=request.items,
             max_live_items=max_live,

@@ -78,6 +78,8 @@ class BatchDispatchReceipts:
 
 @dataclass(frozen=True)
 class BatchSubmitRequest:
+    """A batch submission with the same title contract for every submitter."""
+
     user_id: str
     thread_id: str
     run_id: str | None
@@ -93,6 +95,9 @@ class BatchSubmitRequest:
     continuation_authority: Any = None
     continuation_context: dict[str, Any] | None = None
     dispatch_receipts: BatchDispatchReceipts | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "title", self.title.strip()[:256] or "Subagent batch")
 
 
 class SubagentBatchSubmitter(Protocol):

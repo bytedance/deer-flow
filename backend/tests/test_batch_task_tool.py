@@ -726,6 +726,36 @@ def _explicit_submitter() -> AsyncMock:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw_title", "expected_title"),
+    [
+        pytest.param(" \t\n ", "Subagent batch", id="blank"),
+        pytest.param("  " + "a" * 255 + " tail  ", "a" * 255 + " ", id="overlong"),
+    ],
+)
+async def test_bound_batch_task_normalizes_title_for_explicit_submitter(monkeypatch, raw_title, expected_title) -> None:
+    _mock_subagent_catalog(monkeypatch)
+    submitter = _explicit_submitter()
+    dispatch = _dispatch(1)
+    dispatch.tool_calls[0]["args"]["title"] = raw_title
+    graph = create_agent(
+        model=_ScriptedModel(messages=iter([dispatch, AIMessage(content="Done")])),
+        tools=tool_module.bind_batch_tools(submitter),
+    )
+
+    state = await graph.ainvoke(
+        {"messages": [HumanMessage("Submit job")]},
+        {"configurable": {"thread_id": "thread-1"}},
+        context={"user_id": "user-1"},
+    )
+
+    receipt = next(message for message in state["messages"] if isinstance(message, ToolMessage))
+    assert receipt.status == "success"
+    submitter.submit.assert_awaited_once()
+    assert submitter.submit.call_args.args[0].title == expected_title
+
+
+@pytest.mark.asyncio
 async def test_followup_captures_configurable_settings_with_context_precedence(monkeypatch):
     _mock_subagent_catalog(monkeypatch)
     submitter = _explicit_submitter()
