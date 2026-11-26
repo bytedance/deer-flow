@@ -47,6 +47,7 @@ test.describe("Landing page", () => {
 
     await page.getByRole("button", { name: /switch language/i }).click();
     await page.getByRole("menuitem", { name: /简体中文/ }).click();
+    await expect(page.getByRole("menu")).toBeHidden();
 
     await expect(page.locator("h1")).toContainText(
       "DeerFlow：开源超级智能体引擎",
@@ -55,6 +56,7 @@ test.describe("Landing page", () => {
 
     await page.getByRole("button", { name: "切换语言" }).click();
     await page.getByRole("menuitem", { name: /English/ }).click();
+    await expect(page.getByRole("menu")).toBeHidden();
 
     await expect(page.locator("h1")).toContainText(
       "DeerFlow: Open-Source SuperAgent Harness.",

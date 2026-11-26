@@ -290,14 +290,13 @@ export function Header({
                       <DropdownMenuItem
                         key={item.href}
                         asChild
-                        className="block rounded-lg p-0 focus:bg-[var(--df-muted-2)] focus:text-[var(--df-ink)]"
+                        className="flex flex-col items-start gap-0.5 rounded-lg px-2.5 py-2 text-left transition-colors focus:bg-[var(--df-muted-2)] focus:text-[var(--df-ink)]"
                       >
                         {item.external ? (
                           <a
                             href={item.href}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="flex flex-col gap-0.5 rounded-lg px-2.5 py-2 transition-colors"
                           >
                             <span className="inline-flex items-center gap-1 text-sm font-semibold text-[var(--df-ink)]">
                               <span>{item.title}</span>
@@ -311,10 +310,7 @@ export function Header({
                             </span>
                           </a>
                         ) : (
-                          <Link
-                            href={item.href}
-                            className="flex flex-col gap-0.5 rounded-lg px-2.5 py-2 transition-colors"
-                          >
+                          <Link href={item.href}>
                             <span className="text-sm font-semibold text-[var(--df-ink)]">
                               {item.title}
                             </span>

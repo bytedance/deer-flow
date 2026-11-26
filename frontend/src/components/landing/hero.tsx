@@ -145,8 +145,22 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
               {copy.eyebrow}
             </p>
 
-            <h1 className="mt-4 font-serif text-[2.25rem] leading-[1.02] font-semibold tracking-normal text-balance text-[var(--df-ink)] sm:text-[3.1rem] lg:text-[3.4rem] xl:text-[3.85rem]">
-              {copy.headline}
+            <h1
+              className={cn(
+                "mt-4 font-serif text-[2.25rem] font-semibold tracking-normal text-[var(--df-ink)] sm:text-[3.1rem] lg:text-[3.4rem] xl:text-[3.85rem]",
+                locale === "zh-CN"
+                  ? "leading-[1.14]"
+                  : "leading-[1.02] text-balance",
+              )}
+            >
+              {locale === "zh-CN" ? (
+                <>
+                  <span>DeerFlow：</span>
+                  <span className="inline-block">开源超级智能体引擎</span>
+                </>
+              ) : (
+                copy.headline
+              )}
             </h1>
 
             <p className="mt-5 max-w-xl text-sm leading-6 text-[var(--df-muted-fg)] sm:text-base sm:leading-7">

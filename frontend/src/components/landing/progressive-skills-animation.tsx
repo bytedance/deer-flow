@@ -403,7 +403,7 @@ export default function ProgressiveSkillsAnimation({
                   className={cn(
                     "focus-visible:ring-ring/50 min-h-[32px] rounded border px-2.5 py-1 font-mono text-[11px] font-medium transition-colors duration-150 focus-visible:ring-2 focus-visible:outline-none",
                     isSelected
-                      ? "border-[var(--df-accent)] bg-[var(--df-accent)] text-[var(--df-cta-fg)]"
+                      ? "border-[var(--df-cta)] bg-[var(--df-cta)] text-[var(--df-cta-fg)]"
                       : "border-[var(--df-border)] bg-[var(--df-panel)] text-[var(--df-muted-fg)] hover:border-[var(--df-accent)]/60 hover:text-[var(--df-ink)]",
                   )}
                 >
