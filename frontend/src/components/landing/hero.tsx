@@ -31,7 +31,6 @@ type GitHubStats = {
 
 type HeroCopy = {
   eyebrow: string;
-  headline: string;
   description: string;
   partnership: string;
   starsLabel: string;
@@ -44,10 +43,9 @@ type HeroCopy = {
 
 const HERO_COPY: Record<HeroLocale, HeroCopy> = {
   "en-US": {
-    eyebrow: "DEERFLOW · OPEN SOURCE",
-    headline: "DeerFlow: Open-Source SuperAgent Harness.",
+    eyebrow: "OPEN-SOURCE AGENT HARNESS · V2",
     description:
-      "Sandboxes, persistent memory, progressive skills, MCP tools, and parallel subagents unified in one harness—built for deep research, coding, and creation tasks that span minutes to hours.",
+      "Orchestrate multi-LLM routing, thread-isolated sandboxes, persistent memory, parallel subagents, progressive skills, and MCP tools in one extensible LangGraph runtime.",
     partnership: "In partnership with",
     starsLabel: "GitHub Stars",
     forksLabel: "Forks",
@@ -57,10 +55,9 @@ const HERO_COPY: Record<HeroLocale, HeroCopy> = {
     openSource: "Open Source",
   },
   "zh-CN": {
-    eyebrow: "DEERFLOW · 开源超级智能体",
-    headline: "DeerFlow：开源超级智能体引擎",
+    eyebrow: "开源智能体引擎 · V2",
     description:
-      "将隔离沙箱、长期记忆、渐进式技能、MCP 工具与并行子智能体统一在一个引擎中，稳定执行耗时数分钟至数小时的深度研究、编程与创作任务。",
+      "在一个可扩展的 LangGraph 运行时中统一编排多模型路由、线程隔离沙箱、长期记忆、并行子智能体、渐进式技能与 MCP 工具。",
     partnership: "技术合作",
     starsLabel: "GitHub Stars",
     forksLabel: "Forks",
@@ -111,7 +108,7 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
         }
       })
       .catch(() => {
-        // Hide the optional metrics row when the endpoint is unavailable.
+        // Hide the optional metrics strip when the endpoint is unavailable.
       });
     return () => controller.abort();
   }, []);
@@ -122,44 +119,49 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
   return (
     <section
       className={cn(
-        "relative flex min-h-[100svh] w-full flex-col justify-center overflow-x-clip bg-[var(--df-bg)] pt-[var(--df-header-height)] text-[var(--df-ink)]",
+        "relative flex w-full flex-col justify-center overflow-x-clip bg-[var(--df-bg)] pt-[calc(var(--df-header-height,100px)+2.5rem)] pb-16 text-[var(--df-ink)] sm:pb-24",
         className,
       )}
     >
-      {/* Subtle 72px editorial grid background */}
+      {/* Subtle 24px architectural dot-matrix canvas with soft radial fade */}
       <div
         aria-hidden="true"
-        className="landing-grid-bg pointer-events-none absolute inset-0 z-0"
-      />
-      {/* Soft vignette beneath the sticky header */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-x-0 top-0 z-0 h-40 bg-gradient-to-b from-[var(--df-bg)] to-transparent"
+        className="landing-dot-bg pointer-events-none absolute inset-0 z-0 [background-image:radial-gradient(var(--df-dot,rgba(22,22,20,0.11))_1px,transparent_1px)] [mask-image:radial-gradient(ellipse_78%_72%_at_50%_42%,#000_45%,transparent_100%)] [background-size:24px_24px]"
       />
 
-      <div className="relative z-10 mx-auto w-full max-w-[1520px] px-4 py-10 sm:px-10 sm:py-14 lg:px-14 xl:px-20 2xl:px-24">
-        <div className="grid grid-cols-1 items-center gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(460px,540px)] lg:gap-10 xl:grid-cols-[minmax(0,1fr)_560px] xl:gap-16">
-          {/* Left column: editorial copy, live metrics, entry-point CTAs */}
-          <div className="flex min-w-0 flex-col items-center text-center lg:items-start lg:text-left">
-            <p className="font-mono text-xs font-medium tracking-[0.26em] text-[var(--df-accent)] uppercase">
-              {copy.eyebrow}
-            </p>
+      <div className="relative z-10 mx-auto w-full max-w-[1440px] px-4 sm:px-8 lg:px-12 xl:px-16">
+        <div className="grid grid-cols-1 items-center gap-10 lg:grid-cols-12 xl:gap-12">
+          {/* Left column: editorial positioning, entry CTAs, live repo stats */}
+          <div className="flex min-w-0 flex-col items-start text-left lg:col-span-5">
+            <div className="inline-flex max-w-full items-center gap-2 rounded-full border border-[var(--df-border)] bg-[var(--df-panel)] px-3 py-1 font-mono text-[11px] font-medium tracking-[0.14em] text-[var(--df-text-soft)] uppercase shadow-[0_1px_2px_var(--df-shadow)]">
+              <span
+                aria-hidden="true"
+                className="size-1.5 shrink-0 rounded-full bg-[var(--df-accent)]"
+              />
+              <span className="truncate">{copy.eyebrow}</span>
+            </div>
 
             <h1
               className={cn(
-                "mt-4 font-serif text-[2.25rem] font-semibold tracking-normal text-[var(--df-ink)] sm:text-[3.1rem] lg:text-[3.4rem] xl:text-[3.85rem]",
+                "font-landing-serif mt-5 text-[2.4rem] font-medium tracking-[-0.02em] text-[var(--df-ink)] sm:text-[3.1rem] xl:text-[3.65rem]",
                 locale === "zh-CN"
-                  ? "leading-[1.14]"
-                  : "leading-[1.02] text-balance",
+                  ? "leading-[1.16]"
+                  : "leading-[1.06] text-balance",
               )}
             >
               {locale === "zh-CN" ? (
                 <>
                   <span>DeerFlow：</span>
-                  <span className="inline-block">开源超级智能体引擎</span>
+                  <span className="inline-block text-[var(--df-accent)]">
+                    开源超级智能体引擎
+                  </span>
                 </>
               ) : (
-                copy.headline
+                <>
+                  DeerFlow: Open-Source{" "}
+                  <em className="text-[var(--df-accent)] italic">SuperAgent</em>{" "}
+                  Harness.
+                </>
               )}
             </h1>
 
@@ -167,87 +169,11 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
               {copy.description}
             </p>
 
-            {isStaticWebsite && (
-              <a
-                href="https://byteplus.com"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="focus-visible:ring-ring/50 mt-5 inline-flex min-h-9 items-center gap-2 rounded-full border border-[var(--df-border-strong)] bg-[var(--df-panel)]/85 px-3.5 py-1.5 text-xs font-medium text-[var(--df-text-soft)] transition-colors duration-150 hover:border-[var(--df-accent)] hover:text-[var(--df-ink)] focus-visible:ring-2 focus-visible:outline-none"
-              >
-                <span>{copy.partnership}</span>
-                <BytePlusIcon className="h-3.5 w-auto" />
-                <ArrowUpRight
-                  className="size-3.5 opacity-70"
-                  aria-hidden="true"
-                />
-              </a>
-            )}
-
-            {hasMetrics && (
-              <div
-                data-testid="hero-github-metrics"
-                className="mt-7 flex items-stretch justify-center gap-6 lg:justify-start"
-              >
-                {stats.stars !== null && (
-                  <a
-                    href="https://github.com/bytedance/deer-flow"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title={stats.stars.toLocaleString("en-US")}
-                    className="group focus-visible:ring-ring/50 flex flex-col items-center rounded-sm focus-visible:ring-2 focus-visible:outline-none lg:items-start"
-                  >
-                    <span className="inline-flex items-center gap-1.5">
-                      <Star
-                        className="size-4 text-[var(--df-accent)]"
-                        aria-hidden="true"
-                      />
-                      <span className="font-mono text-xl leading-none font-semibold text-[var(--df-ink)] tabular-nums transition-colors group-hover:text-[var(--df-accent)]">
-                        {formatMetricCount(stats.stars)}
-                      </span>
-                    </span>
-                    <span className="mt-1.5 text-xs text-[var(--df-muted-fg)]">
-                      {copy.starsLabel}
-                    </span>
-                  </a>
-                )}
-
-                {stats.stars !== null && stats.forks !== null && (
-                  <div
-                    aria-hidden="true"
-                    className="w-px self-stretch bg-[var(--df-border)]"
-                  />
-                )}
-
-                {stats.forks !== null && (
-                  <a
-                    href="https://github.com/bytedance/deer-flow/forks"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title={stats.forks.toLocaleString("en-US")}
-                    className="group focus-visible:ring-ring/50 flex flex-col items-center rounded-sm focus-visible:ring-2 focus-visible:outline-none lg:items-start"
-                  >
-                    <span className="inline-flex items-center gap-1.5">
-                      <GitFork
-                        className="size-4 text-[var(--df-accent)]"
-                        aria-hidden="true"
-                      />
-                      <span className="font-mono text-xl leading-none font-semibold text-[var(--df-ink)] tabular-nums transition-colors group-hover:text-[var(--df-accent)]">
-                        {formatMetricCount(stats.forks)}
-                      </span>
-                    </span>
-                    <span className="mt-1.5 text-xs text-[var(--df-muted-fg)]">
-                      {copy.forksLabel}
-                    </span>
-                  </a>
-                )}
-              </div>
-            )}
-
-            {/* Explicit entry points: Workspace, Quick Start, Docs, Open Source */}
-            <div className="mt-8 grid w-full max-w-md grid-cols-2 gap-2.5 sm:flex sm:w-auto sm:max-w-none sm:flex-wrap sm:items-center sm:justify-center sm:gap-3 lg:justify-start">
+            {/* Action cluster: distinctive rounded-full primary CTA + calm secondary links */}
+            <div className="mt-7 flex w-full flex-wrap items-center gap-2.5 sm:gap-3">
               <Link
                 href="/workspace/chats/new"
-                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-[var(--df-cta)] px-4 text-sm font-medium whitespace-nowrap text-[var(--df-cta-fg)] shadow-[0_4px_14px_-5px_color-mix(in_srgb,var(--df-cta)_60%,transparent)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-[var(--df-cta-hover)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
+                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-full bg-[var(--df-cta)] px-5 text-sm font-medium whitespace-nowrap text-[var(--df-cta-fg)] shadow-[0_6px_18px_-6px_color-mix(in_srgb,var(--df-cta)_65%,transparent)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-[var(--df-cta-hover)] focus-visible:ring-2 focus-visible:outline-none sm:px-6"
               >
                 <span>{copy.getStarted}</span>
                 <ArrowRight className="size-4 shrink-0" aria-hidden="true" />
@@ -255,7 +181,7 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
 
               <Link
                 href={`/${docsLang}/docs/application/quick-start`}
-                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong)] bg-transparent px-4 text-sm font-medium whitespace-nowrap text-[var(--df-ink)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[var(--df-cta)] hover:bg-[var(--df-cta)] hover:text-[var(--df-cta-fg)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
+                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-[var(--df-border-strong)] bg-[var(--df-panel)]/90 px-4 text-sm font-medium whitespace-nowrap text-[var(--df-ink)] transition-colors duration-150 hover:border-[var(--df-accent)] hover:bg-[var(--df-accent-soft,rgba(28,93,74,0.09))] hover:text-[var(--df-accent)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
               >
                 <Terminal className="size-4 shrink-0" aria-hidden="true" />
                 <span>{copy.quickStart}</span>
@@ -263,7 +189,7 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
 
               <Link
                 href={`/${docsLang}/docs`}
-                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong)] bg-transparent px-4 text-sm font-medium whitespace-nowrap text-[var(--df-ink)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[var(--df-cta)] hover:bg-[var(--df-cta)] hover:text-[var(--df-cta-fg)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
+                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-[var(--df-border-strong)] bg-[var(--df-panel)]/90 px-4 text-sm font-medium whitespace-nowrap text-[var(--df-ink)] transition-colors duration-150 hover:border-[var(--df-accent)] hover:bg-[var(--df-accent-soft,rgba(28,93,74,0.09))] hover:text-[var(--df-accent)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
               >
                 <BookOpen className="size-4 shrink-0" aria-hidden="true" />
                 <span>{copy.docs}</span>
@@ -273,7 +199,7 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
                 href="https://github.com/bytedance/deer-flow"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong)] bg-transparent px-4 text-sm font-medium whitespace-nowrap text-[var(--df-ink)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[var(--df-cta)] hover:bg-[var(--df-cta)] hover:text-[var(--df-cta-fg)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
+                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-[var(--df-border-strong)] bg-[var(--df-panel)]/90 px-4 text-sm font-medium whitespace-nowrap text-[var(--df-ink)] transition-colors duration-150 hover:border-[var(--df-accent)] hover:bg-[var(--df-accent-soft,rgba(28,93,74,0.09))] hover:text-[var(--df-accent)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
               >
                 <GitHubLogoIcon
                   className="size-4 shrink-0"
@@ -282,10 +208,80 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
                 <span>{copy.openSource}</span>
               </a>
             </div>
+
+            {/* Live GitHub stats & optional static-demo partnership strip */}
+            {(hasMetrics || isStaticWebsite) && (
+              <div className="mt-8 flex w-full flex-wrap items-center gap-x-4 gap-y-2.5 border-t border-[var(--df-border)] pt-5">
+                {hasMetrics && (
+                  <div
+                    data-testid="hero-github-metrics"
+                    className="flex flex-wrap items-center gap-2.5"
+                  >
+                    {stats.stars !== null && (
+                      <a
+                        href="https://github.com/bytedance/deer-flow"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title={stats.stars.toLocaleString("en-US")}
+                        className="group focus-visible:ring-ring/50 inline-flex min-h-9 items-center gap-2 rounded-full border border-[var(--df-border)] bg-[var(--df-bg-soft)] px-3 py-1 font-mono text-xs transition-colors duration-150 hover:border-[var(--df-accent)] focus-visible:ring-2 focus-visible:outline-none"
+                      >
+                        <Star
+                          className="size-3.5 text-[var(--df-accent)]"
+                          aria-hidden="true"
+                        />
+                        <span className="font-semibold text-[var(--df-ink)] tabular-nums transition-colors group-hover:text-[var(--df-accent)]">
+                          {formatMetricCount(stats.stars)}
+                        </span>
+                        <span className="text-[var(--df-muted-fg)]">
+                          {copy.starsLabel}
+                        </span>
+                      </a>
+                    )}
+
+                    {stats.forks !== null && (
+                      <a
+                        href="https://github.com/bytedance/deer-flow/forks"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title={stats.forks.toLocaleString("en-US")}
+                        className="group focus-visible:ring-ring/50 inline-flex min-h-9 items-center gap-2 rounded-full border border-[var(--df-border)] bg-[var(--df-bg-soft)] px-3 py-1 font-mono text-xs transition-colors duration-150 hover:border-[var(--df-accent)] focus-visible:ring-2 focus-visible:outline-none"
+                      >
+                        <GitFork
+                          className="size-3.5 text-[var(--df-accent)]"
+                          aria-hidden="true"
+                        />
+                        <span className="font-semibold text-[var(--df-ink)] tabular-nums transition-colors group-hover:text-[var(--df-accent)]">
+                          {formatMetricCount(stats.forks)}
+                        </span>
+                        <span className="text-[var(--df-muted-fg)]">
+                          {copy.forksLabel}
+                        </span>
+                      </a>
+                    )}
+                  </div>
+                )}
+
+                {isStaticWebsite && (
+                  <a
+                    href="https://byteplus.com"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="focus-visible:ring-ring/50 inline-flex min-h-9 items-center gap-2 rounded-full border border-[var(--df-border)] bg-[var(--df-panel)] px-3 py-1 text-xs font-medium text-[var(--df-text-soft)] transition-colors duration-150 hover:border-[var(--df-accent)] hover:text-[var(--df-ink)] focus-visible:ring-2 focus-visible:outline-none"
+                  >
+                    <span>{copy.partnership}</span>
+                    <BytePlusIcon className="h-3.5 w-auto" />
+                    <ArrowUpRight
+                      className="size-3.5 opacity-70"
+                      aria-hidden="true"
+                    />
+                  </a>
+                )}
+              </div>
+            )}
           </div>
 
-          {/* Right column: Interactive DeerFlow architecture diagram */}
-          <div className="w-full min-w-0">
+          {/* Right column: Interactive 3-tier Agent Harness Blueprint */}
+          <div className="w-full min-w-0 lg:col-span-7">
             <ArchitectureDiagram locale={locale} />
           </div>
         </div>
