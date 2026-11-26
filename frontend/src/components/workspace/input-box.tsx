@@ -811,7 +811,7 @@ export function InputBox({
   const supportReasoningEffort = reasoningEffortOptions.length > 0;
   const threadEffort = useSyncExternalStore(
     subscribe,
-    () => getThreadEffortOverride(threadId, context.reasoning_effort),
+    () => getThreadEffortOverride(threadId),
     () => undefined,
   );
   const thinkingForRun =

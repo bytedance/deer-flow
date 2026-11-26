@@ -209,16 +209,14 @@ export function getThreadModelSnapshot(threadId: string): string | undefined {
   return threadModelNames.get(threadId);
 }
 
-/** Remember which chat explicitly picked the current effort. The account still owns the value. */
 export function getThreadEffortOverride(
   threadId?: string | null,
-  currentEffort?: string,
 ): string | undefined {
-  if (!threadId || !currentEffort) return undefined;
-  const selected = threadEfforts.has(threadId)
+  if (!threadId) return undefined;
+  const effort = threadEfforts.has(threadId)
     ? threadEfforts.get(threadId)
     : safeLocalStorage.getItem(THREAD_EFFORT_KEY_PREFIX + threadId);
-  return selected === currentEffort ? currentEffort : undefined;
+  return effort?.length ? effort : undefined;
 }
 
 function rememberThreadEffortChoice(

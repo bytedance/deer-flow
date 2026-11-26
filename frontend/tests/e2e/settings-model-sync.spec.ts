@@ -4,6 +4,7 @@ import {
   handleRunStream,
   mockLangGraphAPI,
   MOCK_THREAD_ID,
+  MOCK_THREAD_ID_2,
 } from "./utils/mock-api";
 
 for (const agent of [false, true]) {
@@ -19,12 +20,10 @@ for (const agent of [false, true]) {
             reasoning_effort: "low",
           },
         ],
-        threads: [
-          {
-            thread_id: MOCK_THREAD_ID,
-            agent_name: agent ? "researcher" : undefined,
-          },
-        ],
+        threads: [MOCK_THREAD_ID, MOCK_THREAD_ID_2].map((thread_id) => ({
+          thread_id,
+          agent_name: agent ? "researcher" : undefined,
+        })),
       });
       await page.addInitScript(
         ({ threadId }) => {
@@ -88,18 +87,23 @@ for (const agent of [false, true]) {
           await route.fulfill({ json: server });
         }
       });
-      await page.goto(
-        `/workspace/${agent ? "agents/researcher/chats" : "chats"}/${MOCK_THREAD_ID}`,
-      );
-      await page
-        .locator("[data-sidebar='sidebar']")
-        .getByRole("button", { name: /Settings and more/ })
-        .click();
-      await page.keyboard.press("Escape");
-      await page.evaluate(() =>
-        document.dispatchEvent(new Event("visibilitychange")),
-      );
-      await expect.poll(() => reads).toBe(1);
+      const openChat = async (id: string) => {
+        const previousReads = reads;
+        await page.goto(
+          `/workspace/${agent ? "agents/researcher/chats" : "chats"}/${id}`,
+        );
+        // Activate the mocked account and wait for its current preferences.
+        await page
+          .locator("[data-sidebar='sidebar']")
+          .getByRole("button", { name: /Settings and more/ })
+          .click();
+        await page.keyboard.press("Escape");
+        await page.evaluate(() =>
+          document.dispatchEvent(new Event("visibilitychange")),
+        );
+        await expect.poll(() => reads).toBeGreaterThan(previousReads);
+      };
+      await openChat(MOCK_THREAD_ID);
       await expect(
         page.getByRole("button", { name: "Thread Model", exact: true }),
       ).toBeVisible();
@@ -145,7 +149,14 @@ for (const agent of [false, true]) {
           await effort.click();
           await page.getByRole("menuitem").filter({ hasText: /^High/ }).click();
           await page.keyboard.press("Escape");
-          // A separate choice of high matters even when it equals Ultra's preset.
+          await openChat(MOCK_THREAD_ID_2);
+          await effort.click();
+          await page
+            .getByRole("menuitem")
+            .filter({ hasText: /^Medium/ })
+            .click();
+          await expect.poll(() => server.reasoning_effort).toBe("medium");
+          await openChat(MOCK_THREAD_ID);
         }
         await expect(
           page.getByRole("button", { name: "Reasoning Effort: High" }),
@@ -166,23 +177,6 @@ for (const agent of [false, true]) {
           mode_default_fields: ["thinking_enabled"],
           subagent_enabled: field === "mode",
         });
-        if (field === "mode") {
-          const beforeReload = reads;
-          await page.reload();
-          // This auth-disabled fixture activates its mocked account on opening settings.
-          await page
-            .locator("[data-sidebar='sidebar']")
-            .getByRole("button", { name: /Settings and more/ })
-            .click();
-          await page.keyboard.press("Escape");
-          await page.evaluate(() =>
-            document.dispatchEvent(new Event("visibilitychange")),
-          );
-          await expect.poll(() => reads).toBeGreaterThan(beforeReload);
-          await expect(
-            page.getByRole("button", { name: "Reasoning Effort: High" }),
-          ).toBeVisible();
-        }
       }
     });
   }

@@ -3,27 +3,39 @@ import { afterEach, expect, it, rs } from "@rstest/core";
 import { safeLocalStorage } from "@/core/settings/local";
 import {
   getBaseSettingsSnapshot,
-  getThreadEffortOverride,
   getThreadModelSnapshot,
   selectThreadModel,
   updateLocalSettings,
   updateThreadSettings,
 } from "@/core/settings/store";
+import { buildRunContext } from "@/core/threads/hooks";
 
 afterEach(() => {
   rs.restoreAllMocks();
 });
 
-it("marks a separate effort choice only for that chat and its current value", () => {
-  updateThreadSettings("agent-thread", "context", { reasoning_effort: "high" });
-  expect(getThreadEffortOverride("agent-thread", "high")).toBe("high");
-  expect(getThreadEffortOverride("agent-thread", "low")).toBeUndefined();
-  expect(getThreadEffortOverride("another-thread", "high")).toBeUndefined();
-  updateThreadSettings("agent-thread", "context", {
+it("submits each chat's own effort after another chat edits the account preference", () => {
+  const submit = (threadId: string) =>
+    buildRunContext({ threadId, settings: getBaseSettingsSnapshot().context });
+  updateThreadSettings("chat-a", "context", { reasoning_effort: "high" });
+  updateThreadSettings("chat-b", "context", { reasoning_effort: "medium" });
+  expect(submit("chat-a")).toMatchObject({
+    reasoning_effort: "high",
+    mode_default_fields: ["thinking_enabled"],
+  });
+  expect(submit("chat-b")).toMatchObject({
+    reasoning_effort: "medium",
+    mode_default_fields: ["thinking_enabled"],
+  });
+  expect(submit("fresh-chat").mode_default_fields).toContain(
+    "reasoning_effort",
+  );
+  updateThreadSettings("chat-a", "context", {
     mode: "ultra",
     reasoning_effort: "high",
   });
-  expect(getThreadEffortOverride("agent-thread", "high")).toBeUndefined();
+  expect(submit("chat-a").mode_default_fields).toContain("reasoning_effort");
+  expect(submit("chat-b").reasoning_effort).toBe("medium");
 });
 
 it("does not claim to save a default when browser storage rejects the write", () => {
