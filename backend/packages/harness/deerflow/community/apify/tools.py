@@ -22,6 +22,7 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
+from httpx import TimeoutException  # by name: the tests swap this module's httpx for an offline client
 from langchain.tools import tool
 from langgraph.config import get_stream_writer
 
@@ -47,6 +48,9 @@ _INTEGRATION_HEADERS = {"x-apify-integration-platform": "deerflow"}
 _SEARCH_TIMEOUT_SECS = 120.0
 _FETCH_TIMEOUT_SECS = 120.0
 _API_TIMEOUT_SECS = 30.0
+# apify_actor_await keeps this much of its timeout for the last status check, and
+# bounds every check by the time left, so a slow check cannot outlast the wait.
+_LAST_STATUS_CHECK_SECS = 5.0
 # apify/web-search reads one Google results page, which holds about 10 organic results.
 _SEARCH_MAX_RESULTS_CAP = 10
 _DISCOVER_DEFAULT_RESULTS = 10
@@ -202,9 +206,19 @@ def _auth(api_key: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {api_key}"}
 
 
-async def _api_data(client: httpx.AsyncClient, api_key: str, method: str, path: str, *, action: str, params: dict[str, Any] | None = None, payload: object = None) -> dict[str, Any]:
+async def _api_data(
+    client: httpx.AsyncClient,
+    api_key: str,
+    method: str,
+    path: str,
+    *,
+    action: str,
+    params: dict[str, Any] | None = None,
+    payload: object = None,
+    timeout: float = _API_TIMEOUT_SECS,
+) -> dict[str, Any]:
     """Call the Apify API and return the object in its ``data`` envelope."""
-    response = await client.request(method, f"{_API_BASE_URL}{path}", headers=_auth(api_key), params=params, json=payload)
+    response = await client.request(method, f"{_API_BASE_URL}{path}", headers=_auth(api_key), params=params, json=payload, timeout=timeout)
     _raise_for_status(response, action)
     body = _json_body(response, action)
     data = body.get("data") if isinstance(body, dict) else None
@@ -556,8 +570,16 @@ async def apify_actor_await_tool(run_id: str, dataset_id: str, description: str 
     try:
         async with await _new_client(_API_TIMEOUT_SECS) as client:
             while True:
+                check_timeout = min(_API_TIMEOUT_SECS, deadline - loop.time())
+                if check_timeout <= 0:
+                    break
                 try:
-                    run = await _api_data(client, api_key, "GET", f"/actor-runs/{quote(run_id, safe='')}", action="Reading the run")
+                    run = await _api_data(client, api_key, "GET", f"/actor-runs/{quote(run_id, safe='')}", action="Reading the run", timeout=check_timeout)
+                except TimeoutException:
+                    # The wait ran out during the check, not Apify: the run goes on.
+                    if check_timeout < _API_TIMEOUT_SECS:
+                        break
+                    raise
                 except ApifyError as e:
                     if e.status_code != 404:
                         raise
@@ -581,10 +603,10 @@ async def apify_actor_await_tool(run_id: str, dataset_id: str, description: str 
                     return result({"runId": run_id, "status": "SUCCEEDED", "resultCount": len(items), "results": items})
 
                 remaining = deadline - loop.time()
-                if remaining <= 0:
+                if remaining <= _LAST_STATUS_CHECK_SECS:
                     break
                 writer({"type": "apify_run_polling", "runId": run_id, "status": status, "elapsed_secs": elapsed()})
-                await asyncio.sleep(min(poll_interval_secs, remaining))
+                await asyncio.sleep(min(poll_interval_secs, remaining - _LAST_STATUS_CHECK_SECS))
     except asyncio.CancelledError:
         writer({"type": "apify_run_cancelled", "runId": run_id})
         raise

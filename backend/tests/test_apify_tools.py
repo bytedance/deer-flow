@@ -395,6 +395,32 @@ class TestAwait:
         assert payload["status"] == "TIMED_OUT"
         assert "call apify_actor_await again" in payload["error"]
 
+    async def test_status_checks_stay_inside_the_wait(self, config, apify, events, monkeypatch):
+        monkeypatch.setattr(apify_tools, "_LAST_STATUS_CHECK_SECS", 0.1)
+        config(poll_interval_secs=0.02, timeout_secs="0.3")
+        apify.on("GET", "/v2/actor-runs/run-1", _data({"status": "RUNNING"}))
+        payload = json.loads(await apify_tools.apify_actor_await_tool.ainvoke({"run_id": "run-1", "dataset_id": "d"}))
+        assert payload["status"] == "TIMED_OUT"
+        checks = apify.only("GET", "/v2/actor-runs/run-1")
+        assert len(checks) > 1
+        # Every check is bounded by the time left, and the last one keeps its reserve
+        # (less timer jitter).
+        assert all(0 < check.extensions["timeout"]["read"] <= 0.3 for check in checks)
+        assert checks[-1].extensions["timeout"]["read"] >= 0.05
+
+    @pytest.mark.parametrize(("timeout_secs", "status"), [("1", "TIMED_OUT"), ("300", "ERROR")])
+    async def test_a_status_check_that_times_out(self, config, apify, events, timeout_secs, status):
+        # When the wait's own time bounds the check, a timeout ends the wait and the run
+        # goes on. A check that had Apify's full request timeout is an Apify failure.
+        def time_out(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("", request=request)
+
+        config(timeout_secs=timeout_secs)
+        apify.on("GET", "/v2/actor-runs/run-1", time_out)
+        payload = json.loads(await apify_tools.apify_actor_await_tool.ainvoke({"run_id": "run-1", "dataset_id": "d"}))
+        assert payload["status"] == status
+        assert apify.only("POST", "/v2/actor-runs/run-1/abort") == []
+
     async def test_invalid_config_numbers_fall_back_to_defaults(self, config, apify, events):
         # `$VAR` references resolve to strings; a bad one must not raise outside the error boundary.
         config(poll_interval_secs="soon", timeout_secs=False, max_items=2.5)
