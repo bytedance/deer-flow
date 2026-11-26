@@ -186,6 +186,36 @@ async def test_json_acceptance_check_is_offloaded(monkeypatch, tmp_path, permitt
     assert verdict["leaves"][0]["checked"] is permitted
 
 
+@pytest.mark.parametrize("permitted", [True, False])
+@pytest.mark.parametrize("exists", [True, False])
+async def test_file_existence_acceptance_check_is_offloaded(monkeypatch, tmp_path, permitted, exists):
+    """Ordinary delegation authorizes metadata probes in a worker thread and reports an unverified verdict on denial."""
+    from deerflow.authz.rbac import RbacAuthorizationProvider
+    from deerflow.config.authorization_config import AuthorizationConfig
+
+    runtime = _runtime(tmp_path)
+    (tmp_path / "probe.txt").write_text("probe body", encoding="utf-8")
+    provider = RbacAuthorizationProvider(roles={"user": {"sandbox": {"allow": "*" if permitted else []}}})
+    config = SimpleNamespace(authorization=AuthorizationConfig(enabled=True))
+    monkeypatch.setattr("deerflow.authz.sandbox_authz.resolve_authorization_provider", lambda config: provider)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    runtime.context.update(user_id="user-1", user_role="user")
+    if exists:
+        (tmp_path / "user-data" / "outputs" / "report.md").write_text("real body", encoding="utf-8")
+    _patch_task_tool_boundary(monkeypatch, tmp_path)
+    command = await task_tool_module.task_tool.coroutine(
+        runtime=runtime,
+        prompt="p",
+        subagent_type="general-purpose",
+        tool_call_id="tc-file-check",
+        acceptance_criteria=["file:../outputs/report.md exists"],
+    )
+    verdict = command.update["messages"][0].additional_kwargs["subagent_acceptance_verdict"]
+    assert verdict["all_hold"] is (permitted and exists)
+    assert verdict["leaves"][0]["family"] == "file_exists"
+    assert verdict["leaves"][0]["checked"] is permitted
+
+
 async def test_blocking_probe_reader_actually_trips_the_gate(monkeypatch, tmp_path):
     """Meta-check: the same read on the event loop must raise BlockingError,
     so the anchor above cannot go vacuously green. (The size probe is
