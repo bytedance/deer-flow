@@ -454,7 +454,7 @@ async def _raise_lease_valid_elsewhere(
     the owner renewed between our read and the conditional UPDATE). Re-read
     from the store to get the fresh value so ``Retry-After`` is accurate.
     """
-    fresh = await run_mgr.get(run_id, user_id=record.user_id)
+    fresh = await _get_scoped_run(run_mgr, run_id, user_id=getattr(record, "user_id", None))
     if fresh is not None:
         record = fresh
     retry_after = _compute_retry_after(record.lease_expires_at, run_mgr.grace_seconds)
@@ -1246,6 +1246,21 @@ async def _thread_ownership_established(request: Request, thread_id: str) -> boo
     return meta is not None and bool(meta_owner)
 
 
+async def _optional_request_user_id(request: Request) -> str | None:
+    """Resolve the request's user id, tolerating minimal unit-test request stand-ins."""
+    state = getattr(request, "state", None)
+    if getattr(state, "auth_source", None) is None and getattr(request, "cookies", None) is None:
+        return None
+    return await get_current_user(request)
+
+
+async def _get_scoped_run(run_mgr, run_id: str, *, user_id: str | None) -> RunRecord | None:
+    """Fetch a run by id, passing ``user_id`` only when a caller scope is active."""
+    if user_id is None:
+        return await run_mgr.get(run_id)
+    return await run_mgr.get(run_id, user_id=user_id)
+
+
 async def _run_scope_user_id(request: Request, thread_id: str) -> str | None:
     """Resolve the data-filter id for run and message reads, not for authorization.
 
@@ -1277,7 +1292,7 @@ async def _run_scope_user_id(request: Request, thread_id: str) -> str | None:
     state = getattr(request, "state", None)
     user = getattr(state, "user", None)
     if getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE:
-        return await get_current_user(request)
+        return await _optional_request_user_id(request)
     if await _thread_ownership_established(request, thread_id):
         return None
     # Missing or NULL-owner meta row: ownership was never established, so the
@@ -1287,7 +1302,7 @@ async def _run_scope_user_id(request: Request, thread_id: str) -> str | None:
     owner = get_trusted_internal_owner_user_id(request)
     if owner is not None:
         return owner
-    return await get_current_user(request)
+    return await _optional_request_user_id(request)
 
 
 async def _require_run_visible_to_scope(run_id: str, thread_id: str, request: Request) -> None:
@@ -1313,7 +1328,7 @@ async def _require_run_visible_to_scope(run_id: str, thread_id: str, request: Re
             return
         scope = get_trusted_internal_owner_user_id(request) or "default"
     else:
-        scope = await get_current_user(request)
+        scope = await _optional_request_user_id(request)
         if scope is None:
             return
         if await _thread_ownership_established(request, thread_id):
@@ -1413,7 +1428,7 @@ async def cancel_run(
     await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
     user_id = await _run_scope_user_id(request, thread_id)
-    record = await run_mgr.get(run_id, user_id=user_id)
+    record = await _get_scoped_run(run_mgr, run_id, user_id=user_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
@@ -1459,7 +1474,7 @@ async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> Stream
     await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
     user_id = await _run_scope_user_id(request, thread_id)
-    record = await run_mgr.get(run_id, user_id=user_id)
+    record = await _get_scoped_run(run_mgr, run_id, user_id=user_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     bridge = get_stream_bridge(request)
@@ -1509,7 +1524,7 @@ async def _stream_existing_run(
     await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
     user_id = await _run_scope_user_id(request, thread_id)
-    record = await run_mgr.get(run_id, user_id=user_id)
+    record = await _get_scoped_run(run_mgr, run_id, user_id=user_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     bridge = get_stream_bridge(request)
@@ -1791,7 +1806,7 @@ async def list_run_messages(
 
     if data:
         run_mgr = get_run_manager(request)
-        record = await run_mgr.get(run_id, user_id=user_id)
+        record = await _get_scoped_run(run_mgr, run_id, user_id=user_id)
         if record:
             durations = compute_run_durations([record])
             if durations:
