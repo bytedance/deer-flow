@@ -111,13 +111,22 @@ def _clone_neutralized_json(
     """Clone a structured JSON-like payload iteratively with every string key and value neutralized."""
     memo: dict[int, object] = {}
     root_box: list[object] = [None]
+    # Populating mutable containers (list/dict) is deferred until the current
+    # tuple stack drains. Because immutable tuples can only form cycles through
+    # a mutable descendant, every containing tuple is finalized in *memo* before
+    # any descendant list/dict resolves its back-references.
+    deferred_mutables: list[tuple[object, Any, Any]] = [(value, root_box, 0)]
     # Stack frames are either:
     # - (False, node, container, slot): visit *node* and write clone to container[slot]
     # - (True, obj_id, placeholder, container, slot): finalize tuple from *placeholder*
-    stack: list[tuple[Any, ...]] = [(False, value, root_box, 0)]
+    tuple_stack: list[tuple[Any, ...]] = []
 
-    while stack:
-        frame = stack.pop()
+    while tuple_stack or deferred_mutables:
+        if not tuple_stack:
+            node, container, slot = deferred_mutables.pop()
+            tuple_stack.append((False, node, container, slot))
+
+        frame = tuple_stack.pop()
         if frame[0]:
             _, obj_id, placeholder, container, slot = frame
             rebuilt_tuple = tuple(placeholder)
@@ -137,20 +146,16 @@ def _clone_neutralized_json(
             memo[obj_id] = rebuilt_list
             container[slot] = rebuilt_list
             for idx in range(len(current) - 1, -1, -1):
-                stack.append((False, current[idx], rebuilt_list, idx))
+                deferred_mutables.append((current[idx], rebuilt_list, idx))
         elif isinstance(current, tuple):
             obj_id = id(current)
             if obj_id in memo:
                 container[slot] = memo[obj_id]
                 continue
-            # A tuple can self-reference only through a mutable descendant; a
-            # placeholder list breaks that cycle without leaking unsanitized
-            # references and is replaced with the finalized tuple once populated.
             placeholder: list[object] = [None] * len(current)
-            memo[obj_id] = placeholder
-            stack.append((True, obj_id, placeholder, container, slot))
+            tuple_stack.append((True, obj_id, placeholder, container, slot))
             for idx in range(len(current) - 1, -1, -1):
-                stack.append((False, current[idx], placeholder, idx))
+                tuple_stack.append((False, current[idx], placeholder, idx))
         elif isinstance(current, dict):
             obj_id = id(current)
             if obj_id in memo:
@@ -182,7 +187,7 @@ def _clone_neutralized_json(
                 rebuilt_dict[final_key] = None
                 final_entries.append((final_key, item))
             for final_key, item in reversed(final_entries):
-                stack.append((False, item, rebuilt_dict, final_key))
+                deferred_mutables.append((item, rebuilt_dict, final_key))
         else:
             container[slot] = current
 
