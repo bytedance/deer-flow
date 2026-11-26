@@ -1,7 +1,8 @@
 "use client";
 
 import { Portal } from "@headlessui/react";
-import { MenuIcon } from "lucide-react";
+import { GitHubLogoIcon } from "@radix-ui/react-icons";
+import { ArrowUpRight, MenuIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { type ReactNode, useEffect, useRef, useState } from "react";
@@ -14,20 +15,45 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
+import {
+  type LandingLocale,
+  useOptionalLandingLocale,
+} from "@/core/i18n/landing";
+import { cn } from "@/lib/utils";
+
+import { LanguageSwitch } from "./language-switch";
+import { ThemeToggle } from "./theme-toggle";
 
 export type MobileNavLink = {
   href: string;
   label: string;
+  external?: boolean;
+};
+
+export type MobileNavGroup = {
+  title: string;
+  items: MobileNavLink[];
+};
+
+export type MobileNavProps = {
+  links: MobileNavLink[];
+  groups?: MobileNavGroup[];
+  search?: ReactNode;
+  locale?: LandingLocale;
+  triggerClassName?: string;
+  showActions?: boolean;
 };
 
 export function MobileNav({
   links,
+  groups,
   search,
-}: {
-  links: MobileNavLink[];
-  search?: ReactNode;
-}) {
+  locale,
+  triggerClassName,
+  showActions = false,
+}: MobileNavProps) {
   const pathname = usePathname();
+  const { locale: activeLocale } = useOptionalLandingLocale(locale);
   const contentRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   // Close on navigation (e.g. picking a search result). The docs layout keeps
@@ -47,17 +73,59 @@ export function MobileNav({
     return () => window.removeEventListener("hashchange", close);
   }, [open]);
 
+  const getStartedLabel = activeLocale === "zh-CN" ? "开始使用" : "Get Started";
+  const githubLabel =
+    activeLocale === "zh-CN" ? "访问 GitHub" : "Star on GitHub";
+
+  const renderLink = (link: MobileNavLink) => {
+    const linkClassName =
+      "flex min-h-11 items-center justify-between rounded-md px-2 text-sm font-medium text-[var(--df-text-soft)] transition-colors hover:bg-[var(--df-muted-2)] hover:text-[var(--df-ink)]";
+    if (link.external) {
+      return (
+        <a
+          key={link.href}
+          href={link.href}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={() => setOpen(false)}
+          className={linkClassName}
+        >
+          <span>{link.label}</span>
+          <ArrowUpRight
+            className="size-3.5 text-[var(--df-muted-fg)]"
+            aria-hidden="true"
+          />
+        </a>
+      );
+    }
+    return (
+      <Link
+        key={link.href}
+        href={link.href}
+        onClick={() => setOpen(false)}
+        className={linkClassName}
+      >
+        <span>{link.label}</span>
+      </Link>
+    );
+  };
+
   return (
     <Sheet open={open} onOpenChange={setOpen}>
-      <SheetTrigger asChild className="sm:hidden">
-        <Button variant="ghost" size="icon" aria-label="Open menu">
-          <MenuIcon className="size-5" />
+      <SheetTrigger asChild className={cn("xl:hidden", triggerClassName)}>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Open menu"
+          className="h-9 w-9 text-[var(--df-muted-fg)] hover:bg-[var(--df-muted-2)] hover:text-[var(--df-ink)]"
+        >
+          <MenuIcon className="size-5" aria-hidden="true" />
         </Button>
       </SheetTrigger>
       <SheetContent
         ref={contentRef}
         side="right"
-        className="w-64"
+        className="w-72 overflow-y-auto border-l border-[var(--df-border)] bg-[var(--df-bg-soft)] text-[var(--df-ink)] sm:w-80"
         aria-describedby={undefined}
         onClick={(event) => {
           // A result at the current hash emits neither pathname nor hashchange.
@@ -90,8 +158,10 @@ export function MobileNav({
           }, 0);
         }}
       >
-        <SheetHeader>
-          <SheetTitle className="font-serif text-xl">DeerFlow</SheetTitle>
+        <SheetHeader className="border-b border-[var(--df-border)] pb-3">
+          <SheetTitle className="font-serif text-xl font-semibold text-[var(--df-ink)]">
+            DeerFlow
+          </SheetTitle>
         </SheetHeader>
         {search && (
           // Radix's modal scroll lock only allows descendants of its content.
@@ -99,17 +169,47 @@ export function MobileNav({
             <div className="px-4 [&_input]:h-11">{search}</div>
           </Portal.Group>
         )}
-        <nav className="flex flex-col gap-1 px-4 text-base font-medium">
-          {links.map((link) => (
-            <Link
-              key={link.href}
-              href={link.href}
-              onClick={() => setOpen(false)}
-              className="text-secondary-foreground hover:text-foreground rounded-md py-2 transition-colors"
-            >
-              {link.label}
-            </Link>
-          ))}
+        <nav className="flex flex-col gap-5 px-4 pb-6">
+          {groups && groups.length > 0 ? (
+            groups.map((group) => (
+              <div key={group.title} className="flex flex-col gap-1">
+                <p className="px-2 font-mono text-[10px] font-medium tracking-[0.2em] text-[var(--df-muted-fg)] uppercase">
+                  {group.title}
+                </p>
+                <div className="flex flex-col">
+                  {group.items.map(renderLink)}
+                </div>
+              </div>
+            ))
+          ) : (
+            <div className="flex flex-col gap-1">{links.map(renderLink)}</div>
+          )}
+
+          {showActions && (
+            <div className="mt-2 flex flex-col gap-3 border-t border-[var(--df-border)] pt-4">
+              <div className="flex items-center justify-between gap-2">
+                <LanguageSwitch locale={activeLocale} />
+                <ThemeToggle locale={activeLocale} />
+              </div>
+              <a
+                href="https://github.com/bytedance/deer-flow"
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={() => setOpen(false)}
+                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong)] px-3 text-sm font-medium text-[var(--df-ink)] transition-colors hover:bg-[var(--df-muted-2)]"
+              >
+                <GitHubLogoIcon className="size-4" aria-hidden="true" />
+                <span>{githubLabel}</span>
+              </a>
+              <Link
+                href="/workspace/chats/new"
+                onClick={() => setOpen(false)}
+                className="inline-flex min-h-11 items-center justify-center rounded-md bg-[var(--df-cta)] px-3 text-sm font-medium text-[var(--df-cta-fg)] transition-colors hover:bg-[var(--df-cta-hover)]"
+              >
+                {getStartedLabel}
+              </Link>
+            </div>
+          )}
         </nav>
       </SheetContent>
     </Sheet>
