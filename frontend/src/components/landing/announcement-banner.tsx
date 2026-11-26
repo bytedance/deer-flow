@@ -1,7 +1,6 @@
 "use client";
 
-import { GitHubLogoIcon } from "@radix-ui/react-icons";
-import { BookOpen, MessageSquare, X } from "lucide-react";
+import { ArrowRight, X } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
@@ -14,31 +13,28 @@ import { cn } from "@/lib/utils";
 export const ANNOUNCEMENT_BANNER_STORAGE_KEY =
   "deerflow.landing.banner.v1.dismissed";
 
-const BANNER_HEIGHT_VISIBLE = "105px";
-const BANNER_HEIGHT_DISMISSED = "65px";
+const BANNER_HEIGHT_VISIBLE = "100px";
+const BANNER_HEIGHT_DISMISSED = "64px";
 
 const BANNER_COPY: Record<
   LandingLocale,
   {
+    badge: string;
     text: string;
-    githubLabel: string;
-    quickStartLabel: string;
-    discussionsLabel: string;
+    ctaLabel: string;
     dismissLabel: string;
   }
 > = {
   "en-US": {
-    text: "Join the DeerFlow open-source community — sandboxes, skills, memory & MCP.",
-    githubLabel: "DeerFlow on GitHub",
-    quickStartLabel: "Quick Start Guide",
-    discussionsLabel: "GitHub Discussions",
+    badge: "DeerFlow 2.0",
+    text: "Open-source SuperAgent harness with isolated sandboxes, memory & progressive skills.",
+    ctaLabel: "Read the Quick Start",
     dismissLabel: "Dismiss announcement",
   },
   "zh-CN": {
-    text: "加入 DeerFlow 开源社区 — 沙箱、技能、长期记忆与 MCP 工具一体协同。",
-    githubLabel: "访问 DeerFlow GitHub 仓库",
-    quickStartLabel: "快速开始文档",
-    discussionsLabel: "GitHub 讨论区",
+    badge: "DeerFlow 2.0",
+    text: "开源超级智能体 Harness，集成隔离沙箱、长期记忆与渐进式技能系统。",
+    ctaLabel: "查看快速开始",
     dismissLabel: "关闭公告",
   },
 };
@@ -96,50 +92,40 @@ export function AnnouncementBanner({
       role="region"
       aria-label={copy.text}
       className={cn(
-        "relative bg-[var(--df-cta)] text-[var(--df-cta-fg)]",
+        "relative border-b border-[var(--df-border)] bg-[var(--df-bg-soft)] text-[var(--df-text-soft)]",
         className,
       )}
     >
-      <div className="mx-auto flex max-w-[1280px] items-center justify-center gap-2.5 px-3 py-1.5 pr-10 sm:px-6 sm:pr-12">
-        <p className="truncate text-xs font-medium text-white/95 sm:text-[13px]">
+      <div className="mx-auto flex min-h-9 max-w-[1280px] items-center justify-center gap-2 px-4 py-1.5 pr-10 text-xs sm:gap-2.5 sm:px-6 sm:pr-12">
+        <span
+          className="inline-block size-1.5 shrink-0 rounded-full bg-[var(--df-accent)]"
+          aria-hidden="true"
+        />
+        <span className="hidden shrink-0 font-mono text-[11px] font-medium text-[var(--df-ink)] sm:inline">
+          {copy.badge}
+        </span>
+        <span
+          className="hidden text-[var(--df-border-strong)] sm:inline"
+          aria-hidden="true"
+        >
+          /
+        </span>
+        <p className="truncate text-[12px] text-[var(--df-text-soft)] sm:text-[13px]">
           {copy.text}
         </p>
-        <div className="hidden shrink-0 items-center gap-1.5 sm:flex">
-          <a
-            href="https://github.com/bytedance/deer-flow"
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-label={copy.githubLabel}
-            title={copy.githubLabel}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/30 text-white/95 transition-colors duration-150 hover:bg-white/20 focus-visible:ring-2 focus-visible:ring-white/80 focus-visible:outline-none"
-          >
-            <GitHubLogoIcon className="size-3.5" aria-hidden="true" />
-          </a>
-          <Link
-            href={`/${docsLang}/docs/application/quick-start`}
-            aria-label={copy.quickStartLabel}
-            title={copy.quickStartLabel}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/30 text-white/95 transition-colors duration-150 hover:bg-white/20 focus-visible:ring-2 focus-visible:ring-white/80 focus-visible:outline-none"
-          >
-            <BookOpen className="size-3.5" aria-hidden="true" />
-          </Link>
-          <a
-            href="https://github.com/bytedance/deer-flow/discussions"
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-label={copy.discussionsLabel}
-            title={copy.discussionsLabel}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/30 text-white/95 transition-colors duration-150 hover:bg-white/20 focus-visible:ring-2 focus-visible:ring-white/80 focus-visible:outline-none"
-          >
-            <MessageSquare className="size-3.5" aria-hidden="true" />
-          </a>
-        </div>
+        <Link
+          href={`/${docsLang}/docs/application/quick-start`}
+          className="focus-visible:ring-ring/50 inline-flex shrink-0 items-center gap-1 rounded-sm text-[12px] font-medium whitespace-nowrap text-[var(--df-accent)] underline decoration-[var(--df-accent)]/40 underline-offset-4 transition-colors duration-150 hover:text-[var(--df-accent-strong)] hover:decoration-[var(--df-accent-strong)] focus-visible:ring-2 focus-visible:outline-none sm:text-[13px]"
+        >
+          <span>{copy.ctaLabel}</span>
+          <ArrowRight className="size-3" aria-hidden="true" />
+        </Link>
       </div>
       <button
         type="button"
         onClick={handleDismiss}
         aria-label={copy.dismissLabel}
-        className="absolute top-1/2 right-2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-white/85 transition-colors duration-150 hover:bg-white/20 hover:text-white focus-visible:ring-2 focus-visible:ring-white/80 focus-visible:outline-none sm:right-4"
+        className="focus-visible:ring-ring/50 absolute top-1/2 right-2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-[var(--df-muted-fg)] transition-colors duration-150 hover:bg-[var(--df-muted-2)] hover:text-[var(--df-ink)] focus-visible:ring-2 focus-visible:outline-none sm:right-4"
       >
         <X className="size-3.5" aria-hidden="true" />
       </button>

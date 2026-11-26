@@ -45,7 +45,7 @@ export function ThemeToggle({ className, locale }: ThemeToggleProps) {
       aria-label={label}
       title={label}
       className={cn(
-        "focus-visible:ring-ring/50 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-[var(--df-muted-fg)] transition-colors duration-150 hover:bg-[var(--df-muted-2)] hover:text-[var(--df-ink)] focus-visible:ring-2 focus-visible:outline-none",
+        "focus-visible:ring-ring/50 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--df-muted-fg)] transition-colors duration-150 hover:bg-[var(--df-muted)] hover:text-[var(--df-ink)] focus-visible:ring-2 focus-visible:outline-none",
         className,
       )}
     >

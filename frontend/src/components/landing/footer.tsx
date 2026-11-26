@@ -1,9 +1,9 @@
 "use client";
 
 import { GitHubLogoIcon } from "@radix-ui/react-icons";
-import { BookOpen, MessageSquare } from "lucide-react";
+import { ArrowUpRight, BookOpen, Check, Copy, Terminal } from "lucide-react";
 import Link from "next/link";
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   type LandingDocsLang,
@@ -28,6 +28,35 @@ type FooterColumn = {
   links: FooterLink[];
 };
 
+const QUICK_START_COMMANDS =
+  "git clone https://github.com/bytedance/deer-flow.git && cd deer-flow && make dev";
+
+function DeerFlowFooterMark() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+      className="size-6 shrink-0 text-[var(--df-ink)]"
+    >
+      <path
+        d="M4.5 18.5C7.2 16.5 9.6 16.5 12 18C14.4 19.5 16.8 19.5 19.5 17.5"
+        stroke="var(--df-accent)"
+        strokeWidth="1.75"
+        strokeLinecap="round"
+      />
+      <path
+        d="M12 15.25V10.5M12 10.5L7.5 6.5M12 10.5L16.5 6.5M9.5 8.25L8 4.5M14.5 8.25L16 4.5"
+        stroke="currentColor"
+        strokeWidth="1.65"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="5.25" r="1.35" fill="var(--df-accent)" />
+    </svg>
+  );
+}
+
 function getFooterCopy(locale: LandingLocale, docsLang: LandingDocsLang) {
   const isZh = locale === "zh-CN";
 
@@ -43,7 +72,7 @@ function getFooterCopy(locale: LandingLocale, docsLang: LandingDocsLang) {
       ],
     },
     {
-      heading: isZh ? "生态集成" : "Integrations",
+      heading: isZh ? "核心能力" : "Capabilities",
       links: [
         {
           label: isZh ? "模型与服务商" : "Models & Providers",
@@ -121,14 +150,18 @@ function getFooterCopy(locale: LandingLocale, docsLang: LandingDocsLang) {
   ];
 
   return {
-    tagline: isZh
-      ? "开源超级智能体 Harness，集成沙箱、记忆、技能与 MCP 工具。"
-      : "Open-source super agent harness with sandboxes, memory, skills, and MCP tools.",
-    quote: '"Originated from Open Source, give back to Open Source."',
-    license: isZh ? "基于 MIT 许可证开源" : "Licensed under MIT License",
-    githubAriaLabel: isZh ? "DeerFlow GitHub 仓库" : "DeerFlow on GitHub",
-    discussionsAriaLabel: isZh ? "GitHub 讨论区" : "GitHub Discussions",
-    docsAriaLabel: isZh ? "DeerFlow 文档" : "DeerFlow Documentation",
+    mission: isZh
+      ? "面向长周期任务的开源超级智能体 Harness——将隔离沙箱、长期记忆、渐进式技能与子智能体编排融为一体。"
+      : "An open-source super agent harness for long-horizon work — uniting isolated sandboxes, persistent memory, progressive skills, and subagent orchestration.",
+    quickStartEyebrow: isZh ? "本地快速运行" : "RUN LOCALLY",
+    docsLinkLabel: isZh ? "阅读文档" : "Docs",
+    githubLinkLabel: "GitHub",
+    copyCommandAria: isZh ? "复制启动命令" : "Copy quick-start commands",
+    copiedLabel: isZh ? "已复制" : "Copied",
+    license: isZh ? "MIT 开源许可证" : "MIT License",
+    attribution: isZh
+      ? "由 ByteDance 开源并持续维护"
+      : "Open-sourced by ByteDance",
     columns,
   };
 }
@@ -137,58 +170,137 @@ export function Footer({ className, locale }: FooterProps) {
   const { locale: activeLocale, docsLang } = useOptionalLandingLocale(locale);
   const year = useMemo(() => new Date().getFullYear(), []);
   const copy = getFooterCopy(activeLocale, docsLang);
+  const [copied, setCopied] = useState(false);
+  const resetTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (resetTimerRef.current !== null) {
+        window.clearTimeout(resetTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handleCopyCommand = () => {
+    if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) {
+      return;
+    }
+    void navigator.clipboard
+      .writeText(QUICK_START_COMMANDS)
+      .then(() => {
+        setCopied(true);
+        if (resetTimerRef.current !== null) {
+          window.clearTimeout(resetTimerRef.current);
+        }
+        resetTimerRef.current = window.setTimeout(() => {
+          setCopied(false);
+        }, 1800);
+      })
+      .catch(() => {
+        // Ignore clipboard permission errors in restricted contexts.
+      });
+  };
 
   return (
     <footer
       className={cn(
-        "border-t border-[var(--df-border)] bg-[var(--df-bg-soft)] pt-16 pb-8 text-[var(--df-ink)]",
+        "border-t border-[var(--df-border)] bg-[var(--df-bg-soft)] pt-14 pb-10 text-[var(--df-ink)] sm:pt-16",
         className,
       )}
     >
       <div className="mx-auto max-w-[1280px] px-4 sm:px-8 lg:px-12">
-        <div className="grid grid-cols-2 gap-10 md:grid-cols-5">
-          <div className="col-span-2 flex flex-col gap-4 md:col-span-1">
+        {/* Tier 1: Brand mission + inline quick-start card */}
+        <div className="grid grid-cols-1 gap-8 border-b border-[var(--df-border)] pb-12 lg:grid-cols-12 lg:items-center lg:gap-10">
+          <div className="flex flex-col gap-4 lg:col-span-6">
             <Link
               href="/"
-              className="focus-visible:ring-ring/50 w-fit rounded-sm font-serif text-xl font-semibold tracking-tight text-[var(--df-ink)] focus-visible:ring-2 focus-visible:outline-none"
+              className="focus-visible:ring-ring/50 inline-flex w-fit items-center gap-2.5 rounded-sm transition-opacity hover:opacity-80 focus-visible:ring-2 focus-visible:outline-none"
             >
-              DeerFlow
+              <DeerFlowFooterMark />
+              <span className="font-landing-serif text-2xl font-medium tracking-[-0.02em] text-[var(--df-ink)]">
+                DeerFlow
+              </span>
             </Link>
-            <p className="max-w-xs text-sm leading-6 text-[var(--df-muted-fg)]">
-              {copy.tagline}
+            <p className="max-w-md text-sm leading-6 text-[var(--df-muted-fg)] sm:text-[15px]">
+              {copy.mission}
             </p>
-            <div className="flex items-center gap-2">
-              <a
-                href="https://github.com/bytedance/deer-flow"
-                target="_blank"
-                rel="noopener noreferrer"
-                aria-label={copy.githubAriaLabel}
-                className="focus-visible:ring-ring/50 inline-flex h-9 w-9 items-center justify-center rounded-md border border-[var(--df-border)] bg-[var(--df-panel)] text-[var(--df-muted-fg)] transition-colors duration-150 hover:border-[var(--df-border-strong)] hover:text-[var(--df-ink)] focus-visible:ring-2 focus-visible:outline-none"
-              >
-                <GitHubLogoIcon className="size-4" aria-hidden="true" />
-              </a>
-              <a
-                href="https://github.com/bytedance/deer-flow/discussions"
-                target="_blank"
-                rel="noopener noreferrer"
-                aria-label={copy.discussionsAriaLabel}
-                className="focus-visible:ring-ring/50 inline-flex h-9 w-9 items-center justify-center rounded-md border border-[var(--df-border)] bg-[var(--df-panel)] text-[var(--df-muted-fg)] transition-colors duration-150 hover:border-[var(--df-border-strong)] hover:text-[var(--df-ink)] focus-visible:ring-2 focus-visible:outline-none"
-              >
-                <MessageSquare className="size-4" aria-hidden="true" />
-              </a>
-              <Link
-                href={`/${docsLang}/docs`}
-                aria-label={copy.docsAriaLabel}
-                className="focus-visible:ring-ring/50 inline-flex h-9 w-9 items-center justify-center rounded-md border border-[var(--df-border)] bg-[var(--df-panel)] text-[var(--df-muted-fg)] transition-colors duration-150 hover:border-[var(--df-border-strong)] hover:text-[var(--df-ink)] focus-visible:ring-2 focus-visible:outline-none"
-              >
-                <BookOpen className="size-4" aria-hidden="true" />
-              </Link>
-            </div>
           </div>
 
+          <div className="lg:col-span-6">
+            <div className="rounded-xl border border-[var(--df-border)] bg-[var(--df-panel)] p-5 shadow-[0_2px_12px_var(--df-shadow)]">
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 font-mono text-[11px] font-medium tracking-[0.14em] text-[var(--df-accent)] uppercase">
+                  <Terminal className="size-3.5" aria-hidden="true" />
+                  <span>{copy.quickStartEyebrow}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleCopyCommand}
+                  aria-label={copy.copyCommandAria}
+                  className="focus-visible:ring-ring/50 inline-flex h-7 items-center gap-1 rounded-md border border-[var(--df-border-soft)] bg-[var(--df-surface)] px-2 font-mono text-[11px] text-[var(--df-muted-fg)] transition-colors duration-150 hover:border-[var(--df-border-strong)] hover:text-[var(--df-ink)] focus-visible:ring-2 focus-visible:outline-none"
+                >
+                  {copied ? (
+                    <>
+                      <Check
+                        className="size-3 text-[var(--df-accent)]"
+                        aria-hidden="true"
+                      />
+                      <span>{copy.copiedLabel}</span>
+                    </>
+                  ) : (
+                    <Copy className="size-3" aria-hidden="true" />
+                  )}
+                </button>
+              </div>
+
+              <pre className="overflow-x-auto rounded-lg border border-[var(--df-border-soft)] bg-[var(--df-surface)] px-3.5 py-2.5 font-mono text-xs leading-5 text-[var(--df-ink)]">
+                <code>
+                  <span className="text-[var(--df-muted-fg)] select-none">
+                    ${" "}
+                  </span>
+                  git clone https://github.com/bytedance/deer-flow.git
+                  {"\n"}
+                  <span className="text-[var(--df-muted-fg)] select-none">
+                    ${" "}
+                  </span>
+                  cd deer-flow &amp;&amp; make dev
+                </code>
+              </pre>
+
+              <div className="mt-3.5 flex flex-wrap items-center gap-2">
+                <Link
+                  href={`/${docsLang}/docs`}
+                  className="focus-visible:ring-ring/50 inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--df-border)] bg-[var(--df-surface)] px-3 text-xs font-medium text-[var(--df-ink)] transition-colors duration-150 hover:border-[var(--df-border-strong)] hover:bg-[var(--df-muted)] focus-visible:ring-2 focus-visible:outline-none"
+                >
+                  <BookOpen
+                    className="size-3.5 text-[var(--df-accent)]"
+                    aria-hidden="true"
+                  />
+                  <span>{copy.docsLinkLabel}</span>
+                </Link>
+                <a
+                  href="https://github.com/bytedance/deer-flow"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="focus-visible:ring-ring/50 inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--df-border)] bg-[var(--df-surface)] px-3 text-xs font-medium text-[var(--df-ink)] transition-colors duration-150 hover:border-[var(--df-border-strong)] hover:bg-[var(--df-muted)] focus-visible:ring-2 focus-visible:outline-none"
+                >
+                  <GitHubLogoIcon className="size-3.5" aria-hidden="true" />
+                  <span>{copy.githubLinkLabel}</span>
+                  <ArrowUpRight
+                    className="size-3 text-[var(--df-muted-fg)]"
+                    aria-hidden="true"
+                  />
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Tier 2: Balanced 4-column link directory */}
+        <div className="grid grid-cols-2 gap-8 pt-12 sm:grid-cols-4">
           {copy.columns.map((column) => (
             <div key={column.heading} className="flex flex-col gap-3">
-              <h3 className="font-mono text-xs font-semibold tracking-[0.16em] text-[var(--df-ink)] uppercase">
+              <h3 className="font-mono text-[11px] font-semibold tracking-[0.14em] text-[var(--df-ink)] uppercase">
                 {column.heading}
               </h3>
               <ul className="flex flex-col gap-2.5">
@@ -218,13 +330,12 @@ export function Footer({ className, locale }: FooterProps) {
           ))}
         </div>
 
-        <div className="mt-14 flex flex-col items-center justify-between gap-2 border-t border-[var(--df-border)] pt-8 text-center text-xs text-[var(--df-muted-fg)] sm:flex-row sm:text-left">
-          <p className="font-serif text-sm text-[var(--df-text-soft)]">
-            {copy.quote}
+        {/* Bottom bar: MIT license + ByteDance open-source attribution */}
+        <div className="mt-12 flex flex-col items-center justify-between gap-2 border-t border-[var(--df-border)] pt-6 text-center text-xs text-[var(--df-muted-fg)] sm:flex-row sm:text-left">
+          <p className="text-[var(--df-text-soft)]">
+            {copy.license} &middot; {copy.attribution}
           </p>
-          <p>
-            {copy.license} &middot; &copy; {year} DeerFlow
-          </p>
+          <p>&copy; {year} DeerFlow Contributors</p>
         </div>
       </div>
     </footer>

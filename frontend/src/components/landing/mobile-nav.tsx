@@ -79,7 +79,7 @@ export function MobileNav({
 
   const renderLink = (link: MobileNavLink) => {
     const linkClassName =
-      "flex min-h-11 items-center justify-between rounded-md px-2 text-sm font-medium text-[var(--df-text-soft)] transition-colors hover:bg-[var(--df-muted-2)] hover:text-[var(--df-ink)]";
+      "flex min-h-11 items-center justify-between rounded-lg px-2.5 text-sm font-medium text-[var(--df-text-soft)] transition-colors hover:bg-[var(--df-muted)] hover:text-[var(--df-ink)]";
     if (link.external) {
       return (
         <a
@@ -117,7 +117,7 @@ export function MobileNav({
           variant="ghost"
           size="icon"
           aria-label="Open menu"
-          className="h-9 w-9 text-[var(--df-muted-fg)] hover:bg-[var(--df-muted-2)] hover:text-[var(--df-ink)]"
+          className="h-9 w-9 rounded-full text-[var(--df-muted-fg)] hover:bg-[var(--df-muted)] hover:text-[var(--df-ink)]"
         >
           <MenuIcon className="size-5" aria-hidden="true" />
         </Button>
@@ -125,7 +125,7 @@ export function MobileNav({
       <SheetContent
         ref={contentRef}
         side="right"
-        className="w-72 overflow-y-auto border-l border-[var(--df-border)] bg-[var(--df-bg-soft)] text-[var(--df-ink)] sm:w-80"
+        className="w-72 overflow-y-auto border-l border-[var(--df-border)] bg-[var(--df-bg)] text-[var(--df-ink)] sm:w-80"
         aria-describedby={undefined}
         onClick={(event) => {
           // A result at the current hash emits neither pathname nor hashchange.
@@ -159,8 +159,29 @@ export function MobileNav({
         }}
       >
         <SheetHeader className="border-b border-[var(--df-border)] pb-3">
-          <SheetTitle className="font-serif text-xl font-semibold text-[var(--df-ink)]">
-            DeerFlow
+          <SheetTitle className="font-landing-serif flex items-center gap-2 text-xl font-medium tracking-[-0.02em] text-[var(--df-ink)]">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
+              className="size-5 shrink-0 text-[var(--df-ink)]"
+            >
+              <path
+                d="M4.5 18.5C7.2 16.5 9.6 16.5 12 18C14.4 19.5 16.8 19.5 19.5 17.5"
+                stroke="var(--df-accent)"
+                strokeWidth="1.75"
+                strokeLinecap="round"
+              />
+              <path
+                d="M12 15.25V10.5M12 10.5L7.5 6.5M12 10.5L16.5 6.5M9.5 8.25L8 4.5M14.5 8.25L16 4.5"
+                stroke="currentColor"
+                strokeWidth="1.65"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              <circle cx="12" cy="5.25" r="1.35" fill="var(--df-accent)" />
+            </svg>
+            <span>DeerFlow</span>
           </SheetTitle>
         </SheetHeader>
         {search && (
@@ -173,7 +194,7 @@ export function MobileNav({
           {groups && groups.length > 0 ? (
             groups.map((group) => (
               <div key={group.title} className="flex flex-col gap-1">
-                <p className="px-2 font-mono text-[10px] font-medium tracking-[0.2em] text-[var(--df-muted-fg)] uppercase">
+                <p className="px-2.5 font-mono text-[10px] font-medium tracking-[0.18em] text-[var(--df-muted-fg)] uppercase">
                   {group.title}
                 </p>
                 <div className="flex flex-col">
@@ -196,7 +217,7 @@ export function MobileNav({
                 target="_blank"
                 rel="noopener noreferrer"
                 onClick={() => setOpen(false)}
-                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong)] px-3 text-sm font-medium text-[var(--df-ink)] transition-colors hover:bg-[var(--df-muted-2)]"
+                className="inline-flex min-h-11 items-center justify-center gap-2 rounded-full border border-[var(--df-border-strong)] bg-[var(--df-panel)] px-4 text-sm font-medium text-[var(--df-ink)] transition-colors hover:bg-[var(--df-muted)]"
               >
                 <GitHubLogoIcon className="size-4" aria-hidden="true" />
                 <span>{githubLabel}</span>
@@ -204,7 +225,7 @@ export function MobileNav({
               <Link
                 href="/workspace/chats/new"
                 onClick={() => setOpen(false)}
-                className="inline-flex min-h-11 items-center justify-center rounded-md bg-[var(--df-cta)] px-3 text-sm font-medium text-[var(--df-cta-fg)] transition-colors hover:bg-[var(--df-cta-hover)]"
+                className="inline-flex min-h-11 items-center justify-center rounded-full bg-[var(--df-cta)] px-4 text-sm font-medium text-[var(--df-cta-fg)] transition-colors hover:bg-[var(--df-cta-hover)]"
               >
                 {getStartedLabel}
               </Link>

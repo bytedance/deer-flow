@@ -75,7 +75,7 @@ export function LanguageSwitch({ className, locale }: LanguageSwitchProps) {
           type="button"
           aria-label={triggerAriaLabel}
           className={cn(
-            "focus-visible:ring-ring/50 inline-flex h-9 shrink-0 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-[var(--df-muted-fg)] transition-colors duration-150 hover:bg-[var(--df-muted-2)] hover:text-[var(--df-ink)] focus-visible:ring-2 focus-visible:outline-none data-[state=open]:bg-[var(--df-muted-2)] data-[state=open]:text-[var(--df-ink)]",
+            "focus-visible:ring-ring/50 inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium text-[var(--df-muted-fg)] transition-colors duration-150 hover:bg-[var(--df-muted)] hover:text-[var(--df-ink)] focus-visible:ring-2 focus-visible:outline-none data-[state=open]:bg-[var(--df-muted)] data-[state=open]:text-[var(--df-ink)]",
             className,
           )}
         >
@@ -87,7 +87,7 @@ export function LanguageSwitch({ className, locale }: LanguageSwitchProps) {
       <DropdownMenuContent
         align="end"
         sideOffset={8}
-        className="w-44 rounded-lg border border-[var(--df-border)] bg-[var(--df-bg-soft)] p-1.5 text-[var(--df-ink)] shadow-[0_12px_36px_var(--df-shadow)]"
+        className="w-44 rounded-xl border border-[var(--df-border)] bg-[var(--df-panel)] p-1.5 text-[var(--df-ink)] shadow-[0_14px_38px_var(--df-shadow)]"
       >
         {LANGUAGE_OPTIONS.map((option) => {
           const isActive = option.locale === activeLocale;
@@ -96,8 +96,8 @@ export function LanguageSwitch({ className, locale }: LanguageSwitchProps) {
               key={option.locale}
               onSelect={() => handleSelect(option.locale)}
               className={cn(
-                "flex items-center justify-between rounded-md px-2.5 py-2 text-sm text-[var(--df-ink)] transition-colors focus:bg-[var(--df-muted-2)] focus:text-[var(--df-ink)]",
-                isActive && "bg-[var(--df-muted)] font-medium",
+                "flex items-center justify-between rounded-lg px-2.5 py-2 text-sm text-[var(--df-ink)] transition-colors focus:bg-[var(--df-muted)] focus:text-[var(--df-ink)]",
+                isActive && "bg-[var(--df-accent-soft)] font-medium",
               )}
             >
               <span className="flex items-center gap-2">

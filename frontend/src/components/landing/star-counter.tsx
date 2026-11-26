@@ -44,7 +44,7 @@ export function StarCounter({ className }: StarCounterProps) {
   return (
     <span className={cn("inline-flex items-center gap-1", className)}>
       <StarFilledIcon
-        className="size-3.5 text-[var(--df-accent)] transition-colors duration-150 group-hover:text-amber-500"
+        className="size-3.5 text-[var(--df-accent)] transition-colors duration-150 group-hover:text-[var(--df-accent-strong)]"
         aria-hidden="true"
       />
       <NumberTicker

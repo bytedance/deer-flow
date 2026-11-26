@@ -188,7 +188,7 @@ describe("AnnouncementBanner", () => {
     const { unmount } = render(<AnnouncementBanner />);
     expect(
       document.documentElement.style.getPropertyValue("--df-header-height"),
-    ).toBe("105px");
+    ).toBe("100px");
 
     fireEvent.click(
       screen.getByRole("button", { name: "Dismiss announcement" }),
@@ -203,7 +203,7 @@ describe("AnnouncementBanner", () => {
     );
     expect(
       document.documentElement.style.getPropertyValue("--df-header-height"),
-    ).toBe("65px");
+    ).toBe("64px");
 
     unmount();
     render(<AnnouncementBanner />);
@@ -216,8 +216,8 @@ describe("AnnouncementBanner", () => {
 });
 
 describe("Header & Footer shell", () => {
-  it("renders brand, grouped menus, search slot, banner, and Get Started CTA", () => {
-    render(
+  it("renders announcement strip above main nav, grouped menus, search slot, and 2-tier editorial footer", () => {
+    const { container } = render(
       <LandingLocaleProvider initialLocale="en-US">
         <Header
           showBanner
@@ -232,6 +232,14 @@ describe("Header & Footer shell", () => {
     expect(screen.getByRole("button", { name: "Integrations" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Developers" })).toBeTruthy();
     expect(screen.getByLabelText("Search docs")).toBeTruthy();
+
+    const bannerRegion = screen.getByRole("region");
+    const mainNav = screen.getByRole("navigation", { name: "Main navigation" });
+    expect(
+      bannerRegion.compareDocumentPosition(mainNav) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
     expect(
       screen.getByRole("button", { name: "Dismiss announcement" }),
     ).toBeTruthy();
@@ -243,5 +251,15 @@ describe("Header & Footer shell", () => {
     expect(quickStart.getAttribute("href")).toBe(
       "/en/docs/application/quick-start",
     );
+
+    // 2-tier editorial footer: inline quick-start card, 4 columns, MIT + ByteDance attribution
+    expect(container.textContent).toContain("git clone");
+    expect(container.textContent).toContain("make dev");
+    expect(screen.getByRole("heading", { name: "Product" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Capabilities" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Developers" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Community" })).toBeTruthy();
+    expect(container.textContent).toContain("MIT License");
+    expect(container.textContent).toContain("ByteDance");
   });
 });
