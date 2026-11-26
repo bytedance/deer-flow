@@ -55,6 +55,12 @@ def test_address_is_public_rejects_non_public_ipv4_inside_ipv6_spellings() -> No
         "::ffff:0:a9fe:a9fe",  # IPv4-translated (SIIT) metadata spelling
         "2002:a9fe:a9fe::1",
         "::2",  # IPv4-compatible this-network block, not a unicast target
+        # RFC 8215 local-use translation prefix: rejected explicitly, without
+        # relying on the interpreter classification that changed in 3.12.4.
+        "64:ff9b:1::1",
+        "64:ff9b:1::a9fe:a9fe",
+        "64:ff9b:1:42::a9fe:a9fe",
+        "64:ff9b:1::808:808",  # even a public IPv4 spelling must not egress
     ):
         assert not network_proxy.address_is_public(address)
     # 6to4 carrying a public IPv4 target follows the interpreter's outer
@@ -73,6 +79,14 @@ def test_address_is_public_rejects_non_public_ipv4_inside_ipv6_spellings() -> No
     # check: 64:ff9b::c612:105 carries 198.18.1.5.
     assert not network_proxy.address_is_public("64:ff9b::c612:105")
     assert network_proxy.address_is_public("64:ff9b::c612:105", allow_synthetic_dns=True)
+
+
+def test_local_use_nat64_prefix_rejected_independent_of_interpreter_flags(monkeypatch) -> None:
+    # Simulate a pre-3.12.4 interpreter (gh-113171) that reports the RFC 8215
+    # local-use range as global; the explicit rejection must still hold.
+    monkeypatch.setattr(ipaddress.IPv6Address, "is_global", property(lambda self: True))
+    for address in ("64:ff9b:1::1", "64:ff9b:1::a9fe:a9fe", "64:ff9b:1::808:808"):
+        assert not network_proxy.address_is_public(address)
 
 
 def test_policy_denial_and_temporary_or_sandbox_grants(tmp_path, monkeypatch) -> None:

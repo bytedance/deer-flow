@@ -114,6 +114,12 @@ def address_is_public(address: str, *, allow_synthetic_dns: bool = False) -> boo
     except ValueError:
         return False
     if isinstance(parsed, ipaddress.IPv6Address):
+        # The RFC 8215 local-use translation prefix must never egress. CPython
+        # classifies it as non-global only from 3.12.4 (gh-113171), and the
+        # sidecar image can pin an older interpreter, so reject it explicitly
+        # instead of relying on the interpreter's classification.
+        if parsed in ipaddress.ip_network("64:ff9b:1::/48"):
+            return False
         embedded = _embedded_ipv4(parsed)
         # NAT64 (64:ff9b::/96) and IPv4-compatible (::a.b.c.d) spellings report
         # is_global, so the flags below cannot catch a loopback, private or
