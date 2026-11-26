@@ -5667,6 +5667,78 @@ def _seed_branchable_thread(app: FastAPI, thread_id: str) -> None:
     asyncio.run(_seed(initial.config))
 
 
+@pytest.mark.parametrize("failure", ["metadata", "head", "cleanup", "commit_ack"])
+def test_branch_write_failure_keeps_checkpoints_owned(tmp_path, monkeypatch, failure):
+    app = _build_project_threads_app(tmp_path)
+    store, saver = app.state.thread_store, app.state.checkpointer
+    source = "source-branch-failure"
+    branch_ids = set()
+    writes = []
+    injected = []
+    create, put = store.create, saver.aput
+
+    async def create_row(thread_id, **kwargs):
+        branch_ids.add(thread_id)
+        if failure == "metadata":
+            injected.append("metadata")
+            raise RuntimeError("metadata insert failed")
+        record = await create(thread_id, **kwargs)
+        if failure == "commit_ack":
+            injected.append("commit_ack")
+            raise RuntimeError("lost metadata commit acknowledgement")
+        return record
+
+    async def put_checkpoint(config, *args, **kwargs):
+        branch_ids.add(config["configurable"]["thread_id"])
+        if writes and failure in ("head", "cleanup"):
+            injected.append("head")
+            raise RuntimeError("branch head write failed")
+        result = await put(config, *args, **kwargs)
+        writes.append(result)
+        return result
+
+    async def fail_cleanup(thread_id):
+        assert thread_id in branch_ids
+        injected.append("cleanup")
+        raise RuntimeError("checkpoint store unavailable on delete")
+
+    with TestClient(app) as client:
+        assert client.post("/api/threads", json={"thread_id": source}).status_code == 200
+        _seed_branchable_thread(app, source)
+        config = {"configurable": {"thread_id": source}}
+        original_head = asyncio.run(saver.aget_tuple(config))
+        with monkeypatch.context() as faults:
+            faults.setattr(store, "create", create_row)
+            faults.setattr(saver, "aput", put_checkpoint)
+            if failure == "cleanup":
+                faults.setattr(saver, "adelete_thread", fail_cleanup)
+            response = client.post(f"/api/threads/{source}/branches", json={"message_id": "ai-1"})
+        (child,) = branch_ids
+        assert child != source
+        row = asyncio.run(store.get(child, user_id=None))
+        head = asyncio.run(saver.aget_tuple({"configurable": {"thread_id": child}}))
+        assert asyncio.run(saver.aget_tuple(config)).config == original_head.config
+        if failure == "commit_ack":
+            assert injected == ["commit_ack"]
+            assert response.status_code == 200, response.text
+            assert response.json()["thread_id"] == child
+            assert row is not None and head is not None
+        else:
+            assert response.status_code == 500, response.text
+            if failure == "cleanup":
+                assert injected == ["head", "cleanup"]
+                assert row is not None and head is not None
+                assert client.delete(f"/api/threads/{child}").status_code == 200
+            else:
+                assert injected == [failure]
+                assert len(writes) == (0 if failure == "metadata" else 1)
+            assert asyncio.run(store.get(child, user_id=None)) is None
+            assert asyncio.run(saver.aget_tuple({"configurable": {"thread_id": child}})) is None
+            retry = client.post(f"/api/threads/{source}/branches", json={"message_id": "ai-1"})
+            assert retry.status_code == 200, retry.text
+            assert retry.json()["thread_id"] != child
+
+
 def test_branch_inherits_source_project_membership(tmp_path):
     """A branch of a project thread stays in the source thread's project.
 

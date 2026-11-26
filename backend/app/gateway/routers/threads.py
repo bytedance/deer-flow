@@ -1272,26 +1272,6 @@ async def _branch_thread_with_reservation(
         "created_at": now,
     }
     new_config.setdefault("metadata", {}).update(checkpoint_metadata_updates)
-    try:
-        head_config = new_config
-        if replay_base_tuple is not None:
-            head_config = await branch_accessor.aupdate(
-                new_config,
-                branch_values(replay_base_tuple),
-                as_node="branch",
-            )
-            head_config.setdefault("metadata", {}).update(checkpoint_metadata_updates)
-        await branch_accessor.aupdate(
-            head_config,
-            branch_values(snapshot, replaces=replay_base_tuple),
-            as_node="branch",
-        )
-    except _CHECKPOINT_MODE_ERRORS as exc:
-        raise _checkpoint_mode_http_error(exc, new_thread_id) from exc
-    except Exception:
-        logger.exception("Failed to write branch checkpoint for thread %s", sanitize_log_param(new_thread_id))
-        raise HTTPException(status_code=500, detail="Failed to create branch") from None
-
     branch_assistant_id = source_record.get("assistant_id")
     try:
         custom_agent_name(branch_assistant_id)
@@ -1313,17 +1293,52 @@ async def _branch_thread_with_reservation(
         except ProjectNotAssignableError:
             raise
         except Exception:
-            logger.exception("Failed to write branch thread_meta for %s", sanitize_log_param(new_thread_id))
-            raise HTTPException(status_code=500, detail="Failed to create branch") from None
+            # An insert can commit before the caller receives its acknowledgement.
+            # Only resume if this owner's row describes this exact branch attempt.
+            record = await thread_store.get(new_thread_id, **thread_owner_kwargs)
+            if record is None or not all((record.get("metadata") or {}).get(key) == value for key, value in branch_metadata.items()):
+                raise
+            return record
 
-    try:
-        branch_record = await _write_branch_row(source_project_id)
-    except ProjectNotAssignableError:
-        # The source project became unassignable (archived, or deleted in a
-        # race that cleared the source row's membership after our read): keep
-        # the branch usable as an unassigned thread — the pre-inheritance
-        # behavior for sources without an active project.
-        branch_record = await _write_branch_row(None)
+    async def _persist_branch() -> dict:
+        try:
+            record = await _write_branch_row(source_project_id)
+        except ProjectNotAssignableError:
+            # The source project was archived or deleted after the source read.
+            record = await _write_branch_row(None)
+        try:
+            head_config = new_config
+            if replay_base_tuple is not None:
+                head_config = await branch_accessor.aupdate(
+                    new_config,
+                    branch_values(replay_base_tuple),
+                    as_node="branch",
+                )
+                head_config.setdefault("metadata", {}).update(checkpoint_metadata_updates)
+            await branch_accessor.aupdate(
+                head_config,
+                branch_values(snapshot, replaces=replay_base_tuple),
+                as_node="branch",
+            )
+        except (Exception, asyncio.CancelledError):
+            try:
+                # A failed head write may already have persisted the replay base.
+                # Keep the owner row if checkpoint removal itself fails.
+                await get_checkpointer(request).adelete_thread(new_thread_id)
+                await thread_store.delete(new_thread_id, **thread_owner_kwargs)
+            except Exception:
+                logger.exception("Failed to clean up incomplete branch %s", sanitize_log_param(new_thread_id))
+            raise
+        return record
+
+    async with reserve_checkpoint_write(request, new_thread_id, user_id=thread_owner_user_id or get_effective_user_id()):
+        try:
+            branch_record = await await_drained(_persist_branch())
+        except _CHECKPOINT_MODE_ERRORS as exc:
+            raise _checkpoint_mode_http_error(exc, new_thread_id) from exc
+        except Exception:
+            logger.exception("Failed to persist branch %s", sanitize_log_param(new_thread_id))
+            raise HTTPException(status_code=500, detail="Failed to create branch") from None
 
     # The thread feed (GET /messages, /messages/page) reads the run-event
     # store, not checkpoints, and a fresh branch has no run_events — so the
