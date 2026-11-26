@@ -785,22 +785,27 @@ class FeishuChannel(Channel):
         """
         await self._create_notification_message(receive_id, receive_id_type, "interactive", self._build_card_content(text_markdown), delivery_id)
 
-    async def _create_notification_message(self, receive_id, receive_id_type, msg_type, content, delivery_id):
-        if not self.is_running or not self._api_client:
+    async def _create_notification_message(self, receive_id: str, receive_id_type: Literal["open_id", "chat_id"], msg_type: str, content: str, delivery_id: str | None) -> None:
+        client = self._api_client
+        if not self.is_running or not client:
             raise ChannelUnavailable("Feishu channel is not running")
-        from requests.exceptions import ConnectionError as RequestsConnectionError
-        from requests.exceptions import Timeout as RequestsTimeout
-
         body = self._CreateMessageRequestBody.builder().receive_id(receive_id).msg_type(msg_type).content(content)
         if delivery_id is not None:
             body.uuid(delivery_id)
         request = self._CreateMessageRequest.builder().receive_id_type(receive_id_type).request_body(body.build()).build()
-        try:
-            response = await asyncio.to_thread(self._api_client.im.v1.message.create, request)
-        except (RequestsConnectionError, RequestsTimeout, ConnectionError, TimeoutError, OSError) as exc:
-            raise ChannelUnavailable("Feishu notification transport is unavailable") from exc
+        response = await self._call_notification_sdk(lambda: client.im.v1.message.create(request))
         if not response.success():
             raise RuntimeError(f"Feishu notification rejected: code={response.code}")
+
+    @staticmethod
+    async def _call_notification_sdk(call: Callable[[], _T]) -> _T:
+        from requests.exceptions import ConnectionError as RequestsConnectionError
+        from requests.exceptions import Timeout as RequestsTimeout
+
+        try:
+            return await asyncio.to_thread(call)
+        except (RequestsConnectionError, RequestsTimeout, ConnectionError, TimeoutError, OSError) as exc:
+            raise ChannelUnavailable("Feishu notification transport is unavailable") from exc
 
     async def send_group_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
         if self._connection_repo is None or not owner_user_id:
@@ -874,7 +879,7 @@ class FeishuChannel(Channel):
             with BytesIO(content) as stream:
                 return self._upload_file_stream(stream, filename, self._file_type(PurePosixPath(filename).suffix.lower()))
 
-        response = await asyncio.to_thread(upload)
+        response = await self._call_notification_sdk(upload)
         if not response.success():
             raise RuntimeError(f"Feishu attachment upload rejected: code={response.code}")
         return self._uploaded_key(response, "file")

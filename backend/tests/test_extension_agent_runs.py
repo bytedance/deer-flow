@@ -1494,7 +1494,21 @@ async def test_bound_channel_grant_is_invalid_after_reconnect_and_owner_can_reau
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("delivery", ["retry", "rebind", "mute"])
+@pytest.mark.parametrize(
+    "delivery",
+    [
+        "retry",
+        "rebind",
+        "mute",
+        "muted-at-settlement",
+        "mute-reenable-during-binding-lookup",
+        "preference-unavailable-after-binding-lookup",
+        "mute-reenable-during-artifact-read",
+        "mute-reenable-during-upload",
+        "upload-transport-down",
+        "upload-rejected",
+    ],
+)
 async def test_feishu_private_task_receipt_and_proactive_delivery(worker_gateway, monkeypatch, tmp_path, delivery):
     import asyncio
     import json
@@ -1507,6 +1521,7 @@ async def test_feishu_private_task_receipt_and_proactive_delivery(worker_gateway
     from langchain_core.outputs import ChatGeneration, LLMResult
     from langgraph.types import Command
     from lark_oapi.api.im import v1
+    from requests.exceptions import Timeout as RequestsTimeout
     from sqlalchemy import select
 
     from app.channels.feishu import FeishuChannel
@@ -1516,7 +1531,7 @@ async def test_feishu_private_task_receipt_and_proactive_delivery(worker_gateway
     from deerflow.config.paths import get_paths
     from deerflow.persistence.notification_deliveries import NotificationDeliveryRepository
     from deerflow.persistence.notification_deliveries.model import NotificationDeliveryRow
-    from deerflow.persistence.user.im_notifications import ImNotificationPreferencesRepository
+    from deerflow.persistence.user.im_notifications import DISABLED_BY_OWNER, ImNotificationPreferencesRepository
 
     client, _, state, entered, owner = worker_gateway
     tasks = state.coordination_workers
@@ -1541,7 +1556,8 @@ async def test_feishu_private_task_receipt_and_proactive_delivery(worker_gateway
 
     sent, uploads, receipts = [], [], asyncio.Queue()
     loop_thread = threading.get_ident()
-    rejected = False
+    rejected = delivery != "retry"
+    upload_failure = delivery if delivery in ("upload-transport-down", "upload-rejected") else None
 
     def transport(method, url, *, data, params, **kwargs):
         nonlocal rejected
@@ -1552,6 +1568,10 @@ async def test_feishu_private_task_receipt_and_proactive_delivery(worker_gateway
             return SimpleNamespace(status_code=200, headers={}, content=b'{"code":0,"tenant_access_token":"test-token","expire":7200}')
         if url.endswith("/files"):
             uploads.append(data.to_string())
+            if upload_failure == "upload-transport-down":
+                raise RequestsTimeout("Feishu upload temporarily unavailable")
+            if upload_failure == "upload-rejected":
+                code = 230020
             payload = {"file_key": f"file-{len(uploads)}"}
         elif url.endswith("/messages") and (body := json.loads(data)).get("uuid"):
             assert params == [("receive_id_type", "chat_id")]
@@ -1589,13 +1609,48 @@ async def test_feishu_private_task_receipt_and_proactive_delivery(worker_gateway
     message = SimpleNamespace(chat_id="oc_private", message_id="om_start", chat_type="p2p", message_type="text", content=json.dumps({"text": "/task start Write a report"}))
     event = SimpleNamespace(event=SimpleNamespace(message=message, sender=SimpleNamespace(sender_id=SimpleNamespace(open_id="ou_test"))))
 
+    binding_lookups = 0
+
+    async def lookup_bindings(user_id):
+        nonlocal binding_lookups
+        bindings = await connections.list_connections(user_id)
+        binding_lookups += 1
+        if delivery == "mute-reenable-during-binding-lookup" and binding_lookups == 2:
+            await preferences.patch(owner, {"feishu": False})
+            # Reopening restores preferences, but the claimed rows must stay revoked.
+            await preferences.patch(owner, {"feishu": True})
+        return bindings
+
+    async def resolve_preferences(user_id):
+        if delivery == "preference-unavailable-after-binding-lookup" and binding_lookups == 2:
+            raise RuntimeError("preference store unavailable")
+        return await preferences.get(user_id)
+
+    async def read_artifact(*args):
+        artifact = await tasks.repo.read_artifact(*args)
+        if delivery == "mute-reenable-during-artifact-read":
+            await preferences.patch(owner, {"feishu": False})
+            await preferences.patch(owner, {"feishu": True})
+        return artifact
+
+    upload_attachment = channel.upload_task_attachment
+
+    async def upload_with_opt_out(**kwargs):
+        key = await upload_attachment(**kwargs)
+        await preferences.patch(owner, {"feishu": False})
+        await preferences.patch(owner, {"feishu": True})
+        return key
+
+    if delivery == "mute-reenable-during-upload":
+        monkeypatch.setattr(channel, "upload_task_attachment", upload_with_opt_out)
+
     def worker():
         return NotificationDeliveryWorker(
             delivery_repo=outbox,
             resolve_channel=lambda _: channel,
-            resolve_connections=connections.list_connections,
-            resolve_notification_preferences=preferences.get,
-            read_coordination_artifact=tasks.repo.read_artifact,
+            resolve_connections=lookup_bindings,
+            resolve_notification_preferences=resolve_preferences,
+            read_coordination_artifact=read_artifact,
         )
 
     await channels.manager.start()
@@ -1607,6 +1662,8 @@ async def test_feishu_private_task_receipt_and_proactive_delivery(worker_gateway
         await asyncio.wait_for(entered.wait(), 5)
         await worker().run_once(now=datetime.now(UTC))
         assert sent == uploads == []
+        if delivery == "muted-at-settlement":
+            await preferences.patch(owner, {"feishu": False})
         state.release_worker.set()
         final = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
         assert "channel_origin" not in final["task"]
@@ -1619,11 +1676,47 @@ async def test_feishu_private_task_receipt_and_proactive_delivery(worker_gateway
             await connections.upsert_connection(**binding)
         if delivery == "mute":
             await preferences.patch(owner, {"feishu": False})
+        if delivery == "muted-at-settlement":
+            await preferences.patch(owner, {"feishu": True})
         await worker().run_once(now=datetime.now(UTC))
+        async with sessions() as session:
+            rows = (await session.scalars(select(NotificationDeliveryRow).filter_by(source_kind="coordination_task").order_by(NotificationDeliveryRow.created_at))).all()
+        if upload_failure is not None:
+            assert len(uploads) == 2
+            assert [message["msg_type"] for message in sent] == ["interactive"]
+            assert len(rows) == 3
+            counters = (0, 1) if upload_failure == "upload-transport-down" else (1, 0)
+            assert [(row.status, row.attempts, row.parked_attempts) for row in rows[1:]] == [("pending", *counters)] * 2
+            upload_failure = None
+            await worker().run_once(now=datetime.now(UTC) + timedelta(minutes=16))
+            assert sorted(message["msg_type"] for message in sent) == ["file", "file", "interactive"]
+            return
+        if delivery == "preference-unavailable-after-binding-lookup":
+            assert [message["msg_type"] for message in sent] == ["file", "file"]
+            assert len(rows) == 3
+            card = rows[0]
+            assert (card.status, card.attempts, card.parked_attempts) == ("pending", 0, 1)
+            assert card.last_error == "could not verify notification preference"
+            return
+        if delivery in ("mute-reenable-during-artifact-read", "mute-reenable-during-upload"):
+            assert [message["msg_type"] for message in sent] == ["interactive"]
+            assert len(uploads) == (1 if delivery == "mute-reenable-during-upload" else 0)
+            assert len(rows) == 3
+            assert all((row.status, row.last_error, row.claim_token) == ("failed", DISABLED_BY_OWNER, None) for row in rows[1:])
+            return
         if delivery != "retry":
             assert sent == uploads == []
+            if delivery == "muted-at-settlement":
+                assert rows == []
+            else:
+                assert len(rows) == 3
+                assert all(row.status == "failed" and row.claim_token is None for row in rows)
+                if delivery != "rebind":
+                    assert all(row.last_error == DISABLED_BY_OWNER for row in rows)
             return
 
+        assert len(rows) == 3
+        assert sorted((row.status, row.attempts, row.parked_attempts) for row in rows) == [("pending", 1, 0), ("sent", 0, 0), ("sent", 0, 0)]
         await worker().run_once(now=datetime.now(UTC) + timedelta(minutes=2))
         assert all(body["receive_id"] == "oc_private" for body in sent)
         cards = [body for body in sent if body["msg_type"] == "interactive"]

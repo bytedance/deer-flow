@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.coordination.model import TASK_NOTIFICATION_SOURCE, CoordinationInputRow, CoordinationTaskRow, TaskStatus
 from deerflow.persistence.notification_deliveries import NotificationDeliveryRepository
+from deerflow.persistence.user.im_notifications import ImNotificationPreferencesRepository
 from deerflow.utils.time import coerce_iso
 
 _OPEN = {TaskStatus.QUEUED, TaskStatus.RUNNING}
@@ -268,11 +269,15 @@ class CoordinationTaskRepository:
         origin = task.channel_origin
         if origin is None:
             return
+        provider = origin["provider"]
+        preferences = await ImNotificationPreferencesRepository.get_in_session(session, task.owner_id, lock_owner=True)
+        if not preferences.get(provider, False):
+            return
         outbox = NotificationDeliveryRepository(self._sessions)
         fields = {
             "source_kind": TASK_NOTIFICATION_SOURCE,
             "event": task.status,
-            "provider": origin["provider"],
+            "provider": provider,
             "target": origin["account_id"],
             "owner_user_id": task.owner_id,
         }

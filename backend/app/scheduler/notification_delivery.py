@@ -434,7 +434,7 @@ class NotificationDeliveryWorker:
             return
         await self._delivery_repo.mark_sent(delivery_id, claim_token=delivery.get("claim_token"))
 
-    async def _check_target(self, delivery) -> bool:
+    async def _check_target(self, delivery: dict[str, Any]) -> bool:
         # A revoked binding terminates delivery. An unavailable lookup parks it.
         connected = await self._target_still_connected(delivery)
         if connected is True:
@@ -443,12 +443,17 @@ class NotificationDeliveryWorker:
         await self._delivery_repo.mark_failed(delivery["id"], claim_token=delivery.get("claim_token"), error=error, count_attempt=connected is False, terminal=connected is False)
         return False
 
+    async def _coordination_delivery_is_current(self, delivery: dict[str, Any]) -> bool:
+        # A binding lookup can overlap with opt-out, which clears the claim
+        # even if the owner enables notifications again before we resume.
+        return await self._check_target(delivery) and await self._check_notification_preference(delivery) and await self._delivery_repo.is_active_claim(delivery["id"], claim_token=delivery.get("claim_token"))
+
     async def _send_coordination_delivery(self, delivery, channel) -> bool:
         payload = delivery["payload"]
         chat_id = payload["origin"]["chat_id"]
         delivery_id = delivery["id"]
         if "artifact_id" not in payload:
-            if not await self._check_target(delivery):
+            if not await self._coordination_delivery_is_current(delivery):
                 return False
             notice = f"Task ID: {payload['task_id']}\nStatus: {delivery['event']}"
             if payload["attachment_count"]:
@@ -468,14 +473,12 @@ class NotificationDeliveryWorker:
         if not content or len(content) > 30 * 1024 * 1024:
             await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error="Unsupported Feishu attachment size", terminal=True)
             return False
-        if not await self._check_target(delivery) or not await self._check_notification_preference(delivery):
+        if not await self._coordination_delivery_is_current(delivery):
             return False
         file_key = await channel.upload_task_attachment(path=path, content=content)
         # Upload can take time. Verify the destination and the claim again
         # before committing the file message to the original private chat.
-        if not await self._check_target(delivery) or not await self._check_notification_preference(delivery):
-            return False
-        if not await self._delivery_repo.is_active_claim(delivery_id, claim_token=delivery.get("claim_token")):
+        if not await self._coordination_delivery_is_current(delivery):
             return False
         await channel.send_task_attachment(chat_id=chat_id, file_key=file_key, delivery_id=delivery_id)
         return True
