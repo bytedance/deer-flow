@@ -153,11 +153,11 @@ export function SandboxSection({
     >
       <div className="grid grid-cols-1 items-start gap-8 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)] lg:gap-12">
         {/* Left: Editorial Terminal Panel */}
-        <div className="min-w-0 overflow-hidden rounded-md border border-[var(--df-border,#d8d0c2)] bg-[var(--df-panel,#fffaf1)]">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--df-border,#d8d0c2)] bg-[var(--df-muted,#f4edde)]/60 px-4 py-2.5">
-            <div className="flex min-w-0 items-center gap-2 font-mono text-xs text-[var(--df-muted-fg,#625b50)]">
+        <div className="min-w-0 overflow-hidden rounded-md border border-[var(--df-border)] bg-[var(--df-panel)]">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--df-border)] bg-[var(--df-muted)]/60 px-4 py-2.5">
+            <div className="flex min-w-0 items-center gap-2 font-mono text-xs text-[var(--df-muted-fg)]">
               <TerminalIcon
-                className="size-3.5 shrink-0 text-[var(--df-accent,#0a7c93)]"
+                className="size-3.5 shrink-0 text-[var(--df-accent)]"
                 aria-hidden="true"
               />
               <span className="truncate">{activeScene.cwd}</span>
@@ -180,8 +180,8 @@ export function SandboxSection({
                     className={cn(
                       "focus-visible:ring-ring/50 min-h-[30px] rounded border px-2.5 py-0.5 font-mono text-[11px] font-medium transition-colors duration-150 focus-visible:ring-2 focus-visible:outline-none",
                       isSelected
-                        ? "border-[var(--df-accent,#0a7c93)] bg-[var(--df-panel,#fffaf1)] text-[var(--df-ink,#171511)]"
-                        : "border-transparent text-[var(--df-muted-fg,#625b50)] hover:text-[var(--df-ink,#171511)]",
+                        ? "border-[var(--df-accent)] bg-[var(--df-panel)] text-[var(--df-ink)]"
+                        : "border-transparent text-[var(--df-muted-fg)] hover:text-[var(--df-ink)]",
                     )}
                   >
                     {scene.tabLabel}
@@ -198,23 +198,23 @@ export function SandboxSection({
                   {line.kind === "command" && (
                     <>
                       <span
-                        className="shrink-0 font-semibold text-[var(--df-accent,#0a7c93)] select-none"
+                        className="shrink-0 font-semibold text-[var(--df-accent)] select-none"
                         aria-hidden="true"
                       >
                         $
                       </span>
-                      <span className="font-medium text-[var(--df-ink,#171511)]">
+                      <span className="font-medium text-[var(--df-ink)]">
                         {line.text}
                       </span>
                     </>
                   )}
                   {line.kind === "output" && (
-                    <span className="pl-4 text-[var(--df-muted-fg,#625b50)]">
+                    <span className="pl-4 text-[var(--df-muted-fg)]">
                       {line.text}
                     </span>
                   )}
                   {line.kind === "info" && (
-                    <span className="pl-4 text-[var(--df-accent,#0a7c93)]">
+                    <span className="pl-4 text-[var(--df-accent)]">
                       {line.text}
                     </span>
                   )}
@@ -232,27 +232,27 @@ export function SandboxSection({
         {/* Right: Runtime Details & Capability Chips */}
         <div className="min-w-0 space-y-6">
           <div className="space-y-3">
-            <p className="font-mono text-xs font-medium tracking-[0.2em] text-[var(--df-accent,#0a7c93)] uppercase">
+            <p className="font-mono text-xs font-medium tracking-[0.2em] text-[var(--df-accent)] uppercase">
               {copy.runtimeLabel}
             </p>
-            <h3 className="text-xl font-semibold tracking-tight text-[var(--df-ink,#171511)] sm:text-2xl">
+            <h3 className="text-xl font-semibold tracking-tight text-[var(--df-ink)] sm:text-2xl">
               <a
                 href="https://github.com/agent-infra/sandbox"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="focus-visible:ring-ring/50 inline-flex items-center gap-1.5 rounded transition-colors duration-150 hover:text-[var(--df-accent,#0a7c93)] focus-visible:ring-2 focus-visible:outline-none"
+                className="focus-visible:ring-ring/50 inline-flex items-center gap-1.5 rounded transition-colors duration-150 hover:text-[var(--df-accent)] focus-visible:ring-2 focus-visible:outline-none"
               >
                 <span>{copy.runtimeTitle}</span>
                 <ArrowUpRight className="size-4" aria-hidden="true" />
               </a>
             </h3>
-            <p className="text-sm leading-7 text-[var(--df-muted-fg,#625b50)] sm:text-base">
+            <p className="text-sm leading-7 text-[var(--df-muted-fg)] sm:text-base">
               {copy.runtimePrefix}
               <a
                 href="https://github.com/agent-infra/sandbox"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="font-medium text-[var(--df-ink,#171511)] underline decoration-[var(--df-border-strong,#bdb3a2)] underline-offset-4 transition-colors duration-150 hover:text-[var(--df-accent,#0a7c93)] hover:decoration-[var(--df-accent,#0a7c93)]"
+                className="font-medium text-[var(--df-ink)] underline decoration-[var(--df-border-strong)] underline-offset-4 transition-colors duration-150 hover:text-[var(--df-accent)] hover:decoration-[var(--df-accent)]"
               >
                 {copy.runtimeLinkText}
               </a>
@@ -260,20 +260,20 @@ export function SandboxSection({
             </p>
           </div>
 
-          <div className="rounded-md border border-[var(--df-border,#d8d0c2)] bg-[var(--df-panel,#fffaf1)] p-4">
-            <p className="font-mono text-[11px] font-medium tracking-[0.16em] text-[var(--df-muted-fg,#625b50)] uppercase">
+          <div className="rounded-md border border-[var(--df-border)] bg-[var(--df-panel)] p-4">
+            <p className="font-mono text-[11px] font-medium tracking-[0.16em] text-[var(--df-muted-fg)] uppercase">
               {copy.mountsHeading}
             </p>
-            <dl className="mt-3 space-y-2 border-l border-[var(--df-border-soft,#ded6c7)] pl-3.5">
+            <dl className="mt-3 space-y-2 border-l border-[var(--df-border-soft)] pl-3.5">
               {copy.mounts.map((mount) => (
                 <div
                   key={mount.path}
                   className="flex flex-col gap-0.5 sm:flex-row sm:items-baseline sm:justify-between sm:gap-4"
                 >
-                  <dt className="font-mono text-xs font-medium break-all text-[var(--df-ink,#171511)]">
+                  <dt className="font-mono text-xs font-medium break-all text-[var(--df-ink)]">
                     {mount.path}
                   </dt>
-                  <dd className="text-xs text-[var(--df-muted-fg,#625b50)]">
+                  <dd className="text-xs text-[var(--df-muted-fg)]">
                     {mount.note}
                   </dd>
                 </div>
@@ -285,7 +285,7 @@ export function SandboxSection({
             {copy.tags.map((tag) => (
               <span
                 key={tag}
-                className="rounded border border-[var(--df-border,#d8d0c2)] bg-[var(--df-surface,#fbf6ec)] px-2.5 py-1 font-mono text-xs text-[var(--df-text-soft,#3a352d)]"
+                className="rounded border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 py-1 font-mono text-xs text-[var(--df-text-soft)]"
               >
                 {tag}
               </span>
@@ -295,7 +295,7 @@ export function SandboxSection({
           <div>
             <Link
               href={`/${lang}/docs/harness/sandbox`}
-              className="focus-visible:ring-ring/50 inline-flex items-center gap-1.5 rounded font-mono text-xs font-medium text-[var(--df-accent,#0a7c93)] transition-colors duration-150 hover:text-[var(--df-accent-strong,#086a7e)] focus-visible:ring-2 focus-visible:outline-none"
+              className="focus-visible:ring-ring/50 inline-flex items-center gap-1.5 rounded font-mono text-xs font-medium text-[var(--df-accent)] transition-colors duration-150 hover:text-[var(--df-accent-strong)] focus-visible:ring-2 focus-visible:outline-none"
             >
               <span>{copy.docsLink}</span>
               <ArrowUpRight className="size-3.5" aria-hidden="true" />

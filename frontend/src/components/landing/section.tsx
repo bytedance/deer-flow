@@ -31,10 +31,8 @@ export function Section({
     <section
       id={id}
       className={cn(
-        "w-full min-w-0 scroll-mt-[var(--df-header-height,105px)] border-t border-[var(--df-border,#d8d0c2)] py-20 text-[var(--df-ink,#171511)] sm:py-28",
-        variant === "soft"
-          ? "bg-[var(--df-bg-soft,#fbf7ee)]"
-          : "bg-[var(--df-bg,#f6f2e8)]",
+        "w-full min-w-0 scroll-mt-[var(--df-header-height)] border-t border-[var(--df-border)] py-20 text-[var(--df-ink)] sm:py-28",
+        variant === "soft" ? "bg-[var(--df-bg-soft)]" : "bg-[var(--df-bg)]",
         className,
       )}
     >
@@ -43,17 +41,17 @@ export function Section({
           className={cn(
             "flex flex-col",
             isCentered ? "items-center text-center" : "items-start text-left",
-            headerBorder && "border-b border-[var(--df-border,#d8d0c2)] pb-8",
+            headerBorder && "border-b border-[var(--df-border)] pb-8",
           )}
         >
           {eyebrow && (
-            <p className="font-mono text-xs font-medium tracking-[0.24em] text-[var(--df-accent,#0a7c93)] uppercase">
+            <p className="font-mono text-xs font-medium tracking-[0.24em] text-[var(--df-accent)] uppercase">
               {eyebrow}
             </p>
           )}
           <h2
             className={cn(
-              "max-w-full text-2xl font-semibold tracking-tight break-words text-[var(--df-ink,#171511)] sm:text-3xl",
+              "max-w-full text-2xl font-semibold tracking-tight break-words text-[var(--df-ink)] sm:text-3xl",
               eyebrow && "mt-3",
             )}
           >
@@ -62,7 +60,7 @@ export function Section({
           {subtitle && (
             <div
               className={cn(
-                "mt-3 max-w-2xl text-sm leading-7 break-words text-[var(--df-muted-fg,#625b50)] sm:text-base",
+                "mt-3 max-w-2xl text-sm leading-7 break-words text-[var(--df-muted-fg)] sm:text-base",
                 isCentered && "mx-auto",
               )}
             >

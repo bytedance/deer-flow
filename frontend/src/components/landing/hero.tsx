@@ -122,7 +122,7 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
   return (
     <section
       className={cn(
-        "relative flex min-h-[100svh] w-full flex-col justify-center overflow-x-clip bg-[var(--df-bg,#f6f2e8)] pt-[var(--df-header-height,105px)] text-[var(--df-ink,#171511)]",
+        "relative flex min-h-[100svh] w-full flex-col justify-center overflow-x-clip bg-[var(--df-bg)] pt-[var(--df-header-height)] text-[var(--df-ink)]",
         className,
       )}
     >
@@ -130,31 +130,26 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
       <div
         aria-hidden="true"
         className="landing-grid-bg pointer-events-none absolute inset-0 z-0"
-        style={{
-          backgroundImage:
-            "linear-gradient(90deg, var(--df-grid, rgba(35, 31, 25, 0.055)) 1px, transparent 1px), linear-gradient(var(--df-grid-soft, rgba(35, 31, 25, 0.045)) 1px, transparent 1px)",
-          backgroundSize: "72px 72px",
-        }}
       />
       {/* Soft vignette beneath the sticky header */}
       <div
         aria-hidden="true"
-        className="pointer-events-none absolute inset-x-0 top-0 z-0 h-40 bg-gradient-to-b from-[var(--df-bg,#f6f2e8)] to-transparent"
+        className="pointer-events-none absolute inset-x-0 top-0 z-0 h-40 bg-gradient-to-b from-[var(--df-bg)] to-transparent"
       />
 
       <div className="relative z-10 mx-auto w-full max-w-[1520px] px-4 py-10 sm:px-10 sm:py-14 lg:px-14 xl:px-20 2xl:px-24">
         <div className="grid grid-cols-1 items-center gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(460px,540px)] lg:gap-10 xl:grid-cols-[minmax(0,1fr)_560px] xl:gap-16">
           {/* Left column: editorial copy, live metrics, entry-point CTAs */}
           <div className="flex min-w-0 flex-col items-center text-center lg:items-start lg:text-left">
-            <p className="font-mono text-xs font-medium tracking-[0.26em] text-[var(--df-accent,#0a7c93)] uppercase">
+            <p className="font-mono text-xs font-medium tracking-[0.26em] text-[var(--df-accent)] uppercase">
               {copy.eyebrow}
             </p>
 
-            <h1 className="mt-4 font-serif text-[2.25rem] leading-[1.02] font-semibold tracking-normal text-balance text-[var(--df-ink,#171511)] sm:text-[3.1rem] lg:text-[3.4rem] xl:text-[3.85rem]">
+            <h1 className="mt-4 font-serif text-[2.25rem] leading-[1.02] font-semibold tracking-normal text-balance text-[var(--df-ink)] sm:text-[3.1rem] lg:text-[3.4rem] xl:text-[3.85rem]">
               {copy.headline}
             </h1>
 
-            <p className="mt-5 max-w-xl text-sm leading-6 text-[var(--df-muted-fg,#625b50)] sm:text-base sm:leading-7">
+            <p className="mt-5 max-w-xl text-sm leading-6 text-[var(--df-muted-fg)] sm:text-base sm:leading-7">
               {copy.description}
             </p>
 
@@ -163,7 +158,7 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
                 href="https://byteplus.com"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="focus-visible:ring-ring/50 mt-5 inline-flex min-h-9 items-center gap-2 rounded-full border border-[var(--df-border-strong,#bdb3a2)] bg-[var(--df-panel,#fffaf1)]/85 px-3.5 py-1.5 text-xs font-medium text-[var(--df-text-soft,#3a352d)] transition-colors duration-150 hover:border-[var(--df-accent,#0a7c93)] hover:text-[var(--df-ink,#171511)] focus-visible:ring-2 focus-visible:outline-none"
+                className="focus-visible:ring-ring/50 mt-5 inline-flex min-h-9 items-center gap-2 rounded-full border border-[var(--df-border-strong)] bg-[var(--df-panel)]/85 px-3.5 py-1.5 text-xs font-medium text-[var(--df-text-soft)] transition-colors duration-150 hover:border-[var(--df-accent)] hover:text-[var(--df-ink)] focus-visible:ring-2 focus-visible:outline-none"
               >
                 <span>{copy.partnership}</span>
                 <BytePlusIcon className="h-3.5 w-auto" />
@@ -189,14 +184,14 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
                   >
                     <span className="inline-flex items-center gap-1.5">
                       <Star
-                        className="size-4 text-[var(--df-accent,#0a7c93)]"
+                        className="size-4 text-[var(--df-accent)]"
                         aria-hidden="true"
                       />
-                      <span className="font-mono text-xl leading-none font-semibold text-[var(--df-ink,#171511)] tabular-nums transition-colors group-hover:text-[var(--df-accent,#0a7c93)]">
+                      <span className="font-mono text-xl leading-none font-semibold text-[var(--df-ink)] tabular-nums transition-colors group-hover:text-[var(--df-accent)]">
                         {formatMetricCount(stats.stars)}
                       </span>
                     </span>
-                    <span className="mt-1.5 text-xs text-[var(--df-muted-fg,#625b50)]">
+                    <span className="mt-1.5 text-xs text-[var(--df-muted-fg)]">
                       {copy.starsLabel}
                     </span>
                   </a>
@@ -205,7 +200,7 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
                 {stats.stars !== null && stats.forks !== null && (
                   <div
                     aria-hidden="true"
-                    className="w-px self-stretch bg-[var(--df-border,#d8d0c2)]"
+                    className="w-px self-stretch bg-[var(--df-border)]"
                   />
                 )}
 
@@ -219,14 +214,14 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
                   >
                     <span className="inline-flex items-center gap-1.5">
                       <GitFork
-                        className="size-4 text-[var(--df-accent,#0a7c93)]"
+                        className="size-4 text-[var(--df-accent)]"
                         aria-hidden="true"
                       />
-                      <span className="font-mono text-xl leading-none font-semibold text-[var(--df-ink,#171511)] tabular-nums transition-colors group-hover:text-[var(--df-accent,#0a7c93)]">
+                      <span className="font-mono text-xl leading-none font-semibold text-[var(--df-ink)] tabular-nums transition-colors group-hover:text-[var(--df-accent)]">
                         {formatMetricCount(stats.forks)}
                       </span>
                     </span>
-                    <span className="mt-1.5 text-xs text-[var(--df-muted-fg,#625b50)]">
+                    <span className="mt-1.5 text-xs text-[var(--df-muted-fg)]">
                       {copy.forksLabel}
                     </span>
                   </a>
@@ -238,7 +233,7 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
             <div className="mt-8 grid w-full max-w-md grid-cols-2 gap-2.5 sm:flex sm:w-auto sm:max-w-none sm:flex-wrap sm:items-center sm:justify-center sm:gap-3 lg:justify-start">
               <Link
                 href="/workspace/chats/new"
-                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-[var(--df-cta,#0a7c93)] px-4 text-sm font-medium whitespace-nowrap text-[var(--df-cta-fg,#ffffff)] shadow-[0_4px_14px_-5px_color-mix(in_srgb,var(--df-cta,#0a7c93)_60%,transparent)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-[var(--df-cta-hover,#086a7e)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
+                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-[var(--df-cta)] px-4 text-sm font-medium whitespace-nowrap text-[var(--df-cta-fg)] shadow-[0_4px_14px_-5px_color-mix(in_srgb,var(--df-cta)_60%,transparent)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-[var(--df-cta-hover)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
               >
                 <span>{copy.getStarted}</span>
                 <ArrowRight className="size-4 shrink-0" aria-hidden="true" />
@@ -246,7 +241,7 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
 
               <Link
                 href={`/${docsLang}/docs/application/quick-start`}
-                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong,#bdb3a2)] bg-transparent px-4 text-sm font-medium whitespace-nowrap text-[var(--df-ink,#171511)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[var(--df-cta,#0a7c93)] hover:bg-[var(--df-cta,#0a7c93)] hover:text-[var(--df-cta-fg,#ffffff)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
+                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong)] bg-transparent px-4 text-sm font-medium whitespace-nowrap text-[var(--df-ink)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[var(--df-cta)] hover:bg-[var(--df-cta)] hover:text-[var(--df-cta-fg)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
               >
                 <Terminal className="size-4 shrink-0" aria-hidden="true" />
                 <span>{copy.quickStart}</span>
@@ -254,7 +249,7 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
 
               <Link
                 href={`/${docsLang}/docs`}
-                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong,#bdb3a2)] bg-transparent px-4 text-sm font-medium whitespace-nowrap text-[var(--df-ink,#171511)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[var(--df-cta,#0a7c93)] hover:bg-[var(--df-cta,#0a7c93)] hover:text-[var(--df-cta-fg,#ffffff)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
+                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong)] bg-transparent px-4 text-sm font-medium whitespace-nowrap text-[var(--df-ink)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[var(--df-cta)] hover:bg-[var(--df-cta)] hover:text-[var(--df-cta-fg)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
               >
                 <BookOpen className="size-4 shrink-0" aria-hidden="true" />
                 <span>{copy.docs}</span>
@@ -264,7 +259,7 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
                 href="https://github.com/bytedance/deer-flow"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong,#bdb3a2)] bg-transparent px-4 text-sm font-medium whitespace-nowrap text-[var(--df-ink,#171511)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[var(--df-cta,#0a7c93)] hover:bg-[var(--df-cta,#0a7c93)] hover:text-[var(--df-cta-fg,#ffffff)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
+                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong)] bg-transparent px-4 text-sm font-medium whitespace-nowrap text-[var(--df-ink)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[var(--df-cta)] hover:bg-[var(--df-cta)] hover:text-[var(--df-cta-fg)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
               >
                 <GitHubLogoIcon
                   className="size-4 shrink-0"

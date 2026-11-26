@@ -223,39 +223,6 @@ const DIAGRAM_COPY: Record<ArchitectureLocale, DiagramCopy> = {
   },
 };
 
-const ARCH_ANIMATION_CSS = `
-@keyframes df-arch-marquee-y {
-  0% { transform: translateY(0); }
-  100% { transform: translateY(-50%); }
-}
-@keyframes df-arch-marquee-x {
-  0% { transform: translateX(0); }
-  100% { transform: translateX(-50%); }
-}
-@keyframes df-arch-beam-slide {
-  0% { transform: translateX(-100%); opacity: 0; }
-  20% { opacity: 0.9; }
-  80% { opacity: 0.9; }
-  100% { transform: translateX(480%); opacity: 0; }
-}
-.df-arch-track-y {
-  animation: df-arch-marquee-y 26s linear infinite;
-}
-.df-arch-track-x {
-  animation: df-arch-marquee-x 26s linear infinite;
-}
-.df-arch-beam-pulse {
-  animation: df-arch-beam-slide 3.6s ease-in-out infinite;
-}
-@media (prefers-reduced-motion: reduce) {
-  .df-arch-track-y,
-  .df-arch-track-x,
-  .df-arch-beam-pulse {
-    animation: none !important;
-  }
-}
-`;
-
 export function ArchitectureDiagram({
   className,
   locale = "en-US",
@@ -275,36 +242,28 @@ export function ArchitectureDiagram({
       id="architecture"
       aria-label={copy.regionLabel}
       className={cn(
-        "relative w-full min-w-0 scroll-mt-[var(--df-header-height,105px)]",
+        "relative w-full min-w-0 scroll-mt-[var(--df-header-height)]",
         className,
       )}
     >
-      <style>{ARCH_ANIMATION_CSS}</style>
-
       {/* Desktop 3-part Integrations -> Hub -> Harness Tree */}
       <div className="relative hidden min-h-[360px] items-center sm:grid sm:grid-cols-[minmax(0,10.5rem)_auto_minmax(0,1fr)] sm:gap-6">
         {/* Horizontal connecting beam */}
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-x-10 top-1/2 z-0 h-px -translate-y-1/2 overflow-hidden bg-[color-mix(in_srgb,var(--df-accent,#0a7c93)_32%,transparent)]"
+          className="pointer-events-none absolute inset-x-10 top-1/2 z-0 h-px -translate-y-1/2 overflow-hidden bg-[color-mix(in_srgb,var(--df-accent)_32%,transparent)]"
         >
-          <span className="hero-beam-pulse df-arch-beam-pulse block h-full w-24 bg-gradient-to-r from-transparent via-[var(--df-accent,#0a7c93)] to-transparent" />
+          <span className="hero-beam-pulse block h-full w-24 bg-gradient-to-r from-transparent via-[var(--df-accent)] to-transparent" />
         </div>
 
         {/* Col 1: Vertical masked integration marquee */}
         <div
           aria-label={copy.integrationsLabel}
           className="hero-marquee-mask group/marquee-y relative z-10 h-[348px] overflow-hidden"
-          style={{
-            maskImage:
-              "linear-gradient(to bottom, transparent, black 14%, black 86%, transparent)",
-            WebkitMaskImage:
-              "linear-gradient(to bottom, transparent, black 14%, black 86%, transparent)",
-          }}
         >
           <div
             className={cn(
-              "df-arch-track-y flex flex-col group-hover/marquee-y:[animation-play-state:paused]",
+              "hero-marquee-y flex flex-col group-hover/marquee-y:[animation-play-state:paused]",
               selectedNode !== null && "[animation-play-state:paused]",
             )}
           >
@@ -332,25 +291,25 @@ export function ArchitectureDiagram({
                       className={cn(
                         "focus-visible:ring-ring/50 mb-2.5 flex h-12 w-full items-center gap-2.5 rounded-[2px] border px-2.5 text-left transition-colors duration-150 focus-visible:ring-2 focus-visible:outline-none",
                         isActive
-                          ? "border-[var(--df-accent,#0a7c93)] bg-[var(--df-panel,#fffaf1)]"
-                          : "border-[var(--df-border,#d8d0c2)] bg-[var(--df-surface,#fbf6ec)] hover:border-[var(--df-accent,#0a7c93)]/60 hover:bg-[var(--df-panel,#fffaf1)]",
+                          ? "border-[var(--df-accent)] bg-[var(--df-panel)]"
+                          : "border-[var(--df-border)] bg-[var(--df-surface)] hover:border-[var(--df-accent)]/60 hover:bg-[var(--df-panel)]",
                       )}
                     >
                       <span
                         className={cn(
                           "flex size-7 shrink-0 items-center justify-center rounded-[2px] border transition-colors duration-150",
                           isActive
-                            ? "border-[var(--df-accent,#0a7c93)]/40 bg-[color-mix(in_srgb,var(--df-accent,#0a7c93)_12%,transparent)] text-[var(--df-accent,#0a7c93)]"
-                            : "border-[var(--df-border-soft,#ded6c7)] bg-[var(--df-panel,#fffaf1)] text-[var(--df-text-soft,#3a352d)]",
+                            ? "border-[var(--df-accent)]/40 bg-[color-mix(in_srgb,var(--df-accent)_12%,transparent)] text-[var(--df-accent)]"
+                            : "border-[var(--df-border-soft)] bg-[var(--df-panel)] text-[var(--df-text-soft)]",
                         )}
                       >
                         <Icon className="size-3.5" aria-hidden="true" />
                       </span>
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate text-xs leading-tight font-semibold text-[var(--df-ink,#171511)]">
+                        <span className="block truncate text-xs leading-tight font-semibold text-[var(--df-ink)]">
                           {tile.title}
                         </span>
-                        <span className="block truncate font-mono text-[10px] leading-tight text-[var(--df-muted-fg,#625b50)]">
+                        <span className="block truncate font-mono text-[10px] leading-tight text-[var(--df-muted-fg)]">
                           {tile.subtitle}
                         </span>
                       </span>
@@ -369,21 +328,21 @@ export function ArchitectureDiagram({
         >
           <div
             className={cn(
-              "relative flex size-16 items-center justify-center rounded-full border bg-[var(--df-bg,#f6f2e8)] transition-colors duration-200 sm:size-20",
+              "relative flex size-16 items-center justify-center rounded-full border bg-[var(--df-bg)] transition-colors duration-200 sm:size-20",
               activeNode !== null
-                ? "border-[var(--df-accent,#0a7c93)]/70 shadow-[0_0_46px_color-mix(in_srgb,var(--df-accent,#0a7c93)_28%,transparent)]"
-                : "border-[var(--df-accent,#0a7c93)]/40 shadow-[0_0_42px_color-mix(in_srgb,var(--df-accent,#0a7c93)_20%,transparent)]",
+                ? "border-[var(--df-accent)]/70 shadow-[0_0_46px_color-mix(in_srgb,var(--df-accent)_28%,transparent)]"
+                : "border-[var(--df-accent)]/40 shadow-[0_0_42px_color-mix(in_srgb,var(--df-accent)_20%,transparent)]",
             )}
           >
             <span
               aria-hidden="true"
-              className="pointer-events-none absolute -inset-3 rounded-full border border-[color-mix(in_srgb,var(--df-accent,#0a7c93)_16%,transparent)]"
+              className="pointer-events-none absolute -inset-3 rounded-full border border-[color-mix(in_srgb,var(--df-accent)_16%,transparent)]"
             />
             <span
               aria-hidden="true"
-              className="pointer-events-none absolute -inset-[22px] rounded-full border border-[color-mix(in_srgb,var(--df-accent,#0a7c93)_9%,transparent)]"
+              className="pointer-events-none absolute -inset-[22px] rounded-full border border-[color-mix(in_srgb,var(--df-accent)_9%,transparent)]"
             />
-            <DeerFlowEmblem className="size-8 text-[var(--df-ink,#171511)] sm:size-9" />
+            <DeerFlowEmblem className="size-8 text-[var(--df-ink)] sm:size-9" />
           </div>
         </div>
 
@@ -401,16 +360,10 @@ export function ArchitectureDiagram({
         <div
           aria-label={copy.integrationsLabel}
           className="hero-marquee-mask-x group/marquee-x relative w-full min-w-0 overflow-hidden"
-          style={{
-            maskImage:
-              "linear-gradient(to right, transparent, black 10%, black 90%, transparent)",
-            WebkitMaskImage:
-              "linear-gradient(to right, transparent, black 10%, black 90%, transparent)",
-          }}
         >
           <div
             className={cn(
-              "df-arch-track-x flex w-max items-center group-hover/marquee-x:[animation-play-state:paused]",
+              "hero-marquee-x flex w-max items-center group-hover/marquee-x:[animation-play-state:paused]",
               selectedNode !== null && "[animation-play-state:paused]",
             )}
           >
@@ -434,20 +387,20 @@ export function ArchitectureDiagram({
                       className={cn(
                         "focus-visible:ring-ring/50 mr-2.5 flex h-11 shrink-0 items-center gap-2 rounded-[2px] border px-3 text-left transition-colors duration-150 focus-visible:ring-2 focus-visible:outline-none",
                         isActive
-                          ? "border-[var(--df-accent,#0a7c93)] bg-[var(--df-panel,#fffaf1)]"
-                          : "border-[var(--df-border,#d8d0c2)] bg-[var(--df-surface,#fbf6ec)]",
+                          ? "border-[var(--df-accent)] bg-[var(--df-panel)]"
+                          : "border-[var(--df-border)] bg-[var(--df-surface)]",
                       )}
                     >
                       <Icon
                         className={cn(
                           "size-3.5 shrink-0",
                           isActive
-                            ? "text-[var(--df-accent,#0a7c93)]"
-                            : "text-[var(--df-text-soft,#3a352d)]",
+                            ? "text-[var(--df-accent)]"
+                            : "text-[var(--df-text-soft)]",
                         )}
                         aria-hidden="true"
                       />
-                      <span className="text-xs font-semibold whitespace-nowrap text-[var(--df-ink,#171511)]">
+                      <span className="text-xs font-semibold whitespace-nowrap text-[var(--df-ink)]">
                         {tile.title}
                       </span>
                     </button>
@@ -483,13 +436,13 @@ function HarnessTreeCard({
   return (
     <div
       aria-label={copy.treeLabel}
-      className="relative z-10 w-full min-w-0 overflow-hidden rounded-[2px] border border-[var(--df-border,#d8d0c2)] bg-[var(--df-panel,#fffaf1)] p-4 text-left shadow-[0_1px_2px_var(--df-shadow,rgba(40,33,24,0.06))]"
+      className="relative z-10 w-full min-w-0 overflow-hidden rounded-[2px] border border-[var(--df-border)] bg-[var(--df-panel)] p-4 text-left shadow-[0_1px_2px_var(--df-shadow)]"
     >
-      <div className="font-mono text-xs font-semibold tracking-tight text-[var(--df-accent,#0a7c93)]">
+      <div className="font-mono text-xs font-semibold tracking-tight text-[var(--df-accent)]">
         deerflow://
       </div>
 
-      <div className="mt-2.5 border-l border-[var(--df-border-soft,#ded6c7)] pl-3">
+      <div className="mt-2.5 border-l border-[var(--df-border-soft)] pl-3">
         {/* thread/<thread_id>/ */}
         <button
           type="button"
@@ -502,24 +455,21 @@ function HarnessTreeCard({
           className={cn(
             "focus-visible:ring-ring/50 flex w-full min-w-0 flex-wrap items-baseline gap-x-2 rounded-[2px] px-1.5 py-0.5 text-left transition-colors duration-150 focus-visible:ring-2 focus-visible:outline-none",
             activeNode === "thread"
-              ? "bg-[var(--df-muted,#f4edde)]"
-              : "hover:bg-[var(--df-muted,#f4edde)]/70",
+              ? "bg-[var(--df-muted)]"
+              : "hover:bg-[var(--df-muted)]/70",
           )}
         >
-          <span className="font-mono text-xs font-medium text-[var(--df-ink,#171511)]">
+          <span className="font-mono text-xs font-medium text-[var(--df-ink)]">
             thread/
-            <span className="text-[var(--df-accent,#0a7c93)]">
-              &lt;thread_id&gt;
-            </span>
-            /
+            <span className="text-[var(--df-accent)]">&lt;thread_id&gt;</span>/
           </span>
-          <span className="text-[11px] leading-5 text-[var(--df-muted-fg,#625b50)]">
+          <span className="text-[11px] leading-5 text-[var(--df-muted-fg)]">
             {copy.threadAnnotation}
           </span>
         </button>
 
         {/* Nested thread resources */}
-        <ul className="mt-1 ml-1.5 space-y-0.5 border-l border-[var(--df-border-soft,#ded6c7)] pl-3">
+        <ul className="mt-1 ml-1.5 space-y-0.5 border-l border-[var(--df-border-soft)] pl-3">
           {copy.treeEntries.map((entry) => {
             const isActive = activeNode === entry.id;
             return (
@@ -535,21 +485,21 @@ function HarnessTreeCard({
                   className={cn(
                     "focus-visible:ring-ring/50 flex w-full min-w-0 flex-wrap items-baseline gap-x-2.5 rounded-[2px] px-1.5 py-0.5 text-left transition-colors duration-150 focus-visible:ring-2 focus-visible:outline-none",
                     isActive
-                      ? "bg-[var(--df-muted,#f4edde)]"
-                      : "hover:bg-[var(--df-muted,#f4edde)]/70",
+                      ? "bg-[var(--df-muted)]"
+                      : "hover:bg-[var(--df-muted)]/70",
                   )}
                 >
                   <span
                     className={cn(
                       "shrink-0 font-mono text-xs",
                       isActive
-                        ? "font-semibold text-[var(--df-accent,#0a7c93)]"
-                        : "text-[var(--df-ink,#171511)]",
+                        ? "font-semibold text-[var(--df-accent)]"
+                        : "text-[var(--df-ink)]",
                     )}
                   >
                     {entry.path}
                   </span>
-                  <span className="min-w-0 text-[11px] leading-5 text-[var(--df-muted-fg,#625b50)]">
+                  <span className="min-w-0 text-[11px] leading-5 text-[var(--df-muted-fg)]">
                     {entry.description}
                   </span>
                 </button>
@@ -570,21 +520,21 @@ function HarnessTreeCard({
           className={cn(
             "focus-visible:ring-ring/50 mt-1.5 flex w-full min-w-0 flex-wrap items-baseline gap-x-2.5 rounded-[2px] px-1.5 py-0.5 text-left transition-colors duration-150 focus-visible:ring-2 focus-visible:outline-none",
             activeNode === "channels"
-              ? "bg-[var(--df-muted,#f4edde)]"
-              : "hover:bg-[var(--df-muted,#f4edde)]/70",
+              ? "bg-[var(--df-muted)]"
+              : "hover:bg-[var(--df-muted)]/70",
           )}
         >
           <span
             className={cn(
               "shrink-0 font-mono text-xs",
               activeNode === "channels"
-                ? "font-semibold text-[var(--df-accent,#0a7c93)]"
-                : "text-[var(--df-ink,#171511)]",
+                ? "font-semibold text-[var(--df-accent)]"
+                : "text-[var(--df-ink)]",
             )}
           >
             channels/
           </span>
-          <span className="min-w-0 text-[11px] leading-5 text-[var(--df-muted-fg,#625b50)]">
+          <span className="min-w-0 text-[11px] leading-5 text-[var(--df-muted-fg)]">
             {copy.channelsDescription}
           </span>
         </button>
@@ -619,11 +569,11 @@ function DeerFlowEmblem({ className }: { className?: string }) {
       />
       <path
         d="M14 13.8V8.2M22 13.8V8.2"
-        stroke="var(--df-accent,#0a7c93)"
+        stroke="var(--df-accent)"
         strokeWidth="2"
         strokeLinecap="round"
       />
-      <circle cx="18" cy="30" r="2" fill="var(--df-accent,#0a7c93)" />
+      <circle cx="18" cy="30" r="2" fill="var(--df-accent)" />
     </svg>
   );
 }

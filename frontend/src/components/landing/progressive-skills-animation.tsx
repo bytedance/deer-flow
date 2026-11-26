@@ -364,27 +364,24 @@ export default function ProgressiveSkillsAnimation({
     <div
       ref={containerRef}
       className={cn(
-        "w-full min-w-0 overflow-hidden rounded-md border border-[var(--df-border,#d8d0c2)] bg-[var(--df-panel,#fffaf1)]",
+        "w-full min-w-0 overflow-hidden rounded-md border border-[var(--df-border)] bg-[var(--df-panel)]",
         className,
       )}
     >
       {/* Top Toolbar */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--df-border,#d8d0c2)] bg-[var(--df-muted,#f4edde)]/65 px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--df-border)] bg-[var(--df-muted)]/65 px-4 py-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <span
-            className="size-2 shrink-0 rounded-full bg-[var(--df-accent,#0a7c93)]"
+            className="size-2 shrink-0 rounded-full bg-[var(--df-accent)]"
             aria-hidden="true"
           />
-          <span className="font-mono text-xs font-medium text-[var(--df-ink,#171511)]">
+          <span className="font-mono text-xs font-medium text-[var(--df-ink)]">
             {copy.agentLabel}
           </span>
-          <span
-            className="text-[var(--df-border-strong,#bdb3a2)]"
-            aria-hidden="true"
-          >
+          <span className="text-[var(--df-border-strong)]" aria-hidden="true">
             /
           </span>
-          <span className="truncate font-mono text-xs text-[var(--df-accent,#0a7c93)]">
+          <span className="truncate font-mono text-xs text-[var(--df-accent)]">
             {copy.phaseStatus[phase]}
           </span>
         </div>
@@ -406,8 +403,8 @@ export default function ProgressiveSkillsAnimation({
                   className={cn(
                     "focus-visible:ring-ring/50 min-h-[32px] rounded border px-2.5 py-1 font-mono text-[11px] font-medium transition-colors duration-150 focus-visible:ring-2 focus-visible:outline-none",
                     isSelected
-                      ? "border-[var(--df-accent,#0a7c93)] bg-[var(--df-accent,#0a7c93)] text-[var(--df-cta-fg,#ffffff)]"
-                      : "border-[var(--df-border,#d8d0c2)] bg-[var(--df-panel,#fffaf1)] text-[var(--df-muted-fg,#625b50)] hover:border-[var(--df-accent,#0a7c93)]/60 hover:text-[var(--df-ink,#171511)]",
+                      ? "border-[var(--df-accent)] bg-[var(--df-accent)] text-[var(--df-cta-fg)]"
+                      : "border-[var(--df-border)] bg-[var(--df-panel)] text-[var(--df-muted-fg)] hover:border-[var(--df-accent)]/60 hover:text-[var(--df-ink)]",
                   )}
                 >
                   {stage.label}
@@ -421,7 +418,7 @@ export default function ProgressiveSkillsAnimation({
               type="button"
               onClick={handleTogglePlay}
               aria-label={isPlaying ? copy.pause : copy.play}
-              className="focus-visible:ring-ring/50 inline-flex min-h-[32px] items-center gap-1.5 rounded border border-[var(--df-border-strong,#bdb3a2)] bg-[var(--df-panel,#fffaf1)] px-2.5 py-1 font-mono text-xs font-medium text-[var(--df-ink,#171511)] transition-colors duration-150 hover:border-[var(--df-accent,#0a7c93)] hover:text-[var(--df-accent,#0a7c93)] focus-visible:ring-2 focus-visible:outline-none"
+              className="focus-visible:ring-ring/50 inline-flex min-h-[32px] items-center gap-1.5 rounded border border-[var(--df-border-strong)] bg-[var(--df-panel)] px-2.5 py-1 font-mono text-xs font-medium text-[var(--df-ink)] transition-colors duration-150 hover:border-[var(--df-accent)] hover:text-[var(--df-accent)] focus-visible:ring-2 focus-visible:outline-none"
             >
               {isPlaying ? (
                 <Pause className="size-3.5" aria-hidden="true" />
@@ -435,7 +432,7 @@ export default function ProgressiveSkillsAnimation({
               type="button"
               onClick={handleReset}
               aria-label={copy.replay}
-              className="focus-visible:ring-ring/50 inline-flex min-h-[32px] items-center justify-center rounded border border-[var(--df-border,#d8d0c2)] bg-[var(--df-panel,#fffaf1)] px-2 py-1 text-[var(--df-muted-fg,#625b50)] transition-colors duration-150 hover:border-[var(--df-accent,#0a7c93)] hover:text-[var(--df-ink,#171511)] focus-visible:ring-2 focus-visible:outline-none"
+              className="focus-visible:ring-ring/50 inline-flex min-h-[32px] items-center justify-center rounded border border-[var(--df-border)] bg-[var(--df-panel)] px-2 py-1 text-[var(--df-muted-fg)] transition-colors duration-150 hover:border-[var(--df-accent)] hover:text-[var(--df-ink)] focus-visible:ring-2 focus-visible:outline-none"
             >
               <RotateCcw className="size-3.5" aria-hidden="true" />
             </button>
@@ -444,14 +441,14 @@ export default function ProgressiveSkillsAnimation({
       </div>
 
       {/* Main Split Content */}
-      <div className="grid grid-cols-1 divide-y divide-[var(--df-border,#d8d0c2)] lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] lg:divide-x lg:divide-y-0">
+      <div className="grid grid-cols-1 divide-y divide-[var(--df-border)] lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] lg:divide-x lg:divide-y-0">
         {/* Left: Progressive File Tree */}
-        <div className="min-w-0 bg-[var(--df-surface,#fbf6ec)] p-4 sm:p-6">
-          <div className="mb-3 flex items-center justify-between gap-2 border-b border-[var(--df-border-soft,#ded6c7)] pb-2.5">
-            <span className="font-mono text-xs font-semibold text-[var(--df-accent,#0a7c93)]">
+        <div className="min-w-0 bg-[var(--df-surface)] p-4 sm:p-6">
+          <div className="mb-3 flex items-center justify-between gap-2 border-b border-[var(--df-border-soft)] pb-2.5">
+            <span className="font-mono text-xs font-semibold text-[var(--df-accent)]">
               {copy.treeHeader}
             </span>
-            <span className="font-mono text-[11px] text-[var(--df-muted-fg,#625b50)]">
+            <span className="font-mono text-[11px] text-[var(--df-muted-fg)]">
               progressive-load
             </span>
           </div>
@@ -463,12 +460,12 @@ export default function ProgressiveSkillsAnimation({
                 className={cn(
                   "flex min-w-0 items-center justify-between gap-2 rounded px-2 py-1.5 transition-colors duration-150",
                   item.active
-                    ? "bg-[color-mix(in_srgb,var(--df-accent,#0a7c93)_12%,transparent)] font-medium text-[var(--df-accent,#0a7c93)]"
+                    ? "bg-[color-mix(in_srgb,var(--df-accent)_12%,transparent)] font-medium text-[var(--df-accent)]"
                     : item.done
-                      ? "text-[var(--df-ink,#171511)]"
+                      ? "text-[var(--df-ink)]"
                       : item.highlight
-                        ? "bg-[var(--df-muted,#f4edde)] text-[var(--df-ink,#171511)]"
-                        : "text-[var(--df-muted-fg,#625b50)]",
+                        ? "bg-[var(--df-muted)] text-[var(--df-ink)]"
+                        : "text-[var(--df-muted-fg)]",
                   item.skipped && "opacity-55",
                 )}
                 style={{ paddingLeft: `${item.indent * 16 + 8}px` }}
@@ -479,8 +476,8 @@ export default function ProgressiveSkillsAnimation({
                       className={cn(
                         "size-3.5 shrink-0",
                         item.active || item.done
-                          ? "text-[var(--df-accent,#0a7c93)]"
-                          : "text-[var(--df-muted-fg,#625b50)]",
+                          ? "text-[var(--df-accent)]"
+                          : "text-[var(--df-muted-fg)]",
                       )}
                       aria-hidden="true"
                     />
@@ -489,10 +486,10 @@ export default function ProgressiveSkillsAnimation({
                       className={cn(
                         "size-3.5 shrink-0",
                         item.active
-                          ? "text-[var(--df-accent,#0a7c93)]"
+                          ? "text-[var(--df-accent)]"
                           : item.done
                             ? "text-emerald-700 dark:text-emerald-400"
-                            : "text-[var(--df-muted-fg,#625b50)]",
+                            : "text-[var(--df-muted-fg)]",
                       )}
                       aria-hidden="true"
                     />
@@ -501,7 +498,7 @@ export default function ProgressiveSkillsAnimation({
                 </span>
 
                 {item.active && (
-                  <span className="shrink-0 rounded border border-[var(--df-accent,#0a7c93)]/40 px-1.5 py-0.5 text-[10px] text-[var(--df-accent,#0a7c93)]">
+                  <span className="shrink-0 rounded border border-[var(--df-accent)]/40 px-1.5 py-0.5 text-[10px] text-[var(--df-accent)]">
                     {copy.loadingTag}
                   </span>
                 )}
@@ -512,7 +509,7 @@ export default function ProgressiveSkillsAnimation({
                   </span>
                 )}
                 {item.skipped && (
-                  <span className="shrink-0 text-[10px] text-[var(--df-muted-fg,#625b50)]">
+                  <span className="shrink-0 text-[10px] text-[var(--df-muted-fg)]">
                     {copy.skippedTag}
                   </span>
                 )}
@@ -522,43 +519,43 @@ export default function ProgressiveSkillsAnimation({
         </div>
 
         {/* Right: Execution Trace */}
-        <div className="flex min-w-0 flex-col bg-[var(--df-panel,#fffaf1)] p-4 sm:p-6">
+        <div className="flex min-w-0 flex-col bg-[var(--df-panel)] p-4 sm:p-6">
           {/* Prompt Box */}
-          <div className="rounded-md border border-[var(--df-border,#d8d0c2)] bg-[var(--df-surface,#fbf6ec)] p-3.5">
-            <span className="font-mono text-[10px] font-semibold tracking-[0.18em] text-[var(--df-accent,#0a7c93)] uppercase">
+          <div className="rounded-md border border-[var(--df-border)] bg-[var(--df-surface)] p-3.5">
+            <span className="font-mono text-[10px] font-semibold tracking-[0.18em] text-[var(--df-accent)] uppercase">
               {copy.promptBadge}
             </span>
-            <p className="mt-1.5 text-sm leading-6 font-medium text-[var(--df-ink,#171511)]">
+            <p className="mt-1.5 text-sm leading-6 font-medium text-[var(--df-ink)]">
               {copy.promptText}
             </p>
           </div>
 
           {/* Progressive Execution Steps */}
           <div className="mt-4 flex-1 space-y-4 text-sm">
-            <div className="flex items-center gap-2 font-mono text-xs text-[var(--df-muted-fg,#625b50)]">
+            <div className="flex items-center gap-2 font-mono text-xs text-[var(--df-muted-fg)]">
               <Check
-                className="size-3.5 shrink-0 text-[var(--df-accent,#0a7c93)]"
+                className="size-3.5 shrink-0 text-[var(--df-accent)]"
                 aria-hidden="true"
               />
               <span>{copy.foundSkills}</span>
             </div>
 
             {currentIdx >= phaseIndex("load-skill") && (
-              <div className="space-y-2 border-t border-[var(--df-border-soft,#ded6c7)] pt-3">
-                <p className="font-mono text-xs font-semibold text-[var(--df-ink,#171511)]">
+              <div className="space-y-2 border-t border-[var(--df-border-soft)] pt-3">
+                <p className="font-mono text-xs font-semibold text-[var(--df-ink)]">
                   {copy.researchingHeading}
                 </p>
-                <div className="flex items-center gap-2 font-mono text-xs text-[var(--df-muted-fg,#625b50)]">
+                <div className="flex items-center gap-2 font-mono text-xs text-[var(--df-muted-fg)]">
                   <FileText
-                    className="size-3.5 shrink-0 text-[var(--df-accent,#0a7c93)]"
+                    className="size-3.5 shrink-0 text-[var(--df-accent)]"
                     aria-hidden="true"
                   />
                   <span>{copy.loadingDeepSearch}</span>
                 </div>
                 {currentIdx >= phaseIndex("load-template") && (
-                  <div className="flex items-center gap-2 font-mono text-xs text-[var(--df-muted-fg,#625b50)]">
+                  <div className="flex items-center gap-2 font-mono text-xs text-[var(--df-muted-fg)]">
                     <FileText
-                      className="size-3.5 shrink-0 text-[var(--df-accent,#0a7c93)]"
+                      className="size-3.5 shrink-0 text-[var(--df-accent)]"
                       aria-hidden="true"
                     />
                     <span>{copy.loadingBiotech}</span>
@@ -569,11 +566,11 @@ export default function ProgressiveSkillsAnimation({
                     {SEARCH_STEPS.map((step) => (
                       <li
                         key={step.text}
-                        className="flex min-w-0 items-center gap-2 font-mono text-xs text-[var(--df-muted-fg,#625b50)]"
+                        className="flex min-w-0 items-center gap-2 font-mono text-xs text-[var(--df-muted-fg)]"
                       >
                         {step.type === "search" ? (
                           <Search
-                            className="size-3 shrink-0 text-[var(--df-accent,#0a7c93)]"
+                            className="size-3 shrink-0 text-[var(--df-accent)]"
                             aria-hidden="true"
                           />
                         ) : (
@@ -591,13 +588,13 @@ export default function ProgressiveSkillsAnimation({
             )}
 
             {currentIdx >= phaseIndex("load-frontend") && (
-              <div className="space-y-2 border-t border-[var(--df-border-soft,#ded6c7)] pt-3">
-                <p className="font-mono text-xs font-semibold text-[var(--df-ink,#171511)]">
+              <div className="space-y-2 border-t border-[var(--df-border-soft)] pt-3">
+                <p className="font-mono text-xs font-semibold text-[var(--df-ink)]">
                   {copy.buildingHeading}
                 </p>
-                <div className="flex items-center gap-2 font-mono text-xs text-[var(--df-muted-fg,#625b50)]">
+                <div className="flex items-center gap-2 font-mono text-xs text-[var(--df-muted-fg)]">
                   <FileText
-                    className="size-3.5 shrink-0 text-[var(--df-accent,#0a7c93)]"
+                    className="size-3.5 shrink-0 text-[var(--df-accent)]"
                     aria-hidden="true"
                   />
                   <span>{copy.loadingFrontend}</span>
@@ -607,7 +604,7 @@ export default function ProgressiveSkillsAnimation({
                     {WORKSPACE_FILES.map((file) => (
                       <span
                         key={file}
-                        className="inline-flex items-center gap-1.5 rounded border border-[var(--df-border,#d8d0c2)] bg-[var(--df-surface,#fbf6ec)] px-2 py-0.5 font-mono text-xs text-[var(--df-ink,#171511)]"
+                        className="inline-flex items-center gap-1.5 rounded border border-[var(--df-border)] bg-[var(--df-surface)] px-2 py-0.5 font-mono text-xs text-[var(--df-ink)]"
                       >
                         <Check
                           className="size-3 text-emerald-700 dark:text-emerald-400"
@@ -622,21 +619,21 @@ export default function ProgressiveSkillsAnimation({
             )}
 
             {currentIdx >= phaseIndex("load-deploy") && (
-              <div className="space-y-2 border-t border-[var(--df-border-soft,#ded6c7)] pt-3">
-                <p className="font-mono text-xs font-semibold text-[var(--df-ink,#171511)]">
+              <div className="space-y-2 border-t border-[var(--df-border-soft)] pt-3">
+                <p className="font-mono text-xs font-semibold text-[var(--df-ink)]">
                   {copy.deployingHeading}
                 </p>
-                <div className="flex items-center gap-2 font-mono text-xs text-[var(--df-muted-fg,#625b50)]">
+                <div className="flex items-center gap-2 font-mono text-xs text-[var(--df-muted-fg)]">
                   <FileText
-                    className="size-3.5 shrink-0 text-[var(--df-accent,#0a7c93)]"
+                    className="size-3.5 shrink-0 text-[var(--df-accent)]"
                     aria-hidden="true"
                   />
                   <span>{copy.loadingDeploy}</span>
                 </div>
                 {currentIdx >= phaseIndex("deploying") && (
-                  <div className="flex items-center gap-2 font-mono text-xs text-[var(--df-muted-fg,#625b50)]">
+                  <div className="flex items-center gap-2 font-mono text-xs text-[var(--df-muted-fg)]">
                     <Terminal
-                      className="size-3.5 shrink-0 text-[var(--df-accent,#0a7c93)]"
+                      className="size-3.5 shrink-0 text-[var(--df-accent)]"
                       aria-hidden="true"
                     />
                     <span>{copy.executingDeploy}</span>

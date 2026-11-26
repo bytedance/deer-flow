@@ -176,22 +176,22 @@ export function WhatsNewSection({
         {copy.features.map((feature) => (
           <article
             key={feature.title}
-            className="flex h-full min-w-0 flex-col rounded-md border border-[var(--df-border,#d8d0c2)] bg-[var(--df-panel,#fffaf1)] p-6 transition-colors duration-150 hover:border-[var(--df-accent,#0a7c93)]/60 sm:p-7"
+            className="flex h-full min-w-0 flex-col rounded-md border border-[var(--df-border)] bg-[var(--df-panel)] p-6 transition-colors duration-150 hover:border-[var(--df-accent)]/60 sm:p-7"
           >
             <div className="flex flex-wrap items-center gap-2.5">
-              <span className="inline-flex items-center rounded border border-[var(--df-border,#d8d0c2)] bg-[var(--df-surface,#fbf6ec)] px-2.5 py-0.5 font-mono text-xs font-medium text-[var(--df-ink,#171511)]">
+              <span className="inline-flex items-center rounded border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 py-0.5 font-mono text-xs font-medium text-[var(--df-ink)]">
                 {feature.badge}
               </span>
-              <span className="font-mono text-xs text-[var(--df-muted-fg,#625b50)]">
+              <span className="font-mono text-xs text-[var(--df-muted-fg)]">
                 {feature.meta}
               </span>
             </div>
 
-            <h3 className="mt-4 text-lg leading-snug font-semibold text-[var(--df-ink,#171511)] sm:text-xl">
+            <h3 className="mt-4 text-lg leading-snug font-semibold text-[var(--df-ink)] sm:text-xl">
               {feature.title}
             </h3>
 
-            <p className="mt-2.5 text-sm leading-6 text-[var(--df-muted-fg,#625b50)]">
+            <p className="mt-2.5 text-sm leading-6 text-[var(--df-muted-fg)]">
               {feature.description}
             </p>
 
@@ -201,7 +201,7 @@ export function WhatsNewSection({
                   href={feature.externalHref}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="focus-visible:ring-ring/50 inline-flex items-center gap-1.5 rounded font-mono text-xs font-medium text-[var(--df-ink,#171511)] transition-colors duration-150 hover:text-[var(--df-accent,#0a7c93)] focus-visible:ring-2 focus-visible:outline-none"
+                  className="focus-visible:ring-ring/50 inline-flex items-center gap-1.5 rounded font-mono text-xs font-medium text-[var(--df-ink)] transition-colors duration-150 hover:text-[var(--df-accent)] focus-visible:ring-2 focus-visible:outline-none"
                 >
                   <span>{feature.linkLabel}</span>
                   <ArrowUpRight className="size-3.5" aria-hidden="true" />
@@ -209,7 +209,7 @@ export function WhatsNewSection({
               ) : (
                 <Link
                   href={`/${lang}${feature.hrefPath ?? "/docs"}`}
-                  className="focus-visible:ring-ring/50 inline-flex items-center gap-1.5 rounded font-mono text-xs font-medium text-[var(--df-ink,#171511)] transition-colors duration-150 hover:text-[var(--df-accent,#0a7c93)] focus-visible:ring-2 focus-visible:outline-none"
+                  className="focus-visible:ring-ring/50 inline-flex items-center gap-1.5 rounded font-mono text-xs font-medium text-[var(--df-ink)] transition-colors duration-150 hover:text-[var(--df-accent)] focus-visible:ring-2 focus-visible:outline-none"
                 >
                   <span>{feature.linkLabel}</span>
                   <ArrowUpRight className="size-3.5" aria-hidden="true" />

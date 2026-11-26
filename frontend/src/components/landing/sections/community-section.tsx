@@ -76,16 +76,16 @@ export function CommunitySection({
     >
       <div className="mx-auto max-w-3xl space-y-8">
         {/* 3-Cell Horizontal Bordered Highlights Bar */}
-        <div className="grid grid-cols-1 divide-y divide-[var(--df-border,#d8d0c2)] rounded-md border border-[var(--df-border,#d8d0c2)] bg-[var(--df-panel,#fffaf1)] sm:grid-cols-3 sm:divide-x sm:divide-y-0">
+        <div className="grid grid-cols-1 divide-y divide-[var(--df-border)] rounded-md border border-[var(--df-border)] bg-[var(--df-panel)] sm:grid-cols-3 sm:divide-x sm:divide-y-0">
           {copy.highlights.map((item) => (
             <div
               key={item.label}
               className="flex flex-col items-center justify-center px-6 py-5 text-center"
             >
-              <span className="font-mono text-xl font-semibold text-[var(--df-ink,#171511)] tabular-nums">
+              <span className="font-mono text-xl font-semibold text-[var(--df-ink)] tabular-nums">
                 {item.value}
               </span>
-              <span className="mt-1.5 text-xs text-[var(--df-muted-fg,#625b50)]">
+              <span className="mt-1.5 text-xs text-[var(--df-muted-fg)]">
                 {item.label}
               </span>
             </div>
@@ -98,7 +98,7 @@ export function CommunitySection({
             href="https://github.com/bytedance/deer-flow"
             target="_blank"
             rel="noopener noreferrer"
-            className="focus-visible:ring-ring/50 inline-flex min-h-[44px] items-center justify-center gap-2 rounded-md bg-[var(--df-cta,#0a7c93)] px-5 py-2.5 text-sm font-medium text-[var(--df-cta-fg,#ffffff)] transition-colors duration-150 hover:bg-[var(--df-cta-hover,#086a7e)] focus-visible:ring-2 focus-visible:outline-none"
+            className="focus-visible:ring-ring/50 inline-flex min-h-[44px] items-center justify-center gap-2 rounded-md bg-[var(--df-cta)] px-5 py-2.5 text-sm font-medium text-[var(--df-cta-fg)] transition-colors duration-150 hover:bg-[var(--df-cta-hover)] focus-visible:ring-2 focus-visible:outline-none"
           >
             <GitHubLogoIcon className="size-4 shrink-0" aria-hidden="true" />
             <span>{copy.primaryCta}</span>
@@ -108,7 +108,7 @@ export function CommunitySection({
             href="https://github.com/bytedance/deer-flow/discussions"
             target="_blank"
             rel="noopener noreferrer"
-            className="focus-visible:ring-ring/50 inline-flex min-h-[44px] items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong,#bdb3a2)] bg-[var(--df-panel,#fffaf1)] px-5 py-2.5 text-sm font-medium text-[var(--df-ink,#171511)] transition-colors duration-150 hover:border-[var(--df-accent,#0a7c93)] hover:text-[var(--df-accent,#0a7c93)] focus-visible:ring-2 focus-visible:outline-none"
+            className="focus-visible:ring-ring/50 inline-flex min-h-[44px] items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong)] bg-[var(--df-panel)] px-5 py-2.5 text-sm font-medium text-[var(--df-ink)] transition-colors duration-150 hover:border-[var(--df-accent)] hover:text-[var(--df-accent)] focus-visible:ring-2 focus-visible:outline-none"
           >
             <MessageSquare className="size-4 shrink-0" aria-hidden="true" />
             <span>{copy.discussionsCta}</span>
@@ -116,7 +116,7 @@ export function CommunitySection({
 
           <Link
             href={`/${lang}/docs`}
-            className="focus-visible:ring-ring/50 inline-flex min-h-[44px] items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong,#bdb3a2)] bg-[var(--df-panel,#fffaf1)] px-5 py-2.5 text-sm font-medium text-[var(--df-ink,#171511)] transition-colors duration-150 hover:border-[var(--df-accent,#0a7c93)] hover:text-[var(--df-accent,#0a7c93)] focus-visible:ring-2 focus-visible:outline-none"
+            className="focus-visible:ring-ring/50 inline-flex min-h-[44px] items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong)] bg-[var(--df-panel)] px-5 py-2.5 text-sm font-medium text-[var(--df-ink)] transition-colors duration-150 hover:border-[var(--df-accent)] hover:text-[var(--df-accent)] focus-visible:ring-2 focus-visible:outline-none"
           >
             <BookOpen className="size-4 shrink-0" aria-hidden="true" />
             <span>{copy.docsCta}</span>
@@ -124,7 +124,7 @@ export function CommunitySection({
 
           <Link
             href="/workspace"
-            className="focus-visible:ring-ring/50 inline-flex min-h-[44px] items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong,#bdb3a2)] bg-[var(--df-panel,#fffaf1)] px-5 py-2.5 text-sm font-medium text-[var(--df-ink,#171511)] transition-colors duration-150 hover:border-[var(--df-accent,#0a7c93)] hover:text-[var(--df-accent,#0a7c93)] focus-visible:ring-2 focus-visible:outline-none"
+            className="focus-visible:ring-ring/50 inline-flex min-h-[44px] items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong)] bg-[var(--df-panel)] px-5 py-2.5 text-sm font-medium text-[var(--df-ink)] transition-colors duration-150 hover:border-[var(--df-accent)] hover:text-[var(--df-accent)] focus-visible:ring-2 focus-visible:outline-none"
           >
             <span>{copy.workspaceCta}</span>
             <ArrowRight className="size-4 shrink-0" aria-hidden="true" />

@@ -79,12 +79,12 @@ export function SkillsSection({
           {copy.highlights.map((item) => (
             <div
               key={item.label}
-              className="rounded-md border border-[var(--df-border,#d8d0c2)] bg-[var(--df-panel,#fffaf1)] p-4 sm:p-5"
+              className="rounded-md border border-[var(--df-border)] bg-[var(--df-panel)] p-4 sm:p-5"
             >
-              <p className="font-mono text-xs font-semibold text-[var(--df-accent,#0a7c93)]">
+              <p className="font-mono text-xs font-semibold text-[var(--df-accent)]">
                 {item.label}
               </p>
-              <p className="mt-1.5 text-sm leading-6 text-[var(--df-muted-fg,#625b50)]">
+              <p className="mt-1.5 text-sm leading-6 text-[var(--df-muted-fg)]">
                 {item.detail}
               </p>
             </div>

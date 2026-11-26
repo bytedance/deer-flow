@@ -647,13 +647,13 @@ html.dark .shiki span {
     opacity: 0;
   }
   20% {
-    opacity: 1;
+    opacity: 0.9;
   }
   80% {
-    opacity: 1;
+    opacity: 0.9;
   }
   100% {
-    transform: translateX(300%);
+    transform: translateX(480%);
     opacity: 0;
   }
 }

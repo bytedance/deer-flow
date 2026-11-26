@@ -154,8 +154,8 @@ export function CaseStudySection({
             rel="noopener noreferrer"
             className="group focus-visible:ring-ring/50 block h-full min-w-0 rounded-md focus-visible:ring-2 focus-visible:outline-none"
           >
-            <article className="flex h-full min-w-0 flex-col overflow-hidden rounded-md border border-[var(--df-border,#d8d0c2)] bg-[var(--df-panel,#fffaf1)] transition-colors duration-150 group-hover:border-[var(--df-accent,#0a7c93)]/60">
-              <div className="relative aspect-[16/9] w-full overflow-hidden border-b border-[var(--df-border,#d8d0c2)] bg-[var(--df-muted,#f4edde)]">
+            <article className="flex h-full min-w-0 flex-col overflow-hidden rounded-md border border-[var(--df-border)] bg-[var(--df-panel)] transition-colors duration-150 group-hover:border-[var(--df-accent)]/60">
+              <div className="relative aspect-[16/9] w-full overflow-hidden border-b border-[var(--df-border)] bg-[var(--df-muted)]">
                 <Image
                   src={`/images/${caseStudy.threadId}.jpg`}
                   alt={`${caseStudy.title} preview`}
@@ -170,24 +170,24 @@ export function CaseStudySection({
 
               <div className="flex flex-1 flex-col p-5 sm:p-6">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="inline-flex items-center rounded border border-[var(--df-border,#d8d0c2)] bg-[var(--df-surface,#fbf6ec)] px-2 py-0.5 font-mono text-[11px] font-medium tracking-[0.12em] text-[var(--df-muted-fg,#625b50)] uppercase">
+                  <span className="inline-flex items-center rounded border border-[var(--df-border)] bg-[var(--df-surface)] px-2 py-0.5 font-mono text-[11px] font-medium tracking-[0.12em] text-[var(--df-muted-fg)] uppercase">
                     {caseStudy.category}
                   </span>
                   <ArrowUpRight
-                    className="size-4 shrink-0 text-[var(--df-muted-fg,#625b50)] transition-colors duration-150 group-hover:text-[var(--df-accent,#0a7c93)]"
+                    className="size-4 shrink-0 text-[var(--df-muted-fg)] transition-colors duration-150 group-hover:text-[var(--df-accent)]"
                     aria-hidden="true"
                   />
                 </div>
 
-                <h3 className="mt-3 text-base leading-snug font-semibold text-[var(--df-ink,#171511)] transition-colors duration-150 group-hover:text-[var(--df-accent,#0a7c93)] sm:text-lg">
+                <h3 className="mt-3 text-base leading-snug font-semibold text-[var(--df-ink)] transition-colors duration-150 group-hover:text-[var(--df-accent)] sm:text-lg">
                   {caseStudy.title}
                 </h3>
 
-                <p className="mt-2 line-clamp-3 text-sm leading-6 text-[var(--df-muted-fg,#625b50)]">
+                <p className="mt-2 line-clamp-3 text-sm leading-6 text-[var(--df-muted-fg)]">
                   {caseStudy.description}
                 </p>
 
-                <span className="mt-auto inline-flex items-center gap-1 pt-4 font-mono text-xs font-medium text-[var(--df-accent,#0a7c93)]">
+                <span className="mt-auto inline-flex items-center gap-1 pt-4 font-mono text-xs font-medium text-[var(--df-accent)]">
                   {copy.openShowcase}
                   <ArrowUpRight className="size-3.5" aria-hidden="true" />
                 </span>
