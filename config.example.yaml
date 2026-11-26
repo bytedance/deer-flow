@@ -2052,6 +2052,7 @@ sandbox:
 #   # sandbox_timeout: 14400          # finite non-negative remote lifetime seconds; 0 = explicit cleanup
 #   # bash_command_timeout: 600       # default remote command timeout seconds
 #   # replicas: 3                     # active + warm cap per gateway process
+#   # overflow_policy: wait           # reject adds a process-local hard cap including in-flight creates
 #   # idle_timeout: 600               # warm seconds before destroy; 0 disables
 #   # environment:                    # create-time and per-command defaults
 #   #   PYTHONUNBUFFERED: "1"
@@ -3109,6 +3110,8 @@ mcp_agent_auth: {}
 #     agent: research-bot
 #     owners: ["member-user-id"]  # Explicit IDs; one list may cover shared copies.
 #     definition_digests: ["<approved 64-character SHA-256 digest>"]
+#     # Or grants: runtime (no owners/definition_digests here): an administrator
+#     # maintains them via /api/mcp/agent-auth without a restart.
 #     oauth:
 #       grant_type: client_credentials
 #       token_url: https://idp.example/realms/work/protocol/openid-connect/token

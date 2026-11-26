@@ -217,6 +217,12 @@ def init_skill(skill_name, path):
         )
         return None
 
+    # Keep the standalone initializer aligned with SkillStorage creation.
+    # The name grammar above excludes the other Windows device spellings.
+    if re.fullmatch(r"con|prn|aux|nul|com[1-9]|lpt[1-9]", skill_name):
+        print(f"❌ Error: Skill name {skill_name!r} is a reserved Windows device name.", file=sys.stderr)
+        return None
+
     try:
         root = Path(path).resolve()
         skill_dir = root / skill_name
