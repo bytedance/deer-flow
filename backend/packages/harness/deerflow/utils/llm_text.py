@@ -126,13 +126,13 @@ def strip_leading_think_blocks(text: str) -> str:
 
 
 def strip_markdown_code_fence(text: str) -> str:
-    """Remove a single wrapping markdown code fence when present."""
+    """Remove a single wrapping markdown code fence without rewriting its body."""
     stripped = text.strip()
     if not stripped.startswith("```"):
         return stripped
-    lines = stripped.splitlines()
+    lines = stripped.splitlines(keepends=True)
     if len(lines) >= 3 and lines[0].startswith("```") and lines[-1].startswith("```"):
-        return "\n".join(lines[1:-1]).strip()
+        return "".join(lines[1:-1]).strip()
     return stripped
 
 

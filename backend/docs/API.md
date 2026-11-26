@@ -1240,6 +1240,10 @@ Content-Type: application/json
 }
 ```
 
+An archive that is not a valid skill returns `400`, for example one with unsafe
+or conflicting member paths, invalid frontmatter, or a `SKILL.md` that is missing
+or is not a file. A skill name that already exists returns `409`.
+
 #### Upload and Install Skill
 
 Upload a local `.skill` archive and install it for the current user. Requires an
