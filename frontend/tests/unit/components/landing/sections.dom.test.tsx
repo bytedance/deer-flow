@@ -10,10 +10,11 @@ import { WhatsNewSection } from "@/components/landing/sections/whats-new-section
 afterEach(cleanup);
 
 describe("Landing Section shell & content sections", () => {
-  it("Section renders editorial heading without gradient text or nested main landmark", () => {
+  it("Section renders numbered editorial split heading without gradient text or nested main landmark", () => {
     const { container } = render(
       <Section
         id="test-sec"
+        index="01"
         eyebrow="EYEBROW"
         title="Editorial Heading"
         subtitle="Concise subtitle"
@@ -27,6 +28,8 @@ describe("Landing Section shell & content sections", () => {
     expect(section).not.toBeNull();
     expect(section?.className).toContain("--df-bg-soft");
     expect(container.querySelector("main")).toBeNull();
+    expect(screen.getByText("01")).toBeDefined();
+    expect(screen.getByText("EYEBROW")).toBeDefined();
 
     const heading = screen.getByRole("heading", { level: 2 });
     expect(heading.textContent).toBe("Editorial Heading");
@@ -34,16 +37,41 @@ describe("Landing Section shell & content sections", () => {
     expect(heading.className).not.toContain("text-transparent");
   });
 
-  it("SkillsSection renders anchor id, interactive stages, and zh-CN copy", () => {
+  it("SkillsSection renders 3-step progression rail, interactive 2-pane skill inspector, and zh-CN copy", () => {
     const { container, rerender } = render(<SkillsSection locale="en-US" />);
 
     expect(container.querySelector("section#skills")).not.toBeNull();
     expect(screen.getByText("/mnt/skills/")).toBeDefined();
-
-    const deployButton = screen.getByRole("button", { name: "04 Deploy" });
-    fireEvent.click(deployButton);
     expect(
-      screen.getByText("Live at biotech-startup.vercel.app"),
+      screen.getByRole("button", { name: /01 Discover Manifest/i }),
+    ).toBeDefined();
+    expect(
+      screen.getByRole("button", { name: /02 Load On-Demand/i }),
+    ).toBeDefined();
+
+    const executeStep = screen.getByRole("button", {
+      name: /03 Execute in Sandbox/i,
+    });
+    fireEvent.click(executeStep);
+    expect(
+      screen.getByText("/mnt/user-data/outputs/sandbox-brief.md"),
+    ).toBeDefined();
+
+    const dataSkillButton = screen.getByRole("button", {
+      name: /data-analysis/i,
+    });
+    fireEvent.click(dataSkillButton);
+    expect(
+      screen.getByText("/mnt/user-data/outputs/churn-analysis.html"),
+    ).toBeDefined();
+    expect(
+      screen.getByText("/mnt/skills/data-analysis/SKILL.md"),
+    ).toBeDefined();
+
+    const resetButton = screen.getByRole("button", { name: "Reset" });
+    fireEvent.click(resetButton);
+    expect(
+      screen.getByText("/mnt/skills/deep-research/SKILL.md"),
     ).toBeDefined();
 
     rerender(<SkillsSection locale="zh-CN" />);
@@ -52,10 +80,15 @@ describe("Landing Section shell & content sections", () => {
     );
   });
 
-  it("SandboxSection switches terminal scenes, links AIO Sandbox, and supports zh-CN", () => {
+  it("SandboxSection renders mount topology, backend pills, interactive console tabs, and zh-CN copy", () => {
     const { container, rerender } = render(<SandboxSection locale="en-US" />);
 
     expect(container.querySelector("section#sandbox")).not.toBeNull();
+    expect(screen.getByText("/mnt/user-data/uploads")).toBeDefined();
+    expect(screen.getByText("/mnt/user-data/outputs")).toBeDefined();
+    expect(screen.getByText("Local")).toBeDefined();
+    expect(screen.getByText("Docker")).toBeDefined();
+    expect(screen.getByText("Kubernetes")).toBeDefined();
     expect(screen.getByText("cat requirements.txt")).toBeDefined();
 
     const dataTab = screen.getByRole("tab", { name: "data-pipeline" });
@@ -77,12 +110,17 @@ describe("Landing Section shell & content sections", () => {
     );
   });
 
-  it("WhatsNewSection renders 6 editorial cards without MagicBento and localizes docs links", () => {
+  it("WhatsNewSection renders asymmetric editorial bento with 6 cards and localized docs links", () => {
     const { container, rerender } = render(<WhatsNewSection locale="en-US" />);
 
     expect(container.querySelector("section#whats-new")).not.toBeNull();
     expect(container.querySelector(".magic-bento-card")).toBeNull();
-    expect(container.querySelectorAll("article")).toHaveLength(6);
+
+    const articles = container.querySelectorAll("article");
+    expect(articles).toHaveLength(6);
+    expect(articles[0]?.className).toContain("lg:col-span-6");
+    expect(articles[1]?.className).toContain("lg:col-span-6");
+    expect(articles[2]?.className).toContain("lg:col-span-3");
 
     const memoryLink = screen.getByRole("link", { name: "Memory docs" });
     expect(memoryLink.getAttribute("href")).toBe("/en/docs/harness/memory");
@@ -92,18 +130,24 @@ describe("Landing Section shell & content sections", () => {
     expect(zhMemoryLink.getAttribute("href")).toBe("/zh/docs/harness/memory");
   });
 
-  it("CommunitySection renders 3-cell highlights and CTAs without AuroraText or ambilight", () => {
+  it("CommunitySection renders split editorial invitation frame and spec rows without AuroraText or ambilight", () => {
     const { container, rerender } = render(<CommunitySection locale="en-US" />);
 
     expect(container.querySelector("section#community")).not.toBeNull();
     expect(container.querySelector(".ambilight")).toBeNull();
-    expect(screen.getByText("MIT")).toBeDefined();
-    expect(screen.getByText("2.0")).toBeDefined();
-    expect(screen.getByText("100%")).toBeDefined();
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe(
+      "Build the open agent stack with us.",
+    );
+    expect(screen.getByText("MIT Open Source")).toBeDefined();
+    expect(screen.getByText("LangGraph + Extensible Hooks")).toBeDefined();
+    expect(screen.getByText("Web · Lark · Slack · Telegram")).toBeDefined();
 
     expect(
       screen.getByRole("link", { name: "Join on GitHub" }).getAttribute("href"),
     ).toBe("https://github.com/bytedance/deer-flow");
+    expect(
+      screen.getByRole("link", { name: "Discussions" }).getAttribute("href"),
+    ).toBe("https://github.com/bytedance/deer-flow/discussions");
     expect(
       screen.getByRole("link", { name: "Documentation" }).getAttribute("href"),
     ).toBe("/en/docs");
@@ -112,6 +156,9 @@ describe("Landing Section shell & content sections", () => {
     ).toBe("/workspace");
 
     rerender(<CommunitySection locale="zh-CN" />);
+    expect(screen.getByRole("heading", { level: 2 }).textContent).toBe(
+      "共建开源智能体基础设施",
+    );
     expect(
       screen.getByRole("link", { name: "阅读文档" }).getAttribute("href"),
     ).toBe("/zh/docs");

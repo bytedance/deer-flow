@@ -1,4 +1,4 @@
-import { ArrowUpRight } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
 
@@ -18,17 +18,17 @@ type CaseStudyCopy = {
   eyebrow: string;
   title: string;
   subtitle: string;
-  openShowcase: string;
+  inspectReplay: string;
   items: CaseStudyItem[];
 };
 
 const CASE_STUDY_COPY: Record<Locale, CaseStudyCopy> = {
   "en-US": {
-    eyebrow: "Showcase · Live Threads",
+    eyebrow: "Case Studies",
     title: "Case Studies",
     subtitle:
-      "See how DeerFlow researches, plans, writes code, and produces complete deliverables in real threads.",
-    openShowcase: "Open showcase",
+      "Inspect full execution replays showing how DeerFlow plans, researches, writes code, and ships real deliverables.",
+    inspectReplay: "Inspect replay",
     items: [
       {
         threadId: "7cfa5f8f-a2f8-47ad-acbd-da7137baf990",
@@ -75,11 +75,11 @@ const CASE_STUDY_COPY: Record<Locale, CaseStudyCopy> = {
     ],
   },
   "zh-CN": {
-    eyebrow: "案例展示 · 真实会话",
+    eyebrow: "真实回放",
     title: "实战案例",
     subtitle:
-      "查看 DeerFlow 如何在真实任务中完成深度研究、代码执行与多模态交付。",
-    openShowcase: "查看演示",
+      "回放真实执行会话，观察 DeerFlow 如何规划步骤、检索资料、编写代码并交付完整成果。",
+    inspectReplay: "查看回放",
     items: [
       {
         threadId: "7cfa5f8f-a2f8-47ad-acbd-da7137baf990",
@@ -139,6 +139,7 @@ export function CaseStudySection({
   return (
     <Section
       id="case-studies"
+      index="01"
       variant="soft"
       className={className}
       eyebrow={copy.eyebrow}
@@ -146,15 +147,15 @@ export function CaseStudySection({
       subtitle={copy.subtitle}
     >
       <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-        {copy.items.map((caseStudy) => (
+        {copy.items.map((caseStudy, idx) => (
           <Link
             key={caseStudy.threadId}
             href={pathOfPublicDemoThread(caseStudy.threadId)}
             target="_blank"
             rel="noopener noreferrer"
-            className="group focus-visible:ring-ring/50 block h-full min-w-0 rounded-md focus-visible:ring-2 focus-visible:outline-none"
+            className="group focus-visible:ring-ring/50 block h-full min-w-0 rounded-xl focus-visible:ring-2 focus-visible:outline-none"
           >
-            <article className="flex h-full min-w-0 flex-col overflow-hidden rounded-md border border-[var(--df-border)] bg-[var(--df-panel)] transition-colors duration-150 group-hover:border-[var(--df-accent)]/60">
+            <article className="flex h-full min-w-0 flex-col overflow-hidden rounded-xl border border-[var(--df-border)] bg-[var(--df-panel)] transition-all duration-200 group-hover:-translate-y-0.5 group-hover:border-[var(--df-accent)]/50 group-hover:shadow-[0_10px_28px_var(--df-shadow)] motion-reduce:transform-none">
               <div className="relative aspect-[16/9] w-full overflow-hidden border-b border-[var(--df-border)] bg-[var(--df-muted)]">
                 <Image
                   src={`/images/${caseStudy.threadId}.jpg`}
@@ -164,33 +165,37 @@ export function CaseStudySection({
                   loading="lazy"
                   decoding="async"
                   sizes="(min-width: 1024px) 380px, (min-width: 768px) 50vw, 100vw"
-                  className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03] motion-reduce:transform-none"
+                  className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.02] motion-reduce:transform-none"
                 />
               </div>
 
               <div className="flex flex-1 flex-col p-5 sm:p-6">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="inline-flex items-center rounded border border-[var(--df-border)] bg-[var(--df-surface)] px-2 py-0.5 font-mono text-[11px] font-medium tracking-[0.12em] text-[var(--df-muted-fg)] uppercase">
+                  <span className="inline-flex items-center rounded-full bg-[var(--df-accent-soft,rgba(28,93,74,0.09))] px-2.5 py-0.5 font-mono text-[11px] font-medium tracking-[0.08em] text-[var(--df-accent)] uppercase">
                     {caseStudy.category}
                   </span>
-                  <ArrowUpRight
-                    className="size-4 shrink-0 text-[var(--df-muted-fg)] transition-colors duration-150 group-hover:text-[var(--df-accent)]"
-                    aria-hidden="true"
-                  />
+                  <span className="font-mono text-[11px] text-[var(--df-muted-fg)] tabular-nums">
+                    {String(idx + 1).padStart(2, "0")}
+                  </span>
                 </div>
 
-                <h3 className="mt-3 text-base leading-snug font-semibold text-[var(--df-ink)] transition-colors duration-150 group-hover:text-[var(--df-accent)] sm:text-lg">
+                <h3 className="mt-3.5 text-base leading-snug font-semibold text-[var(--df-ink)] transition-colors duration-150 group-hover:text-[var(--df-accent)] sm:text-lg">
                   {caseStudy.title}
                 </h3>
 
-                <p className="mt-2 line-clamp-3 text-sm leading-6 text-[var(--df-muted-fg)]">
+                <p className="mt-2 mb-5 line-clamp-2 text-sm leading-6 text-[var(--df-muted-fg)]">
                   {caseStudy.description}
                 </p>
 
-                <span className="mt-auto inline-flex items-center gap-1 pt-4 font-mono text-xs font-medium text-[var(--df-accent)]">
-                  {copy.openShowcase}
-                  <ArrowUpRight className="size-3.5" aria-hidden="true" />
-                </span>
+                <div className="mt-auto flex items-center justify-between border-t border-[var(--df-border-soft)] pt-4 text-xs">
+                  <span className="inline-flex items-center gap-1.5 font-mono font-medium text-[var(--df-accent)]">
+                    <span>{copy.inspectReplay}</span>
+                    <ArrowRight
+                      className="size-3.5 transition-transform duration-150 group-hover:translate-x-0.5 motion-reduce:transform-none"
+                      aria-hidden="true"
+                    />
+                  </span>
+                </div>
               </div>
             </article>
           </Link>

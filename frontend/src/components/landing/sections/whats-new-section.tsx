@@ -6,6 +6,7 @@ import {
   getLangByLocale,
   type Locale,
 } from "@/core/i18n/locale";
+import { cn } from "@/lib/utils";
 
 import { Section } from "../section";
 
@@ -14,9 +15,11 @@ type FeatureHighlight = {
   meta: string;
   title: string;
   description: string;
+  pills?: string[];
   linkLabel: string;
   hrefPath?: string;
   externalHref?: string;
+  featured?: boolean;
 };
 
 type WhatsNewCopy = {
@@ -28,26 +31,30 @@ type WhatsNewCopy = {
 
 const WHATS_NEW_COPY: Record<Locale, WhatsNewCopy> = {
   "en-US": {
-    eyebrow: "DeerFlow 2.0 · Harness Architecture",
+    eyebrow: "DeerFlow 2.0",
     title: "What's New in DeerFlow 2.0",
     subtitle:
-      "DeerFlow has evolved from a Deep Research framework into an extensible, batteries-included Super Agent harness.",
+      "Evolved from a Deep Research prototype into an extensible, batteries-included Super Agent harness built for real production workflows.",
     features: [
       {
+        featured: true,
         badge: "Context Engineering",
         meta: "Memory & Compaction",
         title: "Long/Short-term Memory",
         description:
-          "Retains user preferences, session goals, and structured context across turns so the agent builds on past work.",
+          "Retains user preferences, structured facts, and session goals across turns while automatically compacting long trajectories so the agent stays sharp over hours of work.",
+        pills: ["Cross-thread facts", "Auto-compaction", "Structured recall"],
         linkLabel: "Memory docs",
         hrefPath: "/docs/harness/memory",
       },
       {
+        featured: true,
         badge: "Long-Running Tasks",
         meta: "LangGraph Runtime",
         title: "Planning and Sub-tasking",
         description:
-          "Plans ahead, reasons through complexity, and delegates scoped sub-agents sequentially or in parallel.",
+          "Decomposes complex goals into explicit plans and delegates scoped sub-agents sequentially or in parallel — keeping each branch isolated with bounded context.",
+        pills: ["Parallel fan-out", "Scoped toolsets", "Checkpointed state"],
         linkLabel: "Sub-agents docs",
         hrefPath: "/docs/harness/subagents",
       },
@@ -56,7 +63,7 @@ const WHATS_NEW_COPY: Record<Locale, WhatsNewCopy> = {
         meta: "Skills · MCP · Plugins",
         title: "Skills and Tools",
         description:
-          "Plug, play, or swap built-in tools, MCP servers, and Markdown skills to build the exact agent you need.",
+          "Plug, play, or swap built-in tools, MCP servers, and Markdown skills without editing core harness code.",
         linkLabel: "Skills & MCP",
         hrefPath: "/docs/harness/skills",
       },
@@ -90,26 +97,30 @@ const WHATS_NEW_COPY: Record<Locale, WhatsNewCopy> = {
     ],
   },
   "zh-CN": {
-    eyebrow: "DeerFlow 2.0 · 架构升级",
+    eyebrow: "DeerFlow 2.0",
     title: "DeerFlow 2.0 新特性",
     subtitle:
-      "DeerFlow 已从深度研究框架全面演进为开箱即用、高度可扩展的超级智能体运行时（Super Agent Harness）。",
+      "从深度研究框架全面演进为开箱即用、高度可扩展的超级智能体运行时（Super Agent Harness），为真实生产工作流而生。",
     features: [
       {
+        featured: true,
         badge: "上下文工程",
         meta: "记忆与压缩",
         title: "长短期记忆",
         description:
-          "沉淀用户偏好、会话目标与结构化记忆，让智能体在多轮协作中真正理解你的工作上下文。",
+          "在多轮任务中沉淀用户偏好、结构化事实与会话目标，并自动压缩超长上下文轨迹，让智能体在持久协作中始终保持专注。",
+        pills: ["跨会话事实沉淀", "自动上下文压缩", "结构化召回"],
         linkLabel: "记忆文档",
         hrefPath: "/docs/harness/memory",
       },
       {
+        featured: true,
         badge: "长任务执行",
         meta: "LangGraph 运行时",
         title: "规划与子任务协作",
         description:
-          "先规划再行动，面对复杂目标自动拆解并串行或并行委派子智能体完成执行。",
+          "先规划再执行，将复杂目标拆解为清晰步骤，并串行或并行委派子智能体独立完成，每个分支拥有独立边界与上下文。",
+        pills: ["并行子任务派发", "独立工具边界", "可恢复状态图"],
         linkLabel: "子智能体文档",
         hrefPath: "/docs/harness/subagents",
       },
@@ -118,7 +129,7 @@ const WHATS_NEW_COPY: Record<Locale, WhatsNewCopy> = {
         meta: "Skills · MCP · 插件",
         title: "技能与工具生态",
         description:
-          "自由插拔内置工具、MCP 服务与 Markdown 技能文件，按需定制属于你的智能体。",
+          "自由插拔内置工具、MCP 服务与 Markdown 技能文件，无需侵入核心代码即可定制工作流。",
         linkLabel: "技能与 MCP",
         hrefPath: "/docs/harness/skills",
       },
@@ -136,7 +147,7 @@ const WHATS_NEW_COPY: Record<Locale, WhatsNewCopy> = {
         meta: "OpenAI 兼容",
         title: "多模型支持",
         description:
-          "原生支持豆包、DeepSeek、OpenAI、Claude、Gemini 及任意兼容 OpenAI 协议的模型服务。",
+          "原生支持豆包、DeepSeek、OpenAI、Claude、Gemini 及任意兼容 OpenAI 协议的推理与多模态模型。",
         linkLabel: "配置参考",
         hrefPath: "/docs/harness/configuration",
       },
@@ -166,58 +177,104 @@ export function WhatsNewSection({
   return (
     <Section
       id="whats-new"
+      index="04"
       variant="default"
       className={className}
       eyebrow={copy.eyebrow}
       title={copy.title}
       subtitle={copy.subtitle}
     >
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-        {copy.features.map((feature) => (
-          <article
-            key={feature.title}
-            className="flex h-full min-w-0 flex-col rounded-md border border-[var(--df-border)] bg-[var(--df-panel)] p-6 transition-colors duration-150 hover:border-[var(--df-accent)]/60 sm:p-7"
-          >
-            <div className="flex flex-wrap items-center gap-2.5">
-              <span className="inline-flex items-center rounded border border-[var(--df-border)] bg-[var(--df-surface)] px-2.5 py-0.5 font-mono text-xs font-medium text-[var(--df-ink)]">
-                {feature.badge}
-              </span>
-              <span className="font-mono text-xs text-[var(--df-muted-fg)]">
-                {feature.meta}
-              </span>
-            </div>
+      <div className="grid grid-cols-1 gap-5 md:grid-cols-2 lg:grid-cols-12">
+        {copy.features.map((feature, idx) => {
+          const isFeatured = Boolean(feature.featured);
 
-            <h3 className="mt-4 text-lg leading-snug font-semibold text-[var(--df-ink)] sm:text-xl">
-              {feature.title}
-            </h3>
-
-            <p className="mt-2.5 text-sm leading-6 text-[var(--df-muted-fg)]">
-              {feature.description}
-            </p>
-
-            <div className="mt-auto pt-5">
-              {feature.externalHref ? (
-                <a
-                  href={feature.externalHref}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="focus-visible:ring-ring/50 inline-flex items-center gap-1.5 rounded font-mono text-xs font-medium text-[var(--df-ink)] transition-colors duration-150 hover:text-[var(--df-accent)] focus-visible:ring-2 focus-visible:outline-none"
-                >
-                  <span>{feature.linkLabel}</span>
-                  <ArrowUpRight className="size-3.5" aria-hidden="true" />
-                </a>
-              ) : (
-                <Link
-                  href={`/${lang}${feature.hrefPath ?? "/docs"}`}
-                  className="focus-visible:ring-ring/50 inline-flex items-center gap-1.5 rounded font-mono text-xs font-medium text-[var(--df-ink)] transition-colors duration-150 hover:text-[var(--df-accent)] focus-visible:ring-2 focus-visible:outline-none"
-                >
-                  <span>{feature.linkLabel}</span>
-                  <ArrowUpRight className="size-3.5" aria-hidden="true" />
-                </Link>
+          return (
+            <article
+              key={feature.title}
+              className={cn(
+                "flex h-full min-w-0 flex-col border border-[var(--df-border)] transition-all duration-200",
+                isFeatured
+                  ? "rounded-2xl border-t-2 border-t-[var(--df-accent)] bg-[var(--df-panel)] p-6 shadow-[0_6px_22px_var(--df-shadow)] sm:p-8 lg:col-span-6"
+                  : "rounded-xl bg-[var(--df-surface)] p-5 hover:border-[var(--df-accent)]/50 hover:bg-[var(--df-panel)] sm:p-6 lg:col-span-3",
               )}
-            </div>
-          </article>
-        ))}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span
+                  className={cn(
+                    "inline-flex items-center rounded-full px-2.5 py-0.5 font-mono text-[11px] font-medium",
+                    isFeatured
+                      ? "bg-[var(--df-accent-soft,rgba(28,93,74,0.09))] text-[var(--df-accent)]"
+                      : "border border-[var(--df-border)] bg-[var(--df-panel)] text-[var(--df-text-soft)]",
+                  )}
+                >
+                  {feature.badge}
+                </span>
+                <span className="font-mono text-[11px] text-[var(--df-muted-fg)] tabular-nums">
+                  {String(idx + 1).padStart(2, "0")}
+                </span>
+              </div>
+
+              <p className="mt-3 font-mono text-[11px] tracking-[0.06em] text-[var(--df-muted-fg)]">
+                {feature.meta}
+              </p>
+
+              <h3
+                className={cn(
+                  "mt-2 leading-snug text-[var(--df-ink)]",
+                  isFeatured
+                    ? "font-landing-serif text-2xl font-medium tracking-[-0.015em] sm:text-[26px]"
+                    : "text-base font-semibold sm:text-lg",
+                )}
+              >
+                {feature.title}
+              </h3>
+
+              <p
+                className={cn(
+                  "mt-2.5 text-sm text-[var(--df-muted-fg)]",
+                  isFeatured ? "leading-7 sm:text-[15px]" : "leading-6",
+                )}
+              >
+                {feature.description}
+              </p>
+
+              {feature.pills && feature.pills.length > 0 && (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {feature.pills.map((pill) => (
+                    <span
+                      key={pill}
+                      className="rounded-lg border border-[var(--df-border-soft)] bg-[var(--df-surface)] px-2.5 py-1 font-mono text-[11px] text-[var(--df-text-soft)]"
+                    >
+                      {pill}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              <div className="mt-auto pt-5">
+                {feature.externalHref ? (
+                  <a
+                    href={feature.externalHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="focus-visible:ring-ring/50 inline-flex items-center gap-1.5 rounded font-mono text-xs font-medium text-[var(--df-accent)] transition-colors duration-150 hover:text-[var(--df-accent-strong)] focus-visible:ring-2 focus-visible:outline-none"
+                  >
+                    <span>{feature.linkLabel}</span>
+                    <ArrowUpRight className="size-3.5" aria-hidden="true" />
+                  </a>
+                ) : (
+                  <Link
+                    href={`/${lang}${feature.hrefPath ?? "/docs"}`}
+                    className="focus-visible:ring-ring/50 inline-flex items-center gap-1.5 rounded font-mono text-xs font-medium text-[var(--df-accent)] transition-colors duration-150 hover:text-[var(--df-accent-strong)] focus-visible:ring-2 focus-visible:outline-none"
+                  >
+                    <span>{feature.linkLabel}</span>
+                    <ArrowUpRight className="size-3.5" aria-hidden="true" />
+                  </Link>
+                )}
+              </div>
+            </article>
+          );
+        })}
       </div>
     </Section>
   );

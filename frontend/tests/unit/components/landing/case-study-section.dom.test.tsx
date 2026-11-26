@@ -22,11 +22,13 @@ describe("CaseStudySection", () => {
     expect(document.querySelector('[style*="background-image"]')).toBeNull();
   });
 
-  it("sets canonical anchor id, links to /showcase threads, and supports zh-CN copy", () => {
+  it("sets canonical anchor id, numbered index, links to /showcase threads, and supports zh-CN copy", () => {
     const { container, rerender } = render(<CaseStudySection locale="en-US" />);
 
     const section = container.querySelector("section#case-studies");
     expect(section).not.toBeNull();
+    expect(screen.getAllByText("01").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("Inspect replay")).toHaveLength(6);
 
     const links = screen.getAllByRole("link");
     expect(links).toHaveLength(6);
@@ -38,5 +40,6 @@ describe("CaseStudySection", () => {
     expect(screen.getByRole("heading", { level: 2 }).textContent).toBe(
       "实战案例",
     );
+    expect(screen.getAllByText("查看回放")).toHaveLength(6);
   });
 });
