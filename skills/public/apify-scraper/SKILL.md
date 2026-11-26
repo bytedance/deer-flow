@@ -48,7 +48,7 @@ Read the reference file to get the input template before calling `apify_actor_st
 3. Fill the input template with values from the user's request. Keep result limits small unless the user asks for more; `apify_actor_await` returns at most 50 items by default.
 4. Call `apify_actor_start(actor_id, run_input, description)`, where `run_input` is the input as a JSON string. It returns `{"action": "start", "runs": [{"runId", "actorId", "datasetId", "status"}]}` without waiting for the run.
 5. Call `apify_actor_await(run_id, dataset_id, description)` with `runs[0].runId` and `runs[0].datasetId`. It waits for the run to finish and returns its results.
-6. If the await result's `status` is `TIMED_OUT`, only the wait ended and the run is still going on Apify: call `apify_actor_await` again with the same IDs. For `FAILED`, `ABORTED` or `TIMED-OUT` (the run itself failed or timed out), report the error and its `statusMessage` to the user. Do not restart the run automatically.
+6. If the await result's `status` is `TIMED_OUT`, only the wait ended and the run is still going on Apify: call `apify_actor_await` again with the same IDs. Its `statusMessage` and `itemCount` show how far the run has got. For `FAILED`, `ABORTED` or `TIMED-OUT` (the run itself failed or timed out), report the error and its `statusMessage` to the user. Do not restart the run automatically.
 
 **Several runs in parallel:** call `apify_actor_start` once per run first (for example, one run per profile), then call `apify_actor_await` for each run.
 

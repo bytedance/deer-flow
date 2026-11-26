@@ -388,12 +388,67 @@ class TestAwait:
         payload = json.loads(await apify_tools.apify_actor_await_tool.ainvoke({"run_id": "nope", "dataset_id": "d"}))
         assert payload["status"] == "NOT_FOUND"
 
-    async def test_the_local_timeout_tells_the_agent_to_wait_again(self, config, apify, events):
-        config(poll_interval_secs=0.01, timeout_secs="0.05")
-        apify.on("GET", "/v2/actor-runs/run-1", _data({"status": "RUNNING"}))
+    async def test_the_local_timeout_reports_progress_and_tells_the_agent_to_wait_again(self, config, apify, events):
+        config(poll_interval_secs=0.01, timeout_secs="1")
+        apify.on("GET", "/v2/actor-runs/run-1", _data({"status": "RUNNING", "statusMessage": "Crawled 40 of 100 pages", "defaultDatasetId": "ds-run"}))
+        apify.on("GET", "/v2/datasets/ds-run", _data({"itemCount": 40}))
         payload = json.loads(await apify_tools.apify_actor_await_tool.ainvoke({"run_id": "run-1", "dataset_id": "d"}))
-        assert payload["status"] == "TIMED_OUT"
-        assert "call apify_actor_await again" in payload["error"]
+        assert {key: payload[key] for key in ("status", "runStatus", "statusMessage", "itemCount")} == {"status": "TIMED_OUT", "runStatus": "RUNNING", "statusMessage": "Crawled 40 of 100 pages", "itemCount": 40}
+        assert "Call apify_actor_await again" in payload["note"]
+        # A healthy run is not an error; an `error` key would mark every wait as a failure.
+        assert "error" not in payload
+
+    async def test_a_failed_item_count_lookup_still_times_out(self, config, apify, events):
+        config(timeout_secs="1")
+        apify.on("GET", "/v2/actor-runs/run-1", _data({"status": "RUNNING"}))
+        apify.on("GET", "/v2/datasets/d", _error(500, "Internal error", "internal-error"))
+        payload = json.loads(await apify_tools.apify_actor_await_tool.ainvoke({"run_id": "run-1", "dataset_id": "d"}))
+        assert payload["status"] == "TIMED_OUT" and "itemCount" not in payload
+
+    @pytest.mark.parametrize("progressing", [True, False])
+    async def test_repeated_waits_through_the_loop_guard(self, config, apify, events, progressing):
+        # A long run takes several waits. One that makes progress must never trip the
+        # loop guard; one that is stalled still does, after the usual warning.
+        from langchain.agents import create_agent
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+        from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+
+        class ScriptedModel(FakeMessagesListChatModel):
+            # The loop warning is added to the model request, not to the saved state.
+            seen: list = []
+
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                self.seen.extend(messages)
+                return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+        waits = 6
+        config(timeout_secs="1")
+        apify.on("GET", "/v2/actor-runs/run-1", *[_data({"status": "RUNNING", "statusMessage": f"Crawled {step if progressing else 0} pages"}) for step in range(waits)])
+        apify.on("GET", "/v2/datasets/d", *[_data({"itemCount": step if progressing else 0}) for step in range(waits)])
+        call = {"name": "apify_actor_await", "args": {"run_id": "run-1", "dataset_id": "d"}, "id": "call_0"}
+        model = ScriptedModel(responses=[AIMessage(content="", tool_calls=[call]) for _ in range(waits)] + [AIMessage(content="Done.")])
+        loop = LoopDetectionMiddleware()
+        graph = create_agent(model=model, tools=[apify_tools.apify_actor_await_tool], middleware=[ToolErrorHandlingMiddleware(), loop])
+        context = {"thread_id": "apify", "run_id": "apify"}
+
+        result = await graph.ainvoke({"messages": [("user", "Wait for the run.")]}, context=context, config={"recursion_limit": 100})
+
+        warnings = [m for m in model.seen if isinstance(m, HumanMessage) and m.name == "loop_warning"]
+        checks = len(apify.only("GET", "/v2/actor-runs/run-1"))
+        if progressing:
+            assert checks == waits
+            assert result["messages"][-1].content == "Done."
+            assert not warnings and loop.consume_stop_reason("apify") is None
+        else:
+            assert checks == 4
+            assert warnings
+            assert context["stop_reason"] == "loop_capped"
 
     async def test_status_checks_stay_inside_the_wait(self, config, apify, events, monkeypatch):
         monkeypatch.setattr(apify_tools, "_LAST_STATUS_CHECK_SECS", 0.1)

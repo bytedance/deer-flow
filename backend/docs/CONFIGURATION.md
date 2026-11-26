@@ -1450,7 +1450,9 @@ caps the cost of a pay-per-event run. It must be a positive number: Apify reads
 0 as no cap, so the tool refuses to start a run when the value is 0 or cannot be
 read. `timeout_secs` and `memory_mbytes` set the run's limits on Apify. When
 `apify_actor_await` reaches its own `timeout_secs`, the run keeps going on Apify
-and the agent can call await again.
+and the agent can call await again. That result reports the run's status message
+and item count rather than an error, so loop detection lets the agent keep
+waiting on a run that makes progress and still stops it on a stalled one.
 Results of `apify_actor_await` and `apify_actor_discover`, and the errors of
 `apify_actor_start`, hold third-party content, so the tool-result sanitization
 and PII redaction middlewares treat them like `web_fetch` output. Offline tests use HTTPX mock transports and need no token.

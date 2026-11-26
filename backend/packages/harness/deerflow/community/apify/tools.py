@@ -530,11 +530,39 @@ async def _dataset_items(client: httpx.AsyncClient, api_key: str, dataset_id: st
     return items
 
 
+async def _run_progress(client: httpx.AsyncClient, api_key: str, run: dict[str, Any], dataset_id: str, time_left: float) -> dict[str, Any]:
+    """Describe how far a run that is still going has got.
+
+    Only values that change when the run makes progress are reported. The loop guard
+    compares repeated results, so a run that scrapes gives a new result on every wait,
+    while a stalled run repeats itself and is still caught. Elapsed time is left out
+    because it changes on every call and would hide a stalled run.
+    """
+    progress: dict[str, Any] = {}
+    for key, name in (("status", "runStatus"), ("statusMessage", "statusMessage")):
+        if _text(run.get(key)):
+            progress[name] = run[key]
+    dataset = _text(run.get("defaultDatasetId")) or dataset_id.strip()
+    if not dataset or time_left <= 0:
+        return progress
+    try:
+        data = await _api_data(client, api_key, "GET", f"/datasets/{quote(dataset, safe='')}", action="Reading the run's dataset", timeout=min(_API_TIMEOUT_SECS, time_left))
+    except Exception as e:
+        # The count is optional: the wait has ended and the run is still going either way.
+        logger.warning("Apify dataset item count lookup failed: %s", type(e).__name__)
+        return progress
+    count = data.get("itemCount")
+    if isinstance(count, int) and not isinstance(count, bool):
+        progress["itemCount"] = count
+    return progress
+
+
 @tool("apify_actor_await", parse_docstring=True)
 async def apify_actor_await_tool(run_id: str, dataset_id: str, description: str = "") -> str:
     """Wait for a previously started Apify actor run to complete and return its results.
-    Polls the run status internally until it reaches a terminal state, streaming progress
-    events. A single call handles all polling — loop detection never fires.
+    Polls the run status until the run ends or the wait reaches its timeout, streaming progress
+    events. A TIMED_OUT status means only the wait ended: the run is still going on Apify, and
+    calling this tool again with the same IDs keeps waiting.
 
     Args:
         run_id: The run ID from apify_actor_start (runs[0].runId).
@@ -567,6 +595,7 @@ async def apify_actor_await_tool(run_id: str, dataset_id: str, description: str 
         return int(loop.time() - start_time)
 
     writer({"type": "apify_run_polling", "runId": run_id, "status": "WAITING", "elapsed_secs": 0})
+    run: dict[str, Any] = {}
     try:
         async with await _new_client(_API_TIMEOUT_SECS) as client:
             while True:
@@ -607,6 +636,7 @@ async def apify_actor_await_tool(run_id: str, dataset_id: str, description: str 
                     break
                 writer({"type": "apify_run_polling", "runId": run_id, "status": status, "elapsed_secs": elapsed()})
                 await asyncio.sleep(min(poll_interval_secs, remaining - _LAST_STATUS_CHECK_SECS))
+            progress = await _run_progress(client, api_key, run, dataset_id, deadline - loop.time())
     except asyncio.CancelledError:
         writer({"type": "apify_run_cancelled", "runId": run_id})
         raise
@@ -614,10 +644,13 @@ async def apify_actor_await_tool(run_id: str, dataset_id: str, description: str 
         writer({"type": "apify_run_failed", "runId": run_id, "status": "ERROR", "elapsed_secs": elapsed()})
         return result({"runId": run_id, "status": "ERROR", "error": _error_text(e, api_key, "run await")})
 
+    # Not an error: the run is healthy and still going, so the result carries no
+    # ``error`` key, which would make every wait look like the same failure.
     return result(
         {
             "runId": run_id,
             "status": "TIMED_OUT",
-            "error": f"Run did not finish within {timeout_secs:g}s. It is still running on Apify; call apify_actor_await again with the same run_id to keep waiting.",
+            **progress,
+            "note": f"The wait ended after {timeout_secs:g}s, but the run is still going on Apify. Call apify_actor_await again with the same run_id and dataset_id to keep waiting.",
         }
     )
