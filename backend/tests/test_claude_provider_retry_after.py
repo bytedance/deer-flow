@@ -29,6 +29,23 @@ def test_usable_claude_retry_after_is_preserved(raw: str, expected_ms: int) -> N
     assert ClaudeChatModel._calc_backoff_ms(1, error) == expected_ms
 
 
+@pytest.mark.parametrize(
+    ("headers", "expected_ms"),
+    [
+        ({"Retry-After": "3"}, 3000),
+        ({"Retry-After": "3.0"}, 3000),
+        ({"Retry-After": "1.5"}, 1500),
+        ({"retry-after-ms": "1500"}, 1500),
+        ({"Retry-After-Ms": "1500"}, 1500),
+        ({"retry-after-ms": "1500", "Retry-After": "45"}, 1500),
+    ],
+)
+def test_fractional_and_millisecond_hints_are_honoured(headers: dict[str, str], expected_ms: int) -> None:
+    error = Exception("rate limited")
+    error.response = SimpleNamespace(headers=httpx.Headers(headers))
+    assert ClaudeChatModel._calc_backoff_ms(1, error) == expected_ms
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("error_type", [anthropic.RateLimitError, anthropic.InternalServerError])

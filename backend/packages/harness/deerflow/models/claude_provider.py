@@ -31,7 +31,7 @@ from langchain_core.messages import BaseMessage
 from pydantic import PrivateAttr
 
 from deerflow.models.credential_loader import OAUTH_ANTHROPIC_BETAS
-from deerflow.utils.retry_after import bounded_retry_after_ms, parse_retry_after_date_ms
+from deerflow.utils.retry_after import retry_after_hint_ms
 
 logger = logging.getLogger(__name__)
 
@@ -465,21 +465,12 @@ class ClaudeChatModel(ChatAnthropic):
 
     @staticmethod
     def _calc_backoff_ms(attempt: int, error: Exception) -> int:
-        """Exponential backoff with a fixed 20% buffer."""
+        """Local exponential backoff with a fixed 20% buffer, shortened by a server hint."""
+        response = getattr(error, "response", None)
+        hint_ms = retry_after_hint_ms(getattr(response, "headers", None), now=time.time())
+        if hint_ms is not None:
+            return hint_ms
+
         backoff_ms = 2000 * (1 << (attempt - 1))
         jitter_ms = int(backoff_ms * 0.2)
-        total_ms = backoff_ms + jitter_ms
-
-        if hasattr(error, "response") and error.response is not None:
-            retry_after = error.response.headers.get("Retry-After")
-            if retry_after:
-                try:
-                    hint_ms = bounded_retry_after_ms(int(retry_after) * 1000)
-                    if hint_ms is not None:
-                        total_ms = hint_ms
-                except (ValueError, TypeError, OverflowError):
-                    hint_ms = parse_retry_after_date_ms(retry_after, now=time.time())
-                    if hint_ms is not None:
-                        total_ms = hint_ms
-
-        return total_ms
+        return backoff_ms + jitter_ms

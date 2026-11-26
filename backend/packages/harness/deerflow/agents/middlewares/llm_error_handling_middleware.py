@@ -29,7 +29,7 @@ from deerflow.config.app_config import AppConfig
 from deerflow.models.request_admission import AdmissionError, RequestAdmission
 from deerflow.models.response_errors import EmptyModelResponseError
 from deerflow.utils.custom_events import aemit_custom_event, emit_custom_event
-from deerflow.utils.retry_after import bounded_retry_after_ms, parse_retry_after_date_ms
+from deerflow.utils.retry_after import retry_after_hint_ms
 
 logger = logging.getLogger(__name__)
 
@@ -1046,26 +1046,7 @@ def _share_rate_limit_cooldown(request: ModelRequest, exc: BaseException) -> Non
 
 def _extract_retry_after_ms(exc: BaseException) -> int | None:
     response = getattr(exc, "response", None)
-    headers = getattr(response, "headers", None)
-    if headers is None:
-        return None
-
-    raw = None
-    header_name = ""
-    for key in ("retry-after-ms", "Retry-After-Ms", "retry-after", "Retry-After"):
-        header_name = key
-        if hasattr(headers, "get"):
-            raw = headers.get(key)
-        if raw:
-            break
-    if not raw:
-        return None
-
-    try:
-        multiplier = 1 if "ms" in header_name.lower() else 1000
-        return bounded_retry_after_ms(float(raw) * multiplier)
-    except (TypeError, ValueError, OverflowError):
-        return parse_retry_after_date_ms(str(raw), now=time.time())
+    return retry_after_hint_ms(getattr(response, "headers", None), now=time.time())
 
 
 def _extract_error_detail(exc: BaseException) -> str:
