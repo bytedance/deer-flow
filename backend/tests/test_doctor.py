@@ -625,18 +625,18 @@ class TestCheckWebSearch:
         assert InfoQuestClient().api_key_set is False
 
     @pytest.mark.parametrize("tool_name", ["web_search", "web_fetch"])
-    def test_groundroute_key_is_checked(self, tmp_path, monkeypatch, tool_name):
-        """Every GroundRoute call needs a key; doctor used to report ok without one."""
-        monkeypatch.delenv("GROUNDROUTE_API_KEY", raising=False)
+    @pytest.mark.parametrize(("provider", "key"), [("groundroute", "GROUNDROUTE_API_KEY"), ("serpapi", "SERPAPI_API_KEY")])
+    def test_search_and_fetch_key_is_checked(self, tmp_path, monkeypatch, tool_name, provider, key):
+        monkeypatch.delenv(key, raising=False)
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(f"config_version: 5\ntools:\n  - name: {tool_name}\n    use: deerflow.community.groundroute.tools:{tool_name}_tool\n")
+        cfg.write_text(f"config_version: 5\ntools:\n  - name: {tool_name}\n    use: deerflow.community.{provider}.tools:{tool_name}_tool\n")
         check = doctor.check_web_search if tool_name == "web_search" else doctor.check_web_fetch
 
         result = check(cfg)
         assert result.status == "warn"
-        assert result.detail == "groundroute configured but GROUNDROUTE_API_KEY not set"
+        assert result.detail == f"{provider} configured but {key} not set"
 
-        monkeypatch.setenv("GROUNDROUTE_API_KEY", "gr-real-key")
+        monkeypatch.setenv(key, "synthetic-key")
         assert check(cfg).status == "ok"
 
     def test_youcom_names_an_ignored_placeholder_in_config(self, tmp_path, monkeypatch):

@@ -5,13 +5,64 @@ import ssl
 import threading
 from types import SimpleNamespace
 
+import httpcore
 import httpx
 import pytest
 
 from deerflow.community.groundroute import tools as groundroute
 from deerflow.community.infoquest.infoquest_client import InfoQuestClient
+from deerflow.community.serpapi import tools as serpapi
 from deerflow.community.webz import tools as webz
 from deerflow.community.youcom import tools as youcom
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("name", "args"), [("web_search", {"query": "coffee"}), ("web_fetch", {"url": "https://example.org/article"})])
+async def test_serpapi_tls_initialization_off_loop_and_io_on_loop(monkeypatch, name, args):
+    loop = threading.get_ident()
+    setup = {}
+    io = []
+    load = ssl.SSLContext.load_verify_locations
+
+    def load_certs(self, *args, **kwargs):
+        assert threading.get_ident() != loop, "TLS trust loading blocks the event loop"
+        setup["certificates"] = threading.get_ident()
+        return load(self, *args, **kwargs)
+
+    payload = b'{"organic_results":[{"title":"coffee"}],"markdown":"coffee"}'
+    network = httpcore.AsyncMockBackend([b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(payload) + payload])
+
+    async def connect_tcp(self, host, port, **kwargs):
+        io.append(("request", threading.get_ident()))
+        return await network.connect_tcp(host, port, **kwargs)
+
+    class Client(serpapi._SerpApiClient):
+        def __init__(self, params):
+            setup["client"] = threading.get_ident()
+            super().__init__(params)
+
+        async def __aexit__(self, *args):
+            await super().__aexit__(*args)
+            assert self.is_closed
+            io.append(("close", threading.get_ident()))
+
+    def config():
+        setup["config"] = threading.get_ident()
+        return SimpleNamespace(get_tool_config=lambda _: SimpleNamespace(model_extra={"api_key": "synthetic-key"}))
+
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.setenv("no_proxy", "*")
+    monkeypatch.setattr(ssl.SSLContext, "load_verify_locations", load_certs)
+    monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", connect_tcp)
+    monkeypatch.setattr(serpapi, "_SerpApiClient", Client)
+    monkeypatch.setattr(serpapi, "get_app_config", config)
+    result = await getattr(serpapi, f"{name}_tool").ainvoke(args)
+
+    assert "coffee" in result
+    assert set(setup) == {"config", "client", "certificates"}
+    assert loop not in setup.values(), setup
+    assert io == [("request", loop), ("close", loop)]
 
 
 @pytest.mark.asyncio

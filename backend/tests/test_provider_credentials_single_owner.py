@@ -230,6 +230,7 @@ TEMPLATE_ENV_VALUE = "your-serper-api-key"
 # provider module, environment variable, how the provider resolves its key
 ENV_KEY_READERS = [
     ("brave", "BRAVE_SEARCH_API_KEY", lambda tools: tools._get_api_key("web_search")),
+    ("serpapi", "SERPAPI_API_KEY", lambda tools: tools._resolve_tool_settings("web_search")[0]),
     ("serper", "SERPER_API_KEY", lambda tools: tools._get_api_key("web_search", extras={"api_key": TEMPLATE_CONFIG_VALUE})),
     ("serply", "SERPLY_API_KEY", lambda tools: tools._get_api_key("web_search")),
     ("sofya", "SOFYA_API_KEY", lambda tools: tools._get_api_key("web_search")),

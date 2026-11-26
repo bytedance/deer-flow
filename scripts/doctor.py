@@ -696,6 +696,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "fastcrw": "CRW_API_KEY",
                 "brave": "BRAVE_SEARCH_API_KEY",
                 "serper": "SERPER_API_KEY",
+                "serpapi": "SERPAPI_API_KEY",
                 "serply": "SERPLY_API_KEY",
                 "sofya": "SOFYA_API_KEY",
                 "specstream": "SPECSTREAM_API_KEY",
@@ -704,6 +705,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "groundroute": "GROUNDROUTE_API_KEY",
             },
             "web_fetch": {
+                "serpapi": "SERPAPI_API_KEY",
                 "infoquest": "INFOQUEST_API_KEY",
                 "exa": "EXA_API_KEY",
                 "firecrawl": "FIRECRAWL_API_KEY",

@@ -290,6 +290,28 @@ class TestBuildMinimalConfig:
         fetch_tool = next(t for t in data.get("tools", []) if t["name"] == "web_fetch")
         assert fetch_tool["timeout"] == 10
 
+    def test_serpapi_picker_writes_both_existing_tool_slots(self):
+        search = next(p for p in SEARCH_PROVIDERS if p.name == "serpapi")
+        fetch = next(p for p in WEB_FETCH_PROVIDERS if p.name == "serpapi")
+        assert search.env_var == fetch.env_var == "SERPAPI_API_KEY"
+        config = build_minimal_config(
+            provider_use="langchain_openai:ChatOpenAI",
+            model_name="gpt-4o",
+            display_name="OpenAI",
+            api_key_field="api_key",
+            env_var="OPENAI_API_KEY",
+            search_use=search.use,
+            search_extra_config=search.extra_config,
+            web_fetch_use=fetch.use,
+            web_fetch_extra_config=fetch.extra_config,
+        )
+        from deerflow.community import serpapi
+        from deerflow.reflection import resolve_variable
+
+        by_name = {entry["name"]: entry for entry in yaml.safe_load(config)["tools"]}
+        assert resolve_variable(by_name["web_search"]["use"]) is serpapi.web_search_tool
+        assert resolve_variable(by_name["web_fetch"]["use"]) is serpapi.web_fetch_tool
+
     def test_no_search_tool_when_not_configured(self):
         content = build_minimal_config(
             provider_use="langchain_openai:ChatOpenAI",
