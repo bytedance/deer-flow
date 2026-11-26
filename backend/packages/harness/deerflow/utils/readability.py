@@ -100,10 +100,18 @@ class Article:
 
 
 _BASE_TAG_RE = re.compile(r"<base", re.IGNORECASE)
-# A successful Readability.js extraction always strips <body> and <title>;
-# their presence in the content signals the subprocess returned the raw document.
-_UNEXTRACTED_DOC_RE = re.compile(r"<body\b[^>]*>|<title\b[^>]*>", re.IGNORECASE)
-_BODY_INNER_RE = re.compile(r"<body[^>]*>(.*)</body>", re.DOTALL | re.IGNORECASE)
+_DOCUMENT_WRAPPER_RE = re.compile(r"<(?:html|head|body)\b", re.IGNORECASE)
+
+
+def _has_document_wrapper(content: str) -> bool:
+    # html.parser preserves explicit wrappers without synthesizing them for
+    # fragments. SVG titles, comments and script examples are not documents.
+    if not _DOCUMENT_WRAPPER_RE.search(content):
+        return False
+    # The Python extractor can enclose a surviving body in a div. Ignore
+    # foreign content, where document-like tags can belong to a chart.
+    wrappers = BeautifulSoup(content, "html.parser").find_all(["html", "head", "body"])
+    return any(wrapper.find_parent(["svg", "math"]) is None for wrapper in wrappers)
 
 
 def _resolve_html_urls(html: str, url: str) -> str:
@@ -227,15 +235,12 @@ class ReadabilityExtractor:
         if not html_content or not str(html_content).strip():
             html_content = "No content could be extracted from this page"
 
-        # Detect silent Readability.js degradation: a successful extraction always
-        # strips <body> and <title> from the content. Their presence means the
-        # subprocess returned the raw document (e.g. on Windows where the node
-        # bridge may not produce real output). When detected, use the resolved
-        # HTML's <body> content so that <a> destinations survive.
-        if url and html and _UNEXTRACTED_DOC_RE.search(html_content):
-            logger.info("Readability.js returned the unextracted document; using resolved HTML body")
-            body_match = _BODY_INNER_RE.search(html)
-            html_content = body_match.group(1) if body_match else html
+        # A whole-document result needs the source body to retain link markup.
+        # Parse it as HTML so body-like text in the head cannot select the start.
+        if html and _has_document_wrapper(html_content):
+            logger.info("Readability extraction returned the unextracted document; using HTML body")
+            body = BeautifulSoup(html, "html5lib").body
+            html_content = body.decode_contents() if body is not None else html
 
         title = article.get("title")
         if not title or not str(title).strip():

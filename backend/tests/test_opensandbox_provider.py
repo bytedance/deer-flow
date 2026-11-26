@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import types
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -31,11 +32,12 @@ import httpx
 import pytest
 from langgraph.runtime import Runtime
 
-from deerflow.community.opensandbox.provider import OpenSandboxProvider, _import_sdk
+from deerflow.community.opensandbox.provider import OpenSandboxProvider, _import_sdk, _SkillUploadError
 from deerflow.community.opensandbox.sandbox import OpenSandboxSandbox
 from deerflow.config import ExtensionsConfig, SkillsConfig
 from deerflow.config.extensions_config import SkillStateConfig
 from deerflow.config.paths import Paths
+from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.sandbox.middleware import SandboxMiddleware
 from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
 from deerflow.skills.projection import get_thread_skill_projection_paths
@@ -294,6 +296,231 @@ def _box(
         default_command_timeout=default_command_timeout,
         on_terminal_failure=on_terminal_failure,
     )
+
+
+def test_wait_policy_preserves_the_legacy_soft_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, sdk = _install(monkeypatch, config={"replicas": 1, "overflow_policy": "wait"})
+    try:
+        provider.acquire("thread-1")
+        provider.acquire("thread-2")
+        assert len(sdk.create_calls) == 2
+    finally:
+        provider.shutdown()
+
+
+def test_reject_policy_enforces_capacity_and_transfers_warm_slots(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, sdk = _install(monkeypatch, config={"replicas": 1, "overflow_policy": "reject"})
+    try:
+        first_id = provider.acquire("thread-1")
+        with pytest.raises(SandboxCapacityExceededError) as caught:
+            provider.acquire("thread-2")
+        assert caught.value.details["code"] == SandboxCapacityExceededError.CODE
+        assert caught.value.details["active"] == 1
+        assert caught.value.details["replicas"] == 1
+        assert caught.value.details["retryable"] is True
+        assert caught.value.details["retry_after_seconds"] == OpenSandboxProvider.CAPACITY_RETRY_AFTER_SECONDS
+        assert len(sdk.create_calls) == 1
+
+        provider.release(first_id)
+        second_id = provider.acquire("thread-2")
+        assert sdk.remotes[0].destroy_calls == 1
+        assert len(sdk.create_calls) == 2
+        with pytest.raises(SandboxCapacityExceededError):
+            provider.acquire("thread-3")
+        assert len(sdk.create_calls) == 2
+        assert provider.get(second_id) is not None
+    finally:
+        provider.shutdown()
+
+
+def test_reject_policy_reserves_capacity_during_inflight_create(monkeypatch: pytest.MonkeyPatch) -> None:
+    first_create_entered = threading.Event()
+    release_first_create = threading.Event()
+    second_finished = threading.Event()
+    factory_calls = 0
+
+    def remote_factory(index: int) -> _FakeRemote:
+        nonlocal factory_calls
+        factory_calls += 1
+        if factory_calls == 1:
+            first_create_entered.set()
+            assert release_first_create.wait(timeout=5)
+        return _FakeRemote(f"remote-{factory_calls}")
+
+    provider, sdk = _install(
+        monkeypatch,
+        sdk=_FakeSandboxClass(remote_factory=remote_factory),
+        config={"replicas": 1, "overflow_policy": "reject"},
+    )
+    results: dict[str, str] = {}
+    errors: dict[str, Exception] = {}
+
+    def acquire(name: str) -> None:
+        try:
+            results[name] = provider.acquire(name)
+        except Exception as exc:
+            errors[name] = exc
+        finally:
+            if name == "thread-2":
+                second_finished.set()
+
+    first = threading.Thread(target=acquire, args=("thread-1",))
+    second = threading.Thread(target=acquire, args=("thread-2",))
+    try:
+        first.start()
+        assert first_create_entered.wait(timeout=5)
+        second.start()
+        assert second_finished.wait(timeout=5)
+        assert isinstance(errors.get("thread-2"), SandboxCapacityExceededError)
+        assert errors["thread-2"].details["reserved"] == 1
+        assert len(sdk.create_calls) == 1
+    finally:
+        release_first_create.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+        provider.shutdown()
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert "thread-1" not in errors
+    assert results["thread-1"]
+
+
+def test_reject_policy_releases_capacity_after_create_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    factory_calls = 0
+
+    def fail_first_create(index: int) -> _FakeRemote:
+        nonlocal factory_calls
+        factory_calls += 1
+        if factory_calls == 1:
+            raise RuntimeError("synthetic create failure")
+        return _FakeRemote(f"remote-{factory_calls}")
+
+    provider, sdk = _install(
+        monkeypatch,
+        sdk=_FakeSandboxClass(remote_factory=fail_first_create),
+        config={"replicas": 1, "overflow_policy": "reject"},
+    )
+    try:
+        with pytest.raises(RuntimeError, match="synthetic create failure"):
+            provider.acquire("thread-1")
+        assert provider.acquire("thread-2")
+        assert len(sdk.create_calls) == 2
+    finally:
+        provider.shutdown()
+
+
+def test_reject_policy_keeps_a_reclaimed_warm_slot_counted_until_registration(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, sdk = _install(monkeypatch, config={"replicas": 1, "overflow_policy": "reject"})
+    competing: list[BaseException] = []
+    prepare = provider._prepare_new_skill_view
+
+    def prepare_then_compete(sandbox, *, thread_id, user_id):
+        prepare(sandbox, thread_id=thread_id, user_id=user_id)
+        if thread_id == "thread-1" and sdk.create_calls and not competing:
+            # The reclaimed sandbox has left the warm pool but is not active yet.
+            try:
+                provider.acquire("thread-2")
+            except SandboxCapacityExceededError as exc:
+                competing.append(exc)
+
+    try:
+        provider.release(provider.acquire("thread-1"))
+        monkeypatch.setattr(provider, "_prepare_new_skill_view", prepare_then_compete)
+        assert provider.acquire("thread-1")
+        assert len(competing) == 1
+        assert competing[0].details["reserved"] == 1
+        assert len(sdk.create_calls) == 1
+        assert provider._reserved_creates == set()
+    finally:
+        provider.shutdown()
+
+
+def test_reject_policy_counts_an_idle_sandbox_until_its_deletion_finishes(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, sdk = _install(monkeypatch, config={"replicas": 1, "overflow_policy": "reject"})
+    deleting, finish = threading.Event(), threading.Event()
+    try:
+        provider.release(provider.acquire("thread-1"))
+        remote = sdk.remotes[0]
+
+        def slow_destroy() -> None:
+            deleting.set()
+            assert finish.wait(timeout=5)
+            remote.destroy_calls += 1
+
+        remote.destroy = slow_destroy
+        reaper = threading.Thread(target=provider._reap_expired_warm, args=(1e-9,))
+        reaper.start()
+        assert deleting.wait(timeout=5)
+        with pytest.raises(SandboxCapacityExceededError) as caught:
+            provider.acquire("thread-2")
+        assert caught.value.details["transitioning"] == 1
+        assert len(sdk.create_calls) == 1
+        finish.set()
+        reaper.join(timeout=5)
+        assert provider.acquire("thread-2")
+        assert len(sdk.create_calls) == 2
+    finally:
+        finish.set()
+        provider.shutdown()
+
+
+def test_reject_policy_refuses_a_replacement_when_eviction_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, sdk = _install(monkeypatch, config={"replicas": 1, "overflow_policy": "reject"})
+    try:
+        provider.release(provider.acquire("thread-1"))
+
+        def failing_destroy() -> None:
+            raise RuntimeError("synthetic deletion timeout")
+
+        sdk.remotes[0].destroy = failing_destroy
+        for thread_id in ("thread-2", "thread-3"):
+            with pytest.raises(SandboxCapacityExceededError) as caught:
+                provider.acquire(thread_id)
+            assert caught.value.details["transitioning"] == 1
+        assert len(sdk.create_calls) == 1
+        assert provider._reserved_creates == set()
+    finally:
+        provider.shutdown()
+
+
+def test_reject_policy_hands_a_failed_reclaim_back_to_the_pool_atomically(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, sdk = _install(monkeypatch, config={"replicas": 2, "overflow_policy": "reject"})
+    try:
+        provider.release(provider.acquire("thread-1"))
+
+        def failing_upload(sandbox, *, thread_id, user_id):
+            raise _SkillUploadError("synthetic skill upload failure")
+
+        counted_twice: list[bool] = []
+        release = provider._release_reservation
+
+        def observe_release(sandbox_id: str) -> None:
+            with provider._lock:
+                counted_twice.append(sandbox_id in provider._reserved_creates and sandbox_id in provider._warm_pool)
+            release(sandbox_id)
+
+        monkeypatch.setattr(provider, "_prepare_new_skill_view", failing_upload)
+        monkeypatch.setattr(provider, "_release_reservation", observe_release)
+        with pytest.raises(_SkillUploadError):
+            provider.acquire("thread-1")
+        assert counted_twice == [False]
+        assert len(provider._warm_pool) == 1
+        assert provider._reserved_creates == set()
+        assert sdk.remotes[0].destroy_calls == 0
+    finally:
+        provider.shutdown()
+
+
+def test_burst_policy_warns_that_opensandbox_keeps_the_soft_cap(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="deerflow.community.opensandbox.provider"):
+        provider, sdk = _install(monkeypatch, config={"replicas": 1, "overflow_policy": "burst"})
+    try:
+        assert "overflow_policy 'burst' is E2B-only" in caplog.text
+        provider.acquire("thread-1")
+        provider.acquire("thread-2")
+        assert len(sdk.create_calls) == 2
+    finally:
+        provider.shutdown()
 
 
 def test_missing_sdk_has_actionable_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -645,13 +872,108 @@ def test_opensandbox_skill_views_replace_on_warm_reuse(opensandbox_skill_view):
 
     for allowlist, expected in [({"alpha"}, {"alpha"}), (set(), set()), (None, {"alpha", "beta", "alice-only"})]:
         runtime = Runtime(context={"thread_id": "thread", "user_id": "alice"})
-        update = SandboxMiddleware(lazy_init=True, available_skills=allowlist).before_agent({}, runtime)
-        assert update == {"sandbox": {"sandbox_id": alice_id}}
+        # A fresh run defers acquisition; the first sandbox tool's acquire
+        # reclaims the warm remote with the run's scoped view.
+        assert SandboxMiddleware(lazy_init=True, available_skills=allowlist).before_agent({}, runtime) is None
+        assert "sandbox_id" not in runtime.context
+        assert env.provider.acquire("thread", user_id="alice") == alice_id
         assert _remote_skills(alice) == expected
         assert {p.name for p in alice.skill_root.iterdir()} == {"public", "custom", "legacy", "integrations"}
         env.provider.release(alice_id)
     assert len(env.sdk.remotes) == 2
     assert _remote_skills(bob) == {"alpha", "beta", "bob-only"}
+
+
+def test_opensandbox_policy_run_without_sandbox_tool_creates_no_remote(opensandbox_skill_view):
+    env = opensandbox_skill_view
+    env.skill("alpha")
+    runtime = Runtime(context={"thread_id": "fresh", "user_id": "alice"})
+
+    assert SandboxMiddleware(lazy_init=True, available_skills=set()).before_agent({}, runtime) is None
+    assert env.sdk.remotes == []
+    assert "sandbox_id" not in runtime.context
+
+    # A later sandbox tool gets a remote holding only the (empty) scoped view.
+    sandbox_id = env.provider.acquire("fresh", user_id="alice")
+    remote = env.sdk.remotes[0]
+    assert env.provider.get(sandbox_id) is not None
+    assert _remote_skills(remote) == set()
+    assert {p.name for p in remote.skill_root.iterdir()} == {"public", "custom", "legacy", "integrations"}
+
+
+def test_opensandbox_policy_run_syncs_a_remote_an_upload_holds(opensandbox_skill_view):
+    env = opensandbox_skill_view
+    env.skill("alpha")
+    # An upload acquired the thread's remote before the run started.
+    sandbox_id = env.provider.acquire("thread", user_id="alice")
+    remote = env.sdk.remotes[0]
+    assert _remote_skills(remote) == {"alpha"}
+    env.skill("beta")
+    runtime = Runtime(context={"thread_id": "thread", "user_id": "alice"})
+
+    # The active remote would be reused without the run's view: stay eager.
+    update = SandboxMiddleware(lazy_init=True, available_skills={"alpha", "beta"}).before_agent({}, runtime)
+    assert update == {"sandbox": {"sandbox_id": sandbox_id}}
+    assert env.sdk.remotes == [remote]
+    assert _remote_skills(remote) == {"alpha", "beta"}
+    assert env.provider.acquire("thread", user_id="alice") == sandbox_id
+    assert _remote_skills(remote) == {"alpha", "beta"}
+
+
+def test_opensandbox_policy_run_syncs_a_remote_an_upload_is_initializing(opensandbox_skill_view, monkeypatch):
+    env = opensandbox_skill_view
+    env.skill("alpha")
+    initial_skill_written = threading.Event()
+    allow_publish = threading.Event()
+    create_remote = env.sdk.remote_factory
+
+    def create_paused_remote(index):
+        remote = create_remote(index)
+        write_file = remote.files.write_file
+
+        def write(path, data, *, mode):
+            write_file(path, data, mode=mode)
+            if not initial_skill_written.is_set():
+                initial_skill_written.set()
+                assert allow_publish.wait(10)
+
+        remote.files.write_file = write
+        return remote
+
+    monkeypatch.setattr(env.sdk, "remote_factory", create_paused_remote)
+    runtime = Runtime(context={"thread_id": "thread", "user_id": "alice"})
+    middleware = SandboxMiddleware(lazy_init=True, available_skills={"alpha", "beta"})
+    decision_made = threading.Event()
+    can_defer = middleware._can_defer_sandbox_acquisition
+
+    def record_decision(*args):
+        result = can_defer(*args)
+        decision_made.set()
+        return result
+
+    monkeypatch.setattr(middleware, "_can_defer_sandbox_acquisition", record_decision)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        upload = executor.submit(env.provider.acquire, "thread", user_id="alice")
+        try:
+            assert initial_skill_written.wait(10)
+            remote = env.sdk.remotes[0]
+            assert _remote_skills(remote) == {"alpha"}
+            env.skill("beta")
+            # Another user's run on the same thread ID can still stay lazy.
+            other_user = Runtime(context={"thread_id": "thread", "user_id": "bob"})
+            assert SandboxMiddleware(lazy_init=True, available_skills={"alpha"}).before_agent({}, other_user) is None
+            run = executor.submit(middleware.before_agent, {}, runtime)
+            assert decision_made.wait(10)
+        finally:
+            allow_publish.set()
+
+        sandbox_id = upload.result(timeout=10)
+        update = run.result(timeout=10)
+
+    assert env.provider.acquire("thread", user_id="alice") == sandbox_id
+    assert env.sdk.remotes == [remote]
+    assert _remote_skills(remote) == {"alpha", "beta"}
+    assert update == {"sandbox": {"sandbox_id": sandbox_id}}
 
 
 @pytest.mark.parametrize("restricted", [False, True])
@@ -711,7 +1033,8 @@ def test_opensandbox_skill_upload_preserves_package_links(opensandbox_skill_view
     (package / "empty link").symlink_to("assets/empty", target_is_directory=True)
 
     runtime = Runtime(context={"thread_id": "thread", "user_id": "alice"})
-    SandboxMiddleware(lazy_init=True, available_skills={"allowed"}).before_agent({}, runtime)
+    assert SandboxMiddleware(lazy_init=True, available_skills={"allowed"}).before_agent({}, runtime) is None
+    env.provider.acquire("thread", user_id="alice")
     uploaded = env.sdk.remotes[0].skill_root / "custom" / "allowed"
     assert (uploaded / "file link").is_symlink()
     assert (uploaded / "file link").read_bytes() == b"data"

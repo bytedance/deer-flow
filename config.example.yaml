@@ -1783,8 +1783,9 @@ uploads:
 # Serves workspace file operations
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
-  # For AioSandboxProvider only: overlap likely sandbox work with the first
-  # model call. It is disabled by default and ignored by other providers.
+  # For AioSandboxProvider and VeFaaSSandboxProvider only: overlap likely
+  # sandbox work with the first model call. Disabled by default; ignored by
+  # other providers.
   prewarm: false
   # Bound pending/ready-unused speculation per provider instance, per process.
   # A full budget skips prewarming; foreground tools still acquire normally.
@@ -2051,6 +2052,7 @@ sandbox:
 #   # sandbox_timeout: 14400          # finite non-negative remote lifetime seconds; 0 = explicit cleanup
 #   # bash_command_timeout: 600       # default remote command timeout seconds
 #   # replicas: 3                     # active + warm cap per gateway process
+#   # overflow_policy: wait           # reject adds a process-local hard cap including in-flight creates
 #   # idle_timeout: 600               # warm seconds before destroy; 0 disables
 #   # environment:                    # create-time and per-command defaults
 #   #   PYTHONUNBUFFERED: "1"
@@ -2093,12 +2095,24 @@ sandbox:
 #     # memory_mb: 2048                                     # 512..131072
 #     # timeout_minutes: 60                                 # 3..1440
 #     # ready_timeout: 60                                   # seconds to wait for Running + HTTP readiness
+#     # snapshot_id: ""                                     # optional pre-baked base snapshot for new sandboxes
+#     # pause_on_idle: false                                # pause warm sandboxes on idle/eviction instead of killing
+#     # auto_pause: false                                   # pass AutoPauseConfig on CreateSandbox
+#     # snapshot_on_idle: false                             # snapshot clean idle sandboxes before kill & auto-restore
+#     # snapshot_type: disk                                 # disk | full
+#     # snapshot_retention_days: 7                          # 1..365 (optional)
+#     # snapshot_timeout: 120                               # seconds to wait for snapshot readiness
+#     # max_snapshots_per_sandbox: 3                        # ready snapshots retained per thread (1..100)
+#     # precache_images: []                                 # optional image URLs to precache via PrecacheSandboxImages
+#     # precache_on_startup: false                          # trigger background image precache on provider startup
 #     # tos_mount:                                          # optional per-thread scoped TOS mount
 #     #   enabled: false
 #     #   bucket: $BYTEPLUS_TOS_BUCKET
 #     #   prefix: deerflow-user-data
 #   # replicas: 3                     # active + warm soft cap per gateway process
 #   # idle_timeout: 600               # warm seconds before KillSandbox; 0 disables
+#   # prewarm: false                  # overlap likely sandbox startup with the first model call
+#   # prewarm_max_concurrent: 1       # pending/unused speculative prewarms per process
 #   # bash_command_timeout: 600       # default remote command timeout seconds
 #   # ownership:
 #   #   type: redis                   # required for multi-worker gateways sharing one veFaaS app
@@ -3096,6 +3110,8 @@ mcp_agent_auth: {}
 #     agent: research-bot
 #     owners: ["member-user-id"]  # Explicit IDs; one list may cover shared copies.
 #     definition_digests: ["<approved 64-character SHA-256 digest>"]
+#     # Or grants: runtime (no owners/definition_digests here): an administrator
+#     # maintains them via /api/mcp/agent-auth without a restart.
 #     oauth:
 #       grant_type: client_credentials
 #       token_url: https://idp.example/realms/work/protocol/openid-connect/token

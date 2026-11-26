@@ -158,6 +158,33 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
     assert refresh_calls == [("refresh", "default")]
 
 
+def test_install_skill_archive_with_a_skill_md_directory_returns_400(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    (skills_root / "custom").mkdir(parents=True)
+    archive = tmp_path / "dir-skill.skill"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("dir-skill/SKILL.md/notes.md", "# Notes\n")
+
+    from deerflow.config.paths import Paths
+
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    storage = UserScopedSkillStorage("default", host_path=str(skills_root))
+    monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: storage)
+    monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
+
+    app = _make_test_app(SimpleNamespace())
+    with TestClient(app) as client:
+        response = client.post("/api/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/dir-skill.skill"})
+
+    # Before the fix this was a 500 whose detail carried the host temp path.
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid skill: SKILL.md must be a file"
+    assert not _user_custom_dir(tmp_path, "default").joinpath("dir-skill").exists()
+
+
 def test_upload_skill_archive_installs_without_thread_workspace(monkeypatch, tmp_path):
     installed_paths: list[Path] = []
     refresh_calls: list[str] = []
@@ -2212,8 +2239,8 @@ def test_custom_skill_mutation_lock_is_scoped_to_the_owning_user(tmp_path, monke
     two users that own disjoint custom-skill trees must not share the lock that
     also spans write_custom_skill's whole projection rebuild.
     """
-    from app.gateway.routers.skills import _custom_skill_mutation_lock
     from deerflow.config.paths import Paths
+    from deerflow.skills.mutation_lock import custom_skill_mutation_lock
 
     monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
     monkeypatch.setattr("deerflow.config.paths._paths", None)
@@ -2222,8 +2249,8 @@ def test_custom_skill_mutation_lock_is_scoped_to_the_owning_user(tmp_path, monke
     alice_second_instance = UserScopedSkillStorage("alice", host_path=str(tmp_path / "skills"))
     bob = UserScopedSkillStorage("bob", host_path=str(tmp_path / "skills"))
 
-    assert _custom_skill_mutation_lock(alice) is _custom_skill_mutation_lock(alice_second_instance)
-    assert _custom_skill_mutation_lock(alice) is not _custom_skill_mutation_lock(bob)
+    assert custom_skill_mutation_lock(alice) is custom_skill_mutation_lock(alice_second_instance)
+    assert custom_skill_mutation_lock(alice) is not custom_skill_mutation_lock(bob)
 
 
 def test_custom_skill_update_does_not_serialize_an_unrelated_user(monkeypatch, tmp_path):

@@ -97,8 +97,9 @@ def _relabel_tool_call_ids(tool_calls: list, msg_index: int, source: str) -> tup
     The id is derived from the call's position so both the pairing pass and the
     model-bound message agree on it without threading state between them.
 
-    Returns the rewritten list, one ``{original, synthetic, name}`` claim entry per
-    relabelled call, and whether anything changed.
+    Returns the rewritten list, one ``{original, synthetic, name, executable}`` claim
+    entry per relabelled call, and whether anything changed. The executable flag
+    breaks ties between equally strong name matches.
     """
     relabeled: list = []
     assigned: list[dict] = []
@@ -110,7 +111,14 @@ def _relabel_tool_call_ids(tool_calls: list, msg_index: int, source: str) -> tup
         synthetic = f"{_SYNTHETIC_TOOL_CALL_ID_PREFIX}{msg_index}_{source}_{position}"
         relabeled.append({**tool_call, "id": synthetic})
         changed = True
-        assigned.append({"original": tool_call.get("id"), "synthetic": synthetic, "name": _tool_call_name(tool_call)})
+        assigned.append(
+            {
+                "original": tool_call.get("id"),
+                "synthetic": synthetic,
+                "name": _tool_call_name(tool_call),
+                "executable": source != "invalid",
+            }
+        )
     return relabeled, assigned, changed
 
 
@@ -130,7 +138,11 @@ def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional:
 
     Malformed originals are all equally empty, so they cannot identify their own
     result; ``open_calls`` is already scoped to the issuing turn. Within that turn the
-    result's name narrows the candidates, and only a *forced* choice is taken:
+    result's name narrows the candidates. An exact name match takes precedence
+    over candidates with missing names. Within the same name-match priority,
+    executable calls take precedence so an invalid same-name sibling cannot
+    steal or block their result (#7821). A persisted ToolMessage can still pair
+    with an invalid call (#2894). Among the remaining candidates:
 
     * one compatible call — its name, or being the turn's only call, identifies it;
     * several compatible calls — position identifies them, but only while ``positional``
@@ -146,7 +158,16 @@ def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional:
     what an unattributable result gets today — better than inventing a pairing.
     """
     candidates = [position for position, entry in enumerate(open_calls) if _same_tool_call_id(entry["original"], result.tool_call_id) and _names_can_pair(entry["name"], result.name)]
-    if not candidates or (len(candidates) > 1 and not positional):
+    if not candidates:
+        return None
+
+    if _valid_tool_name(result.name):
+        exact_matches = [position for position in candidates if _valid_tool_name(open_calls[position]["name"])]
+        candidates = exact_matches or candidates
+
+    executable_matches = [position for position in candidates if open_calls[position]["executable"]]
+    candidates = executable_matches or candidates
+    if len(candidates) > 1 and not positional:
         return None
     return open_calls.pop(candidates[0])["synthetic"]
 

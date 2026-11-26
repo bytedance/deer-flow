@@ -2,8 +2,11 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote, quote_plus
 
 import httpx
+
+from deerflow.community.provider_credentials import redact_secret
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,14 @@ def _get_header(headers: Any, name: str) -> str:
     if value:
         return str(value)
     return str(headers.get(name.lower(), ""))
+
+
+def _sanitize_target_status_code(value: str) -> str:
+    """Return a valid 3-digit HTTP status code (100-599), or empty string."""
+    code = value.strip()
+    if len(code) == 3 and code.isascii() and code.isdigit() and 100 <= int(code) <= 599:
+        return code
+    return ""
 
 
 async def _settle(future: "asyncio.Future[Any]") -> Any:
@@ -87,6 +98,21 @@ class BrowserlessClient:
         unknown keys, so the token must never be sent in the JSON body.
         """
         return {"token": self.token} if self.token else None
+
+    def redact(self, value: object) -> str:
+        """Scrub the configured token (raw and URL-encoded forms) from error text."""
+        text = redact_secret(value, self.token)
+        if self.token:
+            for encoded in (quote(self.token, safe=""), quote_plus(self.token)):
+                if encoded != self.token:
+                    text = redact_secret(text, encoded)
+        return text
+
+    def _target_status_headers(self, headers: Any) -> tuple[str, str]:
+        """Validate ``X-Response-Code`` and redact ``X-Response-Status`` at the client boundary."""
+        target_code = _sanitize_target_status_code(_get_header(headers, "X-Response-Code"))
+        target_status = self.redact(_get_header(headers, "X-Response-Status"))
+        return target_code, target_status
 
     async def fetch_html(
         self,
@@ -197,13 +223,17 @@ class BrowserlessClient:
                 )
 
                 code = resp.status_code
-                target_code = resp.headers.get("X-Response-Code", "")
-                target_status = resp.headers.get("X-Response-Status", "")
+                target_code, target_status = self._target_status_headers(resp.headers)
 
-                logger.debug(f"Browserless response: code={code}, target_code={target_code}, target_status={target_status}")
+                logger.debug(
+                    "Browserless response: code=%s, target_code=%s, target_status=%s",
+                    code,
+                    target_code,
+                    target_status,
+                )
 
                 if code != 200:
-                    return f"Error: Browserless HTTP {code}: {resp.text[:200]}"
+                    return f"Error: Browserless HTTP {code}: {self.redact(resp.text)[:200]}"
 
                 html = resp.text
                 if not html or not html.strip():
@@ -211,18 +241,20 @@ class BrowserlessClient:
 
                 return BrowserlessFetchResult(
                     html=html,
-                    target_status_code=_get_header(resp.headers, "X-Response-Code"),
-                    target_status=_get_header(resp.headers, "X-Response-Status"),
+                    target_status_code=target_code,
+                    target_status=target_status,
                 )
 
         except httpx.TimeoutException:
             return f"Error: Browserless request timed out after {self.timeout_s}s"
         except httpx.RequestError as e:
-            logger.error(f"Browserless request failed: {e}")
-            return f"Error: Browserless request failed: {e!s}"
+            detail = self.redact(e)
+            logger.error("Browserless request failed: %s", detail)
+            return f"Error: Browserless request failed: {detail}"
         except Exception as e:
-            logger.error(f"Browserless fetch failed: {e}")
-            return f"Error: Browserless fetch failed: {e!s}"
+            detail = self.redact(e)
+            logger.error("Browserless fetch failed: %s", detail)
+            return f"Error: Browserless fetch failed: {detail}"
 
     async def capture_screenshot(
         self,
@@ -289,15 +321,16 @@ class BrowserlessClient:
                 )
 
                 code = resp.status_code
+                target_code, target_status = self._target_status_headers(resp.headers)
                 logger.debug(
                     "Browserless screenshot response: code=%s, target_code=%s, target_status=%s",
                     code,
-                    resp.headers.get("X-Response-Code", ""),
-                    resp.headers.get("X-Response-Status", ""),
+                    target_code,
+                    target_status,
                 )
 
                 if code != 200:
-                    return f"Error: Browserless HTTP {code}: {resp.text[:200]}"
+                    return f"Error: Browserless HTTP {code}: {self.redact(resp.text)[:200]}"
 
                 content = resp.content
                 if not content:
@@ -306,16 +339,18 @@ class BrowserlessClient:
                 return BrowserlessScreenshotResult(
                     content=content,
                     content_type=_get_header(resp.headers, "Content-Type"),
-                    target_status_code=_get_header(resp.headers, "X-Response-Code"),
-                    target_status=_get_header(resp.headers, "X-Response-Status"),
+                    target_status_code=target_code,
+                    target_status=target_status,
                     final_url=_get_header(resp.headers, "X-Response-URL"),
                 )
 
         except httpx.TimeoutException:
             return f"Error: Browserless screenshot request timed out after {self.timeout_s}s"
         except httpx.RequestError as e:
-            logger.error(f"Browserless screenshot request failed: {e}")
-            return f"Error: Browserless screenshot request failed: {e!s}"
+            detail = self.redact(e)
+            logger.error("Browserless screenshot request failed: %s", detail)
+            return f"Error: Browserless screenshot request failed: {detail}"
         except Exception as e:
-            logger.error(f"Browserless screenshot failed: {e}")
-            return f"Error: Browserless screenshot failed: {e!s}"
+            detail = self.redact(e)
+            logger.error("Browserless screenshot failed: %s", detail)
+            return f"Error: Browserless screenshot failed: {detail}"
