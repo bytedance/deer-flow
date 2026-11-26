@@ -3,6 +3,8 @@
 from collections.abc import Mapping
 from typing import Final
 
+from deerflow.tracing.context import TRACE_ORIGIN_RUN_KEY
+
 MCP_BROWSER_USER_CONTEXT_KEY: Final[str] = "__deerflow_mcp_browser_user"
 
 CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: Final[str] = "__deerflow_pre_run_message_ids"
@@ -22,15 +24,8 @@ PROJECT_CONTEXT_KEY: Final[str] = "__deerflow_project_context"
 AGENT_AUTH_CONTEXT_KEY: Final[str] = "__deerflow_mcp_agent_authority"
 
 
-def checkpoint_agent_binding_metadata(metadata: object) -> dict[str, str]:
-    """Copy a checkpoint's server-authored agent binding for a state rewrite.
-
-    Callers must pass persisted checkpoint metadata, never request metadata.
-    Missing or malformed values remain unbound so memory writes fail closed.
-    """
+def checkpoint_rewrite_metadata(metadata: object) -> dict[str, str]:
+    """Preserve host metadata when rewriting persisted checkpoint state."""
     if not isinstance(metadata, Mapping):
         return {}
-    value = metadata.get(CHECKPOINT_AGENT_NAME_METADATA_KEY)
-    if not isinstance(value, str) or not value:
-        return {}
-    return {CHECKPOINT_AGENT_NAME_METADATA_KEY: value}
+    return {key: value for key in (CHECKPOINT_AGENT_NAME_METADATA_KEY, TRACE_ORIGIN_RUN_KEY) if isinstance(value := metadata.get(key), str) and value}

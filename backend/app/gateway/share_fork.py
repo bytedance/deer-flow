@@ -24,7 +24,7 @@ from deerflow.config.paths import get_paths
 from deerflow.persistence.thread_meta import ThreadMetaStore
 from deerflow.persistence.thread_shares.sql import ThreadShareRepository
 from deerflow.runtime import ConflictError, ThreadOperationKind
-from deerflow.runtime.context_keys import checkpoint_agent_binding_metadata
+from deerflow.runtime.context_keys import checkpoint_rewrite_metadata
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_branch_history_seed_events
@@ -229,8 +229,9 @@ async def _store_share_provenance(request: Request, thread_id: str, threads: Thr
     head = await accessor.aget(config)
     if head.next or any(task.interrupts for task in head.tasks):
         return False
-    # Keep the head's agent binding: without it, memory writes for the thread fail closed.
-    update_config = {**config, "metadata": checkpoint_agent_binding_metadata(getattr(head, "metadata", None))}
+    # Keep the head's server-authored metadata (agent binding + trace origin):
+    # without the agent binding, memory writes for the thread fail closed.
+    update_config = {**config, "metadata": checkpoint_rewrite_metadata(getattr(head, "metadata", None))}
     imported = await _imported_message_ids(request, accessor, config)
     if imported is None:
         logger.warning("Share copy %s has no readable import checkpoint; memory capture skips it until its copied history can be marked", sanitize_log_param(thread_id))

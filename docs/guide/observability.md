@@ -53,6 +53,21 @@ subagents. Promotion
 events identify deferred-tool names selected by `tool_search`, without copying the search query, routing keywords,
 schemas, arguments, results, or catalog hash into the promotion event itself.
 
+## Distributed Tracing with OpenTelemetry
+
+Gateway accepts the W3C `traceparent` header alongside `X-Trace-Id`. Manual
+scheduled runs and native subagent batches carry the parent across queue
+retries. A checkpoint continuation without a new parent can use the parent
+from its source Run within the same thread and owner.
+
+Configure an OpenTelemetry SDK and exporter in your deployment to record
+`deerflow.run` and `deerflow.subagent` spans. Search by `deerflow.run.id`
+to find the execution. Instrument downstream clients and services to
+propagate context and record their spans in the same tracing backend.
+These execution spans carry IDs and status. Configure any capture of model
+or tool contents separately. At a public ingress, strip trace headers
+from callers whose trace context you do not trust.
+
 ## LangSmith Tracing
 
 DeerFlow has built-in [LangSmith](https://smith.langchain.com) integration for observability. When enabled, all LLM calls, agent runs, and tool executions are traced and visible in the LangSmith dashboard.

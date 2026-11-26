@@ -64,6 +64,7 @@ from deerflow.tracing import (
     build_tracing_callbacks,
     inject_langfuse_metadata,
 )
+from deerflow.tracing.context import annotate_execution, execution_span
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.bash_exit import BASH_TOOL_NAMES, bash_exit_status
 from deerflow.utils.file_io import await_drained
@@ -1840,7 +1841,16 @@ class SubagentExecutor:
                             return result
                         result.status = SubagentStatus.RUNNING
                         result.started_at = _utcnow()
-                    return await self._aexecute_admitted(task, result)
+                    with execution_span("deerflow.subagent", {"deerflow.subagent.id": result.task_id}) as span:
+                        try:
+                            return await self._aexecute_admitted(task, result)
+                        finally:
+                            annotate_execution(
+                                span,
+                                "deerflow.subagent.status",
+                                result.status.value,
+                                failed=result.status in (SubagentStatus.FAILED, SubagentStatus.TIMED_OUT),
+                            )
             except SubagentCheckpointError as exc:
                 result.try_set_terminal(SubagentStatus.FAILED, error=str(exc), admission_failure=True)
                 return result

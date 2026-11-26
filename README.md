@@ -131,7 +131,7 @@ Each guide is the full reference for its topic. Open the one you need.
 | Token usage dashboard, workspace, chat archive | [Workspace UI](docs/guide/workspace.md) |
 | Terminal workbench | [Terminal Workbench (TUI)](docs/guide/tui.md) |
 | Personal access tokens, stream actions, embedded Python client | [API Access and Python Client](docs/guide/api-and-client.md) |
-| Trace correlation, LangSmith, Langfuse, Monocle | [Tracing and Observability](docs/guide/observability.md) |
+| Trace correlation, OpenTelemetry, LangSmith, Langfuse, Monocle | [Tracing and Observability](docs/guide/observability.md) |
 | Deployment risks, admin model, security recommendations | [Security Notice](docs/guide/security.md) |
 
 ## Recommended Models

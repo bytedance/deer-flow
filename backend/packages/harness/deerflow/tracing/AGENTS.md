@@ -12,6 +12,25 @@ cd backend
 python -m pytest tests -q -k "tracing or langfuse or monocle"
 ```
 
+## Distributed tracing
+
+Gateway accepts a W3C `traceparent` and keeps the active server span when ASGI
+is already instrumented. Strip untrusted trace headers at the deployment
+ingress if clients should only start new traces. The host persists the
+canonical parent with Run admission and manual scheduled occurrences, and
+captures it in durable batch execution specs. Client JSON cannot set this
+field. A continuation with no active parent resolves the selected checkpoint
+after the Worker startup barrier. Its source Run reference selects the
+admission parent only within the same owner and thread. Only span identity
+and flags cross durable boundaries.
+
+A fresh Gateway run without a parent starts a `deerflow.run.admit` span.
+The Worker and native subagents emit `deerflow.run` and `deerflow.subagent`
+through the same OpenTelemetry tracer provider. Without an SDK provider
+this is propagation only. Use the existing task lifecycle and model
+observers for extensions. Collector setup, downstream HTTP instrumentation,
+and export policy belong to the deployment.
+
 ## LangSmith and Langfuse
 
 - **Callbacks attach at the graph invocation root, not at the model.** One run

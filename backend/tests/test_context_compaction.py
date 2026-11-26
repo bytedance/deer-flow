@@ -16,6 +16,7 @@ from deerflow.runtime import context_compaction
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_compaction import ContextCompactionFailed, ContextCompactionPendingWork, compact_thread_context
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE
+from deerflow.tracing.context import TRACE_ORIGIN_RUN_KEY
 
 
 class _FakeAccessor:
@@ -287,6 +288,7 @@ async def test_compact_thread_context_real_mutation_graph_finishes_without_sched
     )
     seed_config["metadata"] = {
         CHECKPOINT_AGENT_NAME_METADATA_KEY: DEFAULT_AGENT_NAME_METADATA_VALUE,
+        TRACE_ORIGIN_RUN_KEY: "run-origin-1",
     }
     await seed_accessor.aupdate(
         seed_config,
@@ -319,6 +321,7 @@ async def test_compact_thread_context_real_mutation_graph_finishes_without_sched
     assert snapshot.values["summary_text"] == "COMPRESSED SUMMARY"
     assert snapshot.next == ()
     assert snapshot.metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] == DEFAULT_AGENT_NAME_METADATA_VALUE
+    assert snapshot.metadata[TRACE_ORIGIN_RUN_KEY] == "run-origin-1"
 
 
 @pytest.mark.asyncio

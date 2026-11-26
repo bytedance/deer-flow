@@ -77,7 +77,7 @@ from deerflow.runtime.context_compaction import (
     ThreadCompactionResult,
     compact_thread_context,
 )
-from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, checkpoint_agent_binding_metadata
+from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, checkpoint_rewrite_metadata
 from deerflow.runtime.events.message_seq import stamp_messages_with_seq
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
@@ -103,6 +103,7 @@ from deerflow.runtime.runs.worker import RUN_MESSAGE_IDS_METADATA_KEY, valid_dur
 from deerflow.runtime.secret_context import redact_metadata_secrets
 from deerflow.runtime.serialization import serialize_lc_object
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.tracing.context import TRACE_METADATA_KEYS
 from deerflow.uploads.companions import register_companion, resolve_companion
 from deerflow.utils.file_io import await_drained, run_file_io
 from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
@@ -133,7 +134,7 @@ def _optional_run_event_store(request: Request) -> Any:
 # ``deerflow_origin`` marks a thread the server created for a schedule or an
 # extension; only the server sets it (``create_thread`` below, run admission).
 # The share-import keys decide whether run admission rewrites a copy's history.
-_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY, SHARE_IMPORT_COMPLETE_KEY, SHARE_IMPORT_HISTORY_MARKED_KEY})
+_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY, SHARE_IMPORT_COMPLETE_KEY, SHARE_IMPORT_HISTORY_MARKED_KEY}) | TRACE_METADATA_KEYS
 # Checkpoint metadata the server writes and later reads back as trusted:
 # LangGraph's lineage keys and delta counters (``step`` drives the next turn,
 # ``parents`` the history walk, and ``counters_since_delta_snapshot`` is read
@@ -1265,7 +1266,7 @@ async def _branch_thread_with_reservation(
     # Stamp both synthetic checkpoints with the branch-creation time because
     # serializers fall back to metadata when snapshot.created_at is absent.
     checkpoint_metadata_updates = {
-        **checkpoint_agent_binding_metadata(getattr(snapshot, "metadata", None)),
+        **checkpoint_rewrite_metadata(getattr(snapshot, "metadata", None)),
         **branch_metadata,
         "source": "branch",
         "updated_at": now,
@@ -1989,7 +1990,7 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
             update_config = {
                 **read_config,
                 "configurable": dict(read_config.get("configurable", {})),
-                "metadata": checkpoint_agent_binding_metadata(source_metadata),
+                "metadata": checkpoint_rewrite_metadata(source_metadata),
             }
             updated_config = await accessor.aupdate(
                 update_config,
