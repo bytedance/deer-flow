@@ -174,7 +174,13 @@ async def web_fetch_tool(url: str) -> str:
     try:
         router = await _open_router(_provider(settings))
         try:
-            response = await router.extract(url, format="markdown", timeout=_timeout(settings), data_apis=False)
+            from web_router import UnsupportedFormatError
+
+            extract_kwargs = {"provider": _provider(settings), "timeout": _timeout(settings), "data_apis": False}
+            try:
+                response = await router.extract(url, format="markdown", **extract_kwargs)
+            except UnsupportedFormatError:
+                response = await router.extract(url, format="text", **extract_kwargs)
         finally:
             await _close(router)
     except _NotInstalledError as e:

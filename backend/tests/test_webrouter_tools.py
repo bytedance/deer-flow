@@ -50,12 +50,20 @@ class _Backend:
 
     def build(self, provider: str):
         """A real router whose ``provider`` backend talks to this fake API, counting closes."""
-        router = self._real_router(provider, provider_config={provider: {"transport": httpx.MockTransport(self)}})
+        backend = provider.split(":")[-2] if ":" in provider else provider
+        transport = httpx.MockTransport(self)
+        client = httpx.AsyncClient(transport=transport, base_url="https://api.tavily.com") if backend == "tavily" else None
+        config = {"client": client} if client is not None else {"transport": transport}
+        router = self._real_router(provider, provider_config={backend: config})
         close = router.aclose
 
         async def counted_close() -> None:
             self.closed += 1
-            await close()
+            try:
+                await close()
+            finally:
+                if client is not None:
+                    await client.aclose()
 
         router.aclose = counted_close
         return router
@@ -266,3 +274,44 @@ class TestWebFetchTool:
 
         assert result.startswith("Error: ")
         assert backend.requests == []
+
+
+@pytest.mark.parametrize("method", ["search", "fetch"])
+async def test_tavily_uses_the_real_adapter(tool_config, monkeypatch, method):
+    monkeypatch.setenv("TAVILY_API_KEY", "test-tavily-key")
+    tool_config["provider"] = "tavily"
+    backend = _Backend(httpx.Response(200, json={"results": [{"url": "https://example.com/post", "title": "Example", "content": "Found", "raw_content": "Page body"}]}))
+
+    if method == "search":
+        result = await _search(backend, tool_config)
+        assert result["results"][0]["snippet"] == "Found"
+    else:
+        assert await _fetch(backend, tool_config) == "# Example\n\nPage body"
+    (request,) = backend.requests
+    assert request.url.host == "api.tavily.com"
+    assert request.url.path == ("/search" if method == "search" else "/extract")
+    assert backend.closed == 1
+
+
+async def test_exa_fetch_falls_back_to_text(tool_config, monkeypatch):
+    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    tool_config["provider"] = "exa"
+    backend = _Backend(httpx.Response(200, json={"results": [{"url": "https://example.com/post", "title": "Example", "text": "Plain text"}]}))
+
+    assert await _fetch(backend, tool_config) == "# Example\n\nPlain text"
+    (request,) = backend.requests
+    assert request.url.host == "api.exa.ai"
+    assert request.url.path == "/contents"
+    assert json.loads(request.content)["text"] is True
+    assert backend.closed == 1
+
+
+async def test_fetch_preserves_the_configured_mode(tool_config, monkeypatch):
+    monkeypatch.setenv("LINKUP_API_KEY", "test-linkup-key")
+    tool_config["provider"] = "extract:linkup:linkup-pro"
+    backend = _Backend(httpx.Response(200, json={"markdown": "Mode body"}))
+
+    assert await _fetch(backend, tool_config) == "# https://example.com/post\n\nMode body"
+    (request,) = backend.requests
+    assert json.loads(request.content)["mode"] == "pro"
+    assert backend.closed == 1

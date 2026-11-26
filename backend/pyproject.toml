@@ -86,6 +86,7 @@ dev = [
     # extra); kept in the dev group so its tests run the real library over a fake
     # HTTP transport without forcing it onto installs.
     "webrouter>=0.16.0",
+    "tavily-python>=0.7.25",
 ]
 
 [tool.pytest.ini_options]

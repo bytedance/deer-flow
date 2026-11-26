@@ -951,6 +951,7 @@ dev = [
     { name = "quickjs", marker = "sys_platform != 'win32'" },
     { name = "redis" },
     { name = "ruff" },
+    { name = "tavily-python" },
     { name = "textual" },
     { name = "webrouter" },
 ]
@@ -1003,6 +1004,7 @@ dev = [
     { name = "quickjs", marker = "sys_platform != 'win32'", specifier = "==1.19.4" },
     { name = "redis", specifier = ">=5.0.0" },
     { name = "ruff", specifier = ">=0.14.11" },
+    { name = "tavily-python", specifier = ">=0.7.25" },
     { name = "textual", specifier = ">=0.80" },
     { name = "webrouter", specifier = ">=0.16.0" },
 ]
@@ -1105,6 +1107,7 @@ tui = [
     { name = "textual" },
 ]
 webrouter = [
+    { name = "tavily-python" },
     { name = "webrouter" },
 ]
 
@@ -1165,6 +1168,7 @@ requires-dist = [
     { name = "regex", specifier = ">=2026.4.4" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0,<3.0" },
     { name = "tavily-python", specifier = ">=0.7.17" },
+    { name = "tavily-python", marker = "extra == 'webrouter'", specifier = ">=0.7.25" },
     { name = "tenki", marker = "extra == 'tenki'", specifier = ">=1.4.0" },
     { name = "textual", marker = "extra == 'tui'", specifier = ">=0.80" },
     { name = "tiktoken", specifier = ">=0.8.0" },
@@ -4958,16 +4962,16 @@ wheels = [
 
 [[package]]
 name = "tavily-python"
-version = "0.7.23"
+version = "0.7.25"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "requests" },
     { name = "tiktoken" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/89/d1/197419d6133643848514e5e84e8f41886e825b73bf91ae235a1595c964f5/tavily_python-0.7.23.tar.gz", hash = "sha256:3b92232e0e29ab68898b765f281bb4f2c650b02210b64affbc48e15292e96161", size = 25968, upload-time = "2026-03-09T19:17:32.333Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c3/17/c9eb61fdb8787008321724256a7b4d8537c2bd7e5dea3a9d906f344b873a/tavily_python-0.7.25.tar.gz", hash = "sha256:7fa4a4e9248db8766af1273d0604e48dbf8ff4359af683238feaba8974b259ea", size = 29755, upload-time = "2026-05-29T14:18:23.33Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/64/27/f9c6e9249367be0772fb754849e03cbbc6ad8d80a479bf30ea8811828b2e/tavily_python-0.7.23-py3-none-any.whl", hash = "sha256:52ef85c44b926bce3f257570cd32bc1bd4db54666acf3105617f27411a59e188", size = 19079, upload-time = "2026-03-09T19:17:29.593Z" },
+    { url = "https://files.pythonhosted.org/packages/87/4a/b64377abab39ea156473fff10b8f395c4f6c40e609ce20490ecfae245b60/tavily_python-0.7.25-py3-none-any.whl", hash = "sha256:add36692a488d3ca9fb838d92d04e4004bf149a7260c9e12fb727963056af3b0", size = 21866, upload-time = "2026-05-29T14:18:22.063Z" },
 ]
 
 [[package]]

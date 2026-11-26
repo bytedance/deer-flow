@@ -382,7 +382,7 @@ tools:
     use: deerflow.community.webrouter.tools:web_fetch_tool
     # provider: auto # or one backend, e.g. nimble, tavily, jina, firecrawl
 ```
-Returns the page as markdown from a hosted reader, falling back between backends. No API key is needed: without one, pages are read by keyless tiers (Nimble, Tavily, Jina, Firecrawl, Keenable). Backend keys in the environment are used as for `web_search`. `provider: max` sends each page to every configured backend at once and keeps the first answer, so one fetch reaches several services, and each backend with a key bills for its fetch.
+Returns the page as Markdown (or plain text for backends such as Exa) from a hosted reader, falling back between backends. No API key is needed: without one, pages are read by keyless tiers (Nimble, Tavily, Jina, Firecrawl, Keenable). Backend keys in the environment are used as for `web_search`. `provider: max` sends each page to every configured backend at once and keeps the first answer, so one fetch reaches several services, and each backend with a key bills for its fetch.
 
 Install: `cd backend && uv sync --extra webrouter` (Docker: `UV_EXTRAS=webrouter`)
 

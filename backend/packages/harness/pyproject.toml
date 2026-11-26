@@ -112,7 +112,7 @@ browser = ["playwright>=1.40"]
 memory-zh = ["jieba>=0.42.1"]
 # WebRouter web_search/web_fetch provider (deerflow.community.webrouter). The
 # library is imported only when one of its tools runs.
-webrouter = ["webrouter>=0.16.0"]
+webrouter = ["webrouter>=0.16.0", "tavily-python>=0.7.25"]
 
 [build-system]
 requires = ["hatchling"]
