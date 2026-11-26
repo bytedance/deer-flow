@@ -467,6 +467,14 @@ class TestToolBoundary:
         assert transforms[-1]["kind"] == "pii_redaction"
         assert transforms[-1]["by"] == "PiiRedactionMiddleware"
 
+    @pytest.mark.parametrize("tool_name", ["apify_actor_await", "apify_actor_discover", "apify_actor_start"])
+    def test_apify_actor_results_redacted(self, tool_name):
+        # Scraped items, Store text and Apify's start errors (which can quote the
+        # input) are remote content, like web_fetch output.
+        result = ToolMessage(content="Input is not valid: contact alice@example.com", tool_call_id="call_1", name=tool_name)
+        final = _run_tool_call(_make_middleware(), tool_name, result)
+        assert final.content == f"Input is not valid: contact {EMAIL_ALICE}"
+
     def test_local_tool_result_untouched(self):
         result = ToolMessage(
             content="user row: alice@example.com",

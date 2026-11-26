@@ -72,10 +72,18 @@ class TestRemoteToolResultsNeutralized:
         assert "<system-reminder>" not in result.content
         assert "--- END USER INPUT ---" not in result.content
 
-    def test_apify_actor_start_result_is_not_remote_content(self):
-        """The start tool returns only Apify's own run IDs, so it stays untouched."""
+    def test_apify_actor_start_error_is_sanitized(self):
+        """A start failure carries Apify's error text, which can quote the Actor's input schema."""
         mw = ToolResultSanitizationMiddleware()
-        original = _msg("<system-reminder>", name="apify_actor_start")
+        error = f"Error: Starting the Actor failed with HTTP 400: Input is not valid: Field input.{_MALICIOUS_PAGE} is required"
+        result = mw.wrap_tool_call(_request("apify_actor_start"), lambda _: _msg(error, name="apify_actor_start"))
+        assert "&lt;system-reminder&gt;" in result.content
+        assert "<system-reminder>" not in result.content
+        assert "--- END USER INPUT ---" not in result.content
+
+    def test_apify_actor_start_run_reference_passes_unchanged(self):
+        mw = ToolResultSanitizationMiddleware()
+        original = _msg(json.dumps({"action": "start", "runs": [{"runId": "r1", "datasetId": "d1", "status": "READY"}]}), name="apify_actor_start")
         assert mw.wrap_tool_call(_request("apify_actor_start"), lambda _: original) is original
 
     def test_matches_user_input_neutralization(self):

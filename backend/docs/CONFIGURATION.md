@@ -1451,9 +1451,9 @@ caps the cost of a pay-per-event run. It must be a positive number: Apify reads
 read. `timeout_secs` and `memory_mbytes` set the run's limits on Apify. When
 `apify_actor_await` reaches its own `timeout_secs`, the run keeps going on Apify
 and the agent can call await again.
-Results of `apify_actor_await` and `apify_actor_discover` hold third-party
-content, so the tool-result sanitization and PII redaction middlewares treat them like `web_fetch`
-output. Offline tests use HTTPX mock transports and need no token.
+Results of `apify_actor_await` and `apify_actor_discover`, and the errors of
+`apify_actor_start`, hold third-party content, so the tool-result sanitization
+and PII redaction middlewares treat them like `web_fetch` output. Offline tests use HTTPX mock transports and need no token.
 
 **Built-in Tools**:
 - `web_search` - Search the web (Apify, DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, DeepSeek, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
