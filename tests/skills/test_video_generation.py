@@ -347,6 +347,24 @@ def test_gemini_download_writes_nested_dir(monkeypatch, tmp_path, url, expected_
     assert out.read_bytes() == b"VIDEO"
 
 
+@pytest.mark.parametrize("status", [200, 204])
+@pytest.mark.parametrize("existing", [False, True], ids=["new-output", "existing-output"])
+def test_empty_video_download_preserves_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: int, existing: bool) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    mock_http_transport(monkeypatch, [(status, b"")])
+    output = tmp_path / "video.mp4"
+    if existing:
+        output.write_bytes(b"previous video")
+
+    with pytest.raises(ValueError, match="empty video"):
+        vid.download(GEMINI_VIDEO, str(output))
+
+    if existing:
+        assert output.read_bytes() == b"previous video"
+    else:
+        assert not output.exists()
+
+
 def redirect(location):
     response = requests.Response()
     response.status_code = 302

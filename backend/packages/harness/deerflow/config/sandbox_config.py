@@ -296,7 +296,11 @@ class SandboxConfig(BaseModel):
             ``access_key`` / ``secret_key`` / ``session_token`` (or ``*_env``),
             ``sandbox_access_token``, ``cpu_milli``, ``memory_mb``,
             ``timeout_minutes``, ``ready_timeout``, ``request_timeout``,
-            ``allow_insecure_http``, ``tos_mount``, and ``metadata``.
+            ``allow_insecure_http``, ``tos_mount``, ``metadata``,
+            ``snapshot_id``, ``pause_on_idle``, ``auto_pause``,
+            ``snapshot_on_idle``, ``snapshot_type``, ``snapshot_retention_days``,
+            ``snapshot_timeout``, ``max_snapshots_per_sandbox``,
+            ``precache_images``, and ``precache_on_startup``.
     """
 
     use: str = Field(
@@ -318,12 +322,12 @@ class SandboxConfig(BaseModel):
 
     prewarm: bool = Field(
         default=False,
-        description=("Start an AioSandboxProvider acquire in parallel with the first model call when the user input contains a strong sandbox-use signal. Disabled by default; ignored by other sandbox providers."),
+        description=("Start an AioSandboxProvider or VeFaaSSandboxProvider acquire in parallel with the first model call when the user input contains a strong sandbox-use signal. Disabled by default; ignored by other sandbox providers."),
     )
     prewarm_max_concurrent: int = Field(
         default=1,
         ge=1,
-        description=("Maximum pending or ready-but-unused AIO prewarms per provider instance in this process. When full, skip speculation without delaying foreground tools. This is not a total container or deployment-wide limit."),
+        description=("Maximum pending or ready-but-unused sandbox prewarms per provider instance in this process. When full, skip speculation without delaying foreground tools. This is not a total container or deployment-wide limit."),
     )
     image: str | None = Field(
         default=None,
@@ -342,7 +346,7 @@ class SandboxConfig(BaseModel):
     )
     overflow_policy: SandboxOverflowPolicy = Field(
         default="wait",
-        description="E2B capacity policy. Use wait, reject, or burst.",
+        description="E2B and OpenSandbox capacity policy. OpenSandbox wait keeps its legacy soft cap; reject enforces a process-local hard cap. Burst is E2B-only.",
     )
     acquire_timeout: int = Field(
         default=30,

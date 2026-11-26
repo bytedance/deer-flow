@@ -1610,7 +1610,7 @@ is attempted, and the container is recycled instead of being returned to the
 warm pool. Session-level cleanup does not clear that quarantine because a
 timed-out create may commit after cleanup has already returned.
 
-`prewarm` is disabled by default and applies only to asynchronous AIO runs with
+`prewarm` is disabled by default and applies only to asynchronous AIO and veFaaS runs with
 an unconditional outer execution-lease cleanup: the Gateway/embedded run worker
 and native subagent executor. Direct `create_deerflow_agent(...).ainvoke()` and
 `.astream()` calls retain ordinary lazy acquisition even when this setting is on.
@@ -1779,6 +1779,7 @@ sandbox:
    sandbox_timeout: 14400             # remote lifetime; 0 = explicit cleanup
    bash_command_timeout: 600          # default remote command timeout seconds
    replicas: 3                        # active + warm cap per gateway process
+   overflow_policy: wait              # optional: reject adds a process-local hard cap
    idle_timeout: 600                  # warm seconds before destroy; 0 disables
    environment:
       PYTHONUNBUFFERED: "1"
@@ -1820,7 +1821,12 @@ horizon. File transfer uses OpenSandbox's native filesystem API; bounded
 `find`/`grep` commands implement the directory and content-search surface.
 Downloads are restricted to `/mnt/user-data` and all file paths reject
 traversal. Multi-process discovery and ownership coordination are not yet
-implemented, so `replicas` is a per-Gateway-process soft cap.
+implemented, so `replicas` is a per-Gateway-process soft cap by default. With
+`overflow_policy: reject`, it becomes a process-local hard cap that also counts
+in-flight creates. If all slots are occupied and no warm sandbox can be evicted,
+acquisition raises `SandboxCapacityExceededError` before calling the SDK. This
+can protect a namespace ResourceQuota only when one Gateway process owns the
+provider and `replicas` does not exceed the quota's pod capacity.
 
 **boxd Machine Sandbox** (runs each sandbox as an isolated [boxd](https://boxd.sh?ref=deer-flow) machine):
 
@@ -1992,8 +1998,15 @@ performed local side effects; the agent must retry it explicitly. Non-interactiv
 runs auto-deny without opening a card or waiting for input. The sidecar rejects
 hostnames that policy does not allow before DNS resolution; allowed hostnames
 that resolve to loopback, private, link-local, multicast, IPv6 ULA/site-local,
-or cloud metadata destinations are rejected and can never be approved. Raw
-TCP/UDP, Git-over-SSH, and other non-HTTP protocols remain unavailable in
+or cloud metadata destinations are rejected and can never be approved. This
+screening also unwraps IPv6 spellings that carry an IPv4 destination —
+IPv4-mapped, 6to4, NAT64 (`64:ff9b::/96`), IPv4-translated (`::ffff:0:0:0/96`),
+and the deprecated IPv4-compatible form — and judges the embedded IPv4
+address, while NAT64 spellings of public IPv4 targets stay reachable.
+The RFC 8215 local-use translation prefix (`64:ff9b:1::/48`) is rejected
+explicitly. Operator-defined NAT64 prefixes outside `64:ff9b::/96` are not
+recognized.
+Raw TCP/UDP, Git-over-SSH, and other non-HTTP protocols remain unavailable in
 restricted modes.
 
 Restricted modes currently require the local Docker backend and Docker Engine

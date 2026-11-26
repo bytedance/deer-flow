@@ -1067,6 +1067,38 @@ write, the Gateway resolves environment variables in a copy and validates the
 same expanded document the runtime will load while persisting the original raw
 placeholders.
 
+#### Runtime MCP Agent Grants
+
+Owners and approved definition digests of `mcp_agent_auth` bindings declared
+with `grants: runtime` (admin only; PATs are not accepted). Changes apply to
+the next run and call without a restart. See
+[Per-agent credentials](MCP_SERVER.md#runtime-grants).
+
+```http
+GET    /api/mcp/agent-auth
+GET    /api/mcp/agent-auth/{binding}
+GET    /api/mcp/agent-auth/{binding}/definition-digest?owner={user_id}
+PUT    /api/mcp/agent-auth/{binding}/grants
+DELETE /api/mcp/agent-auth/{binding}/grants
+```
+
+```json
+{"owners": ["<user id>"], "definition_digests": ["<64-character SHA-256 digest>"]}
+```
+
+A grant covers the agent, server, destination and OAuth client the binding had
+when it was written; after `config.yaml` changes one of them, responses show
+`"approval": "stale"` and the grant admits nobody until it is written again.
+A grant whose binding was removed from `config.yaml` is listed with
+`"approval": "retired"` and can still be read and deleted by its binding ID.
+Stale and retired grants, and grants of disabled bindings, keep their owners
+reserved for the agent and server they were approved for until they are
+replaced or deleted; owners listed by a disabled `grants: config` binding stay
+reserved too. A binding moved to `grants: config` whose runtime grant is
+still stored returns it as `stored_grant`, so the owners it reserves are visible
+until the grant is deleted. A write to a disabled binding is checked for overlaps like any
+other, so enabling it again cannot make admission reject both bindings.
+
 #### Reset MCP Tools Cache
 
 Publish a shared cache generation, then clear cached MCP tools and persistent
@@ -1330,6 +1362,12 @@ GET /api/skills/custom/{skill_name}/history
 
 An invalid skill name returns `400`; a skill with neither a `SKILL.md` nor
 recorded history returns `404`.
+
+Each entry's `prev_content` is the content that change replaced. Edits,
+rollbacks and deletions through these routes and the agent's `skill_manage` tool
+take one lock per user, also across Gateway processes that share the home
+volume, so they cannot interleave. An agent patch is refused, and nothing is
+written, when `SKILL.md` changed while the patch was being scanned.
 
 #### Rollback Custom Skill
 
