@@ -10,6 +10,7 @@ import json
 import logging
 import re
 from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -22,6 +23,7 @@ from deerflow.community.apify import tools as apify_tools
 pytestmark = pytest.mark.asyncio
 
 TOKEN = "test-apify-token"
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -409,3 +411,47 @@ class TestAwait:
 
     async def test_empty_run_id_is_rejected(self, config, apify):
         assert await apify_tools.apify_actor_await_tool.ainvoke({"run_id": " ", "dataset_id": "d"}) == "Error: run_id must not be empty"
+
+
+class TestInstallWithoutApify:
+    """A default install has the apify-scraper skill but not the Actor tools.
+
+    The skill must not stop requests that web_search and web_fetch can handle. A
+    model's choices cannot be tested offline, so this pins the two halves the
+    agent sees: the tools a default install loads, and what the skill tells it.
+    """
+
+    @pytest.fixture
+    def default_install(self, tmp_path, monkeypatch):
+        extensions = tmp_path / "extensions_config.json"
+        extensions.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
+        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions))
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "home"))
+
+    async def test_the_template_loads_web_search_and_fetch_but_no_actor_tools(self, default_install):
+        from deerflow.config.app_config import AppConfig
+        from deerflow.tools.tools import get_available_tools
+
+        config = AppConfig.from_file(str(REPO_ROOT / "config.example.yaml"))
+        names = {tool.name for tool in get_available_tools(include_mcp=False, app_config=config)}
+
+        assert {"web_search", "web_fetch"} <= names
+        assert not {name for name in names if name.startswith("apify_actor_")}
+
+    async def test_the_skill_is_enabled_and_falls_back_to_the_web_tools(self, default_install):
+        from deerflow.config.extensions_config import ExtensionsConfig
+        from deerflow.skills.parser import parse_skill_file
+
+        skill_file = REPO_ROOT / "skills" / "public" / "apify-scraper" / "SKILL.md"
+        skill = parse_skill_file(skill_file, category="public", relative_path=Path("apify-scraper"))
+        assert ExtensionsConfig.from_file().is_skill_enabled(skill.name, "public")
+
+        # The model reads the description in its skill list before it opens the skill.
+        assert "apify_actor_start" in skill.description
+        assert "use web_search and web_fetch instead" in skill.description
+        text = skill_file.read_text(encoding="utf-8-sig")
+        rule = text[text.index("## Core Rule") : text.index("## Actor Routing Table")]
+        assert "Check your tool list first" in rule
+        assert "Do the task with `web_search` and `web_fetch`" in rule
+        # The rule that stopped requests on installs without Apify must not return.
+        assert "then stop" not in rule and "do not try other tools" not in rule

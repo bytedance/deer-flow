@@ -1440,7 +1440,8 @@ returns at once, and `apify_actor_await` waits for the run and returns up to
 `max_items` dataset items. The agent starts several runs, then awaits each, to
 scrape in parallel. The `apify-scraper` skill routes common platforms to known
 Actors. When the Actor tools are not enabled, the skill sends the agent to
-`web_search` and `web_fetch` instead, unless the user asked for Apify by name.
+`web_search` and `web_fetch` instead, and when the user asked for Apify, the
+answer also says how to enable the Actor tools.
 The tools read `APIFY_API_TOKEN` or the tool's `api_key`; `config.example.yaml`
 lists their options.
 

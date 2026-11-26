@@ -15,10 +15,10 @@ description: >-
 
 ## Core Rule
 
-This skill needs the `apify_actor_start` and `apify_actor_await` tools. If they are not available:
+This skill needs the `apify_actor_start` and `apify_actor_await` tools. Check your tool list first. If they are not in it:
 
-- If the user asked to use Apify or an Apify Actor, tell them to enable the Apify Actor tools in `config.yaml` (see the Apify blocks in `config.example.yaml`) and set `APIFY_API_TOKEN`, then stop.
-- Otherwise, do the task with `web_search` and `web_fetch`, and ignore the rest of this skill. Do not try to run Actors another way, for example with `bash` or `curl`.
+- Do the task with `web_search` and `web_fetch`, and ignore the rest of this skill. Do not read its reference files, do not call any `apify_actor_*` tool, and do not try to run Actors another way, for example with `bash` or `curl`.
+- If the user asked to use Apify or an Apify Actor, end your answer by telling them that the Apify Actor tools are not enabled, and that they can enable them in `config.yaml` (see the Apify blocks in `config.example.yaml`) and set `APIFY_API_TOKEN`.
 
 For tasks in the routing table below, use the listed Actor ID and do not call `apify_actor_discover`.
 Read the reference file to get the input template before calling `apify_actor_start`.
