@@ -89,11 +89,44 @@ def domain_matches(host: str, rule: str) -> bool:
     return host == rule
 
 
+def _embedded_ipv4(address: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
+    """Return the IPv4 address an IPv6 spelling carries, if any.
+
+    Mirrors the embedded-IPv4 unwrapping in
+    ``deerflow.community.url_safety._is_public_url_host``, plus the
+    IPv4-translated prefix that url_safety rejects via is_reserved. The proxy
+    module is copied into a sidecar as a single file, so it cannot import
+    that module (which pulls pydantic).
+    """
+    embedded = address.ipv4_mapped or address.sixtofour
+    if embedded is None and address in ipaddress.ip_network("64:ff9b::/96"):
+        embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+    if embedded is None and address in ipaddress.ip_network("::ffff:0:0:0/96"):
+        embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+    if embedded is None and 1 < int(address) < 1 << 32:
+        embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+    return embedded
+
+
 def address_is_public(address: str, *, allow_synthetic_dns: bool = False) -> bool:
     try:
         parsed = ipaddress.ip_address(address.split("%", 1)[0])
     except ValueError:
         return False
+    if isinstance(parsed, ipaddress.IPv6Address):
+        # The RFC 8215 local-use translation prefix must never egress. CPython
+        # classifies it as non-global only from 3.12.4 (gh-113171), and the
+        # sidecar image can pin an older interpreter, so reject it explicitly
+        # instead of relying on the interpreter's classification.
+        if parsed in ipaddress.ip_network("64:ff9b:1::/48"):
+            return False
+        embedded = _embedded_ipv4(parsed)
+        # NAT64 (64:ff9b::/96) and IPv4-compatible (::a.b.c.d) spellings report
+        # is_global, so the flags below cannot catch a loopback, private or
+        # metadata address carried inside them. Screen the IPv4 the spelling
+        # actually reaches.
+        if embedded is not None and not address_is_public(str(embedded), allow_synthetic_dns=allow_synthetic_dns):
+            return False
     if parsed.is_global and not parsed.is_multicast and not getattr(parsed, "is_site_local", False):
         return True
     # Docker Desktop's DNS inhibition layer maps public names into the

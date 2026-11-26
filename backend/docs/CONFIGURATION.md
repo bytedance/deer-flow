@@ -1998,8 +1998,15 @@ performed local side effects; the agent must retry it explicitly. Non-interactiv
 runs auto-deny without opening a card or waiting for input. The sidecar rejects
 hostnames that policy does not allow before DNS resolution; allowed hostnames
 that resolve to loopback, private, link-local, multicast, IPv6 ULA/site-local,
-or cloud metadata destinations are rejected and can never be approved. Raw
-TCP/UDP, Git-over-SSH, and other non-HTTP protocols remain unavailable in
+or cloud metadata destinations are rejected and can never be approved. This
+screening also unwraps IPv6 spellings that carry an IPv4 destination —
+IPv4-mapped, 6to4, NAT64 (`64:ff9b::/96`), IPv4-translated (`::ffff:0:0:0/96`),
+and the deprecated IPv4-compatible form — and judges the embedded IPv4
+address, while NAT64 spellings of public IPv4 targets stay reachable.
+The RFC 8215 local-use translation prefix (`64:ff9b:1::/48`) is rejected
+explicitly. Operator-defined NAT64 prefixes outside `64:ff9b::/96` are not
+recognized.
+Raw TCP/UDP, Git-over-SSH, and other non-HTTP protocols remain unavailable in
 restricted modes.
 
 Restricted modes currently require the local Docker backend and Docker Engine
