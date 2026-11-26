@@ -3,6 +3,7 @@
 import builtins
 import json
 import runpy
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -546,3 +547,84 @@ def test_cli_reports_uneven_run_counts(tmp_path, benchmark_script):
     }
     markdown = (tmp_path / "benchmark.md").read_text(encoding="utf-8")
     assert "Eval 1: with_skill=2, without_skill=1" in markdown
+
+
+@pytest.mark.parametrize("baseline_grading", [None, {}])
+def test_cli_omits_delta_without_measured_baseline(
+    tmp_path, benchmark_script, baseline_grading
+):
+    for config, grading in (
+        ("with_skill", {"summary": {"pass_rate": 0.75}}),
+        ("old_skill", baseline_grading),
+    ):
+        if grading is None:
+            continue
+        config_dir = tmp_path / "eval-1" / config
+        config_dir.mkdir(parents=True)
+        (config_dir / "grading.json").write_text(json.dumps(grading), encoding="utf-8")
+
+    completed = run_cli(benchmark_script, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((tmp_path / "benchmark.json").read_text(encoding="utf-8"))
+    assert len(report["runs"]) == 1
+    assert report["run_summary"]["delta"] == {}
+    markdown = (tmp_path / "benchmark.md").read_text(encoding="utf-8")
+    assert "Comparison incomplete" in markdown
+    assert "+0.75" not in markdown
+    assert "+0.75" not in completed.stdout
+    assert "| Pass Rate | 75% ± 0% | — | — |" in markdown
+
+
+def test_cli_omits_delta_when_baseline_runs_have_no_grades(tmp_path, benchmark_script):
+    write_run(tmp_path)
+    (tmp_path / "eval-1" / "without_skill" / "run-1").mkdir(parents=True)
+
+    completed = run_cli(benchmark_script, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((tmp_path / "benchmark.json").read_text(encoding="utf-8"))
+    assert report["run_summary"]["delta"] == {}
+    markdown = (tmp_path / "benchmark.md").read_text(encoding="utf-8")
+    assert "| Pass Rate | 100% ± 0% | — | — |" in markdown
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.parametrize(
+    "metadata,expected",
+    [
+        (
+            {
+                "runs_per_configuration": None,
+                "run_counts_by_eval": {"1": {"with_skill": 2, "without_skill": 1}},
+            },
+            "Eval 1: with_skill=2, without_skill=1",
+        ),
+        ({"runs_per_configuration": 3}, "3 runs per configuration"),
+    ],
+)
+def test_viewer_shows_run_counts(metadata, expected):
+    viewer = (
+        Path(__file__).resolve().parents[2]
+        / "skills/public/skill-creator/eval-viewer/viewer.html"
+    ).read_text(encoding="utf-8")
+    start = viewer.index("function renderBenchmark()")
+    end = viewer.index("\n    }\n", start) + len("\n    }\n")
+    data = {"benchmark": {"metadata": metadata, "run_summary": {}, "runs": []}}
+    script = f"""
+const elements = {{}};
+const document = {{ getElementById: id => (elements[id] ??= {{ style: {{}} }}) }};
+const escapeHtml = text => String(text);
+const EMBEDDED_DATA = {json.dumps(data)};
+{viewer[start:end]}
+renderBenchmark();
+console.log(elements["benchmark-content"].innerHTML);
+"""
+
+    completed = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, check=False
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert expected in completed.stdout
+    assert "? runs per configuration" not in completed.stdout

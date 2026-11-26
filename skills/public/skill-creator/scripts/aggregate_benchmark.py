@@ -242,13 +242,14 @@ def aggregate_results(results: dict) -> dict:
             "tokens": calculate_stats(token_counts)
         }
 
-    # Calculate delta between the first two configs (if two exist)
-    if len(configs) >= 2:
-        primary = run_summary.get(configs[0], {})
-        baseline = run_summary.get(configs[1], {})
-    else:
-        primary = run_summary.get(configs[0], {}) if configs else {}
-        baseline = {}
+    # Calculate delta between the first two configs. It needs accepted runs on
+    # both sides: an unmeasured baseline is not a zero score.
+    if len(configs) < 2 or not results[configs[0]] or not results[configs[1]]:
+        run_summary["delta"] = {}
+        return run_summary
+
+    primary = run_summary[configs[0]]
+    baseline = run_summary[configs[1]]
 
     delta_pass_rate = primary.get("pass_rate", {}).get("mean", 0) - baseline.get("pass_rate", {}).get("mean", 0)
     delta_time = primary.get("time_seconds", {}).get("mean", 0) - baseline.get("time_seconds", {}).get("mean", 0)
@@ -368,12 +369,23 @@ def generate_markdown(benchmark: dict) -> str:
     # Format time
     a_time = a_summary.get("time_seconds", {})
     b_time = b_summary.get("time_seconds", {})
-    lines.append(f"| Time | {a_time.get('mean', 0):.1f}s ± {a_time.get('stddev', 0):.1f}s | {b_time.get('mean', 0):.1f}s ± {b_time.get('stddev', 0):.1f}s | {delta.get('time_seconds', '—')}s |")
+    lines.append(f"| Time | {a_time.get('mean', 0):.1f}s ± {a_time.get('stddev', 0):.1f}s | {b_time.get('mean', 0):.1f}s ± {b_time.get('stddev', 0):.1f}s | {delta['time_seconds'] + 's' if 'time_seconds' in delta else '—'} |")
 
     # Format tokens
     a_tokens = a_summary.get("tokens", {})
     b_tokens = b_summary.get("tokens", {})
     lines.append(f"| Tokens | {a_tokens.get('mean', 0):.0f} ± {a_tokens.get('stddev', 0):.0f} | {b_tokens.get('mean', 0):.0f} ± {b_tokens.get('stddev', 0):.0f} | {delta.get('tokens', '—')} |")
+
+    if not delta:
+        # Show an unmeasured side as missing rather than as a zero score
+        measured = {run["configuration"] for run in benchmark["runs"]}
+        for index in range(len(lines) - 3, len(lines)):
+            cells = lines[index].split("|")
+            for column, config in ((2, config_a), (3, config_b)):
+                if config not in measured:
+                    cells[column] = " — "
+            lines[index] = "|".join(cells)
+        lines.extend(["", "Comparison incomplete: delta omitted until both configurations have accepted runs."])
 
     # Notes section
     if benchmark.get("notes"):
