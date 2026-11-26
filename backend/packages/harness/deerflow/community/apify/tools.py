@@ -375,15 +375,19 @@ async def apify_actor_start_tool(actor_id: str, run_input: str, description: str
         value = _config_number(extra, key, None, integer=True)
         if value is not None:
             params[param] = value
-    # A cost cap that cannot be read must not start the run without one. Apify reads
-    # a cap of 0 as no cap at all, so 0 is refused like any other invalid value.
-    configured_cap = extra.get("max_total_charge_usd")
-    if configured_cap is not None:
-        cap = _positive_number(configured_cap, integer=False)
-        if cap is None:
-            logger.error("Invalid Apify max_total_charge_usd=%r; refusing to start the run without a cost cap", configured_cap)
-            return "Error: tools[apify_actor_start].max_total_charge_usd in config.yaml must be a positive number of US dollars. The run was not started. Ask the operator to fix the setting."
-        params["maxTotalChargeUsd"] = cap
+    # Cost limits: max_total_charge_usd caps a run's charges and platform usage, and
+    # max_paid_items caps the results a pay-per-result Actor charges for. A limit that
+    # cannot be read must not start the run without it. Apify reads 0 as no limit,
+    # so 0 is refused like any other invalid value.
+    for key, param, integer, unit in (("max_total_charge_usd", "maxTotalChargeUsd", False, "number of US dollars"), ("max_paid_items", "maxItems", True, "whole number")):
+        configured = extra.get(key)
+        if configured is None:
+            continue
+        limit = _positive_number(configured, integer=integer)
+        if limit is None:
+            logger.error("Invalid Apify %s=%r; refusing to start the run without that limit", key, configured)
+            return f"Error: tools[apify_actor_start].{key} in config.yaml must be a positive {unit}. The run was not started. Ask the operator to fix the setting."
+        params[param] = limit
 
     try:
         async with await _new_client(_API_TIMEOUT_SECS) as client:

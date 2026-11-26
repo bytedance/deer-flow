@@ -441,7 +441,8 @@ tools:
   - name: apify_actor_start
     group: web
     use: deerflow.community.apify.tools:apify_actor_start_tool
-    # max_total_charge_usd: 1.0 # cost cap per run in USD
+    max_total_charge_usd: 1.0 # cost cap per run in USD
+    # max_paid_items: 1000 # results a pay-per-result Actor can charge for
   - name: apify_actor_await
     group: web
     use: deerflow.community.apify.tools:apify_actor_await_tool
@@ -449,7 +450,7 @@ tools:
     max_items: 50
 ```
 
-Actor runs spend Apify credits. `max_total_charge_usd` caps what one run can cost, except for pay-per-result Actors; without it, a run is limited only by the Apify account's monthly usage limit. `config.example.yaml` lists every option.
+Actor runs spend Apify credits. `max_total_charge_usd` caps what one run can cost. Pay-per-result Actors charge per result instead, and `max_paid_items` limits those. Without these limits, a run is limited only by the Apify account's monthly usage limit. `config.example.yaml` lists every option.
 
 ## Tool groups
 

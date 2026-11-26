@@ -231,14 +231,14 @@ class TestDiscover:
 
 class TestStart:
     async def test_starts_the_run_with_the_input_and_configured_limits(self, config, apify):
-        config(timeout_secs="120", memory_mbytes=1024, max_total_charge_usd="0.5")
+        config(timeout_secs="120", memory_mbytes=1024, max_total_charge_usd="0.5", max_paid_items="200")
         apify.on("POST", "/v2/acts/apify~instagram-scraper/runs", _data({"id": "run-1", "defaultDatasetId": "ds-1", "status": "READY"}, 201))
 
         payload = json.loads(await apify_tools.apify_actor_start_tool.ainvoke({"actor_id": "apify/instagram-scraper", "run_input": '{"username": ["nasa"]}', "description": "NASA"}))
 
         (request,) = apify.requests
         assert json.loads(request.content) == {"username": ["nasa"]}
-        assert dict(request.url.params) == {"timeout": "120", "memory": "1024", "maxTotalChargeUsd": "0.5"}
+        assert dict(request.url.params) == {"timeout": "120", "memory": "1024", "maxTotalChargeUsd": "0.5", "maxItems": "200"}
         assert payload == {"action": "start", "runs": [{"runId": "run-1", "actorId": "apify/instagram-scraper", "datasetId": "ds-1", "status": "READY", "description": "NASA"}]}
 
     async def test_invalid_run_limits_are_dropped_with_a_warning(self, config, apify, caplog):
@@ -249,13 +249,16 @@ class TestStart:
         assert dict(apify.requests[0].url.params) == {}
         assert caplog.text.count("Invalid Apify") == 2
 
-    # Apify reads a cap of 0 as no cap, so 0 must not reach it either.
-    @pytest.mark.parametrize("cap", [0, "0", -1, "lots", "", True, "inf", "nan"])
-    async def test_an_invalid_cost_cap_refuses_to_start_the_run(self, config, apify, cap):
-        config(max_total_charge_usd=cap)
+    # Apify reads a limit of 0 as no limit, so 0 must not reach it either.
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [("max_total_charge_usd", value) for value in (0, "0", -1, "lots", "", True, "inf", "nan")] + [("max_paid_items", value) for value in (0, "0", -5, 2.5, "many", True)],
+    )
+    async def test_an_invalid_cost_limit_refuses_to_start_the_run(self, config, apify, key, value):
+        config(**{key: value})
         apify.on("POST", "/v2/acts/o~a/runs", _data({"id": "r", "defaultDatasetId": "d", "status": "READY"}))
         result = await apify_tools.apify_actor_start_tool.ainvoke({"actor_id": "o/a", "run_input": "{}"})
-        assert result.startswith("Error: tools[apify_actor_start].max_total_charge_usd")
+        assert result.startswith(f"Error: tools[apify_actor_start].{key}")
         assert "The run was not started" in result
         assert apify.requests == []
 

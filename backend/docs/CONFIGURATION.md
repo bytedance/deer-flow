@@ -1445,14 +1445,16 @@ answer also says how to enable the Actor tools.
 The tools read `APIFY_API_TOKEN` or the tool's `api_key`; `config.example.yaml`
 lists their options.
 
-Actor runs spend Apify credits. `max_total_charge_usd` on `apify_actor_start`
-caps what one run can cost: Apify aborts the run when its Actor charges and
-platform usage reach the cap. Pay-per-result Actors are the exception, because
-Apify limits their results by item count, which the tool does not set. Without
-the setting, a run has no cap of its own and is limited only by the Apify
-account's monthly usage limit. The value must be a positive number: Apify reads
-0 as no cap, so the tool refuses to start a run when the value is 0 or cannot be
-read. `timeout_secs` and `memory_mbytes` set the run's limits on Apify.
+Actor runs spend Apify credits, and `apify_actor_start` has two cost limits.
+`max_total_charge_usd` caps what one run can cost: Apify aborts the run when its
+Actor charges and platform usage reach the cap. `config.example.yaml` sets it to
+1.0. Some Actors require a higher minimum, and Apify then rejects the run with an
+error that names it. Pay-per-result Actors charge per result instead, which the
+cap does not cover: `max_paid_items` limits how many results such a run can
+charge for. Without these settings, a run is limited only by the Apify account's
+monthly usage limit. Both must be positive: Apify reads 0 as no limit, so the
+tool refuses to start a run when either is 0 or cannot be read. `timeout_secs`
+and `memory_mbytes` set the run's limits on Apify.
 
 When `apify_actor_await` reaches its own `timeout_secs`, the run keeps going on
 Apify and the agent can call await again. That result reports the run's status
