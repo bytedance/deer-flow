@@ -35,6 +35,31 @@ describe("ScheduledTaskScheduleInput", () => {
     },
   );
 
+  test.each(["2026-12-12T09:30:00+08", "2026-12-12T09:30:00+08:00"])(
+    "opens an explicit-offset timestamp without changing its stored spelling: %s",
+    (runAt) => {
+      const emitted: ScheduleValue[] = [];
+      const { container } = render(
+        <I18nProvider initialLocale="en-US">
+          <ScheduledTaskScheduleInput
+            initial={{
+              schedule_type: "once",
+              schedule_spec: { run_at: runAt },
+              timezone: "Asia/Shanghai",
+            }}
+            onChange={(value) => emitted.push(value)}
+          />
+        </I18nProvider>,
+      );
+      expect(
+        container.querySelector<HTMLInputElement>(
+          'input[type="datetime-local"]',
+        )?.value,
+      ).toBe("2026-12-12T09:30");
+      expect(emitted.at(-1)?.schedule_spec.run_at).toBe(runAt);
+    },
+  );
+
   async function selectPreset(name: string) {
     fireEvent.keyDown(screen.getByTestId("schedule-preset"), {
       key: "ArrowDown",

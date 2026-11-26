@@ -11,6 +11,10 @@ and fractional seconds when the Web UI resolves them in the task's timezone.
 This includes stored timestamps such as `2026-12-07T09:00.5`, which the
 scheduler interprets as `09:00:00.5` in that timezone.
 
+Stored timestamps with an explicit hour-only UTC offset (for example,
+`2026-12-12T09:30:00+08`) display the same time as `+08:00` in the summary and
+editor. Opening the editor preserves the original stored timestamp spelling.
+
 Current MVP capabilities:
 
 - Manage tasks at `/workspace/scheduled-tasks`
