@@ -24,6 +24,12 @@ for download. Text previews show at most 512 KiB. HTML scripts, forms and networ
 requests are blocked. The page rechecks availability on return and every
 30 seconds while visible.
 
+Links and inline images for copied output files retain queries and fragments
+such as `report.pdf#page=3` or `charts.svg#detail`. The file must appear in the
+snapshot's artifact manifest. DeerFlow drops the reserved `download` parameter
+from copied links and images so they can open inline. Use the snapshot's
+download action to save the file. External images remain blocked.
+
 ![A public read-only conversation snapshot](assets/sharing/share-preview.png)
 
 Choose **Continue in my workspace** to create an independent conversation with

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import Callable, Collection, Iterable, Mapping
@@ -235,17 +236,16 @@ def _prepare_stdio_workspace(paths: Paths, *, thread_id: str, user_id: str) -> t
 
 
 def _result_has_text_content(call_tool_result: Any) -> bool:
-    """Return ``True`` when the MCP result carries any text content.
+    """Return ``True`` when text content can use the workspace snapshot.
 
-    The after-call snapshot diff only feeds bare-filename correlation in free
-    text. When the result has no text blocks there is nothing to rewrite, so the
-    caller can skip the second recursive walk entirely.
+    Include the JSON fallback for successful structured-only results. Other
+    non-text results can skip the second workspace walk.
     """
     from mcp.types import EmbeddedResource, TextContent, TextResourceContents
 
     content = getattr(call_tool_result, "content", None)
     if not content:
-        return False
+        return not getattr(call_tool_result, "isError", False) and bool(getattr(call_tool_result, "structuredContent", None))
     for item in content:
         if isinstance(item, TextContent):
             return True
@@ -316,6 +316,8 @@ def _rewrite_unique_bare_filenames(
     """
     candidates: dict[str, list[str]] = {}
     for path in changed_files:
+        if path.name not in text:
+            continue
         virtual_path = _local_uri_to_virtual_path(
             str(path),
             thread_id=thread_id,
@@ -504,8 +506,8 @@ def _convert_call_tool_result(
     the private ``langchain_mcp_adapters.tools._convert_call_tool_result`` symbol.
 
     When ``thread_id`` and ``user_id`` are provided, local files referenced by
-    ``ResourceLink`` blocks or plain text (e.g. screenshots saved by Playwright
-    MCP) have their references translated from the host path to the
+    ``ResourceLink`` blocks, plain text, or string values in the JSON fallback
+    have their references translated from the host path to the
     ``/mnt/user-data/...`` virtual path so they can be resolved by the sandbox
     and artifact API. The files themselves are not copied — stdio servers run
     with their cwd/temp pinned inside the mounted tree, so they already live in
@@ -543,6 +545,9 @@ def _convert_call_tool_result(
         # langgraph is optional; if unavailable, continue with standard MCP content conversion.
         pass
 
+    if changed_files is not None:
+        changed_files = tuple(changed_files)
+
     def _resolve_link_url(uri: str) -> str:
         if thread_id is None or user_id is None:
             return uri
@@ -562,6 +567,16 @@ def _convert_call_tool_result(
             source_base_dir=source_base_dir,
             changed_files=changed_files,
         )
+
+    def _resolve_structured_paths(value: Any) -> Any:
+        # Resolve values before JSON encoding escapes Windows path separators.
+        if isinstance(value, str):
+            return _resolve_text(value)
+        if isinstance(value, list):
+            return [_resolve_structured_paths(item) for item in value]
+        if isinstance(value, dict):
+            return {key: _resolve_structured_paths(item) for key, item in value.items()}
+        return value
 
     # Convert MCP content blocks to LangChain content blocks.
     lc_content = []
@@ -666,7 +681,11 @@ def _convert_call_tool_result(
 
     artifact = None
     if call_tool_result.structuredContent is not None:
-        artifact = {"structured_content": call_tool_result.structuredContent}
+        structured_content = call_tool_result.structuredContent
+        artifact = {"structured_content": structured_content}
+        if not lc_content:
+            projected = _resolve_structured_paths(structured_content) if thread_id is not None and user_id is not None else structured_content
+            lc_content.append(create_text_block(text=json.dumps(projected, ensure_ascii=False)))
     if resource_links:
         if artifact is None:
             artifact = {}
@@ -875,9 +894,8 @@ def _make_session_pool_tool(
                 **domain_kwargs,
             )
 
-        # The after-call snapshot diff only feeds bare-filename correlation in
-        # free text, so skip the second recursive walk when there is no text
-        # content to rewrite. Both the diff and the per-token path resolution
+        # The after-call snapshot diff correlates generated filenames in text,
+        # including the structured-result fallback. Both the diff and path resolution
         # inside _convert_call_tool_result touch the filesystem, so run them off
         # the event loop.
         changed_files: list[Path] | None = None

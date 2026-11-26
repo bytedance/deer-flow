@@ -6,6 +6,7 @@ import asyncio
 import errno
 import json
 import logging
+import os
 import shutil
 import tempfile
 from collections.abc import Iterable
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from deerflow.config.runtime_paths import resolve_path
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.skills.history_lock import locked_history_file
 from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage, walk_skill_directories
 from deerflow.skills.types import SkillCategory
@@ -202,9 +204,13 @@ class LocalSkillStorage(SkillStorage):
         except (zipfile.BadZipFile, IsADirectoryError):
             raise ValueError("File is not a valid ZIP archive") from None
 
-        with zf:
-            scan_archive_preflight_or_raise(path, app_config=self._app_config)
-            safe_extract_skill_archive(zf, tmp_path)
+        try:
+            with zf:
+                scan_archive_preflight_or_raise(path, app_config=self._app_config)
+                safe_extract_skill_archive(zf, tmp_path)
+        except zipfile.BadZipFile:
+            # Member CRC/header errors can surface only when extraction reads the data.
+            raise ValueError("File is not a valid ZIP archive") from None
 
         skill_dir = resolve_skill_dir_from_archive(tmp_path)
 
@@ -297,23 +303,45 @@ class LocalSkillStorage(SkillStorage):
     def append_history(self, name: str, record: dict) -> None:
         self.validate_skill_name(name)
         payload = {"ts": datetime.now(UTC).isoformat(), **record}
+        # A record and its LF terminator are appended whole, under the history
+        # file's own lock. Appenders in other threads and processes do not always
+        # share a mutation lock, and a record holding two SKILL.md revisions
+        # outgrows the text-file buffer: a separate terminator write let another
+        # record land between a record and its "\n", and read_history then
+        # rejected the joined line for good. Encoding first leaves no file
+        # behind on failure.
+        data = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
         history_path = self.get_skill_history_file(name)
         history_path.parent.mkdir(parents=True, exist_ok=True)
-        # JSONL records are LF-delimited on every host: a translated record
-        # boundary made read_history and any raw-byte reader describe different
-        # revisions of the same entry.
-        with history_path.open("a", encoding="utf-8", newline="") as f:
-            f.write(json.dumps(payload, ensure_ascii=False))
-            f.write("\n")
+        # JSONL records are LF-delimited on every host (O_BINARY: no Windows
+        # translation): a translated record boundary made read_history and any
+        # raw-byte reader describe different revisions of the same entry.
+        fd = os.open(history_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o666)
+        try:
+            # The lock spans the retries: a short write (a full disk, a signal)
+            # continues with the rest rather than dropping the tail, and no other
+            # writer's record can land inside this one meanwhile.
+            with locked_history_file(fd):
+                remaining = memoryview(data)
+                while remaining:
+                    remaining = remaining[os.write(fd, remaining) :]
+        finally:
+            os.close(fd)
 
     def read_history(self, name: str) -> list[dict]:
         self.validate_skill_name(name)
         history_path = self.get_skill_history_file(name)
-        if not history_path.exists():
+        try:
+            history_file = history_path.open(encoding="utf-8")
+        except FileNotFoundError:
             return []
+        # Shared with other readers, but not with an append: a record whose
+        # write is still being retried would otherwise read as a torn tail.
+        with history_file, locked_history_file(history_file.fileno(), shared=True):
+            text = history_file.read()
         records: list[dict] = []
         # JSONL boundaries are newlines, not Unicode separators inside JSON strings.
-        for line in history_path.read_text(encoding="utf-8").split("\n"):
+        for line in text.split("\n"):
             if not line.strip():
                 continue
             records.append(json.loads(line))

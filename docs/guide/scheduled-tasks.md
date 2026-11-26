@@ -6,6 +6,13 @@ Editing a one-time task's title or prompt preserves its original execution time,
 
 An unchanged one-time execution time can still be saved within `scheduler.min_once_delay_seconds` of its run. New execution times and reactivated finished tasks must satisfy that minimum delay.
 
+For one-time tasks, the Gateway returns `schedule_spec.run_at` in calendar
+date and time format, including seconds and any fractional seconds. A value
+with an explicit offset is stored and returned in UTC. A value without an
+offset stays a local time in the task's timezone, so changing just the
+timezone keeps the same wall-clock time. Older tasks use the same response
+format, including after their last run.
+
 Current MVP capabilities:
 
 - Manage tasks at `/workspace/scheduled-tasks`

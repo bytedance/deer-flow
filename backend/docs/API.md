@@ -306,6 +306,28 @@ the response is HTTP 504 with detail
 
 ### Runs
 
+#### Submit an input while a Web run is active
+
+`POST /api/threads/{thread_id}/runs/{run_id}/inputs` accepts JSON with
+`request_id`, `text`, `mode` (`queue` or `steer`), and optional `context`.
+To queue attachments, send multipart form data with the JSON in `input`
+and one `files` part per file. Set `mode` to `queue`. The text may be empty
+when the message includes files. Upload limits and thread write permission
+apply.
+
+The input receipt and `GET /api/threads/{thread_id}/inputs` show attachment
+names and sizes. Files become readable by the Agent when the queued message's
+run starts. An available filename is preserved. If a name is taken, the
+Gateway picks an available name and remembers it for publication retries.
+An attachment input stays dispatching until the files are published. If its
+run stops before publication starts, or publication fails before the Agent
+receives the message, the same input can be removed or retried without another
+upload. An uncertain dispatch or publication outcome reuses the accepted run.
+On startup, the Gateway
+cleans up abandoned staging directories older than 24 hours.
+Remote sandboxes without thread-data mounts need Python 3 to publish queued
+attachments and reconcile partial transfers.
+
 #### Create Run
 
 Execute the agent with input.
@@ -440,9 +462,11 @@ the next request without restarting the Gateway. IM channel runs get the same
 default unless a channel `session.config` sets `recursion_limit` (GitHub channel
 runs have their own floor; see
 [CONFIGURATION.md](CONFIGURATION.md#recursion-limits)); embedded
-`DeerFlowClient` runs retain their own defaults and override paths. A run that
-reaches the limit ends with status `error` and `stop_reason: "recursion_capped"`;
-its stream `error` event and the `/wait` error envelope use the name
+`DeerFlowClient` runs retain their own defaults and override paths. When the current graph
+invocation has a terminal checkpoint at the limit, the Gateway finalizes the run
+normally. A run with work remaining at the limit ends with status `error` and
+`stop_reason: "recursion_capped"`. Its stream `error` event and the `/wait`
+error envelope use the name
 `GraphRecursionError`, and the message lists up to five outputs the run created
 but did not present.
 
@@ -1065,6 +1089,38 @@ write, the Gateway resolves environment variables in a copy and validates the
 same expanded document the runtime will load while persisting the original raw
 placeholders.
 
+#### Runtime MCP Agent Grants
+
+Owners and approved definition digests of `mcp_agent_auth` bindings declared
+with `grants: runtime` (admin only; PATs are not accepted). Changes apply to
+the next run and call without a restart. See
+[Per-agent credentials](MCP_SERVER.md#runtime-grants).
+
+```http
+GET    /api/mcp/agent-auth
+GET    /api/mcp/agent-auth/{binding}
+GET    /api/mcp/agent-auth/{binding}/definition-digest?owner={user_id}
+PUT    /api/mcp/agent-auth/{binding}/grants
+DELETE /api/mcp/agent-auth/{binding}/grants
+```
+
+```json
+{"owners": ["<user id>"], "definition_digests": ["<64-character SHA-256 digest>"]}
+```
+
+A grant covers the agent, server, destination and OAuth client the binding had
+when it was written; after `config.yaml` changes one of them, responses show
+`"approval": "stale"` and the grant admits nobody until it is written again.
+A grant whose binding was removed from `config.yaml` is listed with
+`"approval": "retired"` and can still be read and deleted by its binding ID.
+Stale and retired grants, and grants of disabled bindings, keep their owners
+reserved for the agent and server they were approved for until they are
+replaced or deleted; owners listed by a disabled `grants: config` binding stay
+reserved too. A binding moved to `grants: config` whose runtime grant is
+still stored returns it as `stored_grant`, so the owners it reserves are visible
+until the grant is deleted. A write to a disabled binding is checked for overlaps like any
+other, so enabling it again cannot make admission reject both bindings.
+
 #### Reset MCP Tools Cache
 
 Publish a shared cache generation, then clear cached MCP tools and persistent
@@ -1206,6 +1262,11 @@ Content-Type: application/json
 }
 ```
 
+An archive that is not a valid skill returns `400`, for example one with unsafe
+or conflicting member paths, invalid frontmatter, a member CRC-32 mismatch found
+during extraction, or a `SKILL.md` that is missing or is not a file. A skill name
+that already exists returns `409`.
+
 #### Upload and Install Skill
 
 Upload a local `.skill` archive and install it for the current user. Requires an
@@ -1328,6 +1389,12 @@ GET /api/skills/custom/{skill_name}/history
 
 An invalid skill name returns `400`; a skill with neither a `SKILL.md` nor
 recorded history returns `404`.
+
+Each entry's `prev_content` is the content that change replaced. Edits,
+rollbacks and deletions through these routes and the agent's `skill_manage` tool
+take one lock per user, also across Gateway processes that share the home
+volume, so they cannot interleave. An agent patch is refused, and nothing is
+written, when `SKILL.md` changed while the patch was being scanned.
 
 #### Rollback Custom Skill
 

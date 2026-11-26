@@ -71,6 +71,56 @@ def test_resolve_errors_when_none(monkeypatch):
         img._resolve_provider("IMAGE_GENERATION_PROVIDER", "gemini", False)
 
 
+@pytest.mark.parametrize(
+    ("provider", "missing_key"),
+    [
+        ("minimax", "MINIMAX_API_KEY"),
+        ("gemini", "GEMINI_API_KEY"),
+        ("google", "GEMINI_API_KEY"),
+        ("openai", "IMAGE_GENERATION_API_KEY"),
+        ("openai-compatible", "IMAGE_GENERATION_API_KEY"),
+    ],
+)
+def test_cli_forced_provider_requires_its_key(
+    monkeypatch, tmp_path, capsys, provider, missing_key
+):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", provider)
+    for key in ("GEMINI_API_KEY", "MINIMAX_API_KEY", "IMAGE_GENERATION_API_KEY"):
+        monkeypatch.setenv(key, "test-key")
+    monkeypatch.delenv(missing_key)
+
+    def unexpected_post(*args, **kwargs):
+        pytest.fail("A missing provider key must stop the request")
+
+    monkeypatch.setattr(img.requests, "post", unexpected_post)
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("a red deer", encoding="utf-8")
+    output = tmp_path / "slide-03.jpg"
+    output.write_bytes(b"previous slide")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            img.__file__,
+            "--prompt-file",
+            str(prompt),
+            "--reference-images",
+            str(tmp_path / "missing-reference.jpg"),
+            "--output-file",
+            str(output),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        runpy.run_path(img.__file__, run_name="__main__")
+
+    assert error.value.code == 1
+    captured = capsys.readouterr()
+    assert f"{missing_key} is not set" in captured.err
+    assert not captured.out
+    assert output.read_bytes() == b"previous slide"
+
+
 def test_minimax_builds_payload_and_writes(monkeypatch, tmp_path):
     monkeypatch.setenv("MINIMAX_API_KEY", "m")
     raw = b"PNGBYTES"
@@ -176,7 +226,10 @@ def test_minimax_extracts_json_prompt_field(monkeypatch, tmp_path):
     assert captured["json"]["prompt_optimizer"] is True
 
 
-def test_minimax_plaintext_prompt_passes_through(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "prompt", ["a red apple on a table", "x" * 1500], ids=["short", "at-limit"]
+)
+def test_minimax_plaintext_prompt_passes_through(monkeypatch, tmp_path, prompt):
     monkeypatch.setenv("MINIMAX_API_KEY", "m")
     captured = {}
 
@@ -191,27 +244,46 @@ def test_minimax_plaintext_prompt_passes_through(monkeypatch, tmp_path):
 
     monkeypatch.setattr(img.requests, "post", fake_post)
     prompt_file = tmp_path / "p.txt"
-    prompt_file.write_text("a red apple on a table", encoding="utf-8")
+    prompt_file.write_text(prompt, encoding="utf-8")
     img.generate_image(str(prompt_file), [], str(tmp_path / "o.jpg"), "1:1")
 
-    assert captured["json"]["prompt"] == "a red apple on a table"
+    assert captured["json"]["prompt"] == prompt
 
 
-def test_minimax_rejects_overlong_prompt_without_calling_api(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "existing", [False, True], ids=["new-output", "existing-output"]
+)
+def test_cli_minimax_rejects_overlong_prompt(monkeypatch, tmp_path, capsys, existing):
     monkeypatch.setenv("MINIMAX_API_KEY", "m")
 
-    def fake_post(url, headers=None, json=None, **kw):  # pragma: no cover
-        raise AssertionError("must not call the API when the prompt is over the limit")
+    def fake_post(*args, **kwargs):
+        pytest.fail("Overlong prompts must be rejected before calling MiniMax")
 
     monkeypatch.setattr(img.requests, "post", fake_post)
     prompt_file = tmp_path / "p.json"
-    prompt_file.write_text('{"prompt": "' + "x" * 1600 + '"}', encoding="utf-8")
+    prompt_file.write_text('{"prompt": "' + "x" * 1501 + '"}', encoding="utf-8")
     out = tmp_path / "o.jpg"
-    msg = img.generate_image(str(prompt_file), [], str(out), "16:9")
+    if existing:
+        out.write_bytes(b"previous image")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [img.__file__, "--prompt-file", str(prompt_file), "--output-file", str(out)],
+    )
 
-    assert "1500" in msg
-    assert "character" in msg.lower()
-    assert not out.exists()
+    with pytest.raises(SystemExit) as error:
+        runpy.run_path(img.__file__, run_name="__main__")
+
+    assert error.value.code == 1
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert "1501 characters" in captured.err
+    assert "at most 1500" in captured.err
+    assert "Shorten the prompt" in captured.err
+    if existing:
+        assert out.read_bytes() == b"previous image"
+    else:
+        assert not out.exists()
 
 
 def test_minimax_creates_nested_output_dir(monkeypatch, tmp_path):
@@ -455,6 +527,69 @@ def test_openai_compatible_download_requires_2xx(
         assert output.read_bytes() == b"previous image"
     else:
         assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "existing", [False, True], ids=["new-output", "existing-output"]
+)
+def test_openai_compatible_empty_download_preserves_output(
+    monkeypatch, tmp_path, existing
+):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp(
+            {"data": [{"url": "https://cdn.example/image.png"}]}
+        ),
+    )
+    monkeypatch.setattr(
+        img.requests,
+        "get",
+        lambda *args, **kwargs: FakeResp(content=b""),
+    )
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("a red deer", encoding="utf-8")
+    output = tmp_path / "outputs" / "image.png"
+    if existing:
+        output.parent.mkdir()
+        output.write_bytes(b"previous image")
+
+    with pytest.raises(ValueError, match="empty image"):
+        img.generate_image(str(prompt), [], str(output))
+    if existing:
+        assert output.read_bytes() == b"previous image"
+    else:
+        assert not output.parent.exists()
+
+
+@pytest.mark.parametrize(
+    "existing", [False, True], ids=["new-output", "existing-output"]
+)
+def test_openai_compatible_empty_data_url_preserves_output(
+    monkeypatch, tmp_path, existing
+):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp({"data": [{"url": "data:image/png;base64,"}]}),
+    )
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("a red deer", encoding="utf-8")
+    output = tmp_path / "outputs" / "image.png"
+    if existing:
+        output.parent.mkdir()
+        output.write_bytes(b"previous image")
+
+    with pytest.raises(ValueError, match="empty image"):
+        img.generate_image(str(prompt), [], str(output))
+    if existing:
+        assert output.read_bytes() == b"previous image"
+    else:
+        assert not output.parent.exists()
 
 
 @pytest.mark.parametrize(

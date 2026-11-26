@@ -139,3 +139,33 @@ it remains valid. Older tasks created before the migration need a grant.
 An authorized owner can renew with `PUT /api/coordination/tasks/{task_id}/authorization`
 or revoke with `DELETE /api/coordination/tasks/{task_id}/authorization`.
 The Grant table stores only authority metadata and the binding generation.
+
+## Coordinator tasks
+
+Send `"coordinator": true` when creating a Task that needs decomposition.
+The Gateway starts a planning Run with two model tools. `inspect_task` reads
+the root and recent child statuses. `submit_task_decision` commits up to eight
+child tasks in dependency order. The planner uses the default configured
+model. The requested assistant is the default Worker for the plan.
+The planner applies the configured PII redaction to user text before each
+model call. Planned child Tasks inherit the root's saved Worker run settings.
+Each planning step retries once after a temporary provider error or a malformed
+tool call. A second failure ends that planning step with an error.
+
+The Gateway binds the decision to the planner's Run, the root revision and
+the covered input sequence. It checks the root and the current grant under
+the same tree lock used by cancellation. An accepted decision records the
+child IDs and their Worker assignments together. A retry of that decision
+reuses those IDs. A change to an accepted decision returns a conflict.
+
+The Gateway admits a queued child when its prerequisites succeed. It freezes
+the visible prerequisite reply text into the dependent Worker's input. An
+unsuccessful prerequisite prevents admission and settles its dependents as
+failed. Children share the root's revocable authorization.
+
+The parent task view lists child IDs, statuses, result references and artifact
+endpoints, including children from earlier plans. Only the current plan's
+children determine the root outcome. After restart, the
+Gateway continues from the saved decision or retries a planner interrupted
+before it committed. A replay reuses the original input message IDs. Later
+input stays in the same Task's inbox.

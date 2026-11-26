@@ -3,6 +3,7 @@ import logging
 from types import SimpleNamespace
 
 import httpx
+import pytest
 
 from deerflow.logging_config import TraceContextFilter, configure_logging
 from deerflow.trace_context import request_trace_context
@@ -119,7 +120,13 @@ def test_url_redaction_filter_rewrites_request_records() -> None:
     assert plain.getMessage() == "keep this"
 
 
-def test_url_redaction_filter_covers_urllib3_redirect_records() -> None:
+@pytest.fixture
+def urllib3_debug_logging(caplog: pytest.LogCaptureFixture) -> None:
+    # SDK setup can pin the urllib3 parent to WARNING, regardless of the root level.
+    caplog.set_level(logging.DEBUG, logger="urllib3")
+
+
+def test_url_redaction_filter_covers_urllib3_redirect_records(urllib3_debug_logging) -> None:
     """Real-emitter wiring: urllib3 logs through CHILD loggers, and a filter on
     the bare ``urllib3`` logger never sees propagated records (logger filters
     are not inherited). Verified against the installed urllib3 2.7.0:
@@ -214,7 +221,7 @@ def test_url_redaction_filter_covers_urllib3_request_line_records() -> None:
     assert "BearerSecret" not in http2.getMessage()
 
 
-def test_url_redaction_filter_covers_urllib3_request_line_through_real_emit() -> None:
+def test_url_redaction_filter_covers_urllib3_request_line_through_real_emit(urllib3_debug_logging) -> None:
     """Real-emitter wiring for the per-request line: urllib3 logs through the
     ``urllib3.connectionpool`` child logger at DEBUG, so only the
     handler-level filters installed by configure_logging can rewrite the
@@ -386,7 +393,7 @@ def test_url_redaction_filter_covers_urllib3_retry_lines() -> None:
     assert plain_conn.getMessage() == "Starting new HTTP connection (1): cdn.example:443"
 
 
-def test_url_redaction_filter_covers_urllib3_retry_lines_through_real_emit() -> None:
+def test_url_redaction_filter_covers_urllib3_retry_lines_through_real_emit(urllib3_debug_logging) -> None:
     """Real-emitter wiring for the retry lines: the increment line is produced
     by actually calling ``Retry.increment`` (retry.py:545 logs through the
     ``urllib3.util.retry`` child logger at DEBUG), and the connectionpool

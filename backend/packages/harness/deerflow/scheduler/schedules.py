@@ -31,6 +31,20 @@ def normalize_cron_expression(expr: str) -> str:
     return " ".join(parts)
 
 
+def canonical_once_run_at(value: object) -> object:
+    """Serialize explicit instants in UTC and wall times without an offset."""
+    if not isinstance(value, str):
+        return value
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(UTC)
+    except (ValueError, OverflowError):
+        # Admission reports invalid input. Keep malformed old rows readable.
+        return value
+    return parsed.isoformat()
+
+
 def parse_interval_seconds(schedule_spec: dict[str, object]) -> int:
     raw = schedule_spec.get("every_seconds")
     if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:

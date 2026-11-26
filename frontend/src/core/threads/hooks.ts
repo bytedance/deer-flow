@@ -47,6 +47,7 @@ import {
 import type { FileInMessage } from "../messages/utils";
 import { PROJECTS_QUERY_KEY } from "../projects/api";
 import type { LocalSettings } from "../settings";
+import { getThreadEffortOverride } from "../settings/store";
 import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 import { useSubtaskContext, useUpdateSubtask } from "../tasks/context";
 import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
@@ -406,6 +407,20 @@ export function buildRunContext({
       ([key]) => key !== "conversation_references",
     ),
   );
+  const explicitThinking =
+    typeof extraContext?.thinking_enabled === "boolean"
+      ? extraContext.thinking_enabled
+      : undefined;
+  const explicitEffort =
+    typeof extraContext?.reasoning_effort === "string"
+      ? extraContext.reasoning_effort
+      : getThreadEffortOverride(threadId, settings.reasoning_effort);
+  // Older Gateways read the flat values. New ones can distinguish mode
+  // presets from a separate choice, even when both say "high".
+  const modeDefaultFields: string[] = [];
+  if (explicitThinking === undefined)
+    modeDefaultFields.push("thinking_enabled");
+  if (explicitEffort === undefined) modeDefaultFields.push("reasoning_effort");
   return {
     ...extraContext,
     ...ownedSettings,
@@ -415,10 +430,12 @@ export function buildRunContext({
     ...(conversationReferences?.length
       ? { conversation_references: [...conversationReferences] }
       : {}),
-    thinking_enabled: settings.mode !== "flash",
+    mode_default_fields: modeDefaultFields,
+    thinking_enabled: explicitThinking ?? settings.mode !== "flash",
     is_plan_mode: settings.mode === "pro" || settings.mode === "ultra",
     subagent_enabled: settings.mode === "ultra",
     reasoning_effort:
+      explicitEffort ??
       settings.reasoning_effort ??
       (settings.mode === "ultra"
         ? "high"
@@ -2658,6 +2675,7 @@ export function useThreadStream({
     runId: string;
     text: string;
     mode: RunInputMode;
+    files: File[];
     id: string;
     context?: Record<string, unknown>;
   } | null>(null);
@@ -2670,7 +2688,7 @@ export function useThreadStream({
     [onStreamThreadId, runInputAccount],
   );
   const sendInput = useCallback(
-    async (text: string, mode: RunInputMode) => {
+    async (text: string, mode: RunInputMode, files: File[] = []) => {
       const targetThread = onStreamThreadId;
       const runId = inputQuery.data?.active_run_id;
       if (!targetThread || !runId)
@@ -2679,13 +2697,16 @@ export function useThreadStream({
       const attempt =
         previous?.threadId === targetThread &&
         previous.text === text &&
-        previous.mode === mode
+        previous.mode === mode &&
+        previous.files.length === files.length &&
+        previous.files.every((file, index) => file === files[index])
           ? previous
           : {
               threadId: targetThread,
               runId,
               text,
               mode,
+              files,
               id: uuid(),
               context:
                 mode === "queue"
@@ -2708,6 +2729,7 @@ export function useThreadStream({
           text,
           mode,
           context: attempt.context,
+          files: attempt.files,
           signal: controller.signal,
         });
         if (controller.signal.aborted)

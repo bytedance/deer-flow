@@ -755,14 +755,15 @@ export const zhCN: Translations = {
       },
     ],
     pleaseWaitStreaming: "请等待当前响应完成。",
+    send: "发送",
     runInputMode: "运行中发送方式",
     queueMode: "排队执行",
     steerMode: "调整当前任务",
     queueModeHelp: "当前任务结束后再执行",
     steerModeHelp: "在下一处可处理的位置调整当前任务",
     runInputSend: "发送补充消息",
-    runInputTextOnly:
-      "运行中请发送纯文字，附件和斜杠命令请等当前任务结束后发送。",
+    runInputTextOnly: "调整当前任务时请发送纯文字。发送附件请选择排队执行。",
+    runInputUnsupported: "请等当前任务结束后再发送引用和斜杠命令。",
     runInputUnavailable:
       "尚未确认消息是否送达，请检查任务状态后重试，输入内容已保留。",
     stopRun: "停止当前任务",

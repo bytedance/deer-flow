@@ -148,7 +148,7 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 - [Install.md](Install.md) - Setup instructions written for coding agents
 - [Configuration Reference](backend/docs/CONFIGURATION.md) - Every `config.yaml` option
 - [Backend Architecture](backend/README.md) - Backend architecture and API reference
-- [Conversation Sharing](docs/guide/sharing.md) - Expiring read-only snapshots, artifact previews and workspace copies
+- [Conversation Sharing](docs/guide/sharing.md) - Expiring snapshots, file links and previews, and workspace copies
 - [Architecture Overview](docs/ARCHITECTURE.md) - How the services fit together
 - [Contributing Guide](CONTRIBUTING.md) - Development environment, workflow and tests
 - [Changelog](CHANGELOG.md) - Release notes
@@ -156,6 +156,8 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 ## ⚠️ Security Notice
 
 DeerFlow can execute commands and read and write files. It is designed to run in a local trusted environment, and a Gateway admin account is equivalent to code execution on the host. Before you deploy it on a server or expose it to a network, read the full [Security Notice](docs/guide/security.md) and [SECURITY.md](SECURITY.md).
+
+Runtime tool approval is disabled by default. The Gateway warns at startup when it is disabled. See [Skills & Tools](docs/guide/skills-and-tools.md) for configuration.
 
 ## Contributing
 
