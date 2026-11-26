@@ -150,12 +150,7 @@ def _make_meta(*, status: str, source: str, error_type: str | None = None, recov
 
 
 def stamp_exception_meta(msg: ToolMessage, exc_info: BaseException | str) -> ToolMessage:
-    """Stamp deerflow_tool_meta with source='exception' onto an exception-derived ToolMessage.
-
-    Unlike normalize_tool_message (which preserves existing stamps), this function always
-    overwrites any pre-existing TOOL_META_KEY entry.  Exception-derived classification is
-    more authoritative than a tool's own return-time stamp.
-    """
+    """Replace any existing tool metadata with the failure classified from the exception."""
     attrs = classify_exception(exc_info)
     updated_kwargs = dict(msg.additional_kwargs or {})
     updated_kwargs[TOOL_META_KEY] = _make_meta(status="error", source="exception", **attrs)
@@ -172,22 +167,25 @@ _SUBAGENT_FAILURE_STATUSES = frozenset({"failed", "cancelled", "timed_out", "pol
 
 
 def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
-    """Attach tool status, correcting legacy bash analysis that missed an exit."""
+    """Attach tool status, honoring structured HTTP errors and legacy bash exits."""
     content = msg.content if isinstance(msg.content, str) else ""
     bash_status = bash_exit_status(content) if msg.name in BASH_TOOL_NAMES else None
     failed_bash = bash_status is not None and bash_status[0] == "error"
-    existing = (msg.additional_kwargs or {}).get(TOOL_META_KEY)
-    if existing is not None:
-        # Explicit producer stamps remain authoritative. Older checkpoints can
-        # contain generic analysis success for a provider-reported failed exit.
-        if not (failed_bash and isinstance(existing, dict) and existing.get("source") == "content_analysis" and existing.get("status") == "success"):
-            return msg
-
     kwargs = msg.additional_kwargs or {}
-    subagent_status = kwargs.get("subagent_status")
     artifact = msg.artifact if isinstance(msg.artifact, dict) else {}
     response = artifact.get("deerflow_http_response")
     category = _http_error_category(response.get("status_code")) if isinstance(response, dict) else None
+
+    existing = kwargs.get(TOOL_META_KEY)
+    if existing is not None:
+        if not isinstance(existing, dict) or existing.get("status") != "success":
+            return msg
+        # A successful tool return can still describe a failed HTTP request.
+        # Older checkpoints can also carry analysis success for a failed bash exit.
+        if category is None and not (failed_bash and existing.get("source") == "content_analysis"):
+            return msg
+
+    subagent_status = kwargs.get("subagent_status")
     # Producer status and native exit markers describe execution. Documents do not.
     if isinstance(subagent_status, str) and subagent_status in _SUBAGENT_FAILURE_STATUSES:
         attrs = {**_UNKNOWN_ERROR}
@@ -232,7 +230,7 @@ def normalize_tool_result(result: ToolMessage | Command, *, tool_call_id: str = 
 
     When ``tool_call_id`` is provided, only the matching ``ToolMessage`` inside a
     Command is stamped. Other Command fields and unrelated messages are left intact.
-    Producer-supplied ``deerflow_tool_meta`` is preserved by ``normalize_tool_message``.
+    ``normalize_tool_message`` applies status precedence to any existing metadata.
     """
     if isinstance(result, ToolMessage):
         return normalize_tool_message(result)
