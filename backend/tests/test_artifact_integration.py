@@ -17,10 +17,11 @@ from unittest.mock import Mock
 import httpx
 import pytest
 from _agent_e2e_helpers import FakeToolCallingModel
+from deerflow_extension_api import ModelTool, PluginContribution, PluginToolResult
 from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langchain_core.tools import tool
+from langchain_core.tools import ToolException, tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.prebuilt.tool_node import ToolCallRequest
 
@@ -37,6 +38,8 @@ from deerflow.community.crawl4ai import tools as crawl4ai_tools
 from deerflow.config import paths as paths_module
 from deerflow.config.acp_config import ACPAgentConfig
 from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.extensions.plugin_tools import build_plugin_tools
+from deerflow.extensions.registry import ExtensionRegistry
 from deerflow.sandbox import sandbox_provider
 from deerflow.sandbox.sandbox import CommandOutput, Sandbox
 from deerflow.sandbox.tools import bash_tool
@@ -227,6 +230,41 @@ async def test_missing_image_creates_no_artifact_before_or_after_compaction(tmp_
 
     compacted_request = await _compact_and_check_artifacts(agent, model, config, context, [])
     assert not any("missing.png [available]" in message.content for message in compacted_request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("success", [True, False], ids=["typed-result", "tool-exception"])
+async def test_plugin_report_artifacts_follow_invocation_status_through_compaction(success):
+    report_url = "https://files.example/report.pdf"
+    report = "Error: the report summarizes past validation failures."
+    artifact = {"structured_content": {"file": report_url}}
+
+    async def handler(payload, context):
+        if not success:
+            raise ToolException(f"Error: Could not generate {report_url}")
+        return PluginToolResult(report, artifact)
+
+    declaration = ModelTool("report", "Generate a report.", {"type": "object"}, handler, response_format="content_and_artifact")
+    registry = ExtensionRegistry()
+    with registry.attributed_to("test"):
+        registry.plugin(PluginContribution(namespace="test.reports", title="Reports", enabled=True, tools=(declaration,)))
+    (selected_tool,) = build_plugin_tools(registry.build())
+    model = _one_tool_model(selected_tool.name, {}, "call_plugin_report")
+    agent = _compacting_agent(model, selected_tool)
+    config = {"configurable": {"thread_id": THREAD_ID}}
+    context = {"thread_id": THREAD_ID}
+
+    result = await agent.ainvoke({"messages": [HumanMessage(content="Generate the report.")]}, config, context=context)
+    message = next(message for message in result["messages"] if isinstance(message, ToolMessage))
+    compacted_request = await _compact_and_check_artifacts(agent, model, config, context, [report_url] if success else [])
+    expected_status = "success" if success else "error"
+    assert message.status == expected_status
+    assert message.additional_kwargs[TOOL_META_KEY]["status"] == expected_status
+    assert message.artifact == (artifact if success else None)
+    if success:
+        assert message.content == report
+    else:
+        assert not any("report.pdf [available]" in item.content for item in compacted_request)
 
 
 _ACP_REPORT_AGENT = """\

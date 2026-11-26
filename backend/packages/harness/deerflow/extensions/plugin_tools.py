@@ -16,11 +16,13 @@ from deerflow_extension_api.auth import ExtensionPrincipal
 from deerflow_extension_api.plugins import PluginToolResult, ToolContext
 from jsonschema import Draft202012Validator
 from langchain.tools import ToolRuntime
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import StructuredTool, ToolException
 
 from deerflow.config.plugin_settings import defaults
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.tool_provenance import tag_plugin_tool
+from deerflow.utils.messages import TOOL_META_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +74,7 @@ def _validate_artifact_keys(value):
 
 
 def _build_tool(source, plugin, declaration):
+    name = plugin_tool_name(plugin.namespace, declaration.name)
     schema = deepcopy(dict(declaration.input_schema))
     validator = Draft202012Validator(schema)
 
@@ -104,8 +107,16 @@ def _build_tool(source, plugin, declaration):
                 encoded = json.dumps(envelope, ensure_ascii=False, allow_nan=False)
                 if len(encoded.encode()) > 64 * 1024:
                     raise ToolException("Plugin result exceeds 64 KiB.")
+                if runtime.tool_call_id is None:
+                    return result.content
                 # A JSON roundtrip detaches nested values retained by the handler.
-                return result.content, json.loads(encoded)["artifact"]
+                return ToolMessage(
+                    content=result.content,
+                    artifact=json.loads(encoded)["artifact"],
+                    name=name,
+                    tool_call_id=runtime.tool_call_id,
+                    additional_kwargs={TOOL_META_KEY: {"status": "success", "source": "tool_return"}},
+                )
             encoded = json.dumps(result, ensure_ascii=False, allow_nan=False)
             if len(encoded.encode()) > 64 * 1024:
                 raise ToolException("Plugin result exceeds 64 KiB.")
@@ -116,8 +127,7 @@ def _build_tool(source, plugin, declaration):
             logger.warning("Plugin tool failed: %s/%s (%s)", plugin.namespace, declaration.name, type(exc).__name__)
             raise ToolException("Plugin tool unavailable or input rejected.") from None
 
-    options = {"response_format": "content_and_artifact"} if declaration.response_format == "content_and_artifact" else {}
-    tool = StructuredTool(name=plugin_tool_name(plugin.namespace, declaration.name), description=declaration.description, args_schema=schema, coroutine=invoke, handle_tool_error=True, **options)
+    tool = StructuredTool(name=name, description=declaration.description, args_schema=schema, coroutine=invoke, handle_tool_error=True)
     tag_plugin_tool(tool, namespace=plugin.namespace, declaration=declaration.name, installation=source)
     return tool
 
