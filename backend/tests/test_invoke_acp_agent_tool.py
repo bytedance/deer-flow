@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from acp.schema import PromptResponse
 
 from deerflow.config.acp_config import ACPAgentConfig
 from deerflow.config.app_config import AppConfig
@@ -318,6 +319,7 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
                     content=text_content_block("ACP result"),
                 ),
             )
+            return PromptResponse(stop_reason="end_turn")
 
     class DummyProcessContext:
         def __init__(self, client, cmd, *args, cwd):
@@ -443,7 +445,7 @@ async def test_invoke_acp_agent_uses_per_thread_workspace_when_thread_id_in_conf
             return SimpleNamespace(session_id="s1")
 
         async def prompt(self, **kwargs):
-            pass
+            return PromptResponse(stop_reason="end_turn")
 
     class DummyProcessContext:
         def __init__(self, client, cmd, *args, cwd):
@@ -536,7 +538,7 @@ async def test_invoke_acp_agent_passes_env_to_spawn(monkeypatch, tmp_path):
             return SimpleNamespace(session_id="s1")
 
         async def prompt(self, **kwargs):
-            pass
+            return PromptResponse(stop_reason="end_turn")
 
     class DummyProcessContext:
         def __init__(self, client, cmd, *args, env=None, cwd):
@@ -629,7 +631,7 @@ async def test_invoke_acp_agent_skips_invalid_mcp_servers(monkeypatch, tmp_path,
             return SimpleNamespace(session_id="s1")
 
         async def prompt(self, **kwargs):
-            pass
+            return PromptResponse(stop_reason="end_turn")
 
     class DummyProcessContext:
         def __init__(self, client, cmd, *args, env=None, cwd=None):
@@ -717,7 +719,7 @@ async def test_invoke_acp_agent_passes_none_env_when_not_configured(monkeypatch,
             return SimpleNamespace(session_id="s1")
 
         async def prompt(self, **kwargs):
-            pass
+            return PromptResponse(stop_reason="end_turn")
 
     class DummyProcessContext:
         def __init__(self, client, cmd, *args, env=None, cwd):
@@ -830,7 +832,7 @@ def test_get_available_tools_sync_invoke_acp_agent_preserves_thread_workspace(mo
             return SimpleNamespace(session_id="s1")
 
         async def prompt(self, **kwargs):
-            pass
+            return PromptResponse(stop_reason="end_turn")
 
     class DummyProcessContext:
         def __init__(self, client, cmd, *args, env=None, cwd):

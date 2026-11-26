@@ -374,7 +374,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             )
             mcp_servers = []
 
-        async def _converse(conn) -> None:
+        async def _converse(conn) -> str:
             await conn.initialize(
                 protocol_version=PROTOCOL_VERSION,
                 client_capabilities=ClientCapabilities(),
@@ -384,10 +384,11 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             session = await conn.new_session(**session_kwargs)
             if agent_config.model:
                 await _select_session_model(conn, session, agent_config.model)
-            await conn.prompt(
+            response = await conn.prompt(
                 session_id=session.session_id,
                 prompt=[text_block(prompt)],
             )
+            return response.stop_reason
 
         stderr_drain: asyncio.Task[None] | None = None
         timed_out = False
@@ -400,7 +401,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                     stderr_drain = asyncio.create_task(_drain_agent_stderr(proc.stderr))
                 try:
                     async with asyncio.timeout(agent_config.timeout_seconds) as deadline:
-                        await _await_while_agent_runs(_converse(conn), proc)
+                        stop_reason = await _await_while_agent_runs(_converse(conn), proc)
                 except TimeoutError:
                     if not deadline.expired():
                         raise
@@ -422,7 +423,10 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                     failed=True,
                 )
             result = client.collected_text
-            logger.info("ACP agent '%s' returned %d characters", agent, len(result))
+            logger.info("ACP agent '%s' stopped with reason '%s' and returned %d characters", agent, stop_reason, len(result))
+            if stop_reason != "end_turn":
+                error = f"Error: ACP agent '{agent}' stopped with reason '{stop_reason}'."
+                return tool_result(f"{error}\n\n{result}" if result else error, failed=True)
             return tool_result(result or "(no response)")
         except Exception as e:
             logger.error("ACP agent '%s' invocation failed (%s)", agent, type(e).__name__)

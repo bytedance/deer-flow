@@ -5,18 +5,15 @@ context -> model references the handle in a later tool call -> resolution
 rewrites it to the real reference at the tool-call boundary.
 """
 
-import asyncio
 import ipaddress
 import json
 import re
 import sys
-from contextlib import asynccontextmanager
 from pathlib import PurePosixPath
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
-import acp
 import httpx
 import pytest
 from _agent_e2e_helpers import FakeToolCallingModel
@@ -232,31 +229,51 @@ async def test_missing_image_creates_no_artifact_before_or_after_compaction(tmp_
     assert not any("missing.png [available]" in message.content for message in compacted_request)
 
 
+_ACP_REPORT_AGENT = """\
+import asyncio
+import sys
+
+import acp
+from acp.schema import InitializeResponse, NewSessionResponse, PromptResponse
+
+
+class ReportAgent:
+    def on_connect(self, conn):
+        self.conn = conn
+
+    async def initialize(self, protocol_version, **kwargs):
+        return InitializeResponse(protocol_version=protocol_version)
+
+    async def new_session(self, **kwargs):
+        return NewSessionResponse(session_id="session-1")
+
+    async def prompt(self, session_id, **kwargs):
+        stop_reason, report = sys.argv[1:]
+        await self.conn.session_update(session_id=session_id, update=acp.update_agent_message_text(report))
+        if stop_reason == "request_error":
+            raise RuntimeError("The ACP prompt failed.")
+        return PromptResponse(stop_reason=stop_reason)
+
+
+asyncio.run(acp.run_agent(ReportAgent()))
+"""
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("success", [True, False], ids=["completed-report", "failed-invocation"])
-async def test_acp_report_artifacts_follow_invocation_status_through_compaction(tmp_path, monkeypatch, success):
+@pytest.mark.parametrize("stop_reason", ["end_turn", "refusal", "cancelled", "max_tokens", "max_turn_requests", "request_error"])
+async def test_acp_report_artifacts_follow_invocation_status_through_compaction(tmp_path, monkeypatch, stop_reason):
     report_url = "https://files.example/report.pdf"
     report = f"Error: the report describes past failures. Download [{report_url}]"
     monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
     monkeypatch.setattr(ExtensionsConfig, "from_file", classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})))
 
-    @asynccontextmanager
-    async def spawn_agent_process(client, *_args, **_kwargs):
-        async def prompt(session_id, **_kwargs):
-            await client.session_update(session_id, acp.update_agent_message_text(report))
-            if not success:
-                raise RuntimeError("The ACP connection failed during the prompt.")
-            return acp.schema.PromptResponse(stop_reason="end_turn")
-
-        connection = SimpleNamespace(
-            initialize=AsyncMock(),
-            new_session=AsyncMock(return_value=acp.schema.NewSessionResponse(session_id="session-1")),
-            prompt=prompt,
-        )
-        yield connection, SimpleNamespace(stderr=None, wait=asyncio.Event().wait)
-
-    monkeypatch.setattr(acp, "spawn_agent_process", spawn_agent_process)
-    selected_tool = build_invoke_acp_agent_tool({"test": ACPAgentConfig(command=sys.executable, description="Test ACP agent")})
+    agent_config = ACPAgentConfig(
+        command=sys.executable,
+        args=["-c", _ACP_REPORT_AGENT, stop_reason, report],
+        description="Test ACP agent",
+        timeout_seconds=15,
+    )
+    selected_tool = build_invoke_acp_agent_tool({"test": agent_config})
     model = _one_tool_model("invoke_acp_agent", {"agent": "test", "prompt": "Generate a report."}, "call_acp")
     agent = _compacting_agent(model, selected_tool)
     config = {"configurable": {"thread_id": THREAD_ID}}
@@ -264,11 +281,17 @@ async def test_acp_report_artifacts_follow_invocation_status_through_compaction(
 
     result = await agent.ainvoke({"messages": [HumanMessage(content="Generate the report.")]}, config, context=context)
     message = next(message for message in result["messages"] if isinstance(message, ToolMessage))
+    success = stop_reason == "end_turn"
+    compacted_request = await _compact_and_check_artifacts(agent, model, config, context, [report_url] if success else [])
     if success:
         assert message.content == report
+    else:
+        assert not any("report.pdf [available]" in item.content for item in compacted_request)
+        if stop_reason != "request_error":
+            assert stop_reason in message.content
+            assert report in message.content
     expected_status = "success" if success else "error"
     assert message.status == expected_status
-    await _compact_and_check_artifacts(agent, model, config, context, [report_url] if success else [])
     assert message.additional_kwargs[TOOL_META_KEY]["status"] == expected_status
 
 
