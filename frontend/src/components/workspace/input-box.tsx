@@ -105,7 +105,11 @@ import {
   retireProjectAttachments,
   useStagedProjectAttachments,
 } from "@/core/projects/composer-attach";
-import { getThreadEffortOverride, subscribe } from "@/core/settings/store";
+import {
+  getThreadEffortOverride,
+  reconcileThreadEffort,
+  subscribe,
+} from "@/core/settings/store";
 import {
   buildReferenceMessageMetadata,
   type SidecarContext,
@@ -742,6 +746,11 @@ export function InputBox({
     uploadLimits,
   ]);
 
+  const threadEffort = useSyncExternalStore(
+    subscribe,
+    () => getThreadEffortOverride(threadId),
+    () => undefined,
+  );
   useEffect(() => {
     if (models.length === 0) {
       return;
@@ -754,6 +763,9 @@ export function InputBox({
       ? models.find((m) => m.name === defaultModelName)
       : undefined;
     const fallbackModel = currentModel ?? agentDefaultModel ?? models[0]!;
+    if (threadEffort && typeof context.model_name === "string") {
+      reconcileThreadEffort(threadId, context.model_name, fallbackModel);
+    }
     const nextModelName = fallbackModel.name;
     const nextMode = getResolvedMode(context.mode, fallbackModel);
     // A remembered effort may not exist in this model's contract (issue #5073);
@@ -780,7 +792,14 @@ export function InputBox({
       },
       { automatic: true },
     );
-  }, [context, models, defaultModelName, onContextChange]);
+  }, [
+    context,
+    models,
+    defaultModelName,
+    onContextChange,
+    threadId,
+    threadEffort,
+  ]);
 
   const selectedModel = useMemo(() => {
     if (models.length === 0) {
@@ -809,11 +828,6 @@ export function InputBox({
   );
 
   const supportReasoningEffort = reasoningEffortOptions.length > 0;
-  const threadEffort = useSyncExternalStore(
-    subscribe,
-    () => getThreadEffortOverride(threadId),
-    () => undefined,
-  );
   const thinkingForRun =
     thinkingRequired ||
     (supportThinking &&

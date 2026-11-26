@@ -185,8 +185,9 @@ Ultra. If you switch to a model that requires thinking, it runs with thinking
 enabled. A model configured with `on_disable_request: reject` still rejects
 an explicit API request to disable it. An effort you pick in one chat stays
 with that chat when you change the effort in another. Choosing a mode or
-model in the same chat resets its effort choice. Explicit API settings take
-precedence over Agent defaults.
+model in the same chat resets its effort choice. So does switching to a
+fallback when its model disappears from the catalog. Explicit API settings
+take precedence over Agent defaults.
 
 Custom Agents migrated to `agent_storage.backend: db` remain editable through
 Agent settings and `update_agent` while the importer retains their old files
