@@ -128,6 +128,39 @@ describe("parseMCPServerDefinition", () => {
     expect(Object.keys(parsed).sort()).toEqual(["a", "b"]);
   });
 
+  it.each(["type", "command", "url"])(
+    "rejects a malformed wrapped entry named %s",
+    (name) => {
+      expect(() =>
+        parseMCPServerDefinition(
+          JSON.stringify({
+            mcpServers: {
+              good: { command: "npx" },
+              [name]: "mistyped",
+            },
+          }),
+        ),
+      ).toThrow(
+        expect.objectContaining({
+          code: "serverConfigNotObject",
+          serverName: name,
+        }),
+      );
+    },
+  );
+
+  it.each([
+    { command: "npx", type: "stdio" },
+    { type: "sse", url: "https://example.test/mcp" },
+    { transport: "http", url: "https://example.test/mcp" },
+    { command: "npx", env: { command: "value" }, headers: { url: "value" } },
+  ])("keeps a coherent bare transport configuration (%j)", (config) => {
+    expect(
+      parseMCPServerDefinition(JSON.stringify({ mcpServers: config }))
+        .mcpServers,
+    ).toMatchObject(config);
+  });
+
   it("rejects blank input", () => {
     expectDefinitionError("   ", "emptyDefinition");
   });

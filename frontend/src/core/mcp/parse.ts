@@ -37,9 +37,25 @@ function isWrappedServerMap(value: Record<string, unknown>): value is Record<
   // A bare server named mcpServers identifies its transport. Otherwise this
   // is a wrapper whose entries must be validated individually, even if one
   // or all of them are malformed.
-  return !["command", "url", "type"].some(
-    (key) => typeof config[key] === "string",
+  const nonempty = (value: unknown) =>
+    typeof value === "string" && value.trim().length > 0;
+  // A configured sibling is evidence of a wrapped map, even when a mistyped
+  // sibling happens to be named command, url or type. Credential maps are data.
+  const hasServerSibling = Object.entries(config).some(
+    ([key, value]) =>
+      key !== "env" &&
+      key !== "headers" &&
+      isPlainObject(value) &&
+      (nonempty(value.command) || nonempty(value.url)),
   );
+  const transport = config.type ?? config.transport ?? "stdio";
+  const coherent =
+    transport === "stdio"
+      ? nonempty(config.command)
+      : typeof transport === "string" &&
+        ["http", "sse", "streamable_http"].includes(transport) &&
+        nonempty(config.url);
+  return hasServerSibling || !coherent;
 }
 
 /** Serialize one existing server into the same copy-paste format the parser accepts. */
