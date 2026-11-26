@@ -115,6 +115,16 @@ def _uploads() -> Any:
     return uploads
 
 
+async def prepare_published_uploads(paths: list[Path], *, sandbox: object | None = None) -> None:
+    """Make published thread files readable by mounted and remote sandboxes."""
+    uploads = _uploads()
+    # The Gateway and the sandbox can run under different UIDs.
+    await run_file_io(uploads._make_uploaded_paths_sandbox_readable, paths)
+    if sandbox is not None:
+        for path in paths:
+            await run_file_io(uploads._sync_upload_to_sandbox, sandbox, path, uploads.upload_virtual_path(path.name))
+
+
 class UnsafeFilenameError(ValueError):
     """The display filename could not be normalized/claimed; ordinary behavior skips it."""
 
@@ -152,14 +162,12 @@ class ThreadUploadIngestionService:
         self._config = app_config
         self._limits: UploadLimits | None = None
         self._uploads_dir: Path | None = None
-        self._sync_to_sandbox = False
         self._sandbox_lease: SandboxRequestLease | None = None
         self._sandbox: Any = None
         self._auto_convert = False
         self._seen_filenames: set[str] = set()
         self._written_paths: list[Path] = []
         self._companion_pairs: list[tuple[Path, Path]] = []
-        self._sync_targets: list[tuple[Path, str]] = []
         self._total_size = 0
 
     async def __aenter__(self) -> ThreadUploadIngestionService:
@@ -198,8 +206,7 @@ class ThreadUploadIngestionService:
         listing = await run_file_io(uploads.list_files_in_dir, self._uploads_dir)
         self._seen_filenames.update(entry["filename"] for entry in listing["files"])
         sandbox_provider = uploads.get_sandbox_provider()
-        self._sync_to_sandbox = not uploads._uses_thread_data_mounts(sandbox_provider)
-        if self._sync_to_sandbox:
+        if not uploads._uses_thread_data_mounts(sandbox_provider):
 
             async def acquire_lease() -> None:
                 self._sandbox_lease = await uploads.try_acquire_sandbox_for_request(
@@ -359,8 +366,6 @@ class ThreadUploadIngestionService:
             raise
 
         virtual_path = uploads.upload_virtual_path(safe_filename)
-        if self._sync_to_sandbox:
-            self._sync_targets.append((file_path, virtual_path))
 
         file_info: dict[str, Any] = {
             "filename": safe_filename,
@@ -422,8 +427,6 @@ class ThreadUploadIngestionService:
                 else:
                     unique_md_name, md_path = await self._link_commit_with_retry(uploads, Path(md_staged), unique_md_name)
                     md_virtual_path = uploads.upload_virtual_path(md_path.name)
-                    if self._sync_to_sandbox:
-                        self._sync_targets.append((md_path, md_virtual_path))
                     file_info["markdown_file"] = md_path.name
                     self._companion_pairs.append((file_path, md_path))
                     file_info["markdown_path"] = str(self._uploads_dir / md_path.name)
@@ -447,18 +450,7 @@ class ThreadUploadIngestionService:
         await await_drained(self._finalize())
 
     async def _finalize(self) -> None:
-        uploads = _uploads()
-        # Uploaded files are created with 0o600 permissions (owner read/write
-        # only). In Docker sandbox deployments the gateway writes as root but
-        # the sandbox process runs as a non-root user (typically UID 1000).
-        # Without group/other read bits the sandbox cannot access the files —
-        # whether the uploads directory is bind-mounted into the container or
-        # synced via sandbox.update_file. Always add group/other read bits so
-        # every sandbox configuration can read the uploaded content.
-        await run_file_io(uploads._make_uploaded_paths_sandbox_readable, self._written_paths)
-        if self._sync_to_sandbox and self._sandbox is not None:
-            for file_path, virtual_path in self._sync_targets:
-                await run_file_io(uploads._sync_upload_to_sandbox, self._sandbox, file_path, virtual_path)
+        await prepare_published_uploads(self._written_paths, sandbox=self._sandbox)
         # Record the final inode/version only after sandbox-readable chmod and
         # any synchronization have completed; chmod changes st_ctime_ns.
         for original, markdown in self._companion_pairs:

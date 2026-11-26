@@ -63,7 +63,7 @@ from app.gateway.conversation_reader import (
 from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.pagination import trim_run_message_page
-from app.gateway.run_inputs import RunInputRequest, change_run_input, list_thread_inputs, submit_run_input
+from app.gateway.run_inputs import RunInputRequest, change_run_input, list_thread_inputs, submit_http_run_input
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import (
     abuild_checkpoint_state_accessor,
@@ -114,10 +114,30 @@ async def revoke_tool_approval_grants(thread_id: ThreadId, request: Request):
     return await revoke_approval_grants(thread_id, request)
 
 
-@router.post("/{thread_id}/runs/{run_id}/inputs")
+@router.post(
+    "/{thread_id}/runs/{run_id}/inputs",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {"schema": RunInputRequest.model_json_schema()},
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["input", "files"],
+                        "properties": {
+                            "input": {"type": "string", "description": "JSON input with mode set to queue"},
+                            "files": {"type": "array", "items": {"type": "string", "format": "binary"}},
+                        },
+                    },
+                },
+            },
+        },
+    },
+)
 @require_permission("runs", "create", owner_check=True, require_existing=True)
-async def create_run_input(thread_id: ThreadId, run_id: str, body: RunInputRequest, request: Request):
-    return await submit_run_input(thread_id, run_id, body, request)
+async def create_run_input(thread_id: ThreadId, run_id: str, request: Request):
+    return await submit_http_run_input(thread_id, run_id, request)
 
 
 @router.get("/{thread_id}/inputs")

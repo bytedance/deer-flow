@@ -306,6 +306,28 @@ the response is HTTP 504 with detail
 
 ### Runs
 
+#### Submit an input while a Web run is active
+
+`POST /api/threads/{thread_id}/runs/{run_id}/inputs` accepts JSON with
+`request_id`, `text`, `mode` (`queue` or `steer`), and optional `context`.
+To queue attachments, send multipart form data with the JSON in `input`
+and one `files` part per file. Set `mode` to `queue`. The text may be empty
+when the message includes files. Upload limits and thread write permission
+apply.
+
+The input receipt and `GET /api/threads/{thread_id}/inputs` show attachment
+names and sizes. Files become readable by the Agent when the queued message's
+run starts. An available filename is preserved. If a name is taken, the
+Gateway picks an available name and remembers it for publication retries.
+An attachment input stays dispatching until the files are published. If its
+run stops before publication starts, or publication fails before the Agent
+receives the message, the same input can be removed or retried without another
+upload. An uncertain dispatch or publication outcome reuses the accepted run.
+On startup, the Gateway
+cleans up abandoned staging directories older than 24 hours.
+Remote sandboxes without thread-data mounts need Python 3 to publish queued
+attachments and reconcile partial transfers.
+
 #### Create Run
 
 Execute the agent with input.
