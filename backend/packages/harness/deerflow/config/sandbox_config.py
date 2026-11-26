@@ -1,4 +1,5 @@
 import ipaddress
+import logging
 import math
 import re
 from typing import Literal
@@ -7,6 +8,8 @@ from urllib.parse import parse_qs, urlsplit
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from deerflow.config._boolean_guards import reject_boolean
+
+logger = logging.getLogger(__name__)
 
 SandboxOwnershipType = Literal["memory", "redis"]
 SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
@@ -17,6 +20,11 @@ SandboxNetworkApproval = Literal["deny", "prompt"]
 # Reserving half the signed range for that timestamp keeps accepted TTLs usable
 # without making config validation depend on the current clock.
 _REDIS_MAX_SAFE_TTL_MILLISECONDS = (2**63 - 1) // 2
+
+
+def is_local_sandbox_use(use: str) -> bool:
+    """Identify the built-in local provider by its configured class path."""
+    return use.endswith(":LocalSandboxProvider") and "deerflow.sandbox.local" in use
 
 
 def normalize_container_path(value: str) -> str:
@@ -237,8 +245,6 @@ class SandboxConfig(BaseModel):
 
     Common options:
         use: Class path of the sandbox provider (required)
-        allow_host_bash: Enable host-side bash execution for LocalSandboxProvider.
-            Dangerous and intended only for fully trusted local workflows.
 
     AioSandboxProvider, BoxliteProvider, E2BSandboxProvider, OpenSandboxProvider, and
     LocalSandboxProvider shared options:
@@ -249,9 +255,7 @@ class SandboxConfig(BaseModel):
         idle_timeout: Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.
         environment: Environment variables to inject into the sandbox (values starting with $ are
             resolved from host env when config is loaded; providers use them verbatim). Injected
-            entries bypass the env-policy scrubber as operator-authorized values;
-            LocalSandboxProvider masks injected credentials from bash tool output and command
-            errors while preserving benign configuration values.
+            entries bypass the env-policy scrubber as operator-authorized values.
 
     BoxliteProvider specific options:
         health_check_skip_seconds: Optional reclaim-time skip window in seconds for recently released warm VMs. Default behavior is 0.0 = always validate before reuse.
@@ -285,6 +289,18 @@ class SandboxConfig(BaseModel):
             (``BOXD_API_KEY`` is the fallback for ``boxd_api_key``).
         vcpu, memory, from_snapshot, auto_suspend_timeout, ready_timeout,
             name_prefix, labels: machine shape, readiness deadline and naming.
+
+    VeFaaSSandboxProvider specific options:
+        vefaas: Optional nested mapping (or flat fields on ``sandbox``) holding
+            ``region``, ``endpoint``, ``function_id``, ``sandbox_base_url``,
+            ``access_key`` / ``secret_key`` / ``session_token`` (or ``*_env``),
+            ``sandbox_access_token``, ``cpu_milli``, ``memory_mb``,
+            ``timeout_minutes``, ``ready_timeout``, ``request_timeout``,
+            ``allow_insecure_http``, ``tos_mount``, ``metadata``,
+            ``snapshot_id``, ``pause_on_idle``, ``auto_pause``,
+            ``snapshot_on_idle``, ``snapshot_type``, ``snapshot_retention_days``,
+            ``snapshot_timeout``, ``max_snapshots_per_sandbox``,
+            ``precache_images``, and ``precache_on_startup``.
     """
 
     use: str = Field(
@@ -293,16 +309,25 @@ class SandboxConfig(BaseModel):
     )
     allow_host_bash: bool = Field(
         default=False,
-        description="Allow the bash tool to execute directly on the host when using LocalSandboxProvider. Dangerous; intended only for fully trusted local environments.",
+        deprecated=True,
+        description="Legacy setting accepted for compatibility. Bash requires an isolated sandbox provider.",
     )
+
+    @field_validator("allow_host_bash")
+    @classmethod
+    def _warn_legacy_host_bash(cls, value: bool, info: ValidationInfo) -> bool:
+        if value and is_local_sandbox_use(info.data.get("use", "")):
+            logger.warning("LocalSandboxProvider ignores deprecated sandbox.allow_host_bash. To run Bash commands, select an isolated sandbox provider such as AioSandboxProvider via sandbox.use and remove sandbox.allow_host_bash.")
+        return value
+
     prewarm: bool = Field(
         default=False,
-        description=("Start an AioSandboxProvider acquire in parallel with the first model call when the user input contains a strong sandbox-use signal. Disabled by default; ignored by other sandbox providers."),
+        description=("Start an AioSandboxProvider or VeFaaSSandboxProvider acquire in parallel with the first model call when the user input contains a strong sandbox-use signal. Disabled by default; ignored by other sandbox providers."),
     )
     prewarm_max_concurrent: int = Field(
         default=1,
         ge=1,
-        description=("Maximum pending or ready-but-unused AIO prewarms per provider instance in this process. When full, skip speculation without delaying foreground tools. This is not a total container or deployment-wide limit."),
+        description=("Maximum pending or ready-but-unused sandbox prewarms per provider instance in this process. When full, skip speculation without delaying foreground tools. This is not a total container or deployment-wide limit."),
     )
     image: str | None = Field(
         default=None,
@@ -321,7 +346,7 @@ class SandboxConfig(BaseModel):
     )
     overflow_policy: SandboxOverflowPolicy = Field(
         default="wait",
-        description="E2B capacity policy. Use wait, reject, or burst.",
+        description="E2B and OpenSandbox capacity policy. OpenSandbox wait keeps its legacy soft cap; reject enforces a process-local hard cap. Burst is E2B-only.",
     )
     acquire_timeout: int = Field(
         default=30,

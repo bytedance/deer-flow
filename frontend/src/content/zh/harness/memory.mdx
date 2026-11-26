@@ -99,6 +99,8 @@ deermem 是默认后端，完整实现了契约的全部能力：
 
 OpenViking 是远程记忆后端，职责边界划分得很清楚：**DeerFlow 负责捕获时机、召回查询和会话游标；`langchain-openviking` 包负责传输、消息转换、批处理与 Session 提交**。
 
+单用户示例：
+
 ```yaml
 memory:
   enabled: true
@@ -118,11 +120,34 @@ memory:
       max_injection_chars: 12000
 ```
 
+多用户 / 多租户隔离示例：
+
+```yaml
+memory:
+  enabled: true
+  injection_enabled: true
+  manager_class: openviking
+  mode: middleware
+  backend_config:
+    base_url: http://openviking:1933
+    user_credentials:
+      alice:
+        api_key_env: OPENVIKING_API_KEY_ALICE
+        tenant_id: acme
+      bob:
+        api_key_env: OPENVIKING_API_KEY_BOB
+        tenant_id: globex
+    # 或使用 credential_provider（+ credential_provider_config）/ host_hooks["credential_provider"]
+    client_pool:
+      max_clients: 64
+      idle_ttl_seconds: 900.0
+```
+
 接入要点：
 
-- **一个 API Key 绑定一个 DeerFlow 拥有者**，访问其他用户会被拒绝；USER Key 放在服务端环境变量（`api_key_env`），不要写进 `config.yaml`。
-- **一个 DeerFlow 线程映射到一个稳定的 OpenViking Session**，会话游标以哈希形式存于 `{storage_path}/openviking/sessions/` 下。
-- 当前版本支持单用户单 Key、middleware 模式；多用户 Key 分发不在本版本范围内。完整边界与启动指南见 `docs/OPENVIKING.md`。
+- **支持 `api_key` 模式下的单用户绑定与多用户 / 多租户隔离**：单用户模式通过 `owner_user_id` + `api_key_env` 将一个 USER API Key 绑定到一个 DeerFlow 拥有者；多用户模式通过 `user_credentials`（每用户 `api_key_env` 或 `api_key`，以及可选 `tenant_id`）或动态 `credential_provider`（`credential_provider` + `credential_provider_config`，或宿主注入 `host_hooks["credential_provider"]`）与有界 LRU/TTL `client_pool` 实现按作用域隔离。多用户配置与 `owner_user_id` / `api_key_env` 互斥，未映射、空白或已吊销的用户一律 fail-closed 拒绝，绝不回退到其他用户的 Key 或环境变量 `OPENVIKING_API_KEY`。
+- **一个 DeerFlow 线程映射到一个稳定的 OpenViking Session**（未配置 `tenant_id` 时保留 v1 会话哈希，配置 `tenant_id` 时生成互相隔离的 v2 哈希），仅含哈希的本地游标存于 `{storage_path}/openviking/sessions/` 下。
+- **仅支持 `memory.mode: middleware`**：不支持 `auth_mode: trusted` / `account` 头（OpenViking 服务端由每个 USER API Key 推导 `account` 与 `user`）。完整安全边界、密钥轮换/吊销与启动指南见 `docs/OPENVIKING.md`。
 
 ## 实现自己的记忆后端
 

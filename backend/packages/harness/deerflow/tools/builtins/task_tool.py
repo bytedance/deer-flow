@@ -33,7 +33,7 @@ from deerflow.models.selection import authorize_selected_model
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
-from deerflow.subagents.acceptance_checks import check_acceptance_criteria, render_acceptance_section
+from deerflow.subagents.acceptance_checks import check_acceptance_criteria_async, render_acceptance_section
 from deerflow.subagents.capacity import SubagentExecutionCapacity, configured_subagent_queue_timeout_seconds
 from deerflow.subagents.config import resolve_subagent_model_name
 from deerflow.subagents.context_snapshot import ParentContextSnapshot
@@ -872,9 +872,8 @@ async def task_tool(
       when the assignment has clear specialist or context-isolation benefit, or is
       one of several independent, non-overlapping tasks that can actually run in
       parallel.
-    - **bash**: Command execution specialist for running bash commands. This is only
-      available when host bash is explicitly allowed or when using an isolated shell
-      sandbox such as `AioSandboxProvider`. Use it only for a bounded shell workflow
+    - **bash**: Command execution specialist that requires an isolated sandbox provider
+      such as `AioSandboxProvider`. Use it only for a bounded shell workflow
       with clear context-isolation or independent-parallel benefit.
       Routine git, build, test, or deploy operations are not sufficient reason to delegate.
 
@@ -1323,8 +1322,10 @@ async def task_tool(
                 acceptance_verdict = None
                 if acceptance_criteria:
                     try:
-                        acceptance_verdict = await asyncio.to_thread(
-                            check_acceptance_criteria,
+                        # The async entry point decides sandbox:execute on this
+                        # event loop (loop-affine providers must be constructed
+                        # here) and offloads the checklist itself.
+                        acceptance_verdict = await check_acceptance_criteria_async(
                             acceptance_criteria,
                             runtime=runtime,
                             thread_data=thread_data,

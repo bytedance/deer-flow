@@ -6,6 +6,13 @@ Editing a one-time task's title or prompt preserves its original execution time,
 
 An unchanged one-time execution time can still be saved within `scheduler.min_once_delay_seconds` of its run. New execution times and reactivated finished tasks must satisfy that minimum delay.
 
+For one-time tasks, the Gateway returns `schedule_spec.run_at` in calendar
+date and time format, including seconds and any fractional seconds. A value
+with an explicit offset is stored and returned in UTC. A value without an
+offset stays a local time in the task's timezone, so changing just the
+timezone keeps the same wall-clock time. Older tasks use the same response
+format, including after their last run.
+
 Current MVP capabilities:
 
 - Manage tasks at `/workspace/scheduled-tasks`
@@ -120,6 +127,9 @@ still unchecked; stop when everything is checked.” In the web app the result i
 live card with the schedule, the stop condition and buttons, and the agent
 replies in one or two sentences; IM and other non-web turns describe the
 schedule, the next run and the stop condition in plain text.
+
+Conversation scheduling actions require an active owner account. The Gateway
+returns `authority_expired` when the account is no longer active.
 
 - **Which tasks a conversation manages.** The tasks created in it, and, in a run
   conversation (the chat a scheduled run posted into), the task that run belongs

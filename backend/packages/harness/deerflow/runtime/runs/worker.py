@@ -25,19 +25,20 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager, ExitStack
 from contextvars import Context
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
-from typing import Any, Final, Literal, cast
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
+from uuid import uuid4
 
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.errors import GraphRecursionError
-from langgraph.types import Command, Overwrite
+from langgraph.types import Command, Overwrite, StateSnapshot
 from opentelemetry.trace import Span
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
@@ -73,6 +74,7 @@ from deerflow.runtime.context_keys import (
 )
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
 from deerflow.runtime.events.producer import current_producer, publisher_scope, run_producer_context
+from deerflow.runtime.events.store.base import RunEventStoreNotCommittedError
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
@@ -121,6 +123,10 @@ from .naming import resolve_root_run_name
 from .schemas import GOAL_RUN_HARD_STOP_REASONS as _GOAL_RUN_HARD_STOP_REASONS
 from .schemas import RunStatus, ThreadOperationKind
 from .store.base import canonical_run_created_at
+
+if TYPE_CHECKING:
+    from deerflow.runtime.journal import RunJournal
+
 
 logger = logging.getLogger(__name__)
 _THREAD_INCARNATION_UNSET = object()
@@ -368,6 +374,41 @@ _RECURSION_CAPPED_STOP_REASON = "recursion_capped"
 # ends in error without an exception; the Gateway spells it the same way.
 _RUN_ERROR_NAME = "RunError"
 _RECURSION_CAPPED_LISTED_OUTPUTS = 5
+
+
+_GRAPH_INVOCATION_KEY = "deerflow_graph_invocation_id"
+
+
+async def _graph_stream_events(stream: AsyncIterator[Any], accessor: CheckpointStateAccessor, thread_id: str, invocation_id: str, journal: RunJournal | None = None) -> AsyncIterator[Any]:
+    """Accept a step-boundary completion only with this invocation's idle root checkpoint."""
+    try:
+        async for event in stream:
+            yield event
+    except GraphRecursionError as error:
+        completed = None
+        try:
+            if accessor.checkpointer is not None:
+                snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+                if (
+                    isinstance(snapshot, StateSnapshot)
+                    and snapshot.metadata
+                    and snapshot.metadata.get("source") == "loop"
+                    and snapshot.metadata.get(_GRAPH_INVOCATION_KEY) == invocation_id
+                    and not snapshot.next
+                    and not snapshot.tasks
+                    and not snapshot.interrupts
+                ):
+                    completed = snapshot
+        except Exception:
+            logger.debug("Could not verify the checkpoint at the graph step limit", exc_info=True)
+        finally:
+            if journal is not None:
+                try:
+                    journal.record_step_limit_outcome(error, completed)
+                except Exception:
+                    logger.warning("Could not journal the graph step-limit outcome", exc_info=True)
+        if completed is None:
+            raise
 
 
 def _recursion_capped_message(recursion_limit: object, delivery_content: dict[str, Any] | None) -> str:
@@ -893,12 +934,18 @@ class _SubagentEventBuffer:
     #: Flush once this many events are buffered, bounding memory and reload lag on
     #: a single deep subagent without paying a per-step lock.
     FLUSH_THRESHOLD = 25
+    MAX_WRITE_ATTEMPTS = 3
 
     def __init__(self, event_store: Any | None, thread_id: str, run_id: str) -> None:
         self._event_store = event_store
         self._thread_id = thread_id
         self._run_id = run_id
         self._pending: list[dict[str, Any]] = []
+        self._persistence_stopped = False
+        self._consecutive_failures = 0
+        self._unconfirmed_events = 0
+        self._skipped_events = 0
+        self._affected_tasks: set[str] = set()
 
     async def add(self, chunk: Any) -> None:
         """Buffer one custom stream chunk; flush on a terminal event or threshold."""
@@ -913,50 +960,90 @@ class _SubagentEventBuffer:
         record = subagent_run_event(chunk)
         if record is None:
             return
+        if self._persistence_stopped:
+            self._skipped_events += 1
+            self._remember_task(record)
+            return
         self._pending.append({"thread_id": self._thread_id, "run_id": self._run_id, **record})
         if record["event_type"] == "subagent.end" or len(self._pending) >= self.FLUSH_THRESHOLD:
             await self.flush()
 
     async def flush(self) -> None:
-        """Persist buffered events in one ``put_batch`` call; swallow store errors."""
+        """Drain one batch; retry only a proven uncommitted write.
+
+        A failed acknowledgement can follow a successful commit. Release that
+        batch and fence this buffer's later writes
+        instead of duplicating history or overtaking an unknown predecessor.
+        Live SSE delivery is independent and remains best-effort throughout.
+        """
         if self._event_store is None or not self._pending:
             return
         batch = self._pending
         self._pending = []
         write_task = asyncio.create_task(self._event_store.put_batch(batch))
         cancellation: asyncio.CancelledError | None = None
-        failure: Exception | None = None
-        while True:
+        while not write_task.done():
             try:
-                await asyncio.shield(write_task)
-                break
+                # wait() neither cancels the owned write nor raises its outcome.
+                # This distinguishes caller cancellation from store cancellation
+                # even when both happen during the same event-loop iteration.
+                await asyncio.wait({write_task})
             except asyncio.CancelledError as exc:
                 host_task = asyncio.current_task()
-                if host_task is None or not host_task.cancelling():
-                    # The store task itself was cancelled. It did not confirm
-                    # durability, so retain the batch for a later flush.
-                    self._pending = batch + self._pending
-                    raise
                 if cancellation is None:
                     cancellation = exc
-                while host_task.cancelling():
+                while host_task is not None and host_task.cancelling():
                     host_task.uncancel()
-            except Exception as exc:
-                failure = exc
-                break
 
-        if failure is not None:
-            # Re-buffer the failed batch (ahead of any events queued since) so a
-            # transient store error does not silently drop subagent step events.
-            self._pending = batch + self._pending
+        try:
+            write_task.result()
+        except (Exception, asyncio.CancelledError) as failure:
+            # Only this explicit store contract proves replay is safe. Generic
+            # exceptions and store-originated cancellation are ambiguous, even
+            # if they look like transient transport failures.
+            self._consecutive_failures += 1
+            retryable = isinstance(failure, RunEventStoreNotCommittedError)
+            self._persistence_stopped = not retryable or self._consecutive_failures >= self.MAX_WRITE_ATTEMPTS
+            if self._persistence_stopped:
+                self._unconfirmed_events += len(batch) + len(self._pending)
+                for event in batch + self._pending:
+                    self._remember_task(event)
+                self._pending.clear()
+            else:
+                self._pending = batch + self._pending
             logger.warning(
-                "Run %s: failed to persist %d subagent step event(s)",
+                "Run %s: failed to persist %d subagent step event(s); %s",
                 self._run_id,
                 len(batch),
+                "persistence stopped (unknown outcome or retry limit)" if self._persistence_stopped else "not committed, retained for retry",
                 exc_info=(type(failure), failure, failure.__traceback__),
             )
+        else:
+            self._consecutive_failures = 0
         if cancellation is not None:
             raise cancellation
+
+    def _remember_task(self, event: dict[str, Any]) -> None:
+        task_id = event.get("metadata", {}).get("task_id")
+        if isinstance(task_id, str) and len(self._affected_tasks) < 20:
+            self._affected_tasks.add(task_id)
+
+    @property
+    def writes_confirmed(self) -> bool:
+        """Whether the producer can close after the final flush has settled."""
+        return not self._persistence_stopped and not self._pending
+
+    def log_summary(self) -> None:
+        if not self.writes_confirmed:
+            for event in self._pending:
+                self._remember_task(event)
+            logger.warning(
+                "Run %s: subagent history incomplete; unconfirmed=%d skipped=%d task_ids_sample=%s",
+                self._run_id,
+                self._unconfirmed_events + len(self._pending),
+                self._skipped_events,
+                sorted(self._affected_tasks),
+            )
 
 
 def _bind_trace_id(config: dict[str, Any], runtime_ctx: dict[str, Any], trace_origin_run_id: str | None) -> str:
@@ -1277,10 +1364,13 @@ async def run_agent(
                     exc_info=True,
                 )
         else:
+            from deerflow.persistence.coordination.workers import WORKER_SHUTDOWN
+
             await run_manager.set_status(
                 run_id,
                 RunStatus.interrupted,
                 error=cleanup_error,
+                stop_reason=WORKER_SHUTDOWN if record.coordination_shutdown else None,
                 **terminal_status_kwargs,
             )
             logger.info("Run %s was cancelled", run_id)
@@ -1499,6 +1589,10 @@ async def run_agent(
             checkpoint_metadata = {}
             config["metadata"] = checkpoint_metadata
         checkpoint_metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] = DEFAULT_AGENT_NAME_METADATA_VALUE if checkpoint_agent_name is None else checkpoint_agent_name
+        from deerflow.persistence.coordination.workers import RUN_GRANT_METADATA, WORKER_CHECKPOINT_RUN
+
+        if (record.metadata or {}).get(RUN_GRANT_METADATA):
+            checkpoint_metadata[WORKER_CHECKPOINT_RUN] = run_id
         _pin_admission_project_context(config, runtime_ctx)
         if knowledge_scope is not None:
             runtime_ctx[KNOWLEDGE_SCOPE_RUNTIME_KEY] = execution_scope(knowledge_scope)
@@ -1822,6 +1916,14 @@ async def run_agent(
             if input_control is not None:
                 await input_control.inputs.reopen()
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "messages-tuple" in requested_modes else None
+            # A Goal continuation is a distinct graph invocation on the same run and thread.
+            invocation = uuid4()
+            invocation_id = invocation.hex
+            stream_config["metadata"] = {**(stream_config.get("metadata") or {}), _GRAPH_INVOCATION_KEY: invocation_id}
+            if journal is not None:
+                root_id = stream_config.get("run_id") or invocation
+                stream_config["run_id"] = root_id
+                journal.step_limit_root = root_id
             try:
                 async with _checkpoint_thread_lock(thread_id):
                     if len(lg_modes) == 1 and not stream_subgraphs:
@@ -1830,7 +1932,7 @@ async def run_agent(
                         stream = agent.astream(input_payload, config=stream_config, stream_mode=single_mode)
                         broke_on_abort = False
                         try:
-                            async for chunk in stream:
+                            async for chunk in _graph_stream_events(stream, accessor, thread_id, invocation_id, journal):
                                 if record.abort_event.is_set():
                                     broke_on_abort = True
                                     logger.info("Run %s abort requested — stopping", run_id)
@@ -1880,7 +1982,7 @@ async def run_agent(
                     )
                     broke_on_abort = False
                     try:
-                        async for item in stream:
+                        async for item in _graph_stream_events(stream, accessor, thread_id, invocation_id, journal):
                             if record.abort_event.is_set():
                                 broke_on_abort = True
                                 logger.info("Run %s abort requested — stopping", run_id)
@@ -1932,6 +2034,8 @@ async def run_agent(
                             else:
                                 logger.debug("Could not close agent stream for run %s", run_id, exc_info=True)
             finally:
+                if journal is not None:
+                    journal.step_limit_root = None
                 stream_error = sys.exception()
                 if file_tool_chunk_batcher is not None:
                     try:
@@ -2247,7 +2351,10 @@ async def run_agent(
                 # Persist any subagent step events still buffered (#3779) — including on
                 # abort/exception paths, where the stream loop broke before its own flush.
                 if not record.ownership_lost and subagent_events is not None:
-                    await subagent_events.flush()
+                    try:
+                        await subagent_events.flush()
+                    finally:
+                        subagent_events.log_summary()
 
                 if not record.ownership_lost and event_store is not None and pre_run_workspace_snapshot is not None:
                     try:
@@ -2547,7 +2654,7 @@ async def run_agent(
                                 raise RuntimeError(evidence_failure)
 
                         evidence_receipt = await journal.finish_evidence(before_receipt=confirm_terminal)
-                        if evidence_receipt is not None and (subagent_events is None or not subagent_events._pending):
+                        if evidence_receipt is not None and (subagent_events is None or subagent_events.writes_confirmed):
                             from deerflow.runtime.events.store.db import DbRunEventStore
 
                             if isinstance(event_store, DbRunEventStore) and current_producer() is not None:

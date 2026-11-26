@@ -168,14 +168,10 @@ def _subagent_release_policy(
 
 
 def _resolve_runtime_option(cfg: dict, key: str, agent_value, default):
-    """Resolve a runtime option with ``request > agent config > default`` precedence.
-
-    ``key in cfg`` (not ``cfg.get(key)``) distinguishes "request omitted the
-    field" from "request set it to a falsy value", so a request-supplied
-    ``thinking_enabled: false`` is honored instead of falling through to the
-    agent default. ``agent_value`` is used only when it is not ``None`` (a
-    custom agent's unset field means "do not override" — issue #4336).
-    """
+    """Resolve lead reasoning: explicit request, agent setting, mode preset, runtime default."""
+    mode_fields = cfg.get("mode_default_fields")
+    if agent_value is not None and isinstance(mode_fields, list) and key in mode_fields:
+        return agent_value
     if key in cfg:
         return cfg[key]
     if agent_value is not None:
@@ -756,7 +752,7 @@ def build_middlewares(
     # after every built-in content transform so it sanitizes the near-final
     # message list, and outer of the MODEL_PHYSICAL extension anchor so
     # extensions placed there keep their final-request guarantee.
-    middlewares.append(ModelContentCompatibilityMiddleware())
+    middlewares.append(ModelContentCompatibilityMiddleware(supports_vision=model_config.supports_vision if model_config is not None else True))
 
     # Inject custom middlewares before ClarificationMiddleware
     if custom_middlewares:
@@ -1128,7 +1124,7 @@ def _assemble_lead_agent(
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
-    # thinking / reasoning precedence: request > custom agent default > runtime
+    # thinking / reasoning precedence: explicit request > custom agent > mode preset > runtime
     # default (issue #4336). See ``_resolve_runtime_option`` for the falsy-vs-unset
     # handling.
     agent_thinking = getattr(agent_config, "thinking_enabled", None) if agent_config else None

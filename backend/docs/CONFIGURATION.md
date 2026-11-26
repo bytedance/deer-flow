@@ -1577,11 +1577,10 @@ externalized to `.tool-results`. To allow larger pages, raise
 
 DeerFlow supports multiple sandbox execution modes. Configure your preferred mode in `config.yaml`:
 
-**Local Execution** (runs sandbox code directly on the host machine):
+**Local Workspace** (provides workspace file tools):
 ```yaml
 sandbox:
    use: deerflow.sandbox.local:LocalSandboxProvider # Local execution
-   allow_host_bash: false # default; host bash is disabled unless explicitly re-enabled
 ```
 
 **Docker Execution** (runs sandbox code in isolated Docker containers):
@@ -1611,7 +1610,7 @@ is attempted, and the container is recycled instead of being returned to the
 warm pool. Session-level cleanup does not clear that quarantine because a
 timed-out create may commit after cleanup has already returned.
 
-`prewarm` is disabled by default and applies only to asynchronous AIO runs with
+`prewarm` is disabled by default and applies only to asynchronous AIO and veFaaS runs with
 an unconditional outer execution-lease cleanup: the Gateway/embedded run worker
 and native subagent executor. Direct `create_deerflow_agent(...).ainvoke()` and
 `.astream()` calls retain ordinary lazy acquisition even when this setting is on.
@@ -1780,6 +1779,7 @@ sandbox:
    sandbox_timeout: 14400             # remote lifetime; 0 = explicit cleanup
    bash_command_timeout: 600          # default remote command timeout seconds
    replicas: 3                        # active + warm cap per gateway process
+   overflow_policy: wait              # optional: reject adds a process-local hard cap
    idle_timeout: 600                  # warm seconds before destroy; 0 disables
    environment:
       PYTHONUNBUFFERED: "1"
@@ -1821,7 +1821,12 @@ horizon. File transfer uses OpenSandbox's native filesystem API; bounded
 `find`/`grep` commands implement the directory and content-search surface.
 Downloads are restricted to `/mnt/user-data` and all file paths reject
 traversal. Multi-process discovery and ownership coordination are not yet
-implemented, so `replicas` is a per-Gateway-process soft cap.
+implemented, so `replicas` is a per-Gateway-process soft cap by default. With
+`overflow_policy: reject`, it becomes a process-local hard cap that also counts
+in-flight creates. If all slots are occupied and no warm sandbox can be evicted,
+acquisition raises `SandboxCapacityExceededError` before calling the SDK. This
+can protect a namespace ResourceQuota only when one Gateway process owns the
+provider and `replicas` does not exceed the quota's pod capacity.
 
 **boxd Machine Sandbox** (runs each sandbox as an isolated [boxd](https://boxd.sh?ref=deer-flow) machine):
 
@@ -1890,10 +1895,12 @@ Choose between local execution or Docker-based isolation:
 ```yaml
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
-  allow_host_bash: false
 ```
 
-`allow_host_bash` is intentionally `false` by default. DeerFlow's local sandbox is a host-side convenience mode, not a secure shell isolation boundary. If you need `bash`, prefer `AioSandboxProvider`. Only set `allow_host_bash: true` for fully trusted single-user local workflows.
+The local provider serves workspace file operations. To run shell commands, set
+`sandbox.use` to an isolated provider such as `AioSandboxProvider`. Existing
+configurations can still contain the deprecated `allow_host_bash` setting. The
+local provider ignores it and logs migration guidance when it is set to `true`.
 
 When `LocalSandboxProvider` runs under `make up`, it runs inside the `deer-flow-gateway` container. In that mode, `sandbox.mounts[].host_path` is resolved from the gateway container's filesystem, not from your Docker host. If you need a local-sandbox custom mount in production Docker, bind the host directory into the gateway service first, then use the in-container path in `config.yaml`:
 
@@ -1988,11 +1995,34 @@ With `approval: prompt`, a denied public domain becomes a Human Input card with
 **Deny**, **Allow temporarily**, and **Allow for this sandbox** choices. DeerFlow
 does not replay the failed command after approval because it may already have
 performed local side effects; the agent must retry it explicitly. Non-interactive
-runs auto-deny without opening a card or waiting for input. The sidecar rejects
-hostnames that policy does not allow before DNS resolution; allowed hostnames
-that resolve to loopback, private, link-local, multicast, IPv6 ULA/site-local,
-or cloud metadata destinations are rejected and can never be approved. Raw
-TCP/UDP, Git-over-SSH, and other non-HTTP protocols remain unavailable in
+runs auto-deny without opening a card or waiting for input.
+
+The sidecar records denials in a fixed-size tmpfs, so it keeps that history
+bounded: a sandbox can request an unlimited number of unique hosts, and a full
+tmpfs would stop both denial recording and approval handling. Once the limit is
+reached it drops denials that were superseded by another approval card, then
+trims resolved history — ordered by when each decision was applied, so a card
+answered just now is kept — to leave room for pending approvals. A card that is
+currently awaiting a decision is never dropped, so a burst of unanswered cards
+can exceed the limit, but reaching that needs one poll per tool call rather
+than a flood. Persisted request fields are truncated (the method to 16
+characters), so the row limit also bounds the bytes on disk. Recording is best
+effort: if the policy database cannot be read or written, the request is still
+denied with the policy message instead of the connection being closed. A failed
+policy lookup denies without recording, so a transient database error cannot
+create an approval card for a destination that already holds a grant.
+
+The sidecar rejects hostnames that policy does not allow before DNS resolution;
+allowed hostnames that resolve to loopback, private, link-local, multicast,
+IPv6 ULA/site-local, or cloud metadata destinations are rejected and can never
+be approved. This screening also unwraps IPv6 spellings that carry an IPv4
+destination — IPv4-mapped, 6to4, NAT64 (`64:ff9b::/96`), IPv4-translated
+(`::ffff:0:0:0/96`), and the deprecated IPv4-compatible form — and judges the
+embedded IPv4 address, while NAT64 spellings of public IPv4 targets stay
+reachable. The RFC 8215 local-use translation prefix (`64:ff9b:1::/48`) is
+rejected explicitly. Operator-defined NAT64 prefixes outside `64:ff9b::/96`
+are not recognized.
+Raw TCP/UDP, Git-over-SSH, and other non-HTTP protocols remain unavailable in
 restricted modes.
 
 Restricted modes currently require the local Docker backend and Docker Engine
@@ -2243,11 +2273,9 @@ This field is a discovery and activation allowlist; a listed skill's `allowed-to
 
 The same semantics apply to `subagents.agents.<name>.skills` and `subagents.custom_agents.<name>.skills`: omitted or `null` exposes all enabled skills, `[]` exposes none, and a list limits discovery and activation. A skill's `allowed-tools` declaration never removes baseline tools; it is compatibility metadata for other agent frameworks.
 
-`LocalSandboxProvider` enforces this filesystem view through its managed virtual
-path mappings only. Explicit per-Agent skill policies therefore fail closed when
-`sandbox.allow_host_bash` is enabled, because host subprocesses can bypass those
-mappings. Keep host bash disabled (the default), or use AIO/provisioner/E2B when
-shell access and filesystem isolation are both required.
+`LocalSandboxProvider` applies this view through the workspace file tools and
+managed virtual path mappings. Use AIO, provisioner or E2B for workflows that
+also require shell commands.
 
 ### Title Generation
 
@@ -2404,7 +2432,7 @@ before exposing an instance to untrusted input.
 
 | Mode | `config.yaml` | Host Docker socket | Isolation |
 |------|---------------|--------------------|-----------|
-| `local` (default) | `deerflow.sandbox.local:LocalSandboxProvider` | Not mounted | Commands run **inside the gateway container** on its filesystem. Not a strong boundary — `allow_host_bash` is `false` by default and should stay off for untrusted workloads. |
+| `local` (default) | `deerflow.sandbox.local:LocalSandboxProvider` | Not mounted | Workspace file operations use the Gateway filesystem and configured mounts. |
 | `aio` (pure DooD) | `deerflow.community.aio_sandbox:AioSandboxProvider` (no `provisioner_url`) | **Mounted** (opt-in overlay) | Sandbox containers are started via the host Docker daemon. |
 | `provisioner` (Kubernetes) | `AioSandboxProvider` + `provisioner_url` | Not mounted | Sandbox pods are created through the provisioner's K8s API over HTTP. Strongest isolation. |
 

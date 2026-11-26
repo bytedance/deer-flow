@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 
 import pytest
-from support.nginx_conf import NGINX_CONFIGS, extract_location_block, parse_body_size_bytes, parse_read_timeout_seconds, read_config
+from support.nginx_conf import NGINX_CONFIGS, extract_location_block, multipart_body_size_floor, parse_body_size_bytes, parse_read_timeout_seconds, read_config
 
 from app.gateway.routers.project_documents import router as project_documents_router
 from app.gateway.routers.uploads import DEFAULT_MAX_FILE_SIZE
@@ -55,6 +55,8 @@ def test_project_documents_route_allows_the_upload_limit_gateway_enforces(path):
     uploads_size_bytes = parse_body_size_bytes(extract_location_block(read_config(path), UPLOADS_LOCATION))
 
     assert size_bytes >= DEFAULT_MAX_FILE_SIZE, f"{path}: project documents client_max_body_size is {size_bytes} bytes but Gateway accepts {DEFAULT_MAX_FILE_SIZE} by default; nginx would 413 a file Gateway allows"
+    required_bytes = multipart_body_size_floor(DEFAULT_MAX_FILE_SIZE, 1)
+    assert size_bytes > required_bytes, f"{path}: project documents client_max_body_size is {size_bytes} bytes but a representative one-file multipart request needs more than {required_bytes} bytes; nginx would 413"
     assert size_bytes == uploads_size_bytes, f"{path}: project documents and thread uploads share uploads.max_file_size, so their nginx ceilings must match"
     assert "proxy_request_buffering off;" in block, f"{path}: uploads must stream to Gateway instead of spooling to client_body_temp"
 

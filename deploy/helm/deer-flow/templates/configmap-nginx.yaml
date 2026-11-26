@@ -183,8 +183,23 @@ data:
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                 proxy_set_header X-Forwarded-Proto $forwarded_proto;
-                client_max_body_size 100M;
+                # Gateway counts file bytes only; leave room for multipart framing.
+                # If uploads.* is raised, raise this ceiling in all maintained nginx configs.
+                client_max_body_size 101M;
                 proxy_request_buffering off;
+            }
+
+            # Allow multipart framing beyond the 100 MiB of queued attachments.
+            location ~ ^/api/threads/[^/]+/runs/[^/]+/inputs$ {
+                proxy_pass http://gateway_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+                client_max_body_size 101M;
+                proxy_request_buffering off;
+                proxy_read_timeout 600s;
             }
 
             # Project documents — multipart upload plus the promote/attach/content/
@@ -199,7 +214,9 @@ data:
                 proxy_set_header X-Real-IP $remote_addr;
                 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                 proxy_set_header X-Forwarded-Proto $forwarded_proto;
-                client_max_body_size 100M;
+                # Gateway counts file bytes only; leave room for multipart framing.
+                # If uploads.* is raised, raise this ceiling in all maintained nginx configs.
+                client_max_body_size 101M;
                 proxy_request_buffering off;
                 proxy_read_timeout 600s;
             }

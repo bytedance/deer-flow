@@ -1,4 +1,4 @@
-"""Optional AIO startup owned by the same lease as its agent execution."""
+"""Optional AIO and veFaaS sandbox startup owned by the same lease as its agent execution."""
 
 from __future__ import annotations
 
@@ -28,6 +28,16 @@ from deerflow.sandbox.sandbox_provider import SandboxProvider, get_initialized_s
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
+
+_PREWARM_PROVIDER_SUFFIXES = (
+    ":AioSandboxProvider",
+    ":VeFaaSSandboxProvider",
+)
+
+
+def _supports_prewarm_provider(sandbox_use: object) -> bool:
+    return isinstance(sandbox_use, str) and sandbox_use.endswith(_PREWARM_PROVIDER_SUFFIXES)
+
 
 _CODE_FENCE_RE = re.compile(r"```")
 _URL_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s<>]+")
@@ -117,15 +127,16 @@ class SandboxPrewarm:
             if config is None:
                 config = await asyncio.to_thread(get_app_config)
             sandbox = config.sandbox
-            if not getattr(sandbox, "prewarm", False) or not sandbox.use.endswith(":AioSandboxProvider"):
+            if not getattr(sandbox, "prewarm", False) or not _supports_prewarm_provider(getattr(sandbox, "use", None)):
                 return None
             # Startup policy is run-scoped, but authorization must be fresh;
             # claiming later does not replace the ordinary tool's fresh gate.
             await authorize_sandbox_execution_async(context=self.context, app_config=await safe_app_config_async())
             self.provider = get_initialized_sandbox_provider()
             if self.provider is None:
-                # Only AIO opts in here; its constructor performs filesystem and
-                # backend setup, so keep that work off the model's event loop.
+                # Only AIO and veFaaS opt in here; their constructors perform
+                # filesystem/store/backend setup, so keep that work off the
+                # model's event loop.
                 self.provider = await run_sync_lifecycle_operation(get_sandbox_provider)
             self.manager = get_sandbox_lease_manager(self.provider)
             limit = getattr(sandbox, "prewarm_max_concurrent", 1)

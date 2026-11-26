@@ -21,15 +21,11 @@ DeerFlow supports four sandbox modes. Choose the one that fits your deployment:
 
 ### LocalSandbox (default)
 
-Commands run directly on the host machine's filesystem. There is no container isolation.
-
-- **Best for**: trusted, single-user local development workflows.
-- **Risk**: the agent has access to the host filesystem. Use `allow_host_bash: false` (default) to prevent arbitrary command execution.
+The local provider serves workspace file operations through dedicated tools.
 
 ```yaml
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
-  allow_host_bash: false # default; set to true only for fully trusted workflows
 ```
 
 ### Container-based AIO Sandbox
@@ -213,14 +209,7 @@ Set to `0` to disable truncation.
 
 ### LocalSandbox
 
-The `LocalSandbox` runs commands directly on the host. By default, the `bash` tool is **disabled** to prevent arbitrary host command execution. Enable it only for fully trusted, single-user workflows:
-
-```yaml
-sandbox:
-  allow_host_bash: true # Dangerous: grants the agent shell access to your machine
-```
-
-Even without `bash`, the agent can still read and write files through the dedicated file tools.
+Use the local provider for workspace file operations. Bash requires an isolated provider.
 
 ### Container sandbox
 

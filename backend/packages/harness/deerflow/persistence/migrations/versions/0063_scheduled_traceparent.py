@@ -2,8 +2,8 @@
 
 import sqlalchemy as sa
 
-revision = "0059_scheduled_traceparent"
-down_revision = "0058_mcp_browser_oauth"
+revision = "0063_scheduled_traceparent"
+down_revision = "0062_mcp_agent_grants"
 branch_labels = None
 depends_on = None
 

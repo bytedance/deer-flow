@@ -260,6 +260,23 @@ def test_external_loop_cap_is_rejected(boundary):
     assert error.value.detail == "External loop_cap state is not allowed"
 
 
+@pytest.mark.parametrize("boundary", ["run", "state"])
+@pytest.mark.parametrize("value", ["share", None])
+def test_external_imported_history_channel_is_rejected(boundary, value):
+    """Only share import sets it; a caller could otherwise clear a copy's provenance or forge it."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input, strip_server_owned_state_metadata
+    from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
+
+    transform = normalize_input if boundary == "run" else strip_server_owned_state_metadata
+    with pytest.raises(HTTPException) as error:
+        transform({IMPORTED_HISTORY_CHANNEL: value})
+
+    assert error.value.status_code == 400
+    assert error.value.detail == "External imported_history state is not allowed"
+
+
 @pytest.mark.parametrize("mode", ["full", "delta"])
 def test_external_run_goal_clears_the_previous_goal_outcome(mode):
     """A caller goal replaces the goal, so the record of the earlier met goal must go."""

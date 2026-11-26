@@ -3,14 +3,15 @@
 ## Sandbox Mode
 
 DeerFlow supports multiple sandbox execution modes:
-- **Local Execution** (runs sandbox code directly on the host machine)
+- **Local Workspace** (files through workspace tools and configured mounts)
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
 
-Local bash tool status follows the process exit code, including timeout failures.
-Successful commands may print `Error:` or JSON containing an `error` field without
-being marked as failed. Output is still subject to the configured redaction and
-size limits; those transformations do not change the execution status.
+When a provider returns a structured exit code, Bash tool status follows that
+code, including timeout failures. Providers that return plain text, including
+AIO, use output-based status detection. A command that exits successfully can be
+reported as a failure if it prints `Error:` or JSON with an `error` field.
+Configured redaction and output limits still apply.
 
 The optional [Tenki provider](../../backend/packages/harness/deerflow/community/tenki/README.md)
 retains failed termination handles for retry and rejects late acquisitions after
@@ -38,7 +39,10 @@ checkpoint, the runtime resolves the reference against the authenticated user
 and thread before a tool can reuse it. A missing runtime thread ID raises an
 error even when the referenced sandbox is cached.
 
-When host Bash is enabled for Local Execution, DeerFlow starts OS detection with `uname -s`, then uses `sw_vers` on Darwin. On Linux, it reads host system files such as `/etc/os-release` only when the active sandbox policy permits it. Host filesystem path checks still apply; after a blocked path, the agent is directed to use a permitted command-only probe or virtual path instead of repeating the rejected command.
+Local workspaces use the dedicated file tools. Switch to an isolated sandbox
+provider for workflows that need Bash. A config that opts into host Bash with
+`allow_host_bash: true` still loads with the local provider and logs a migration
+warning.
 
 For Docker development and production, service startup follows the configured
 sandbox mode, including when the `sandbox:` header or `use` field has a trailing
@@ -94,6 +98,8 @@ same-size content edits are still copied on release.
 Outputs with case- or Unicode-equivalent file or directory names are skipped
 before copying, and aliases of existing local paths are rejected, preserving
 previous complete copies.
+Rebuilding an OpenSandbox for the same user and thread can reuse its logical ID,
+and terminal failures affect only the instance that reported them.
 
 OpenSandbox also uploads enabled skills to `skills.container_path`. An explicit
 Agent skill list replaces the managed skill directories before tools run; an
@@ -124,6 +130,34 @@ not a failure of the read tool. This keeps receipts accurate when inspecting
 saved API error responses and avoids blocking later reads when the optional
 `tool_progress` guard is enabled. Actual read failures and output truncation
 still retain their error or partial-result status.
+
+## Kubernetes sandbox Pod resources
+
+With the AIO Kubernetes provisioner, set `provisioner.sandboxResources` in
+your Helm values to size the sandbox container in each new Pod. For example,
+to raise the memory limit to 4 GiB and the ephemeral storage limit to 2 GiB:
+
+```yaml
+provisioner:
+  sandboxResources:
+    limits:
+      memory: 4Gi
+      ephemeral-storage: 2Gi
+```
+
+Each field can be overridden independently. Helm rejects unknown resource names
+in `requests` and `limits` when rendering the chart. For a standalone provisioner,
+set the corresponding environment variables on the provisioner container.
+
+| Resource | Request variable | Default request | Limit variable | Default limit |
+| --- | --- | --- | --- | --- |
+| `cpu` | `SANDBOX_CPU_REQUEST` | `100m` | `SANDBOX_CPU_LIMIT` | `1000m` |
+| `memory` | `SANDBOX_MEMORY_REQUEST` | `256Mi` | `SANDBOX_MEMORY_LIMIT` | `1Gi` |
+| `ephemeral-storage` | `SANDBOX_EPHEMERAL_STORAGE_REQUEST` | `500Mi` | `SANDBOX_EPHEMERAL_STORAGE_LIMIT` | `500Mi` |
+
+The provisioner checks at startup that each value is a nonnegative Kubernetes
+quantity and each request is at most its limit. The separate Helm value
+`provisioner.resources` sizes the provisioner container itself.
 
 ## Redis Cluster for shared sandbox ownership
 
@@ -176,12 +210,6 @@ Scope release waits for in-flight execution and cleanup without a separate drain
 deadline. Allow for the remaining command timeout (600 seconds by default), plus
 session/transport/recovery/cleanup time when setting operator-facing release
 budgets; the HTTP cleanup timeout does not bound the preceding lock wait.
-
-With local host bash enabled, the path guard permits division in simple shell
-arithmetic and recognized single-quoted Python, Node.js and Perl programs.
-Variable-built paths remain checked even when the filename is numeric or a
-glob precedes the slash. This is a best-effort guard; host filesystem isolation
-requires an isolated sandbox provider.
 
 Local `grep` reports file permission and I/O failures as errors rather than
 successful empty or partial searches. Binary files and files that disappear
@@ -265,6 +293,16 @@ instead of an output-verification verdict. This distinguishes an incomplete scan
 from a complete scan with no produced outputs; it does not prove that no outputs
 were produced. Outputs modified and observed in both snapshots still participate
 in that check.
+
+`OpenSandboxProvider` preserves its legacy soft cap by default. Set
+`overflow_policy: reject` to make `replicas` a process-local hard cap covering
+active sandboxes, the warm pool and in-flight create reservations. A full pool
+with no warm sandbox to evict raises `SandboxCapacityExceededError` before an
+SDK create, with a 30 second retry hint. Failed creates release their
+reservations. `burst` is E2B-only: OpenSandbox logs a warning and keeps the
+soft cap. This is not a
+multi-process quota: use it only when one Gateway process owns the provider and
+`replicas` fits the Kubernetes ResourceQuota.
 
 `E2BSandboxProvider` uses `wait` as its default overflow policy. It waits for
 `acquire_timeout`, then fails the agent turn. DeerFlow does not retry the turn
@@ -355,7 +393,7 @@ Ranged `read_file` calls count lines the same way on every sandbox provider: a l
 Concurrent reads and writes to the same file share a gate across synchronous and asynchronous tool calls. Async callers waiting for that gate do not occupy worker threads needed to finish the current read or write. Cancelling a waiting call leaves the current operation running; a call that already started file inspection still waits for that work to finish before releasing its gate.
 
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
-On the local sandbox, `grep(literal=True)` also searches long lines in minified text or single-line JSON, within the existing file-size limit. Case-insensitive literal matching avoids repeated-prefix rescans while preserving Unicode case behavior. Regex searches retain their long-line safety guard.
+On the local sandbox, `grep(literal=True)` also searches long lines in minified text or single-line JSON, within the existing file-size limit. Case-insensitive literal matching avoids repeated-prefix rescans while preserving Unicode case behavior. Regex searches retain their long-line safety guard. Matched lines show `/mnt/...` virtual paths where `write_file` stored host paths in a code file, spelled as stored and before the line is shortened; the pattern still matches the stored text.
 
 Across sandbox providers, returned previews show only the beginning of each matched line (200 characters by default), so a match later in a long line may not appear in the preview. Use the reported path and line number to inspect the source. The `truncated` flag concerns match-count limits, not preview length.
 E2B's `glob` filter preserves spaces, quotes, and dollar signs in filename patterns, while wildcard matching and root-relative directory scoping remain unchanged.
@@ -483,11 +521,8 @@ continue to accept URL-encoded paths.
 
 The `write_file` guidance reflects the active model's output token limit, including custom-agent and thinking-mode overrides. For longer documents, the agent is guided to write sections with `append=True`; models without a known limit receive no numeric budget hint.
 
-With `AioSandboxProvider`, shell execution runs inside isolated containers. With `LocalSandboxProvider`, file tools still map to per-thread directories on the host, but host `bash` is disabled by default because it is not a secure isolation boundary. Re-enable host bash only for fully trusted local workflows. Host bash commands have a wall-clock timeout, and long-lived processes should be started in the background with output redirected to a workspace log. If local command startup fails after spawning a child, DeerFlow attempts to kill and reap that child before propagating the startup error. On Windows, Git Bash/MSYS argument-conversion exclusions are limited to safe non-root virtual path prefixes, so host-native CLI launchers retain their normal MSYS compatibility. When the local sandbox falls back to PowerShell, it captures output as UTF-8 so CJK text does not depend on the Gateway host locale.
-
-On Windows, relative paths in local commands start in the thread workspace.
-PowerShell supports spaces and typographic apostrophes in the workspace path.
-The `cmd.exe` fallback supports workspace paths on a local or mapped drive.
+With `AioSandboxProvider`, shell execution runs inside the sandbox container.
+With `LocalSandboxProvider`, the file tools map to per-thread directories.
 
 Docker AIO sandboxes default to their existing open egress behavior for
 compatibility. Operators can set `sandbox.network.mode` to `isolated` or

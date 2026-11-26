@@ -306,6 +306,12 @@ rolling upgrade, route keyed runs with ID-less input and their retries to
 upgraded workers until all Gateway workers are upgraded; older workers may
 reject those retries with 409. See the [run API contract](../../backend/docs/API.md#create-run).
 
+During a rolling upgrade, route multipart Queue submissions and their retry
+and remove requests to upgraded Gateways. Only a run owned by a worker that
+supports queued attachments can accept them. Older Gateways handle queue items
+as plain text, so finish or remove items with attachments before rolling back.
+See [queued input](../../backend/docs/API.md#submit-an-input-while-a-web-run-is-active).
+
 ### Redis checkpoint history cache upgrade
 
 The v2 cache rebuilds histories under a new default prefix. Deleting or pruning
@@ -319,7 +325,18 @@ across cache versions.
 
 If you prefer running services locally:
 
-Prerequisite: complete the "Configuration" steps above first (`make setup`). `make dev` requires a valid `config.yaml` in the project root. Set `DEER_FLOW_PROJECT_ROOT` to define that root explicitly, or `DEER_FLOW_CONFIG_PATH` to point at a specific config file. Runtime state defaults to `.deer-flow` under the project root and can be moved with `DEER_FLOW_HOME`; skills default to `skills/` under the project root and can be moved with `DEER_FLOW_SKILLS_PATH`. Run `make doctor` to verify your setup before starting.
+Before starting local development, follow the [configuration guide](configuration.md)
+to run `make setup` from the repository root or prepare `config.yaml` manually.
+
+`make dev` needs a valid configuration file. Set `DEER_FLOW_CONFIG_PATH` to
+point at a specific file. Otherwise, DeerFlow looks for `config.yaml` under
+`DEER_FLOW_PROJECT_ROOT`, which defaults to the checkout root. It then falls back
+to the checkout's `backend/config.yaml` and `config.yaml` in that order.
+
+When started with `make dev`, DeerFlow stores runtime state in `backend/.deer-flow`
+in the checkout by default. Set `DEER_FLOW_HOME` to choose a different location.
+Skills default to `skills/` under the project root and can be moved with
+`DEER_FLOW_SKILLS_PATH`. Run `make doctor` to verify your setup before starting.
 
 Configuration checks and agent-storage migrations use the installed backend environment through `uv run --no-sync --project backend` from the repository root. This preserves relative runtime paths and installed optional dependencies; see the [setup checks](../../backend/docs/SETUP.md#steps) and [agent-storage migration](../../backend/docs/CONFIGURATION.md#agent-storage).
 
@@ -416,7 +433,10 @@ every run. To reuse the last build instead, pass `SKIP_FRONTEND_BUILD=1` (or add
 `--skip-frontend-build` when calling `./scripts/serve.sh --prod` directly). This
 is opt-in: it fails fast when `frontend/.next` has no completed build.
 
-Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
+With the bundled nginx configuration, nginx rewrites public LangGraph-compatible
+requests from `/api/langgraph/*` to `/api/*` before proxying them to the Gateway.
+For example, `POST /api/langgraph/threads` reaches the Gateway as
+`POST /api/threads`.
 
 Cold agent imports during run creation use a dedicated worker pool, keeping
 unrelated Gateway requests responsive while the agent stack loads. A failed

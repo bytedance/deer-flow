@@ -236,6 +236,7 @@ class ChannelService:
         # runs this constructor off the loop.
         self.store: ChannelStore = store if store is not None else resolve_channel_store(app_config)
         self._connection_repo = connection_repo
+        self._connections_configured = bool(getattr(getattr(app_config, "channel_connections", None), "enabled", False))
         # Language of DeerFlow's own replies (/connect, /goal): the owner's web UI
         # language, read from the connection repository's database, else
         # channel_connections.notification_locale (captured here; restart-scoped).
@@ -740,6 +741,10 @@ class ChannelService:
         """Instantiate and start a single channel."""
         if self._stopping or not self._running:
             logger.warning("Refusing to start %s while ChannelService is stopped or stopping", name)
+            return False
+
+        if name == "feishu" and self._connections_configured and self._connection_repo is None:
+            logger.error("Feishu requires an available connection repository when channel connections are enabled")
             return False
 
         import_path = _CHANNEL_REGISTRY.get(name)

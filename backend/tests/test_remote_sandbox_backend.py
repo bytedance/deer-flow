@@ -824,3 +824,99 @@ def test_provisioner_discover_returns_none_on_request_exception(monkeypatch):
     monkeypatch.setattr(requests, "get", mock_get)
 
     assert backend._provisioner_discover("abc123") is None
+
+
+def test_provisioner_create_forwards_sandbox_environment(monkeypatch):
+    backend = RemoteSandboxBackend(
+        "http://provisioner:8002",
+        environment={"DISABLE_JUPYTER": "true", "DISABLE_CODE_SERVER": "true"},
+    )
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    seen = {}
+
+    def mock_post(url, json, timeout, headers=None):
+        seen.update(json)
+        return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"})
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    backend._provisioner_create("thread-1", "abc123")
+    assert seen["environment"] == {"DISABLE_JUPYTER": "true", "DISABLE_CODE_SERVER": "true"}
+
+
+def test_provisioner_create_leaves_owned_settings_to_dedicated_fields(monkeypatch):
+    """Dropped capacity keys must not eat the operator's entry budget."""
+    operator = {f"OPERATOR_{index}": "true" for index in range(32)}
+    backend = RemoteSandboxBackend(
+        "http://provisioner:8002",
+        max_shell_sessions=13,
+        max_bash_sessions=50,
+        environment={
+            **operator,
+            "AIO_BASH_MAX_SESSIONS": "50",
+            "MAX_SHELL_SESSIONS": "13",
+            "DEERFLOW_LARK_BROKER_URL": "http://spoofed",
+        },
+    )
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    seen = {}
+
+    def mock_post(url, json, timeout, headers=None):
+        seen.update(json)
+        return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001", "max_shell_sessions": 13, "max_bash_sessions": 50})
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    backend._provisioner_create("thread-1", "abc123")
+    assert seen["environment"] == operator
+    assert (seen["max_shell_sessions"], seen["max_bash_sessions"]) == (13, 50)
+
+
+@pytest.mark.parametrize(
+    ("environment", "message"),
+    [
+        ({f"OPERATOR_{index}": "true" for index in range(33)}, "carries 33 entries"),
+        ({"DISABLE JUPYTER": "true"}, "must match"),
+        ({"DISABLE_VNC": "x" * 1025}, "exceeds 1024 characters"),
+        ({"DISABLE_VNC": "true\x00"}, "NUL byte"),
+    ],
+)
+def test_provisioner_backend_rejects_a_map_the_provisioner_would_refuse(environment, message):
+    """A config the provisioner rejects must fail where the operator set it, not on first create."""
+    with pytest.raises(ValueError, match=message):
+        RemoteSandboxBackend("http://provisioner:8002", environment=environment)
+
+
+def test_provisioner_backend_counts_entries_the_provisioner_owns_out(monkeypatch):
+    """Owned keys never reach the provisioner, so they cannot push a valid map over its limit."""
+    operator = {f"OPERATOR_{index}": "true" for index in range(32)}
+    backend = RemoteSandboxBackend(
+        "http://provisioner:8002",
+        environment={**operator, "AIO_BASH_MAX_SESSIONS": "50", "MAX_SHELL_SESSIONS": "13"},
+    )
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    seen = {}
+
+    def mock_post(url, json, timeout, headers=None):
+        seen.update(json)
+        return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001", "max_shell_sessions": 13, "max_bash_sessions": 50})
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    backend._provisioner_create("thread-1", "abc123")
+    assert seen["environment"] == operator
+
+
+def test_provisioner_create_omits_environment_when_unconfigured(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    seen = {}
+
+    def mock_post(url, json, timeout, headers=None):
+        seen.update(json)
+        return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"})
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    backend._provisioner_create("thread-1", "abc123")
+    assert "environment" not in seen

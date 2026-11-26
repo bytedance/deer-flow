@@ -311,6 +311,7 @@ async def web_fetch_tool(url: str) -> tuple[str, dict | None]:
     Args:
         url: The URL to fetch the contents of.
     """
+    client: BrowserlessClient | None = None
     try:
         # Config resolution stats and hashes the config files; keep it off the event loop.
         cfg = await asyncio.to_thread(_get_tool_config, "web_fetch") or {}
@@ -363,8 +364,9 @@ async def web_fetch_tool(url: str) -> tuple[str, dict | None]:
         return f"{article.to_markdown()[:4096]}{_target_status_warning(result)}", artifact
 
     except Exception as e:
-        logger.error(f"Error in web_fetch_tool: {e}")
-        return f"Error: {str(e)}", None
+        detail = client.redact(e) if client is not None else str(e)
+        logger.error("Error in web_fetch_tool: %s", detail)
+        return f"Error: {detail}", None
 
 
 @tool("web_capture", parse_docstring=True)
@@ -392,6 +394,7 @@ async def web_capture_tool(
         viewport_width: Optional viewport width in pixels.
         viewport_height: Optional viewport height in pixels.
     """
+    client: BrowserlessClient | None = None
     try:
         # Config resolution stats and hashes the config files; keep it off the event loop.
         cfg = await asyncio.to_thread(_get_tool_config, "web_capture") or {}
@@ -447,5 +450,6 @@ async def web_capture_tool(
         )
 
     except Exception as e:
-        logger.error(f"Error in web_capture_tool: {e}")
-        return _tool_message(f"Error: {str(e)}", tool_call_id)
+        detail = client.redact(e) if client is not None else str(e)
+        logger.error("Error in web_capture_tool: %s", detail)
+        return _tool_message(f"Error: {detail}", tool_call_id)
