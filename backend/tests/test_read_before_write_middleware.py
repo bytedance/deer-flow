@@ -204,6 +204,38 @@ class TestWriteGate:
         handler.assert_called_once()
         assert result.status != "error"
 
+    @pytest.mark.parametrize(
+        ("name", "args"),
+        [
+            pytest.param("write_file", {"content": "v2"}, id="write_file"),
+            pytest.param("write_file", {"content": "v2", "append": True}, id="append"),
+            pytest.param("str_replace", {"old_str": "a", "new_str": "b"}, id="str_replace"),
+        ],
+    )
+    def test_file_too_large_to_read_blocks_instead_of_failing_open(self, name, args):
+        # read_file can never mark such a file, so failing open would let any
+        # write replace it unread.
+        import errno
+
+        from deerflow.agents.middlewares.read_before_write_middleware import WRITE_BLOCK_KEY
+
+        mw = _middleware({self.PATH: OSError(errno.EFBIG, "File is larger than 100 MB", self.PATH)})
+        request = _make_request(name, {"description": "d", "path": self.PATH, **args})
+        handler = MagicMock()
+        result = mw.wrap_tool_call(request, handler)
+        handler.assert_not_called()
+        assert result.status == "error"
+        assert result.additional_kwargs[WRITE_BLOCK_KEY] == {"path": self.PATH, "tool": name}
+        assert "File is larger than 100 MB" in result.content
+
+    def test_other_os_errors_still_fail_open(self):
+        mw = _middleware({self.PATH: OSError("connection reset")})
+        request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"})
+        handler = MagicMock(return_value=ToolMessage(content="OK", tool_call_id="call-1", name="write_file"))
+        result = mw.wrap_tool_call(request, handler)
+        handler.assert_called_once()
+        assert result.status != "error"
+
     def test_normalized_path_matching(self):
         mw = _middleware({self.PATH: "v1"})
         messages = [_read_marked_message(self.PATH, "v1")]
@@ -238,6 +270,20 @@ class TestAsyncPaths:
 
         result = asyncio.run(mw.awrap_tool_call(request, handler))
         assert result.status == "error"
+
+    def test_async_file_too_large_to_read_blocks(self):
+        import asyncio
+        import errno
+
+        mw = _middleware({self.PATH: OSError(errno.EFBIG, "File is larger than 100 MB", self.PATH)})
+        request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"})
+
+        async def handler(_request):
+            raise AssertionError("handler must not run when blocked")
+
+        result = asyncio.run(mw.awrap_tool_call(request, handler))
+        assert result.status == "error"
+        assert "too large to read" in result.content
 
     def test_async_blocked_write_has_deerflow_tool_meta(self):
         import asyncio
