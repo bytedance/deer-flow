@@ -20,6 +20,7 @@ import copy
 import gc
 import inspect
 import logging
+import math
 import os
 import sys
 import threading
@@ -1142,7 +1143,9 @@ def _run_error_frame(message: str, exc: BaseException) -> dict[str, object]:
         if isinstance(details.get("retryable"), bool):
             frame["retryable"] = details["retryable"]
         retry_after = details.get("retry_after_seconds")
-        if isinstance(retry_after, int | float) and not isinstance(retry_after, bool):
+        # A NaN or infinite hint would be written as a bare token the SDK
+        # rejects, losing the whole frame; omit it and keep the rest.
+        if isinstance(retry_after, int | float) and not isinstance(retry_after, bool) and math.isfinite(retry_after):
             frame["retry_after_seconds"] = retry_after
     return frame
 

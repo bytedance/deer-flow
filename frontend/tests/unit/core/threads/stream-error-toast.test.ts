@@ -4,7 +4,7 @@ import { enUS } from "@/core/i18n/locales/en-US";
 import { getStreamErrorToastMessage } from "@/core/threads/hooks";
 
 describe("getStreamErrorToastMessage", () => {
-  it("says the sandbox pool is busy for a capacity run error", () => {
+  it("says sandboxes are temporarily unavailable for a capacity run error", () => {
     // The SDK turns the run's error event into an Error named after the
     // backend exception; the message holds the provider's raw details.
     const error = new Error(
@@ -17,7 +17,7 @@ describe("getStreamErrorToastMessage", () => {
     );
   });
 
-  it("says the sandbox pool is busy for a raw frame with the code", () => {
+  it("says sandboxes are temporarily unavailable for a raw frame with the code", () => {
     expect(
       getStreamErrorToastMessage(
         { message: "raw", code: "SANDBOX_CAPACITY_EXCEEDED" },

@@ -1728,7 +1728,7 @@ export const enUS: Translations = {
     streamReplayGap:
       "Some live updates expired. The conversation was restored from saved state.",
     sandboxBusy:
-      "All sandboxes are busy right now. Please try again in a minute.",
+      "Sandboxes are temporarily unavailable. Please try again shortly.",
     streamServerError: (status) =>
       `The service is temporarily unavailable (HTTP ${status}). Please try again.`,
     outlineLabel: "Conversation outline",

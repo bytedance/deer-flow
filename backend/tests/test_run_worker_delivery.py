@@ -447,6 +447,9 @@ _CAPACITY_ERROR = SandboxCapacityExceededError(active=4, replicas=4, retry_after
         # A run that acquires its sandbox before the model runs fails with the
         # provider's capacity error; clients get its code and retry hint (#8586).
         (_CAPACITY_ERROR, {"code": "SANDBOX_CAPACITY_EXCEEDED", "retryable": True, "retry_after_seconds": 30.0}),
+        # A non-finite hint is dropped; the code and retryable flag still arrive.
+        (SandboxCapacityExceededError(active=4, replicas=4, retry_after_seconds=float("nan")), {"code": "SANDBOX_CAPACITY_EXCEEDED", "retryable": True}),
+        (SandboxCapacityExceededError(active=4, replicas=4, retry_after_seconds=float("inf")), {"code": "SANDBOX_CAPACITY_EXCEEDED", "retryable": True}),
         (SandboxCommandError("bash failed", exit_code=2), {}),
         (RuntimeError("boom"), {}),
     ],
