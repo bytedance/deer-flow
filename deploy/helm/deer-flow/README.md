@@ -681,6 +681,41 @@ helm template deer-flow deploy/helm/deer-flow -n deer-flow -f my-values.yaml | \
   kubectl apply --dry-run=client -f -
 ```
 
+## Upgrading an existing GitOps deployment
+
+If your controller syncs `helm template` output, the chart's `lookup` cannot
+read the installed StatefulSets. Kubernetes rejects changes to their
+`volumeClaimTemplates`, including removal of the old `helm.sh/chart` label.
+Before the first sync with this chart, read that label from each installed
+`data` template. For the example release with bundled PostgreSQL and Redis:
+
+```bash
+kubectl -n deer-flow get statefulset deer-flow-deer-flow-postgres deer-flow-deer-flow-redis -o json |
+  jq -r '.items[] | .metadata.name as $name | .spec.volumeClaimTemplates[]? |
+    select(.metadata.name == "data") | [$name, .metadata.labels["helm.sh/chart"]] | @tsv'
+```
+
+For example, if both templates have the value `deer-flow-2.2.0`, add this
+patch to the Kustomization that consumes the rendered manifests:
+
+```yaml
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: StatefulSet
+      name: deer-flow-deer-flow-(postgres|redis)
+      namespace: deer-flow
+    patch: |-
+      - op: add
+        path: /spec/volumeClaimTemplates/0/metadata/labels/helm.sh~1chart
+        value: deer-flow-2.2.0
+```
+
+Use your installed names, namespace and label values. If the values differ,
+give each StatefulSet its own patch. Skip any StatefulSet without the label.
+Keep the patch on subsequent syncs while the original StatefulSet exists.
+
 ## Uninstall
 
 With home persistence enabled (the default), check the home PVC in Helm's
@@ -695,27 +730,13 @@ helm get manifest deer-flow -n deer-flow | sed -n '/^# Source: .*\/pvc-home\.yam
 Look for `helm.sh/resource-policy: keep` under `metadata.annotations` and
 note the claim's name and namespace. Older releases, including 2.2.0, can
 delete the claim and its workspace files on uninstall. If the annotation is
-missing, upgrade the existing release using a chart that includes it. From a
-checkout with the fix, this upgrade carries forward the release's configured
-values and picks up the new chart defaults. Run it against the cluster so
-Helm can read the immutable claim template labels on existing PostgreSQL and
-Redis StatefulSets. An offline `helm template` render cannot recover those labels.
+missing, the release needs an upgrade before uninstalling.
 
-```bash
-helm upgrade deer-flow deploy/helm/deer-flow -n deer-flow
-```
+### Save the release values before upgrading or uninstalling
 
-After an upgrade, verify that `helm status deer-flow -n deer-flow` reports
-`deployed`. A failed upgrade can already have applied the PVC annotation.
-For a persistent workspace, rerun the manifest check above and confirm it
-shows the keep annotation before running the uninstall command.
-
-### Save the release values and credentials for a reinstall
-
-Before uninstalling, export the installed release's user-supplied values.
-This captures overrides from every `-f` file and `--set` flag, including
-the workspace volume's requested size. The file may contain credentials.
-Create a private file and keep its path for the reinstall.
+Export the installed release's user-supplied values to a private file. This
+captures overrides from every `-f` file and `--set` flag and may include
+credentials. Keep the file for both the upgrade and the reinstall.
 
 ```bash
 restore_values=$(mktemp "$HOME/deer-flow-values.XXXXXXXX") &&
@@ -723,9 +744,38 @@ restore_values=$(mktemp "$HOME/deer-flow-values.XXXXXXXX") &&
   printf 'Saved release values to %s\n' "$restore_values"
 ```
 
-Continue once the export succeeds. If you resized the home PVC directly in
-Kubernetes, update `persistence.home.size` in the saved values to match the
-claim's current storage request.
+Once the export succeeds, check the live storage request if home persistence
+is enabled. Use the claim name and namespace from the manifest above:
+
+```bash
+kubectl -n deer-flow get pvc deer-flow-deer-flow-home -o jsonpath='{.spec.resources.requests.storage}{"\n"}'
+```
+
+If you expanded the PVC outside Helm (for example, from `10Gi` to `20Gi`),
+set `persistence.home.size` to the live request in the saved file, preserving
+all other overrides. A stale size can cause the upgrade to fail before Helm
+applies the keep annotation.
+
+If the stored manifest lacks the keep annotation on the home PVC, upgrade
+from a checkout with the fix, passing the complete saved values. Run the
+upgrade against the cluster so Helm can read the installed claim template
+labels on the PostgreSQL and Redis StatefulSets.
+
+```bash
+helm upgrade deer-flow deploy/helm/deer-flow -n deer-flow -f "$restore_values"
+```
+
+After an upgrade, verify that `helm status deer-flow -n deer-flow` reports
+`deployed`. A failed upgrade can already have applied the PVC annotation.
+Rerun the manifest check above and confirm the home PVC has the keep
+annotation before uninstalling.
+
+### Preserve the database and credentials for a reinstall
+
+If you run bundled PostgreSQL with `postgresql.primary.persistence.enabled=false`,
+back up the database before uninstalling and restore it after reinstalling.
+PostgreSQL uses an `emptyDir` in this configuration and loses its data when
+the Pod is removed.
 
 The bundled PostgreSQL volume keeps its original database password. The app
 also needs its original `DEER_FLOW_CREDENTIALS_KEY` to decrypt saved
@@ -771,7 +821,7 @@ helm install deer-flow deploy/helm/deer-flow -f "$restore_values" \
   -n deer-flow
 ```
 
-### Discard the retained workspace
+### Discard the retained home files
 
 After uninstalling, delete the home claim only if you intend to discard its
 files. With a `Delete` reclaim policy, deleting the claim also removes its
@@ -780,3 +830,8 @@ backing storage. The example release uses the following claim.
 ```bash
 kubectl -n deer-flow delete pvc deer-flow-deer-flow-home
 ```
+
+This command removes only the home claim. With the default persistence
+settings, the PostgreSQL and Redis claims survive. A fresh install that
+generates a new PostgreSQL password cannot authenticate to the retained
+database. Reuse the saved database credentials when reinstalling against it.
