@@ -83,7 +83,7 @@ from deerflow.config.paths import get_paths, make_safe_user_id
 from deerflow.constants import DELIVERY_PRESENTATION_TOOL_NAMES
 from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus, ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.goal import is_active_goal
-from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso
+from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso, run_sort_key
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.exceptions import SandboxAuthorizationError
@@ -1261,6 +1261,11 @@ def _allows_legacy_default_owner(request: Request) -> bool:
     return getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE and get_trusted_internal_owner_user_id(request) is None
 
 
+def _is_legacy_default_run(record: RunRecord) -> bool:
+    """Whether ``record`` belongs to the legacy/default owner scope."""
+    return (getattr(record, "user_id", None) or "default") == "default"
+
+
 async def _get_scoped_run(
     run_mgr,
     run_id: str,
@@ -1280,9 +1285,48 @@ async def _get_scoped_run(
     record = await run_mgr.get(run_id, user_id=user_id)
     if record is None and allow_legacy_default and user_id == "default":
         legacy = await run_mgr.get(run_id)
-        if legacy is not None and not getattr(legacy, "user_id", None):
+        if legacy is not None and _is_legacy_default_run(legacy):
             return legacy
     return record
+
+
+async def _list_legacy_default_runs(
+    run_mgr,
+    thread_id: str,
+    *,
+    limit: int,
+    before_created_at: str | None = None,
+    before_run_id: str | None = None,
+) -> list[RunRecord]:
+    """Walk unfiltered keyset batches and keep only default/legacy NULL-owner runs."""
+    batch_size = max(limit, 50)
+    cursor = (before_created_at, before_run_id) if before_created_at and before_run_id else None
+    matched: list[RunRecord] = []
+    seen: set[str] = set()
+    while len(matched) < limit:
+        kwargs: dict[str, Any] = {"user_id": None, "limit": batch_size}
+        if cursor is not None:
+            kwargs["before_created_at"], kwargs["before_run_id"] = cursor
+        batch = await run_mgr.list_by_thread(thread_id, **kwargs)
+        if not batch:
+            break
+        for record in batch:
+            if record.run_id not in seen and _is_legacy_default_run(record):
+                seen.add(record.run_id)
+                matched.append(record)
+                if len(matched) == limit:
+                    return matched
+        if len(batch) < batch_size:
+            break
+        last = batch[-1]
+        try:
+            next_cursor = (format_run_cursor_created_at(last.created_at), last.run_id)
+        except (TypeError, ValueError):
+            break
+        if cursor is not None and run_sort_key(*next_cursor) >= run_sort_key(*cursor):
+            break
+        cursor = next_cursor
+    return matched
 
 
 async def _run_scope_user_id(request: Request, thread_id: str) -> str | None:
@@ -1371,7 +1415,10 @@ async def list_runs(thread_id: ThreadId, request: Request) -> list[RunResponse]:
     """List the newest runs for a thread (default 100, as a bare array)."""
     run_mgr = get_run_manager(request)
     user_id = await _run_scope_user_id(request, thread_id)
-    records = await run_mgr.list_by_thread(thread_id, user_id=user_id)
+    if user_id == "default" and _allows_legacy_default_owner(request):
+        records = await _list_legacy_default_runs(run_mgr, thread_id, limit=100)
+    else:
+        records = await run_mgr.list_by_thread(thread_id, user_id=user_id)
     return [_record_to_response(r) for r in records]
 
 
@@ -1399,13 +1446,22 @@ async def list_runs_page(
 
     run_mgr = get_run_manager(request)
     user_id = await _run_scope_user_id(request, thread_id)
-    records = await run_mgr.list_by_thread(
-        thread_id,
-        user_id=user_id,
-        limit=limit + 1,
-        before_created_at=before_created_at,
-        before_run_id=before_run_id,
-    )
+    if user_id == "default" and _allows_legacy_default_owner(request):
+        records = await _list_legacy_default_runs(
+            run_mgr,
+            thread_id,
+            limit=limit + 1,
+            before_created_at=before_created_at,
+            before_run_id=before_run_id,
+        )
+    else:
+        records = await run_mgr.list_by_thread(
+            thread_id,
+            user_id=user_id,
+            limit=limit + 1,
+            before_created_at=before_created_at,
+            before_run_id=before_run_id,
+        )
     has_more = len(records) > limit
     page = records[:limit]
     last = page[-1] if page and has_more else None
@@ -1423,7 +1479,12 @@ async def get_run(thread_id: ThreadId, run_id: str, request: Request) -> RunResp
     """Get details of a specific run."""
     run_mgr = get_run_manager(request)
     user_id = await _run_scope_user_id(request, thread_id)
-    record = await run_mgr.get(run_id, user_id=user_id)
+    record = await _get_scoped_run(
+        run_mgr,
+        run_id,
+        user_id=user_id,
+        allow_legacy_default=_allows_legacy_default_owner(request),
+    )
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     return _record_to_response(record)

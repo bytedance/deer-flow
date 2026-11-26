@@ -13,6 +13,7 @@ browser/API sessions.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -1210,3 +1211,116 @@ def test_ownerless_internal_caller_controls_legacy_null_owner_run_on_shared_thre
 
     assert legacy_run.status == RunStatus.interrupted
     assert other_run.status == RunStatus.running
+
+
+@pytest.mark.no_auto_user
+@pytest.mark.parametrize("ownership", ["missing_meta", "null_owner"])
+def test_ownerless_internal_caller_reads_and_paginates_legacy_null_owner_runs(ownership: str) -> None:
+    """Ownerless internal callers see legacy NULL-owner runs in detail, list, and paged history."""
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    if ownership == "null_owner":
+        asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=None))
+    run_store = _RecordingRunStore()
+    run_manager = RunManager(store=run_store)
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
+
+    def _stamp(run_id: str, offset: int, record=None) -> None:
+        ts = (base_time + timedelta(seconds=offset)).isoformat()
+        run_store._runs[run_id]["created_at"] = run_store._runs[run_id]["updated_at"] = ts
+        if record is not None:
+            record.created_at = record.updated_at = ts
+
+    def _seed_at(run_id: str, user_id: str | None, offset: int) -> None:
+        _seed_run(run_store, run_id, user_id=user_id)
+        _stamp(run_id, offset)
+
+    # Interleave >50 non-default runs before and between default-scope rows to exercise multi-batch paging.
+    _seed_at("run-legacy-store-oldest", None, 1)
+    for i in range(55):
+        _seed_at(f"run-owner-old-{i:02d}", OWNER_RAW, 2 + i)
+    _seed_at("run-default-store-mid", "default", 57)
+
+    live_legacy = asyncio.run(run_manager.create(THREAD_ID, user_id=None))
+    assert live_legacy.user_id is None
+    _stamp(live_legacy.run_id, 58, live_legacy)
+
+    for i in range(55):
+        _seed_at(f"run-owner-new-{i:02d}", OWNER_RAW, 59 + i)
+
+    browser_live = asyncio.run(run_manager.create(THREAD_ID, user_id=str(BROWSER_USER_ID)))
+    _stamp(browser_live.run_id, 114, browser_live)
+    other_thread_legacy = asyncio.run(run_manager.create("other-thread", user_id=None))
+
+    ownerless = _make_app(user=_internal_user(None), auth_source=AUTH_SOURCE_INTERNAL, run_store=run_store, run_manager=run_manager, thread_store=thread_store)
+    browser = _make_app(user=_browser_user(), auth_source=AUTH_SOURCE_SESSION, run_store=run_store, run_manager=run_manager, thread_store=thread_store)
+    explicit = _make_app(user=_internal_user(OWNER_RAW), auth_source=AUTH_SOURCE_INTERNAL, run_store=run_store, run_manager=run_manager, thread_store=thread_store)
+    owner_headers = {INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW}
+    expected_ids = [live_legacy.run_id, "run-default-store-mid", "run-legacy-store-oldest"]
+
+    with ownerless:
+        for run_id in expected_ids:
+            assert ownerless.get(f"/api/threads/{THREAD_ID}/runs/{run_id}").status_code == 200
+        for hidden_id in ("run-owner-new-00", browser_live.run_id, other_thread_legacy.run_id):
+            assert ownerless.get(f"/api/threads/{THREAD_ID}/runs/{hidden_id}").status_code == 404
+
+        assert [r["run_id"] for r in ownerless.get(f"/api/threads/{THREAD_ID}/runs").json()] == expected_ids
+
+        p1 = ownerless.get(f"/api/threads/{THREAD_ID}/runs/page", params={"limit": 2}).json()
+        assert [r["run_id"] for r in p1["data"]] == expected_ids[:2]
+        assert p1["has_more"] is True and p1["next_before_run_id"] == "run-default-store-mid"
+
+        p2 = ownerless.get(
+            f"/api/threads/{THREAD_ID}/runs/page",
+            params={"limit": 2, "before_created_at": p1["next_before_created_at"], "before_run_id": p1["next_before_run_id"]},
+        ).json()
+        assert [r["run_id"] for r in p2["data"]] == [expected_ids[2]]
+        assert p2["has_more"] is False and p2["next_before_run_id"] is None
+
+    # Browser and explicit-owner callers still stay strictly isolated from legacy NULL-owner runs.
+    with browser:
+        assert browser.get(f"/api/threads/{THREAD_ID}/runs/{live_legacy.run_id}").status_code == 404
+        assert [r["run_id"] for r in browser.get(f"/api/threads/{THREAD_ID}/runs").json()] == [browser_live.run_id]
+        assert [r["run_id"] for r in browser.get(f"/api/threads/{THREAD_ID}/runs/page").json()["data"]] == [browser_live.run_id]
+
+    with explicit:
+        for run_id in expected_ids:
+            assert explicit.get(f"/api/threads/{THREAD_ID}/runs/{run_id}", headers=owner_headers).status_code == 404
+        listed_ids = {r["run_id"] for r in explicit.get(f"/api/threads/{THREAD_ID}/runs", headers=owner_headers).json()}
+        assert listed_ids.isdisjoint({*expected_ids, browser_live.run_id})
+
+
+@pytest.mark.no_auto_user
+def test_ownerless_internal_caller_reads_and_paginates_legacy_null_owner_runs_sql(db_event_store: DbRunEventStore) -> None:
+    """SQL RunRepository preserves legacy NULL-owner visibility and multi-batch keyset pagination."""
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=None))
+    run_store = RunRepository(get_session_factory())
+
+    async def _seed() -> None:
+        await run_store.put("run-sql-legacy-null-old", thread_id=THREAD_ID, user_id=None, status="success")
+        await asyncio.sleep(0.02)
+        for i in range(55):
+            await run_store.put(f"run-sql-owner-{i:02d}", thread_id=THREAD_ID, user_id=OWNER_RAW, status="success")
+        await asyncio.sleep(0.02)
+        await run_store.put("run-sql-default", thread_id=THREAD_ID, user_id="default", status="success")
+        await asyncio.sleep(0.02)
+        await run_store.put("run-sql-legacy-null-new", thread_id=THREAD_ID, user_id=None, status="success")
+
+    anyio.run(_seed)
+
+    client = _make_app(user=_internal_user(None), auth_source=AUTH_SOURCE_INTERNAL, run_store=run_store, event_store=db_event_store, thread_store=thread_store)
+    expected_ids = ["run-sql-legacy-null-new", "run-sql-default", "run-sql-legacy-null-old"]
+
+    with client:
+        for run_id in expected_ids:
+            assert client.get(f"/api/threads/{THREAD_ID}/runs/{run_id}").status_code == 200
+        assert client.get(f"/api/threads/{THREAD_ID}/runs/run-sql-owner-00").status_code == 404
+        assert [r["run_id"] for r in client.get(f"/api/threads/{THREAD_ID}/runs").json()] == expected_ids
+
+        p1 = client.get(f"/api/threads/{THREAD_ID}/runs/page", params={"limit": 2}).json()
+        assert [r["run_id"] for r in p1["data"]] == expected_ids[:2] and p1["has_more"] is True
+        p2 = client.get(
+            f"/api/threads/{THREAD_ID}/runs/page",
+            params={"limit": 2, "before_created_at": p1["next_before_created_at"], "before_run_id": p1["next_before_run_id"]},
+        ).json()
+        assert [r["run_id"] for r in p2["data"]] == [expected_ids[2]] and p2["has_more"] is False
