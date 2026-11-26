@@ -201,7 +201,7 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
     Args:
         query: Search keywords describing what you want to find. Be specific for better results.
         max_results: Maximum number of search results to return. Default is 5. One page is fetched, so at most 10 (20 for the scholar vertical).
-        time_range: Optional relative publication/update window. Use only when the request requires recent results. Applied on the search and news verticals; Scholar has no relative window, and the result then says ``time_range.applied: false``.
+        time_range: Optional relative publication/update window. Use only when the request requires recent results. Applied on the search and news verticals; Scholar has none, and the result then says ``time_range.applied: false``.
     """
     config = get_app_config().get_tool_config("web_search")
     extra = (config.model_extra or {}) if config is not None else {}
