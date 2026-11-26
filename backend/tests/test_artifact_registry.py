@@ -7,6 +7,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.messages.content import create_file_block, create_image_block
 
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
+from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 from deerflow.agents.thread_state import merge_tool_artifacts
 from deerflow.tools.artifact_registry import (
     _detect_refs_in_text,
@@ -539,6 +540,27 @@ def test_extract_artifacts_respects_tool_result_status(native_status, tool_meta,
     )
     entries = extract_artifacts_from_result(result, thread_id="thread-1")
     assert [entry["real_ref"] for entry in entries] == ([structured_ref, resource_ref, image_ref, text_ref] if register_refs else [])
+
+
+@pytest.mark.parametrize(
+    ("producer", "path", "expected"),
+    [
+        ("ToolOutputBudgetMiddleware", "/mnt/user-data/outputs/custom results/bash.log", ["/mnt/user-data/outputs/custom results/bash.log"]),
+        ("ToolOutputBudgetMiddleware", "/mnt/user-data/outputs/../missing.log", []),
+        ("ToolOutputBudgetMiddleware", ["/mnt/user-data/outputs/.tool-results/missing.log"], []),
+        ("other", "/mnt/user-data/outputs/.tool-results/missing.log", []),
+    ],
+)
+def test_failed_result_uses_only_budget_middleware_output_reference(producer, path, expected):
+    result = ToolMessage(
+        content="Error: see /mnt/user-data/outputs/.tool-results/missing.log",
+        tool_call_id="call-failed",
+        name="bash",
+        status="error",
+        additional_kwargs={TOOL_TRANSFORMS_KEY: [{"kind": "externalized", "by": producer, "externalized_path": path}]},
+    )
+    entries = extract_artifacts_from_result(result, thread_id="thread-1", detect_refs_in_text=False)
+    assert [entry["real_ref"] for entry in entries] == expected
 
 
 def test_no_extraction_from_plain_text_without_refs():

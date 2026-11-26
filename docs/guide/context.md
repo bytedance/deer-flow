@@ -177,10 +177,10 @@ become available in the next batch, when rejected additions can be retried.
 ## Evidence-based agent decisions
 
 Tool-result and model-error policies use producer metadata, native exit status, actual exception types and structured HTTP/provider fields. Page titles, quoted errors and words such as “timeout” or “no results” do not establish a failure category or permanent tool unavailability. Browserless passes the target HTTP status in the tool artifact; providers without that evidence preserve page text without guessing from it. Repeated-call and resource budgets still apply.
-File reads report actual failures and truncation at the producer; producer-stamped successful reads preserve document examples, including text beginning with `Error:`.
+File reads report failures and truncation at the producer. Successful file reads and Crawl4AI fetches carry a success status even when the document begins with `Error:`.
 For stamped text results, the model receives a JSON object separating reported execution status from `content`, with whitespace preserved by JSON escaping. Checkpoints and tool receipts retain the original result. This exposes existing status to providers that omit message metadata; it does not validate the document's claims or guarantee the model's final answer.
 
-Artifact capture skips a tool result when either its native or normalized status is `error`. Results marked `partial_success` can register references that pass the usual validation. Text scanning remains controlled by `tool_artifacts.detect_refs_in_text`. Missing or invalid normalized status falls back to the native message status. Existing registry entries follow the usual retention policy.
+When either the native or normalized tool status is `error`, artifact capture registers only the output file that the output budget middleware successfully saved. Its handle survives context compaction, keeping saved diagnostics accessible. Successful and `partial_success` results can register references that pass the usual validation. Text scanning remains controlled by `tool_artifacts.detect_refs_in_text`. Missing or invalid normalized status falls back to the native message status. Existing registry entries follow the usual retention policy.
 
 OpenAI connection and timeout errors use the configured `llm_call.retry_max_attempts` budget (default: three total attempts). Other OpenAI `APIError` failures without usable status or error code receive at most one retry, within that configured ceiling.
 

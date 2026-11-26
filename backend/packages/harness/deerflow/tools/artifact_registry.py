@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 from langchain_core.messages import ToolMessage
 
+from deerflow.agents.middlewares.tool_transform_meta import read_tool_transforms
 from deerflow.agents.thread_state import ArtifactEntry
 from deerflow.utils.messages import get_tool_message_status
 
@@ -322,6 +323,22 @@ def _display_name_for_ref(ref: str) -> str:
     return ref.replace("\\", "/").split("/")[-1] or ref
 
 
+def _externalized_output_path(result: ToolMessage) -> str | None:
+    prefix = f"{_SANDBOX_PATH_PREFIX}outputs/"
+    for transform in reversed(read_tool_transforms(result)):
+        if transform["kind"] != "externalized" or transform.get("by") != "ToolOutputBudgetMiddleware":
+            continue
+        path = transform.get("externalized_path")
+        if not isinstance(path, str) or not path.startswith(prefix) or not _is_referenceable_url(path):
+            continue
+        if "\\" in path or "\x00" in path or _REF_LINE_BOUNDARY_PATTERN.search(path):
+            continue
+        parts = path.removeprefix(prefix).split("/")
+        if len(parts) == 2 and all(part not in {"", ".", ".."} for part in parts):
+            return path
+    return None
+
+
 class _EntrySink:
     """Allocates sequential per-result ordinals so every extracted reference
     within one tool result gets a distinct handle."""
@@ -379,19 +396,25 @@ def extract_artifacts_from_result(
        conservatively for sandbox paths and remote file URLs (gated by
        ``detect_refs_in_text``).
 
-    Error results produce no entries. Every distinct reference from one
-    result gets its own handle via a sequential ordinal; the same ``real_ref``
+    Error results can register an output file explicitly recorded by the budget
+    middleware. Every distinct reference from one result gets its own handle
+    via a sequential ordinal; the same ``real_ref``
     surfaced by several sources (e.g. a ``resource_links`` entry and the
     placeholder text the conversion layer wrote for the same link) is kept
     only from the first source, so one resource never gets two handles.
     """
-    if get_tool_message_status(result) == "error":
+    failed = get_tool_message_status(result) == "error"
+    diagnostic_path = _externalized_output_path(result) if failed else None
+    if failed and diagnostic_path is None:
         return []
 
     now = _utc_now_iso()
     tool_name = result.name or "unknown"
     tool_call_id = result.tool_call_id or ""
     sink = _EntrySink(thread_id=thread_id, tool_call_id=tool_call_id, call_index=call_index, created_at=now, tool_name=tool_name, occurrence_id=result.id)
+    if diagnostic_path is not None:
+        return [sink.add(artifact_type="file", display_name=_display_name_for_ref(diagnostic_path), real_ref=diagnostic_path)]
+
     entries: list[ArtifactEntry] = []
     seen_refs: set[str] = set()
 

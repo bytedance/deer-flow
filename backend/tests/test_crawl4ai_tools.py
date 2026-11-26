@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from deerflow.community.crawl4ai.crawl4ai_client import Crawl4AiClient
+from deerflow.community.crawl4ai.crawl4ai_client import Crawl4AiClient, Crawl4AiFetchError
 
 
 @pytest.fixture
@@ -278,9 +278,11 @@ class TestCrawl4AiTools:
     async def test_web_fetch_tool_truncates_to_max_chars(self, cfg, length, kept):
         from deerflow.community.crawl4ai import tools
 
+        markdown = "Error: " + "x" * (length - len("Error: "))
+
         def respond(request):
             assert request.url.path == "/md"
-            return httpx.Response(200, json={"success": True, "markdown": "x" * length})
+            return httpx.Response(200, json={"success": True, "markdown": markdown})
 
         transport = httpx.MockTransport(respond)
         mock_httpx = SimpleNamespace(
@@ -295,9 +297,9 @@ class TestCrawl4AiTools:
             result = await tools.web_fetch_tool.ainvoke("https://example.com")
 
         if kept is None:
-            assert result == "x" * length
+            assert result == markdown
         else:
-            assert result == "x" * kept + f"\n\n[web_fetch: truncated to the first {kept} of {length} characters]"
+            assert result == markdown[:kept] + f"\n\n[web_fetch: truncated to the first {kept} of {length} characters]"
 
     @patch("deerflow.community.crawl4ai.tools._build_client")
     @pytest.mark.usefixtures("public_dns")
@@ -305,7 +307,7 @@ class TestCrawl4AiTools:
         from deerflow.community.crawl4ai import tools
 
         mock_client = MagicMock()
-        mock_client.fetch_markdown = AsyncMock(return_value="Error: Crawl4AI returned empty markdown")
+        mock_client.fetch_markdown = AsyncMock(return_value=Crawl4AiFetchError("Error: Crawl4AI returned empty markdown"))
         mock_build.return_value = mock_client
 
         with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value=None):

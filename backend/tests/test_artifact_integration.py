@@ -5,11 +5,13 @@ context -> model references the handle in a later tool call -> resolution
 rewrites it to the real reference at the tool-call boundary.
 """
 
+import ipaddress
 import json
 import re
 from pathlib import PurePosixPath
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -26,8 +28,14 @@ from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactR
 from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.agents.thread_state import ThreadState
+from deerflow.community.crawl4ai import crawl4ai_client
+from deerflow.community.crawl4ai import tools as crawl4ai_tools
+from deerflow.sandbox import sandbox_provider
+from deerflow.sandbox.sandbox import CommandOutput, Sandbox
+from deerflow.sandbox.tools import bash_tool
 from deerflow.tools.artifact_registry import generate_handle
 from deerflow.tools.builtins import view_image_tool
 
@@ -48,6 +56,55 @@ class RecordingToolCallingModel(FakeToolCallingModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # noqa: ANN001, ANN003
         self.received.append(list(messages))
         return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+_COMPACTION_SUMMARY = "The first request finished."
+
+
+def _compacting_agent(model, selected_tool):
+    return create_agent(
+        model=model,
+        tools=[selected_tool],
+        middleware=[
+            ToolOutputBudgetMiddleware(),
+            ToolErrorHandlingMiddleware(),
+            ArtifactCaptureMiddleware(),
+            DurableContextMiddleware(),
+            DeerFlowSummarizationMiddleware(
+                model=FakeMessagesListChatModel(responses=[AIMessage(content=_COMPACTION_SUMMARY)]),
+                trigger=("messages", 5),
+                keep=("messages", 2),
+                token_counter=len,
+            ),
+        ],
+        state_schema=ThreadState,
+        checkpointer=InMemorySaver(),
+    )
+
+
+def _one_tool_model(name, args, call_id):
+    return RecordingToolCallingModel(
+        responses=[
+            AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": call_id, "type": "tool_call"}]),
+            AIMessage(content="The first request finished."),
+            AIMessage(content="Ready to continue."),
+        ]
+    )
+
+
+async def _compact_and_check_artifacts(agent, model, config, context, expected):
+    before = (await agent.aget_state(config)).values
+    await agent.ainvoke({"messages": [HumanMessage(content="Continue with the next request.")]}, config, context=context)
+    after = (await agent.aget_state(config)).values
+    compacted_request = model.received[-1]
+    assert after["summary_text"] == _COMPACTION_SUMMARY
+    assert not any(isinstance(message, ToolMessage) for message in [*after["messages"], *compacted_request])
+    assert [entry["real_ref"] for entry in before.get("tool_artifacts", [])] == expected
+    assert after.get("tool_artifacts", []) == before.get("tool_artifacts", [])
+    context_blocks = [message.content for message in compacted_request if message.additional_kwargs.get("durable_context_data")]
+    for entry in after.get("tool_artifacts", []):
+        assert any(f"`{entry['handle']}` -> {entry['artifact_type']}: {entry['display_name']} [available]" in block for block in context_blocks)
+    return compacted_request
 
 
 class ArtifactCycleModel(RecordingToolCallingModel):
@@ -145,31 +202,8 @@ async def test_missing_image_creates_no_artifact_before_or_after_compaction(tmp_
     uploads = tmp_path / "uploads"
     uploads.mkdir()
     missing_path = "/mnt/user-data/uploads/missing.png"
-    model = RecordingToolCallingModel(
-        responses=[
-            AIMessage(content="", tool_calls=[{"name": "view_image", "args": {"image_path": missing_path}, "id": "call_view", "type": "tool_call"}]),
-            AIMessage(content="The image could not be opened."),
-            AIMessage(content="Ready to continue."),
-        ]
-    )
-    summary = "The first image request finished."
-    agent = create_agent(
-        model=model,
-        tools=[view_image_tool],
-        middleware=[
-            ToolErrorHandlingMiddleware(),
-            ArtifactCaptureMiddleware(),
-            DurableContextMiddleware(),
-            DeerFlowSummarizationMiddleware(
-                model=FakeMessagesListChatModel(responses=[AIMessage(content=summary)]),
-                trigger=("messages", 5),
-                keep=("messages", 2),
-                token_counter=len,
-            ),
-        ],
-        state_schema=ThreadState,
-        checkpointer=InMemorySaver(),
-    )
+    model = _one_tool_model("view_image", {"image_path": missing_path}, "call_view")
+    agent = _compacting_agent(model, view_image_tool)
     config = {"configurable": {"thread_id": THREAD_ID}}
     context = {"thread_id": THREAD_ID}
 
@@ -186,15 +220,77 @@ async def test_missing_image_creates_no_artifact_before_or_after_compaction(tmp_
     assert stored_result.additional_kwargs[TOOL_META_KEY]["status"] == "error"
     assert json.loads(model_result.content) == {TOOL_META_KEY: {"status": "error", "source": "tool_return"}, "content": error_text}
 
-    await agent.ainvoke({"messages": [HumanMessage(content="Continue with the next request.")]}, config, context=context)
-    after = (await agent.aget_state(config)).values
-    compacted_request = model.received[-1]
-    assert after["summary_text"] == summary
-    assert not any(isinstance(message, ToolMessage) for message in [*after["messages"], *compacted_request])
-    assert {
-        "checkpoint_refs": [entry["real_ref"] for checkpoint in (before, after) for entry in checkpoint.get("tool_artifacts", [])],
-        "advertised_after_compaction": any("missing.png [available]" in message.content for message in compacted_request),
-    } == {"checkpoint_refs": [], "advertised_after_compaction": False}
+    compacted_request = await _compact_and_check_artifacts(agent, model, config, context, [])
+    assert not any("missing.png [available]" in message.content for message in compacted_request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("success", [True, False], ids=["successful-page", "failed-fetch"])
+async def test_crawl4ai_artifacts_follow_fetch_status_through_compaction(monkeypatch, success):
+    report_url = "https://files.example/report.pdf"
+    markdown = f"Error: the report describes past failures. Download [{report_url}]"
+    requests = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        assert request.url.path == "/md"
+        return httpx.Response(200, json={"success": success, "markdown": markdown})
+
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(
+        crawl4ai_client,
+        "httpx",
+        SimpleNamespace(AsyncClient=lambda **kwargs: httpx.AsyncClient(transport=transport, **kwargs), TimeoutException=httpx.TimeoutException, RequestError=httpx.RequestError),
+    )
+    monkeypatch.setattr(crawl4ai_tools, "_get_tool_config", lambda _: {"network_isolation_confirmed": True})
+    monkeypatch.setattr("deerflow.community.url_safety.resolve_host_addresses", lambda *args, **kwargs: [ipaddress.ip_address("93.184.216.34")])
+    model = _one_tool_model("web_fetch", {"url": report_url}, "call_fetch")
+    agent = _compacting_agent(model, crawl4ai_tools.web_fetch_tool)
+    config = {"configurable": {"thread_id": THREAD_ID}}
+    context = {"thread_id": THREAD_ID}
+
+    result = await agent.ainvoke({"messages": [HumanMessage(content="Fetch the report.")]}, config, context=context)
+    message = next(message for message in result["messages"] if isinstance(message, ToolMessage))
+    assert requests == [{"url": report_url, "f": "fit"}]
+    assert message.content == (markdown if success else f"Error: Crawl4AI reported failure for {report_url}")
+    await _compact_and_check_artifacts(agent, model, config, context, [report_url] if success else [])
+    assert message.additional_kwargs[TOOL_META_KEY]["status"] == ("success" if success else "error")
+
+
+@pytest.mark.asyncio
+async def test_failed_bash_diagnostic_artifact_survives_compaction(tmp_path, monkeypatch):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    missing_path = "/mnt/user-data/outputs/missing.pdf"
+    stdout = f"Could not produce {missing_path}\n" + "diagnostic line\n" * 850 + "Exit Code: 2"
+    sandbox = Mock(spec=Sandbox, id="fixture:diagnostics", execute_command=Mock(return_value=CommandOutput(stdout, 2)), supports_command_cancellation=False)
+    provider = Mock(spec=sandbox_provider.SandboxProvider, uses_thread_data_mounts=True)
+    provider.get.return_value = sandbox
+    provider.get_scoped.return_value = sandbox
+    monkeypatch.setattr(sandbox_provider, "_default_sandbox_provider", provider)
+    model = _one_tool_model("bash", {"command": "run-report"}, "call_bash")
+    agent = _compacting_agent(model, bash_tool)
+    config = {"configurable": {"thread_id": THREAD_ID}}
+    context = {"thread_id": THREAD_ID}
+
+    result = await agent.ainvoke(
+        {
+            "messages": [HumanMessage(content="Run the report command.")],
+            "thread_data": {"outputs_path": str(outputs)},
+            "sandbox": {"sandbox_id": sandbox.id},
+        },
+        config,
+        context=context,
+    )
+    sandbox.execute_command.assert_called_once()
+    message = next(message for message in result["messages"] if isinstance(message, ToolMessage))
+    assert message.status == "error"
+    assert message.additional_kwargs[TOOL_META_KEY]["exit_code"] == 2
+    assert missing_path in message.content
+    (log,) = (outputs / ".tool-results").glob("*.log")
+    assert log.read_text(encoding="utf-8") == stdout
+    ref = f"/mnt/user-data/outputs/{log.relative_to(outputs).as_posix()}"
+    await _compact_and_check_artifacts(agent, model, config, context, [ref])
 
 
 @pytest.mark.parametrize(

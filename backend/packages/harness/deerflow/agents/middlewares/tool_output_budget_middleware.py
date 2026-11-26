@@ -95,6 +95,7 @@ class _BudgetedContent(NamedTuple):
     replacement: str
     transform_kind: str
     blob_metadata: dict[str, Any] | None = None
+    externalized_path: str | None = None
 
 
 def _default_config() -> ToolOutputConfig:
@@ -541,8 +542,8 @@ def _budget_content(
 ) -> _BudgetedContent | None:
     """Apply budget to *content* and name the applied transform.
 
-    Returns the replacement, transform kind, and optional durable blob
-    metadata, or ``None`` if no change was needed.
+    Returns the replacement, transform kind, and any persisted output reference,
+    or ``None`` if no change was needed.
     """
     threshold = config.tool_overrides.get(tool_name, config.externalize_min_chars)
     if threshold <= 0 and config.fallback_max_chars <= 0:
@@ -652,7 +653,8 @@ def _budget_content(
                     tail_chars=config.preview_tail_chars,
                 ),
                 "externalized",
-                blob_metadata,
+                blob_metadata=blob_metadata,
+                externalized_path=virtual_path,
             )
 
         if durable_fallback_required:
@@ -745,9 +747,10 @@ def _patch_tool_message(
         source_sha256 = tool_content_fingerprint(msg.content)
     except (TypeError, ValueError, RecursionError):
         source_sha256 = None
-    if citation_result is not None and budgeted is not None and budgeted.transform_kind == "externalized":
-        append_tool_transform(new_kwargs, "externalized", by="ToolOutputBudgetMiddleware", source_sha256=source_sha256)
-    append_tool_transform(new_kwargs, transform_kind, by="ToolOutputBudgetMiddleware", source_sha256=source_sha256)
+    if budgeted is not None and budgeted.externalized_path is not None:
+        append_tool_transform(new_kwargs, "externalized", by="ToolOutputBudgetMiddleware", source_sha256=source_sha256, externalized_path=budgeted.externalized_path)
+    if transform_kind != "externalized":
+        append_tool_transform(new_kwargs, transform_kind, by="ToolOutputBudgetMiddleware", source_sha256=source_sha256)
     update["additional_kwargs"] = new_kwargs
     return msg.model_copy(update=update)
 

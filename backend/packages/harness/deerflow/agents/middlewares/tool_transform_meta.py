@@ -20,13 +20,23 @@ _SHA256_HEX_LENGTH = 64
 _HEX_DIGITS = frozenset("0123456789abcdef")
 
 
-def append_tool_transform(additional_kwargs: dict, kind: str, *, by: str, version: str = "1", source_sha256: str | None = None) -> None:
+def append_tool_transform(
+    additional_kwargs: dict,
+    kind: str,
+    *,
+    by: str,
+    version: str = "1",
+    source_sha256: str | None = None,
+    externalized_path: str | None = None,
+) -> None:
     """Append one transform entry.
 
     ``source_sha256`` names the content the transform replaced, for observers
     that compare results across calls: a replacement can embed per-call data
     (an externalized file path, for example), so its bytes are not a stable
     identity for the output the tool returned.
+
+    ``externalized_path`` records the virtual path once output persistence succeeds.
     """
     trail = additional_kwargs.get(TOOL_TRANSFORMS_KEY)
     if not isinstance(trail, list):
@@ -34,6 +44,8 @@ def append_tool_transform(additional_kwargs: dict, kind: str, *, by: str, versio
     entry = {"kind": kind, "by": by, "version": version}
     if source_sha256 is not None:
         entry["source_sha256"] = source_sha256
+    if externalized_path is not None:
+        entry["externalized_path"] = externalized_path
     additional_kwargs[TOOL_TRANSFORMS_KEY] = [*trail, entry]
 
 
