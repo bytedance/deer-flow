@@ -202,6 +202,7 @@ This skill auto-selects the provider by environment variables (no CLI change):
 - Otherwise, `IMAGE_GENERATION_API_KEY` set → use an OpenAI-compatible Images API.
 - Force one explicitly with `IMAGE_GENERATION_PROVIDER=gemini|minimax|openai`.
   `openai-compatible` is also accepted as an alias for `openai`.
+  If the selected provider's key is missing, the CLI names it on stderr and exits with status 1.
 
 OpenAI-compatible settings:
 

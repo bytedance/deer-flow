@@ -308,7 +308,9 @@ The built-in `image-generation` skill supports Gemini, MiniMax, and
 OpenAI-compatible Images APIs. Select the latter with
 `IMAGE_GENERATION_PROVIDER=openai`, then configure
 `IMAGE_GENERATION_API_KEY`, `IMAGE_GENERATION_BASE_URL`, and
-`IMAGE_GENERATION_MODEL`. Run the skill's script in an isolated sandbox such as
+`IMAGE_GENERATION_MODEL`. If the explicitly selected provider's API key is missing,
+the CLI reports the missing key on stderr and exits with status 1.
+Run the skill's script in an isolated sandbox such as
 Docker/AIO, the Kubernetes provisioner, or E2B, and pass the variables through
 `sandbox.environment`. Sandbox commands do not inherit API keys from the Gateway
 process.

@@ -264,7 +264,7 @@ def _generate_image_minimax(
 ) -> str:
     bearer_value = os.getenv("MINIMAX_API_KEY")
     if not bearer_value:
-        return "MINIMAX_API_KEY is not set"
+        raise ValueError("MINIMAX_API_KEY is not set")
     prompt = _minimax_prompt(prompt)
     if len(prompt) > MINIMAX_PROMPT_MAX_CHARS:
         raise ValueError(
@@ -310,6 +310,10 @@ def _generate_image_minimax(
 def _generate_image_gemini(
     prompt: str, reference_images: list[str], output_file: str, aspect_ratio: str
 ) -> str:
+    bearer_value = os.getenv("GEMINI_API_KEY")
+    if not bearer_value:
+        raise ValueError("GEMINI_API_KEY is not set")
+
     parts = []
     valid_reference_images = []
     for ref_img in reference_images:
@@ -328,9 +332,6 @@ def _generate_image_gemini(
             image_b64 = base64.b64encode(f.read()).decode("utf-8")
         parts.append({"inlineData": {"mimeType": "image/jpeg", "data": image_b64}})
 
-    bearer_value = os.getenv("GEMINI_API_KEY")
-    if not bearer_value:
-        return "GEMINI_API_KEY is not set"
     response = _post_image(
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent",
         headers={"x-goog-api-key": bearer_value, "Content-Type": "application/json"},
@@ -389,7 +390,7 @@ def _generate_image_openai(
 ) -> str:
     bearer_value = os.getenv("IMAGE_GENERATION_API_KEY")
     if not bearer_value:
-        return "IMAGE_GENERATION_API_KEY is not set"
+        raise ValueError("IMAGE_GENERATION_API_KEY is not set")
 
     url = f"{_openai_base_url()}/images/generations"
     headers = {"Authorization": f"Bearer {bearer_value}"}
