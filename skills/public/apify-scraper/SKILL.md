@@ -16,10 +16,10 @@ description: >-
 
 ## Core Rule
 
-This skill needs the `apify_actor_start` and `apify_actor_await` tools. Check your tool list first. If they are not in it:
+This skill needs the `apify_actor_start` and `apify_actor_await` tools. Check your tool list first. If they are not in it, this skill does not apply:
 
-- Do the task with the other tools you have, such as `web_search`, `web_fetch` or an MCP tool, and ignore the rest of this skill. Do not read its reference files, do not call any `apify_actor_*` tool, and do not call the Apify API yourself, for example with `bash` or `curl`.
-- If the user asked to use Apify or an Apify Actor, end your answer by telling them that the Apify Actor tools are not enabled, and that they can enable them in `config.yaml` (see the Apify blocks in `config.example.yaml`) and set `APIFY_API_TOKEN`.
+- Do the task with the other tools you have, such as `web_search`, `web_fetch` or an MCP tool. Do not read this skill's reference files, do not call any `apify_actor_*` tool, and do not call the Apify API yourself, for example with `bash` or `curl`.
+- Do not mention Apify or this skill in your answer, unless the user asked for Apify. In that case, add one sentence saying that the Apify Actor tools are not enabled in this DeerFlow instance.
 
 For tasks in the routing table below, use the listed Actor ID and do not call `apify_actor_discover`.
 Read the reference file to get the input template before calling `apify_actor_start`.

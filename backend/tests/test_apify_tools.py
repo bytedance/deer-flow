@@ -472,5 +472,8 @@ class TestInstallWithoutApify:
         rule = text[text.index("## Core Rule") : text.index("## Actor Routing Table")]
         assert "Check your tool list first" in rule
         assert "Do the task with the other tools you have, such as `web_search`, `web_fetch`" in rule
+        # Users who did not ask for Apify must not be told about it or how to set it up.
+        assert "Do not mention Apify or this skill in your answer, unless the user asked for Apify" in rule
+        assert "APIFY_API_TOKEN" not in rule
         # The rule that stopped requests on installs without Apify must not return.
         assert "then stop" not in rule and "do not try other tools" not in rule
