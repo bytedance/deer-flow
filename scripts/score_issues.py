@@ -547,15 +547,20 @@ def validate_issue_records(issues: list[Any]) -> None:
             raise ValueError(f"Issue record {index} must be a JSON object")
         number = issue.get("number")
         if type(number) is not int or number <= 0:
-            raise ValueError(f"Issue record {index} must have a positive integer number")
+            raise ValueError(
+                f"Issue record {index} must have a positive integer number"
+            )
         for field in ("title", "body", "url"):
             value = issue.get(field)
             if value is not None and not isinstance(value, str):
-                raise ValueError(f"Issue record {index} field '{field}' must be text or null")
+                raise ValueError(
+                    f"Issue record {index} field '{field}' must be text or null"
+                )
         labels = issue.get("labels", [])
         if not isinstance(labels, list) or not all(
             isinstance(label, str)
-            or isinstance(label, dict) and isinstance(label.get("name"), str)
+            or isinstance(label, dict)
+            and isinstance(label.get("name"), str)
             for label in labels
         ):
             raise ValueError(f"Issue record {index} labels must be a list of names")
@@ -573,7 +578,8 @@ def validate_unique_imports(issues: list[dict[str, Any]], repo: str | None) -> N
     )
     positions: dict[tuple[str, str, int], int] = {}
     for index, issue in enumerate(issues, start=1):
-        match = ISSUE_URL_RE.fullmatch(issue.get("url") or "")
+        url = (issue.get("url") or "").partition("#")[0].partition("?")[0]
+        match = ISSUE_URL_RE.fullmatch(url)
         scope = (match["host"].lower(), match["repo"].lower()) if match else fallback
         number = issue["number"]
         identity = (*scope, number)
@@ -790,7 +796,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     declared = load_declared_labels(LABELS_FILE)
-    results: list[dict[str, Any]] = []
+    results_by_future: dict[concurrent.futures.Future, dict[str, Any]] = {}
     failed_numbers: list[int] = []
 
     try:
@@ -813,11 +819,11 @@ def main(argv: list[str] | None = None) -> int:
             }
             for fut in concurrent.futures.as_completed(futures):
                 try:
-                    results.append(fut.result())
+                    results_by_future[fut] = fut.result()
                 except Exception as err:
                     issue = futures[fut]
                     failed_numbers.append(issue["number"])
-                    results.append(failed_evaluation_result(issue, err))
+                    results_by_future[fut] = failed_evaluation_result(issue, err)
     except Exception as err:
         print(f"Error scoring issues: {err}", file=sys.stderr)
         return 1
@@ -830,6 +836,8 @@ def main(argv: list[str] | None = None) -> int:
         "Needs-Info": 4,
         "Not-Applicable": 5,
     }
+    # The stable sort breaks remaining ties in input order.
+    results = [results_by_future[fut] for fut in futures]
     results.sort(
         key=lambda r: (
             r["scoring"]["needs_review"],
@@ -859,7 +867,7 @@ def main(argv: list[str] | None = None) -> int:
     if failed_numbers:
         print(
             "Error evaluating issues: "
-            + ", ".join(f"#{number}" for number in failed_numbers),
+            + ", ".join(f"#{number}" for number in sorted(failed_numbers)),
             file=sys.stderr,
         )
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import html
 import http.client
 import importlib.util
@@ -399,6 +400,95 @@ def test_export_detects_duplicates_by_repository_before_scoring(scorer, transpor
         assert "appears more than once" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("suffix", ["#issuecomment-123", "?foo=1", "?foo=1#issuecomment-123"])
+@pytest.mark.parametrize("repo_args", [[], ["--repo", "other/default"]], ids=["no-repo", "repo-fallback"])
+def test_export_rejects_duplicate_issue_links_with_query_or_fragment(scorer, transport, tmp_path, issue, facts, capsys, suffix, repo_args):
+    source = tmp_path / "issues.json"
+    other = {**issue, "url": f"HTTPS://GITHUB.COM/ByteDance/Deer-Flow/issues/42{suffix}"}
+    source.write_text(json.dumps([issue, other]), encoding="utf-8")
+    calls = transport(response(facts))
+
+    assert scorer.main(["--input-json", str(source), "--api-key", "test-key", *repo_args]) == 1
+    assert calls == []
+    assert "Issue #42 appears more than once" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("other_url", "repo_args"),
+    [
+        ("https://github.com/other/deer-flow/issues/42?foo=1", ["--repo", "github.com/bytedance/deer-flow"]),
+        ("https://github.example/bytedance/deer-flow/issues/42#issuecomment-123", ["--repo", "github.com/bytedance/deer-flow"]),
+        ("http://github.com/bytedance/deer-flow/issues/42#issuecomment-123", []),
+        ("https://user@github.com/bytedance/deer-flow/issues/42?foo=1", []),
+        ("https://github.com:443/bytedance/deer-flow/issues/42#issuecomment-123", []),
+        ("https://github.com:444/bytedance/deer-flow/issues/42?foo=1", []),
+        ("https://github.com/bytedance/deer-flow/issues/42/#issuecomment-123", []),
+        ("https://github.com/bytedance/deer-flow/issues/42/comments?foo=1", []),
+        ("https://github.com/bytedance/deer-flow/pull/42#issuecomment-123", []),
+    ],
+)
+def test_export_preserves_distinct_repository_scopes(scorer, transport, tmp_path, issue, facts, other_url, repo_args):
+    source, output = tmp_path / "issues.json", tmp_path / "results.json"
+    source.write_text(json.dumps([issue, {**issue, "url": other_url}]), encoding="utf-8")
+    calls = transport(response(facts))
+
+    assert scorer.main(["--input-json", str(source), "--output-json", str(output), "--api-key", "test-key", *repo_args]) == 0
+    assert len(calls) == 2
+    assert {row["url"] for row in json.loads(output.read_text(encoding="utf-8"))} == {issue["url"], other_url}
+
+
+@pytest.mark.parametrize("outcome", ["valid", "invalid", "worker-error"])
+def test_report_order_is_independent_of_worker_completion_order(scorer, monkeypatch, tmp_path, issue, facts, capsys, outcome):
+    source, output, report = [tmp_path / name for name in ("issues.json", "results.json", "report.md")]
+    items = [
+        {**issue, "title": "First issue"},
+        {**issue, "title": "Second issue", "url": "https://github.com/another/deer-flow/issues/42"},
+    ]
+    if outcome == "worker-error":
+        items[1].update(number=43, url="https://github.com/another/deer-flow/issues/43")
+        items.append({**issue, "number": 44, "title": "Successful issue", "url": "https://github.com/another/deer-flow/issues/44"})
+    elif outcome == "invalid":
+        items[1]["url"] = None
+    source.write_text(json.dumps(items), encoding="utf-8")
+    calls = []
+
+    def urlopen(request, **kwargs):
+        title = json.loads(json.loads(request.data)["input"][1]["content"])["title"]
+        calls.append(title)
+        if outcome == "worker-error" and title != "Successful issue":
+            raise ConnectionResetError()
+        assessment = {"priority": []} if outcome == "invalid" else facts
+        return io.BytesIO(json.dumps(response(assessment)).encode("utf-8"))
+
+    def completed(futures):
+        ordered = list(futures)
+        for future in reversed(ordered) if reverse else ordered:
+            assert concurrent.futures.wait([future], timeout=10).done
+            yield future
+
+    monkeypatch.setattr(scorer.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(scorer.concurrent.futures, "as_completed", completed)
+    args = ["--input-json", str(source), "--api-key", "test-key", "--output-json", str(output), "--output-md", str(report)]
+    reports = []
+    for reverse in (False, True):
+        calls.clear()
+        assert scorer.main(args) == int(outcome != "valid")
+        assert sorted(calls) == sorted(item["title"] for item in items)
+        reports.append((json.loads(output.read_text(encoding="utf-8")), report.read_text(encoding="utf-8"), capsys.readouterr().err))
+
+    rows, markdown, stderr = reports[0]
+    assert [row["title"] for row in rows] == (["Successful issue", "First issue", "Second issue"] if outcome == "worker-error" else ["First issue", "Second issue"])
+    if outcome == "valid":
+        assert f"| 1 | [#42]({items[0]['url']}) First issue |" in markdown
+        assert f"| 2 | [#42]({items[1]['url']}) Second issue |" in markdown
+    elif outcome == "worker-error":
+        assert "Error evaluating issues: #42, #43" in stderr
+    else:
+        assert [row["scoring"]["needs_review"] for row in rows] == [True, True]
+        assert markdown.count("| — | ") == 2
+    assert reports[1] == reports[0]
+
+
 def test_only_valid_assessments_are_ranked(scorer, monkeypatch, tmp_path, issue, facts):
     source, output, report = [tmp_path / name for name in ("issues.json", "results.json", "report.md")]
     verified = {**issue, "title": "Verified", "number": 43, "url": issue["url"].removesuffix("42") + "43"}
@@ -596,16 +686,20 @@ def test_live_fetch_uses_supported_fields(scorer, monkeypatch, issue_number):
 
 
 @pytest.mark.parametrize(
-    ("repo", "url"),
+    ("repo", "url", "error"),
     [
-        (None, "https://github.com/bytedance/deer-flow/issues/42"),
-        ("bytedance/deer-flow", "https://github.com/example-fork/deer-flow/issues/42"),
-        ("bytedance/deer-flow", "https://github.com/bytedance/deer-flow/issues/43"),
-        ("bytedance/deer-flow", "https://example.com/bytedance/deer-flow/issues/42"),
-        ("bytedance/deer-flow", ""),
+        (None, "https://github.com/bytedance/deer-flow/issues/42", "--repo is required"),
+        ("bytedance/deer-flow", "https://github.com/example-fork/deer-flow/issues/42", "does not match --repo"),
+        ("bytedance/deer-flow", "https://github.com/bytedance/deer-flow/issues/43", "must have a matching HTTPS issue URL"),
+        ("bytedance/deer-flow", "https://example.com/bytedance/deer-flow/issues/42", "does not match --repo"),
+        ("bytedance/deer-flow", "", "must have a matching HTTPS issue URL"),
+        ("bytedance/deer-flow", "https://github.com/bytedance/deer-flow/issues/42#issuecomment-123", "must have a matching HTTPS issue URL"),
+        ("bytedance/deer-flow", "https://github.com/bytedance/deer-flow/issues/42?foo=1", "must have a matching HTTPS issue URL"),
     ],
 )
-def test_label_apply_rejects_entire_invalid_export_before_any_gh_call(scorer, monkeypatch, tmp_path, repo, url):
+@pytest.mark.parametrize("label_mode", ["--dry-run", "--apply-labels"])
+def test_label_modes_reject_entire_invalid_export_before_any_calls(scorer, transport, monkeypatch, tmp_path, capsys, repo, url, error, label_mode):
+    monkeypatch.delenv("GH_HOST", raising=False)
     input_file = tmp_path / "issues.json"
     input_file.write_text(
         json.dumps(
@@ -616,15 +710,18 @@ def test_label_apply_rejects_entire_invalid_export_before_any_gh_call(scorer, mo
         ),
         encoding="utf-8",
     )
-    calls = []
+    gh_calls = []
+    model_calls = transport({})
 
     def fake_gh(cmd, **kwargs):
-        calls.append(cmd)
+        gh_calls.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(scorer.subprocess, "run", fake_gh)
-    args = ["--input-json", str(input_file), "--offline", "--apply-labels"]
+    args = ["--input-json", str(input_file), "--api-key", "test-key", label_mode]
     if repo:
         args += ["--repo", repo]
     assert scorer.main(args) == 1
-    assert calls == []
+    assert error in capsys.readouterr().err
+    assert model_calls == []
+    assert gh_calls == []

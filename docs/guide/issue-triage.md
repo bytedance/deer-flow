@@ -52,9 +52,9 @@ quotes unchanged; Markdown escapes markup and displays line breaks.
 
 Priorities are `P0` through `P3`, `Needs-Info` (impact cannot be assessed), and
 `Not-Applicable` (a finding confined to an unmerged PR). Valid assessments rank
-by numeric priority first, followed by the two nonnumeric states. Issue number
-breaks ties. Entries awaiting manual review appear after the ranked entries
-and have no rank.
+by numeric priority first, followed by the two nonnumeric states. Ties break by
+issue number, then by input order. Entries awaiting manual review appear after
+the ranked entries and have no rank.
 
 Routes are `fix`, `investigate`, `assign`, `design`, `needs_info`, `extension`,
 `governance`, `discussion` and `pr_review`. Governance and general questions
@@ -76,7 +76,8 @@ the reports.
 Each JSON record must be an object with a positive integer issue number.
 Invalid records are reported by their input position before evaluation starts.
 Repeated records for the same host, repository, and issue number are rejected
-before evaluation starts.
+before evaluation starts. Duplicate checks ignore queries and fragments on
+HTTPS issue URLs.
 With `--input-json`, `--issue NUMBER` scores only the matching record and
 requires that number to appear exactly once in the export.
 
@@ -96,8 +97,9 @@ python scripts/score_issues.py --input-json issues.json \
 `--apply-labels` explicitly enables writes through `gh`. Only labels declared
 in `.github/labels.yml` are eligible. Entries requiring manual review, offline
 previews, `Needs-Info`, and `Not-Applicable` receive no labels. Existing live
-priority labels are preserved. JSON input requires `--repo`, and every issue's
-URL and number must match the target before any labels are written.
+priority labels are preserved. JSON input requires `--repo`. Label previews and
+writes require an HTTPS URL of the form `https://HOST/OWNER/REPO/issues/NUMBER`
+that matches the issue number and target repository.
 Before each write, the script reads the current title and body and compares
 them with the text used for scoring. A change skips that issue, reports the
 reason on stderr, and makes the command exit nonzero after the batch.
