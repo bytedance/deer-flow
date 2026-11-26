@@ -117,6 +117,18 @@ def run_is_before_cursor(
     return run_sort_key(created_at, run_id) < run_sort_key(before_created_at, before_run_id)
 
 
+def run_owner_matches(
+    record_user_id: str | None,
+    user_id: str | None,
+    *,
+    allow_legacy_default: bool = False,
+) -> bool:
+    """Whether a run stamped with ``record_user_id`` is visible to ``user_id``."""
+    if user_id is None or record_user_id == user_id:
+        return True
+    return allow_legacy_default and user_id == "default" and not record_user_id
+
+
 class RunStore(abc.ABC):
     supports_run_inputs = False
 
@@ -193,6 +205,7 @@ class RunStore(abc.ABC):
         run_id: str,
         *,
         user_id: str | None = None,
+        allow_legacy_default: bool = False,
     ) -> dict[str, Any] | None:
         pass
 
@@ -202,6 +215,7 @@ class RunStore(abc.ABC):
         thread_id: str,
         *,
         user_id: str | None = None,
+        allow_legacy_default: bool = False,
         limit: int = 100,
         before_created_at: str | None = None,
         before_run_id: str | None = None,

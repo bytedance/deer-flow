@@ -26,6 +26,7 @@ from deerflow.runtime.runs.store.base import (
     StatusFinalization,
     canonical_run_created_at,
     normalize_run_created_at_iso,
+    run_owner_matches,
 )
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
@@ -295,13 +296,14 @@ class RunRepository(RunStore):
         run_id,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
+        allow_legacy_default: bool = False,
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.get")
         async with self._sf() as session:
             row = await session.get(RunRow, run_id)
             if row is None:
                 return None
-            if resolved_user_id is not None and row.user_id != resolved_user_id:
+            if not run_owner_matches(row.user_id, resolved_user_id, allow_legacy_default=allow_legacy_default):
                 return None
             return self._row_to_dict(row)
 
@@ -364,6 +366,7 @@ class RunRepository(RunStore):
         thread_id,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
+        allow_legacy_default: bool = False,
         limit=100,
         before_created_at: str | None = None,
         before_run_id: str | None = None,
@@ -371,7 +374,10 @@ class RunRepository(RunStore):
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.list_by_thread")
         stmt = select(RunRow).where(RunRow.thread_id == thread_id, RunRow.operation_kind == "run")
         if resolved_user_id is not None:
-            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+            if allow_legacy_default and resolved_user_id == "default":
+                stmt = stmt.where(or_(RunRow.user_id == resolved_user_id, RunRow.user_id.is_(None), RunRow.user_id == ""))
+            else:
+                stmt = stmt.where(RunRow.user_id == resolved_user_id)
         if before_created_at and before_run_id:
             cursor_dt = datetime.fromisoformat(normalize_run_created_at_iso(before_created_at))
             if cursor_dt.tzinfo is None:

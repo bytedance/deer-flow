@@ -16,6 +16,7 @@ from deerflow.runtime.runs.store.base import (
     StatusFinalization,
     canonical_run_created_at,
     run_is_before_cursor,
+    run_owner_matches,
     run_sort_key,
 )
 
@@ -139,11 +140,11 @@ class MemoryRunStore(RunStore):
         self._index_run(run_id, thread_id)
         return self._runs[run_id]
 
-    async def get(self, run_id, *, user_id=None):
+    async def get(self, run_id, *, user_id=None, allow_legacy_default=False):
         run = self._runs.get(run_id)
         if run is None:
             return None
-        if user_id is not None and run.get("user_id") != user_id:
+        if not run_owner_matches(run.get("user_id"), user_id, allow_legacy_default=allow_legacy_default):
             return None
         return run
 
@@ -165,6 +166,7 @@ class MemoryRunStore(RunStore):
         thread_id,
         *,
         user_id=None,
+        allow_legacy_default=False,
         limit=100,
         before_created_at=None,
         before_run_id=None,
@@ -180,7 +182,7 @@ class MemoryRunStore(RunStore):
             for run_id in run_ids
             if (run := self._runs.get(run_id)) is not None
             and run.get("operation_kind", "run") == "run"
-            and (user_id is None or run.get("user_id") == user_id)
+            and run_owner_matches(run.get("user_id"), user_id, allow_legacy_default=allow_legacy_default)
             and run_is_before_cursor(
                 run.get("created_at"),
                 run["run_id"],

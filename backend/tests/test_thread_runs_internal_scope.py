@@ -30,6 +30,7 @@ from app.gateway.authz import AuthContext, Permissions
 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, get_internal_user
 from app.gateway.routers import thread_runs
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.run.sql import RunRepository
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.runtime.events.store.db import DbRunEventStore
@@ -1291,7 +1292,9 @@ def test_ownerless_internal_caller_reads_and_paginates_legacy_null_owner_runs(ow
 
 @pytest.mark.no_auto_user
 def test_ownerless_internal_caller_reads_and_paginates_legacy_null_owner_runs_sql(db_event_store: DbRunEventStore) -> None:
-    """SQL RunRepository preserves legacy NULL-owner visibility and multi-batch keyset pagination."""
+    """SQL RunRepository filters legacy/default ownership before pagination, unaffected by other users' unreadable rows."""
+    from sqlalchemy import update
+
     thread_store = MemoryThreadMetaStore(InMemoryStore())
     asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=None))
     run_store = RunRepository(get_session_factory())
@@ -1299,12 +1302,17 @@ def test_ownerless_internal_caller_reads_and_paginates_legacy_null_owner_runs_sq
     async def _seed() -> None:
         await run_store.put("run-sql-legacy-null-old", thread_id=THREAD_ID, user_id=None, status="success")
         await asyncio.sleep(0.02)
-        for i in range(55):
-            await run_store.put(f"run-sql-owner-{i:02d}", thread_id=THREAD_ID, user_id=OWNER_RAW, status="success")
-        await asyncio.sleep(0.02)
         await run_store.put("run-sql-default", thread_id=THREAD_ID, user_id="default", status="success")
         await asyncio.sleep(0.02)
         await run_store.put("run-sql-legacy-null-new", thread_id=THREAD_ID, user_id=None, status="success")
+        await asyncio.sleep(0.02)
+        # Put >50 newer non-default runs ahead of the default/NULL rows, including one
+        # unreadable historical row in the first unfiltered batch.
+        for i in range(55):
+            await run_store.put(f"run-sql-owner-{i:02d}", thread_id=THREAD_ID, user_id=OWNER_RAW, status="success")
+        async with get_session_factory()() as session:
+            await session.execute(update(RunRow).where(RunRow.run_id == "run-sql-owner-54").values(status="corrupt-status"))
+            await session.commit()
 
     anyio.run(_seed)
 

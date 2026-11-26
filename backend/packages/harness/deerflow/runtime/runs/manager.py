@@ -32,6 +32,7 @@ from .store.base import (
     canonical_run_created_at,
     normalize_run_created_at_iso,
     run_is_before_cursor,
+    run_owner_matches,
     run_sort_key,
 )
 
@@ -1178,6 +1179,7 @@ class RunManager:
         run_id: str,
         *,
         user_id: str | None = None,
+        allow_legacy_default: bool = False,
         raise_on_store_error: bool = False,
     ) -> RunRecord | None:
         """Return a run record by ID, or ``None``.
@@ -1186,13 +1188,15 @@ class RunManager:
             run_id: The run ID to look up.
             user_id: Optional user ID for permission filtering across in-memory
                 and store records.
+            allow_legacy_default: When true with ``user_id="default"``, match
+                legacy records stamped with ``None`` or ``""`` as well.
             raise_on_store_error: Propagate store hydration/mapping failures so
                 lifecycle callers can distinguish them from a missing run.
         """
         async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
         if record is not None and not record.evicted:
-            if user_id is not None and record.user_id != user_id:
+            if not run_owner_matches(record.user_id, user_id, allow_legacy_default=allow_legacy_default):
                 return None
             return record
         # A hidden record is authoritative for "this run is deleted", so never
@@ -1202,8 +1206,11 @@ class RunManager:
             return None
         if self._store is None:
             return None
+        store_kwargs: dict[str, Any] = {"user_id": user_id}
+        if allow_legacy_default and user_id == "default":
+            store_kwargs["allow_legacy_default"] = True
         try:
-            row = await self._store.get(run_id, user_id=user_id)
+            row = await self._store.get(run_id, **store_kwargs)
         except Exception:
             if raise_on_store_error:
                 raise
@@ -1214,7 +1221,7 @@ class RunManager:
         async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
         if record is not None and not record.evicted:
-            if user_id is not None and record.user_id != user_id:
+            if not run_owner_matches(record.user_id, user_id, allow_legacy_default=allow_legacy_default):
                 return None
             return record
         if record is not None or row is None:
@@ -1232,6 +1239,7 @@ class RunManager:
         run_id: str,
         *,
         user_id: str | None = None,
+        allow_legacy_default: bool = False,
         raise_on_store_error: bool = False,
     ) -> RunRecord | None:
         """Return a run record by ID, checking the persistent store as fallback.
@@ -1241,6 +1249,7 @@ class RunManager:
         return await self.get(
             run_id,
             user_id=user_id,
+            allow_legacy_default=allow_legacy_default,
             raise_on_store_error=raise_on_store_error,
         )
 
@@ -1249,6 +1258,7 @@ class RunManager:
         thread_id: str,
         *,
         user_id: str | None = None,
+        allow_legacy_default: bool = False,
         limit: int = 100,
         before_created_at: str | None = None,
         before_run_id: str | None = None,
@@ -1265,6 +1275,8 @@ class RunManager:
             thread_id: The thread ID to filter by.
             user_id: Optional user ID for permission filtering across in-memory
                 and store records.
+            allow_legacy_default: When true with ``user_id="default"``, include
+                legacy records stamped with ``None`` or ``""`` before pagination.
             limit: Maximum number of runs to return.
             before_created_at: ISO timestamp of the last run on the previous page.
             before_run_id: Run id of the last run on the previous page.
@@ -1289,7 +1301,7 @@ class RunManager:
                 for record in self._thread_records_locked(thread_id)
                 if record.operation_kind == ThreadOperationKind.run
                 and not record.evicted
-                and (user_id is None or record.user_id == user_id)
+                and run_owner_matches(record.user_id, user_id, allow_legacy_default=allow_legacy_default)
                 and run_is_before_cursor(
                     record.created_at,
                     record.run_id,
@@ -1307,6 +1319,8 @@ class RunManager:
         # distinct row when that page is occupied by duplicate local records.
         store_limit = limit + len(memory_records)
         store_kwargs: dict[str, Any] = {"user_id": user_id, "limit": store_limit}
+        if allow_legacy_default and user_id == "default":
+            store_kwargs["allow_legacy_default"] = True
         if before_created_at is not None and before_run_id is not None:
             store_kwargs["before_created_at"] = before_created_at
             store_kwargs["before_run_id"] = before_run_id
@@ -1325,7 +1339,7 @@ class RunManager:
             # so a store row here can only be a stale or partial read. An
             # authoritative live record owned by another user must likewise
             # block a stale store row from surfacing.
-            if known is not None and (known.evicted or (user_id is not None and known.user_id != user_id)):
+            if known is not None and (known.evicted or not run_owner_matches(known.user_id, user_id, allow_legacy_default=allow_legacy_default)):
                 continue
             if run_id not in records_by_id:
                 try:
