@@ -175,6 +175,46 @@ def test_str_replace_on_a_mixed_file_edits_only_the_matched_lines(tmp_path, monk
     assert after == b"lf1\nlf2\nCRLF1\r\nCRLF2\r\n"
 
 
+@pytest.mark.parametrize(
+    ("old_str", "new_str", "expected"),
+    [
+        # new_str takes the line ending of the span's first line break.
+        pytest.param("b\nc\nd", "B\nC\nD", b"a\r\nB\r\nC\r\nD\r\ne\n", id="crlf-first"),
+        pytest.param("c\nd\ne", "C\nD\nE", b"a\r\nb\r\nC\nD\nE\n", id="lf-first"),
+        pytest.param("b\nc\n", "B\n", b"a\r\nB\r\nd\r\ne\n", id="ends-after-lf"),
+        pytest.param("c\nd\n", "X\n", b"a\r\nb\r\nX\ne\n", id="ends-after-crlf"),
+    ],
+)
+def test_str_replace_matches_a_ranged_read_across_mixed_endings(tmp_path, monkeypatch, old_str, new_str, expected) -> None:
+    # A ranged read joins lines with "\n", so a span crossing CRLF and LF lines
+    # matches neither the literal nor the all-CRLF spelling of old_str.
+    result, after = _str_replace(tmp_path, monkeypatch, b"a\r\nb\r\nc\nd\r\ne\n", old_str=old_str, new_str=new_str)
+
+    assert result == "OK"
+    assert after == expected
+
+
+def test_str_replace_across_mixed_endings_replaces_the_first_match_or_all(tmp_path, monkeypatch) -> None:
+    mixed = b"x\r\ny\nx\ny\r\nx\r\ny\n"
+
+    result, after = _str_replace(tmp_path, monkeypatch, mixed, old_str="x\ny\nx", new_str="Z\nZ")
+    assert result == "OK"
+    assert after == b"Z\r\nZ\ny\r\nx\r\ny\n"
+
+    result, after = _str_replace(tmp_path, monkeypatch, mixed, old_str="x\ny\n", new_str="X\nY\n", replace_all=True)
+    assert result == "OK"
+    assert after == b"X\r\nY\r\nX\nY\nX\r\nY\r\n"
+
+
+def test_str_replace_on_a_mixed_file_still_reports_a_missing_old_str(tmp_path, monkeypatch) -> None:
+    mixed = b"a\r\nb\nc\r\n"
+
+    result, after = _str_replace(tmp_path, monkeypatch, mixed, old_str="a\nc", new_str="x")
+
+    assert result.startswith("Error: String to replace not found in file")
+    assert after == mixed
+
+
 def test_str_replace_on_an_lf_file_writes_new_str_as_given(tmp_path, monkeypatch) -> None:
     result, after = _str_replace(tmp_path, monkeypatch, b"one\ntwo\n", old_str="one\n", new_str="uno\r\n")
 

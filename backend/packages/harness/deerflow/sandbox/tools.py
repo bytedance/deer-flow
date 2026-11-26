@@ -1,4 +1,5 @@
 import asyncio
+import bisect
 import json
 import logging
 import ntpath
@@ -3619,6 +3620,48 @@ def _match_line_endings(content: str, old_str: str, new_str: str) -> tuple[str, 
     return old_str, new_str
 
 
+def _replace_across_line_endings(content: str, old_str: str, new_str: str, replace_all: bool) -> str | None:
+    """Replace a multi-line ``old_str`` whose span mixes CRLF and LF lines.
+
+    A ranged read of a mixed file joins lines with ``\\n``, so the snippet
+    matches neither its literal nor its all-CRLF spelling. Match it against the
+    file with CRLF read as LF and replace only the original span, so line
+    endings outside it stay as stored. ``new_str`` takes the ending of the
+    span's first line break.
+    """
+    flat_old = old_str.replace("\r\n", "\n")
+    if "\r\n" not in content or "\n" not in flat_old:
+        return None
+    flat = content.replace("\r\n", "\n")
+    index = flat.find(flat_old)
+    if index < 0:
+        return None
+    # Where each CRLF's "\n" sits in flat: flat offset i starts in content at
+    # i plus the number of CRLFs before it.
+    flat_crlf = [m.start() - k for k, m in enumerate(re.finditer("\r\n", content))]
+    pieces: list[str] = []
+    copied = 0
+    while index >= 0:
+        flat_end = index + len(flat_old)
+        start = index + bisect.bisect_left(flat_crlf, index)
+        end = flat_end + bisect.bisect_left(flat_crlf, flat_end)
+        span = content[start:end]
+        crlf = "\r\n" in span[: span.index("\n") + 1]
+        pieces += [content[copied:start], _to_crlf(new_str) if crlf else new_str.replace("\r\n", "\n")]
+        copied = end
+        index = flat.find(flat_old, flat_end) if replace_all else -1
+    pieces.append(content[copied:])
+    return "".join(pieces)
+
+
+def _replace_keeping_line_endings(content: str, old_str: str, new_str: str, replace_all: bool) -> str | None:
+    """Return ``content`` with ``old_str`` replaced, or None when it is absent."""
+    old_str, new_str = _match_line_endings(content, old_str, new_str)
+    if old_str in content:
+        return content.replace(old_str, new_str) if replace_all else content.replace(old_str, new_str, 1)
+    return _replace_across_line_endings(content, old_str, new_str, replace_all)
+
+
 @tool("str_replace", parse_docstring=True)
 def str_replace_tool(
     runtime: Runtime,
@@ -3657,14 +3700,10 @@ def str_replace_tool(
                 # A no-op edit. str.replace("", new_str) would insert new_str at
                 # every character boundary, so this cannot fall through.
                 return "OK"
-            old_str, new_str = _match_line_endings(content, old_str, new_str)
-            if not content or old_str not in content:
+            replaced = _replace_keeping_line_endings(content, old_str, new_str, replace_all)
+            if replaced is None:
                 return f"Error: String to replace not found in file: {requested_path}"
-            if replace_all:
-                content = content.replace(old_str, new_str)
-            else:
-                content = content.replace(old_str, new_str, 1)
-            sandbox.write_file(path, content)
+            sandbox.write_file(path, replaced)
         return "OK"
     except SandboxCapacityExceededError as e:
         return _sandbox_capacity_result(runtime, e, "str_replace")

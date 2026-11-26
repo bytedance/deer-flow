@@ -2847,6 +2847,8 @@ class _AioFileServer:
         pytest.param(b"one\r\ntwo old\nthree\rfour", "old", "new", b"one\r\ntwo new\nthree\rfour", id="mixed"),
         pytest.param(b"one\ntwo old\nthree\n", "old", "new", b"one\ntwo new\nthree\n", id="lf"),
         pytest.param(b"first\r\nsecond\r\n", "first\nsecond", "1\n2", b"1\r\n2\r\n", id="crlf-multiline-lf-old-str"),
+        # A ranged read of lines 3-5 returns "c\nd\ne"; the span crosses from CRLF to LF.
+        pytest.param(b"a\r\nb\r\nc\r\nd\ne\n", "c\nd\ne", "C\nD\nE", b"a\r\nb\r\nC\r\nD\r\nE\n", id="mixed-multiline-ranged-read"),
     ],
 )
 def test_str_replace_on_aio_keeps_the_file_line_endings(sandbox, monkeypatch, stored, old_str, new_str, expected):

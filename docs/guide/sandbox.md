@@ -390,7 +390,7 @@ Loop warnings let agents save collected results before their final answer. If th
 
 Ranged `read_file` calls count lines the same way on every sandbox provider: a line ends only at a newline. On AIO, E2B, BoxLite, Tenki, and OpenSandbox, a file with bare carriage returns (such as a saved progress log), form feeds, or Unicode line separators therefore returns the same lines as on the local sandbox, and the `start_line` a truncated read suggests points at the next unread line.
 
-A full `read_file` returns line endings as stored, so `str_replace` keeps a CRLF, CR-only or mixed-ending file in its own endings. On AIO, `read_file` and `str_replace` read the stored bytes and fail on a file larger than 100 MB, leaving it unchanged; read part of such a file with `bash` (`head`, `tail` or `sed -n`).
+A full `read_file` returns line endings as stored, so `str_replace` keeps a CRLF, CR-only or mixed-ending file in its own endings. An `old_str` copied from a ranged read of a mixed-ending file, whose lines are joined with `\n`, still matches when it spans CRLF and LF lines: only the matched text changes, and `new_str` takes the line ending of the first line break in that text. On AIO, `read_file` and `str_replace` read the stored bytes and fail on a file larger than 100 MB, leaving it unchanged; read part of such a file with `bash` (`head`, `tail` or `sed -n`).
 
 Concurrent reads and writes to the same file share a gate across synchronous and asynchronous tool calls. Async callers waiting for that gate do not occupy worker threads needed to finish the current read or write. Cancelling a waiting call leaves the current operation running; a call that already started file inspection still waits for that work to finish before releasing its gate.
 

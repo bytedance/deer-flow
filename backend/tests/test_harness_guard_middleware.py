@@ -283,6 +283,28 @@ class TestHarnessGuardMiddleware:
         assert res.status == "error"
         assert "WRITE BLOCKED" in res.content
 
+    def test_str_replace_across_mixed_endings_is_verified(self):
+        """A ranged-read old_str spanning CRLF and LF lines is spliced and checked too."""
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(write_verify_syntax=True, block_on_syntax_error=True))
+        mixed_file = "def foo():\r\n    x = 1\n    return x\r\n"
+        req = _make_request(
+            "str_replace",
+            {"path": "module.py", "old_str": "def foo():\n    x = 1\n    return x", "new_str": "def foo(:\n    return 1"},
+        )
+
+        def dummy_handler(r):
+            return ToolMessage(content="Replaced", tool_call_id=r.tool_call["id"], name="str_replace")
+
+        with patch(
+            "deerflow.agents.middlewares.harness_guard_middleware.read_current_file_content",
+            return_value=mixed_file,
+        ):
+            res = middleware.wrap_tool_call(req, dummy_handler)
+
+        assert isinstance(res, ToolMessage)
+        assert res.status == "error"
+        assert "WRITE BLOCKED" in res.content
+
     def test_file_backed_progressive_repair_python(self, tmp_path):
         """Start with two Python syntax errors (missing colons).
         The first edit must reach disk while the other error remains;
