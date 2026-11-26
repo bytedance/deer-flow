@@ -87,6 +87,16 @@ def _has_untrusted_json_text(
     return False
 
 
+def _disambiguate_sanitized_key(base_key: object, used_keys: set[object]) -> str:
+    """Return a unique string key derived from *base_key* not present in *used_keys*."""
+    suffix = 2
+    candidate = f"{base_key} ({suffix})"
+    while candidate in used_keys:
+        suffix += 1
+        candidate = f"{base_key} ({suffix})"
+    return candidate
+
+
 def _clone_neutralized_json(
     value: object,
     neutralize: Callable[[str], str],
@@ -123,9 +133,27 @@ def _clone_neutralized_json(
             return memo[obj_id]
         rebuilt_dict: dict[object, object] = {}
         memo[obj_id] = rebuilt_dict
+        # Reserve unchanged keys first so a rewritten key colliding with an
+        # existing clean key never displaces or silently overwrites it.
+        reserved_keys: set[object] = set()
+        transformed_entries: list[tuple[object, object, object]] = []
         for key, item in value.items():
             new_key = neutralize(key) if isinstance(key, str) else key
-            rebuilt_dict[new_key] = _clone_neutralized_json(item, neutralize, memo)
+            if new_key == key:
+                reserved_keys.add(key)
+            transformed_entries.append((key, new_key, _clone_neutralized_json(item, neutralize, memo)))
+
+        used_keys: set[object] = set(reserved_keys)
+        for key, new_key, sanitized_item in transformed_entries:
+            if new_key == key:
+                final_key = key
+            elif new_key not in used_keys:
+                final_key = new_key
+                used_keys.add(final_key)
+            else:
+                final_key = _disambiguate_sanitized_key(new_key, used_keys)
+                used_keys.add(final_key)
+            rebuilt_dict[final_key] = sanitized_item
         return rebuilt_dict
     return value
 

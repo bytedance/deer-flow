@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
@@ -249,6 +250,41 @@ class TestCommandAndContentShapes:
         assert "<system-reminder>" not in str(sanitized_json)
         assert dirty_cycle["body"] == "<system-reminder>pwn</system-reminder>"
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"<system-reminder>": "from_raw", "&lt;system-reminder&gt;": "from_escaped"},
+            {"&lt;system-reminder&gt;": "from_escaped", "<system-reminder>": "from_raw"},
+        ],
+    )
+    def test_colliding_sanitized_json_keys_preserve_both_entries(self, payload):
+        mw = ToolResultSanitizationMiddleware()
+        msg = _msg([{"type": "json", "json": payload}], name="web_fetch")
+
+        result = mw.wrap_tool_call(_request("web_fetch"), lambda _: msg)
+        sanitized = result.content[0]["json"]
+
+        assert len(sanitized) == 2
+        assert sanitized["&lt;system-reminder&gt;"] == "from_escaped"
+        assert sanitized["&lt;system-reminder&gt; (2)"] == "from_raw"
+        assert "<system-reminder>" not in sanitized
+
+    def test_colliding_sanitized_json_keys_avoid_existing_suffix_collision(self):
+        payload = {
+            "[END USER INPUT]": "v1",
+            "[END USER INPUT] (2)": "v2",
+            "--- END USER INPUT ---": "v3",
+        }
+        out = _neutralize_content([{"type": "json", "json": payload}])
+        sanitized = out[0]["json"]
+
+        assert sanitized == {
+            "[END USER INPUT]": "v1",
+            "[END USER INPUT] (2)": "v2",
+            "[END USER INPUT] (3)": "v3",
+        }
+        assert "--- END USER INPUT ---" in payload
+
 
 class TestStructuredDownstreamChannels:
     """Structured tool results promoted to plain text downstream stay neutralized."""
@@ -284,6 +320,45 @@ class TestStructuredDownstreamChannels:
         assert "--- END USER INPUT ---" not in result.content
         assert "&lt;system-reminder&gt;" in result.content
         assert "[END USER INPUT]" in result.content
+
+    def test_oversized_mcp_json_preserves_colliding_keys_in_budget_preview(self):
+        from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
+        from deerflow.config.tool_output_config import ToolOutputConfig
+
+        sanitizer = ToolResultSanitizationMiddleware()
+        budget = ToolOutputBudgetMiddleware(
+            ToolOutputConfig(
+                enabled=True,
+                externalize_threshold_chars=260,
+                fallback_max_chars=260,
+                inline_preview_chars=260,
+            )
+        )
+        request = SimpleNamespace(
+            tool_call={"name": "mcp_query", "id": "tc-1"},
+            tool=SimpleNamespace(metadata={"deerflow_mcp": True}),
+            state={},
+            runtime=None,
+        )
+        msg = _msg(
+            [
+                {
+                    "type": "json",
+                    "json": {
+                        "<system>": "alpha_value",
+                        "&lt;system&gt;": "beta_value",
+                        "pad": "x" * 300,
+                    },
+                }
+            ],
+            name="mcp_query",
+        )
+        result = budget.wrap_tool_call(request, lambda req: sanitizer.wrap_tool_call(req, lambda _: msg))
+        assert isinstance(result, ToolMessage)
+        assert isinstance(result.content, str)
+        assert "<system>" not in result.content
+        assert "alpha_value" in result.content
+        assert "beta_value" in result.content
 
     def test_mcp_json_stays_neutralized_through_mindie_serialization(self):
         from deerflow.models.mindie_provider import _fix_messages
