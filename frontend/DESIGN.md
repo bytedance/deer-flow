@@ -9,11 +9,11 @@ file and the code disagree, fix one of them in the same change.
 
 The app has three surfaces that share one token set:
 
-| Surface            | Routes                             | Character                                                                          |
-| ------------------ | ---------------------------------- | ---------------------------------------------------------------------------------- |
-| Workspace (app UI) | `/workspace/*`, `/login`, `/setup` | Dense, calm, task-focused. Most UI work happens here.                              |
-| Docs               | `/[lang]/docs/*` (Nextra 4)        | Reading-first. Nextra theme with the landing `Header` in place of Nextra's navbar. |
-| Landing and blog   | `/`, `/blog/*`                     | Editorial, light-default with full dark-mode support via `--df-*` warm tokens.     |
+| Surface            | Routes                             | Character                                                                                                   |
+| ------------------ | ---------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Workspace (app UI) | `/workspace/*`, `/login`, `/setup` | Dense, calm, task-focused. Most UI work happens here.                                                       |
+| Docs               | `/[lang]/docs/*` (Nextra 4)        | Reading-first. Nextra theme with the landing `Header` in place of Nextra's navbar.                          |
+| Landing and blog   | `/`, `/blog/*`                     | Original Warm Alabaster + Deep Forest Pine editorial theme with full dark-mode support via `--df-*` tokens. |
 
 ## Color
 
@@ -53,12 +53,16 @@ Rules:
 ## Typography
 
 - **Sans** (`--font-sans`): the platform UI stack (`ui-sans-serif, system-ui`).
-  Used for all UI and body text.
-- **Serif** (Tailwind `font-serif`): reserved for the **DeerFlow wordmark**,
-  landing hero display headline, and a few brand moments (header, footer quote,
-  auth pages, workspace header). Don't use it for section headings, UI labels,
-  or body text.
-- **Mono** (`font-mono`): code, paths, IDs, token counts.
+  Used for all workspace and docs UI text. The landing surface layers
+  **DM Sans** (`--font-landing-sans` / `.font-landing-sans`) for calm editorial
+  body copy.
+- **Serif** (`Newsreader` via `--font-landing-serif` / `.font-landing-serif`,
+  and Tailwind `font-serif`): reserved for the **DeerFlow wordmark**, landing
+  hero display headline, numbered editorial section headings, featured
+  highlights, and brand moments (header, footer quote, auth pages, workspace
+  header). Don't use it for workspace UI controls or body text.
+- **Mono** (`JetBrains Mono` via `--font-mono` / `font-mono`): numbered section
+  eyebrows, code, filesystem paths, IDs, and token counts.
 - Dark mode sets `font-weight: 300` on `.dark` to offset light-on-dark bloom.
   Don't fight it with per-component weights.
 - Sizes are Tailwind's scale. UI text is `text-sm` (14px); body and reading text
@@ -148,11 +152,15 @@ file content and preserve the author's styling.
 Landing-scoped tokens and legacy decorative primitives. Don't copy legacy
 decorative effects into app or docs UI:
 
-- The landing page (`/`) uses `--df-*` editorial tokens defined on `:root` and
-  `.dark` in `globals.css` (warm light paper default plus dark mode via
-  `next-themes`, no forced dark mode) with alternating section canvases
-  (`--df-bg`, `--df-bg-soft`), hairline borders (`--df-border`), flat panels
-  (`--df-panel`), and a single teal accent (`--df-accent` / `--df-cta`).
+- The landing page (`/`) uses DeerFlow's original `--df-*` editorial tokens
+  defined on `:root` and `.dark` in `globals.css`: **Warm Alabaster**
+  (`#FAF9F6` canvas, `#F2F0EA` soft bands, `#FFFFFF` panels) with **Deep Forest
+  Pine** (`#1C5D4A` light / `#58B89C` luminous sage pine in dark mode) as the
+  single signature accent, paired with `Newsreader` + `DM Sans` + `JetBrains
+Mono` typography and a subtle 24px dot-matrix canvas (`.landing-dot-bg`).
+  Filled accent buttons and active pills with white text must always use
+  `--df-cta` / `--df-cta-fg` (`#1C5D4A` light, `#1F6B55` dark) rather than
+  `--df-accent` so contrast stays WCAG AA compliant in dark mode.
 - Legacy decorative utilities (`.golden-text`, `.ambilight`) and primitives
   (`aurora-text`, `flickering-grid`, `shine-border` in `components/ui/`) remain
   only where still referenced by workspace or auth screens and are not used on
