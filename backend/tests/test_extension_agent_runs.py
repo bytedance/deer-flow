@@ -802,6 +802,9 @@ async def worker_gateway(runtime, tmp_path):
 
     runs, state, request, entered, _ = runtime
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'workers.db'}")
+    # Match the Gateway journal mode so concurrent readers do not block worker commits.
+    async with engine.connect() as connection:
+        await connection.exec_driver_sql("PRAGMA journal_mode=WAL")
     await bootstrap_schema(engine, backend="sqlite")
     factory = async_sessionmaker(engine)
     async with factory.begin() as session:
@@ -930,6 +933,7 @@ async def test_coordinator_recovers_its_decision_and_runs_dependent_workers(work
 
     from langchain_core.messages import AIMessage
     from langchain_core.outputs import ChatGeneration, LLMResult
+    from sqlalchemy import text
 
     client, runs, state, entered, _ = worker_gateway
 
@@ -983,9 +987,13 @@ async def test_coordinator_recovers_its_decision_and_runs_dependent_workers(work
     assert report["status"] == research["status"] == "queued"
     assert report["run_settings"] == research["run_settings"] == settings
 
-    await _restart_coordination(state)
-    state.coordination_workers.start_recovery()
-    await asyncio.wait_for(entered.wait(), 8)
+    # Keep a read transaction open while recovery admits the first worker.
+    async with state.coordination_workers.repo._sessions() as reader:
+        await reader.execute(text("BEGIN"))
+        assert await reader.scalar(text("SELECT id FROM coord_tasks WHERE id = :task_id"), {"task_id": task_id}) == task_id
+        await _restart_coordination(state)
+        state.coordination_workers.start_recovery()
+        await asyncio.wait_for(entered.wait(), 8)
     waiting = (await client.get(f"{url}/{report['id']}")).raise_for_status().json()
     assert waiting["execution"] is None
     state.release_worker.set()

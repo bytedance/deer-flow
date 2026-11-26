@@ -559,6 +559,35 @@ describe("zonedLocalToUtcIso DST transitions", () => {
 });
 
 describe("onceRunAtInstant", () => {
+  test.each([
+    ["2026-12-07T09:00.5", "Asia/Shanghai", "2026-12-07T01:00:00.5+00:00"],
+    ["2026-12-07T09:00,5", "Asia/Shanghai", "2026-12-07T01:00:00.5+00:00"],
+    [
+      "2026-12-07T09:00:45,123",
+      "Asia/Shanghai",
+      "2026-12-07T01:00:45.123+00:00",
+    ],
+    ["2026-11-01T01:30.5", "America/New_York", "2026-11-01T05:30:00.5+00:00"],
+    [
+      "2026-12-07T09:00:45.123456",
+      "Asia/Shanghai",
+      "2026-12-07T01:00:45.123456+00:00",
+    ],
+    ["2026-12-07 09:00:45", "Asia/Shanghai", "2026-12-07T01:00:45+00:00"],
+    [
+      "2026-11-01T01:30:45.123",
+      "America/New_York",
+      "2026-11-01T05:30:45.123+00:00",
+    ],
+    [
+      "2026-03-08T02:30:45.123",
+      "America/New_York",
+      "2026-03-08T07:30:45.123+00:00",
+    ],
+  ])("preserves sub-minute precision for %s in %s", (value, zone, expected) => {
+    expect(onceRunAtInstant(value, zone)).toBe(expected);
+  });
+
   test("a run_at without an offset is wall-clock time in the task's zone", () => {
     expect(onceRunAtInstant("2026-10-07T09:00:00", "Asia/Shanghai")).toBe(
       "2026-10-07T01:00:00+00:00",
