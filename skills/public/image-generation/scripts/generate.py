@@ -331,6 +331,17 @@ def _generate_image_minimax(
 def _generate_image_gemini(
     prompt: str, reference_images: list[str], output_file: str, aspect_ratio: str
 ) -> str:
+    image_key = (
+        os.getenv("IMAGE_GENERATION_API_KEY")
+        if os.getenv("IMAGE_GENERATION_PROVIDER", "").strip().lower()
+        in {"gemini", "google"}
+        else None
+    )
+    bearer_value = image_key or os.getenv("GEMINI_API_KEY")
+    if not bearer_value:
+        raise MissingImageCredentialError("GEMINI_API_KEY is not set")
+    model = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3-pro-image-preview")
+
     parts = []
     for ref_img in reference_images:
         if not validate_image(ref_img):
@@ -345,16 +356,6 @@ def _generate_image_gemini(
             image_b64 = base64.b64encode(f.read()).decode("utf-8")
         parts.append({"inlineData": {"mimeType": mime_type, "data": image_b64}})
 
-    image_key = (
-        os.getenv("IMAGE_GENERATION_API_KEY")
-        if os.getenv("IMAGE_GENERATION_PROVIDER", "").strip().lower()
-        in {"gemini", "google"}
-        else None
-    )
-    bearer_value = image_key or os.getenv("GEMINI_API_KEY")
-    if not bearer_value:
-        raise MissingImageCredentialError("GEMINI_API_KEY is not set")
-    model = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3-pro-image-preview")
     response = _post_image(
         f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         headers={"x-goog-api-key": bearer_value, "Content-Type": "application/json"},
@@ -397,6 +398,11 @@ def _write_openai_image(payload: dict, output_file: str) -> str:
             image_bytes = base64.b64decode(encoded)
         else:
             image_bytes = _download_image(image_url)
+
+    # A provider can answer 200 with no bytes, or hand back an empty data URL.
+    # Fail before the output is opened so an existing image is preserved.
+    if not image_bytes:
+        raise ValueError("Provider returned an empty image")
 
     _ensure_output_dir(output_file)
     with open(output_file, "wb") as f:

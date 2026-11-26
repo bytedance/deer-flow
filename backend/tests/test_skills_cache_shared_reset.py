@@ -843,20 +843,14 @@ async def test_skill_manage_tool_drains_write_refresh_and_publish_across_cancell
     await asyncio.to_thread(agent_skill_tool.install)
     entered = threading.Event()
     release = threading.Event()
-    to_thread = skill_manage_module._to_thread
+    write_custom_skill = UserScopedSkillStorage.write_custom_skill
 
-    async def _parking_to_thread(func, /, *args, **kwargs):
-        if getattr(func, "__name__", None) != "write_custom_skill":
-            return await to_thread(func, *args, **kwargs)
+    def _parked_write(self, *args, **kwargs):
+        entered.set()
+        assert release.wait(5), "test never released the parked write"
+        return write_custom_skill(self, *args, **kwargs)
 
-        def _parked():
-            entered.set()
-            assert release.wait(5), "test never released the parked write"
-            return func(*args, **kwargs)
-
-        return await to_thread(_parked)
-
-    monkeypatch.setattr(skill_manage_module, "_to_thread", _parking_to_thread)
+    monkeypatch.setattr(UserScopedSkillStorage, "write_custom_skill", _parked_write)
     edited = _skill_content(_AGENT_SKILL, "Edited skill")
     task = asyncio.create_task(agent_skill_tool.call(action="edit", content=edited))
     try:

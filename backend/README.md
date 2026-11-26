@@ -80,11 +80,13 @@ model request.
 
 ### Sandbox System
 
-With lazy initialization, a fresh AIO run prepares its authorized Agent skill
-view without acquiring a container until a sandbox-backed tool needs one.
-Existing sandbox state still requires eager policy rebinding; upload-based
-providers still acquire and synchronize skills eagerly. Explicit sandbox
-prewarming remains a separate opt-in behavior.
+With lazy initialization, a fresh AIO or OpenSandbox run prepares its
+authorized Agent skill view without acquiring a sandbox until a sandbox-backed
+tool needs one. OpenSandbox installs that view when the tool acquires the
+remote. A run with existing sandbox state still rebinds eagerly. OpenSandbox
+also synchronizes eagerly when another operation holds or is initializing the
+thread's remote. Other upload-based providers acquire and synchronize skills
+eagerly. Explicit sandbox prewarming remains a separate opt-in behavior.
 
 Per-thread isolated execution with virtual path translation:
 

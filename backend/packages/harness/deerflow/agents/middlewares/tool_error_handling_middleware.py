@@ -895,7 +895,7 @@ def build_subagent_runtime_middlewares(
     # checkpoints are never written.
     from deerflow.agents.middlewares.model_content_compatibility_middleware import ModelContentCompatibilityMiddleware
 
-    middlewares.append(ModelContentCompatibilityMiddleware())
+    middlewares.append(ModelContentCompatibilityMiddleware(supports_vision=model_config.supports_vision if model_config is not None else True))
 
     # SubagentDateContextMiddleware (#4781) — inject framework-owned temporal
     # context before the first model call without registering the lead agent's

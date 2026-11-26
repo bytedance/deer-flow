@@ -40,6 +40,7 @@ from app.gateway.routers import (
     integrations,
     knowledge,
     mcp,
+    mcp_agent_auth,
     mcp_tasks,
     mcp_user_oauth,
     memory,
@@ -672,6 +673,9 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         ensure_browser_runtime_available(startup_config)
         logger.info("Configuration loaded successfully")
         warn_if_auth_disabled_enabled()
+        hitl_approval = getattr(startup_config, "hitl_approval", None)
+        if getattr(hitl_approval, "enabled", False) is not True:
+            logger.warning("hitl_approval is not enabled. Tool calls can execute without runtime human review. Set hitl_approval.enabled to true in config.yaml to enable tool approvals. See docs/guide/skills-and-tools.md.")
     except Exception as e:
         error_msg = f"Failed to load configuration during gateway startup: {e}"
         logger.exception(error_msg)
@@ -1375,6 +1379,8 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # MCP API is mounted at /api/mcp
     app.include_router(capabilities.router)
+    # Runtime MCP agent credential grants (admin) at /api/mcp/agent-auth
+    app.include_router(mcp_agent_auth.router)
     app.include_router(mcp.router)
     app.include_router(personal_mcp.router)
     app.include_router(mcp_user_oauth.router)

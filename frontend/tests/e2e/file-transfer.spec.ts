@@ -162,7 +162,7 @@ test("uploads retain successful files, cancel one file and retry only the failed
   await page
     .locator('textarea[name="message"]')
     .fill("Review these attachments");
-  await prompt.getByRole("button", { name: "Submit", exact: true }).click();
+  await prompt.getByRole("button", { name: "Send", exact: true }).click();
   await expect.poll(() => attempts.length).toBe(3);
   await expect(prompt.getByRole("status")).toHaveText([
     "Uploaded",
@@ -216,7 +216,7 @@ test("uploads retain successful files, cancel one file and retry only the failed
     path: path.join(qa, "uploads-recovered-light.png"),
     animations: "disabled",
   });
-  await prompt.getByRole("button", { name: "Submit", exact: true }).click();
+  await prompt.getByRole("button", { name: "Send", exact: true }).click();
   await expect.poll(() => sends).toBe(1);
   await expect(prompt.getByTitle("success.txt", { exact: true })).toHaveCount(
     0,

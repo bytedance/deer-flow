@@ -131,6 +131,34 @@ saved API error responses and avoids blocking later reads when the optional
 `tool_progress` guard is enabled. Actual read failures and output truncation
 still retain their error or partial-result status.
 
+## Kubernetes sandbox Pod resources
+
+With the AIO Kubernetes provisioner, set `provisioner.sandboxResources` in
+your Helm values to size the sandbox container in each new Pod. For example,
+to raise the memory limit to 4 GiB and the ephemeral storage limit to 2 GiB:
+
+```yaml
+provisioner:
+  sandboxResources:
+    limits:
+      memory: 4Gi
+      ephemeral-storage: 2Gi
+```
+
+Each field can be overridden independently. Helm rejects unknown resource names
+in `requests` and `limits` when rendering the chart. For a standalone provisioner,
+set the corresponding environment variables on the provisioner container.
+
+| Resource | Request variable | Default request | Limit variable | Default limit |
+| --- | --- | --- | --- | --- |
+| `cpu` | `SANDBOX_CPU_REQUEST` | `100m` | `SANDBOX_CPU_LIMIT` | `1000m` |
+| `memory` | `SANDBOX_MEMORY_REQUEST` | `256Mi` | `SANDBOX_MEMORY_LIMIT` | `1Gi` |
+| `ephemeral-storage` | `SANDBOX_EPHEMERAL_STORAGE_REQUEST` | `500Mi` | `SANDBOX_EPHEMERAL_STORAGE_LIMIT` | `500Mi` |
+
+The provisioner checks at startup that each value is a nonnegative Kubernetes
+quantity and each request is at most its limit. The separate Helm value
+`provisioner.resources` sizes the provisioner container itself.
+
 ## Redis Cluster for shared sandbox ownership
 
 Gateways sharing AIO containers or E2B VMs can store ownership leases in Redis
@@ -266,6 +294,16 @@ from a complete scan with no produced outputs; it does not prove that no outputs
 were produced. Outputs modified and observed in both snapshots still participate
 in that check.
 
+`OpenSandboxProvider` preserves its legacy soft cap by default. Set
+`overflow_policy: reject` to make `replicas` a process-local hard cap covering
+active sandboxes, the warm pool and in-flight create reservations. A full pool
+with no warm sandbox to evict raises `SandboxCapacityExceededError` before an
+SDK create, with a 30 second retry hint. Failed creates release their
+reservations. `burst` is E2B-only: OpenSandbox logs a warning and keeps the
+soft cap. This is not a
+multi-process quota: use it only when one Gateway process owns the provider and
+`replicas` fits the Kubernetes ResourceQuota.
+
 `E2BSandboxProvider` uses `wait` as its default overflow policy. It waits for
 `acquire_timeout`, then fails the agent turn. DeerFlow does not retry the turn
 automatically. Clients can use the structured error to schedule a retry.
@@ -355,7 +393,7 @@ Ranged `read_file` calls count lines the same way on every sandbox provider: a l
 Concurrent reads and writes to the same file share a gate across synchronous and asynchronous tool calls. Async callers waiting for that gate do not occupy worker threads needed to finish the current read or write. Cancelling a waiting call leaves the current operation running; a call that already started file inspection still waits for that work to finish before releasing its gate.
 
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
-On the local sandbox, `grep(literal=True)` also searches long lines in minified text or single-line JSON, within the existing file-size limit. Case-insensitive literal matching avoids repeated-prefix rescans while preserving Unicode case behavior. Regex searches retain their long-line safety guard.
+On the local sandbox, `grep(literal=True)` also searches long lines in minified text or single-line JSON, within the existing file-size limit. Case-insensitive literal matching avoids repeated-prefix rescans while preserving Unicode case behavior. Regex searches retain their long-line safety guard. Matched lines show `/mnt/...` virtual paths where `write_file` stored host paths in a code file, spelled as stored and before the line is shortened; the pattern still matches the stored text.
 
 Across sandbox providers, returned previews show only the beginning of each matched line (200 characters by default), so a match later in a long line may not appear in the preview. Use the reported path and line number to inspect the source. The `truncated` flag concerns match-count limits, not preview length.
 E2B's `glob` filter preserves spaces, quotes, and dollar signs in filename patterns, while wildcard matching and root-relative directory scoping remain unchanged.

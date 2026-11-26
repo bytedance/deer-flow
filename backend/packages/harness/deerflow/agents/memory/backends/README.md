@@ -5,7 +5,10 @@ Each subfolder under `agents/memory/backends/` is a pluggable memory backend. Sw
 - `deermem/` - the default backend (deer-flow's own: structured facts + JSON storage).
 - `noop/` - an empty backend and the **template** to copy when adding a new one.
 - `openviking/` - optional remote backend using the official
-  `langchain-openviking` package (single-user middleware mode).
+  `langchain-openviking` package (`memory.mode: middleware` only; supports
+  single-user `owner_user_id` + `api_key_env` and fail-closed multi-user /
+  multi-tenant isolation via `user_credentials` or `credential_provider` with
+  optional `tenant_id` and `client_pool`).
 - `honcho/` - optional remote Honcho backend over HTTP: user-model memory (representations built by Honcho's server-side deriver; no local LLM calls). Workspace-per-user isolation with per-user overrides.
 
 This guide tells you **which files to touch** when you change, swap, or add a memory system. Paths are relative to `backend/` unless noted.

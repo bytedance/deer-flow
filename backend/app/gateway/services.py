@@ -16,7 +16,7 @@ import math
 import re
 import threading
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from types import SimpleNamespace
@@ -117,7 +117,7 @@ from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_con
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.goal_objective import normalize_goal_objective
-from deerflow.utils.messages import IMPORTED_HISTORY_KEY, ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
+from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_KEY, ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -650,7 +650,7 @@ def _normalize_input_messages(
 #: record that clearing a satisfied goal writes; a caller copy would forge one.
 #: Older checkpoints can contain loop detection's record of frequency-capped
 #: tools. Reserve its channel for server-owned state.
-SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs", LOOP_CAP_STATE_KEY})
+SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs", LOOP_CAP_STATE_KEY, IMPORTED_HISTORY_CHANNEL})
 
 #: The ``write_todos`` status contract the todo middleware renders.
 _TODO_STATUSES = frozenset({"pending", "in_progress", "completed", "blocked", "waiting"})
@@ -1200,6 +1200,7 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
         "model_name",
         "tool_approval_mode",
         "mode",
+        "mode_default_fields",
         "thinking_enabled",
         "reasoning_effort",
         "is_plan_mode",
@@ -1354,6 +1355,12 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
             existing_runtime_context["locale"] = locale
     for section in (existing_configurable, existing_runtime_context):
         if isinstance(section, dict):
+            # A previous turn's mode preset only applies when this request sends it again.
+            previous_defaults = section.pop("mode_default_fields", None)
+            if isinstance(previous_defaults, list):
+                for field in ("thinking_enabled", "reasoning_effort"):
+                    if field in previous_defaults:
+                        section.pop(field, None)
             for key in _MODEL_SELECTION_CONTEXT_KEYS:
                 section.pop(key, None)
     if isinstance(existing_runtime_context, dict) and "client" in existing_runtime_context:
@@ -1368,6 +1375,14 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
 
     configurable = config.setdefault("configurable", {})
     runtime_context = config.setdefault("context", {})
+    if isinstance(mode_fields := context.get("mode_default_fields"), list):
+        context = dict(context)
+        defaults = [key for key in ("thinking_enabled", "reasoning_effort") if key in mode_fields and key in context]
+        for key in defaults:
+            # A preset cannot replace an explicit value supplied in body.config.
+            if any(isinstance(section, dict) and key in section for section in (configurable, runtime_context)):
+                context.pop(key)
+        context["mode_default_fields"] = [key for key in defaults if key in context]
     # UI language is public request data, never a checkpoint default. An
     # explicit invalid/null value clears a legacy config.context preference.
     if "locale" in context and isinstance(runtime_context, dict):
@@ -2473,6 +2488,8 @@ async def start_run(
     require_existing_thread: bool = False,
     evidence_origin: str | None = None,
     scheduled_task_runtime: Mapping[str, Any] | None = None,
+    agent_factory_override: Callable | None = None,
+    input_message_idempotency_key: str | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
@@ -2490,6 +2507,9 @@ async def start_run(
     evidence_origin : str | None
         Trusted Python entry-point provenance, never copied from request data.
         Internal launches without an explicit origin remain unknown.
+    input_message_idempotency_key : str | None
+        Reuse input message IDs when a managed planner replays a previous
+        execution. Admission still uses this run's own idempotency key.
     """
     # Cancel-capability gate. interrupt/rollback strategies terminate an already
     # active run — runs:cancel capability, not runs:create — so a create-only
@@ -2501,6 +2521,8 @@ async def start_run(
     require_cancel_permission_if(request, body.multitask_strategy != "reject")
     if scheduled_task_runtime is not None and getattr(request.state, "auth_source", None) != AUTH_SOURCE_INTERNAL:
         raise HTTPException(status_code=403, detail="Scheduled runtime authority requires an internal launcher")
+    if (agent_factory_override is not None or input_message_idempotency_key is not None) and not getattr(request.state, "coordination_execution_id", None):
+        raise HTTPException(status_code=403, detail="Coordinator factory requires a managed execution")
 
     try:
         validate_thread_id(thread_id)
@@ -2602,7 +2624,9 @@ async def start_run(
         # Cold resolution imports the lead-agent stack. Use the assembly pool
         # so import-lock waiters cannot starve unrelated default-executor work.
         # Keep this before admission so import failures cannot create a run.
-        agent_factory = await run_assembly(resolve_agent_factory, body.assistant_id)
+        agent_factory = agent_factory_override
+        if agent_factory is None:
+            agent_factory = await run_assembly(resolve_agent_factory, body.assistant_id)
         admitted_origin = evidence_origin or ("unknown" if is_internal_caller else "interactive")
         if admitted_origin not in EVIDENCE_ORIGINS:
             raise ValueError("Unsupported host evidence origin")
@@ -2651,7 +2675,7 @@ async def start_run(
         request_input = _canonical_run_record_input(body.input, graph_input) if idempotency_key else None
         knowledge_default_request_hash = hashlib.sha256(json.dumps(request_input, sort_keys=True, ensure_ascii=False).encode()).hexdigest() if idempotency_key else None
         if isinstance(graph_input, dict):
-            graph_input = _assign_missing_run_input_message_ids(graph_input, thread_id=thread_id, idempotency_key=idempotency_key)
+            graph_input = _assign_missing_run_input_message_ids(graph_input, thread_id=thread_id, idempotency_key=input_message_idempotency_key or idempotency_key)
         # deerflow_trace_id is server-issued, so the caller's value is replaced
         # here at the trust boundary. body.metadata forks two ways -- through
         # build_run_config into config["metadata"], which the run worker

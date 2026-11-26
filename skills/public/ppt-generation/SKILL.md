@@ -143,7 +143,7 @@ selected provider configuration to that command.
 {"prompt_file": "/mnt/user-data/workspace/slide-02-prompt.json", "reference_images": ["/mnt/user-data/outputs/slide-01.jpg"], "output_file": "/mnt/user-data/outputs/slide-02.jpg", "aspect_ratio": "16:9"}
 ```
 
-4. **Continue for all remaining slides**, always referencing the previous slide:
+4. **Continue for all remaining slides**. Use the previous slide as a reference only after the script reports that it generated that slide. A failed attempt can leave an older image at the same path.
 
 Call `generate_image` once per slide, waiting for success before the next call.
 For example, use slide 2 as the reference for slide 3, then slide 3 for slide 4.
