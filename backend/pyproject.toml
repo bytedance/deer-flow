@@ -85,7 +85,7 @@ dev = [
     # WebRouter web_search/web_fetch provider (also the deerflow-harness[webrouter]
     # extra); kept in the dev group so its tests run the real library over a fake
     # HTTP transport without forcing it onto installs.
-    "webrouter[search,extract]>=0.14.0",
+    "webrouter>=0.16.0",
 ]
 
 [tool.pytest.ini_options]

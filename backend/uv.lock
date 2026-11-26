@@ -952,7 +952,7 @@ dev = [
     { name = "redis" },
     { name = "ruff" },
     { name = "textual" },
-    { name = "webrouter", extra = ["extract", "search"] },
+    { name = "webrouter" },
 ]
 
 [package.metadata]
@@ -1004,7 +1004,7 @@ dev = [
     { name = "redis", specifier = ">=5.0.0" },
     { name = "ruff", specifier = ">=0.14.11" },
     { name = "textual", specifier = ">=0.80" },
-    { name = "webrouter", extras = ["search", "extract"], specifier = ">=0.14.0" },
+    { name = "webrouter", specifier = ">=0.16.0" },
 ]
 extensions = []
 
@@ -1105,7 +1105,7 @@ tui = [
     { name = "textual" },
 ]
 webrouter = [
-    { name = "webrouter", extra = ["extract", "search"] },
+    { name = "webrouter" },
 ]
 
 [package.metadata]
@@ -1169,7 +1169,7 @@ requires-dist = [
     { name = "textual", marker = "extra == 'tui'", specifier = ">=0.80" },
     { name = "tiktoken", specifier = ">=0.8.0" },
     { name = "tzdata", specifier = ">=2025.1" },
-    { name = "webrouter", extras = ["search", "extract"], marker = "extra == 'webrouter'", specifier = ">=0.14.0" },
+    { name = "webrouter", marker = "extra == 'webrouter'", specifier = ">=0.16.0" },
 ]
 provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite", "tenki", "opensandbox", "boxd", "monocle", "browser", "memory-zh", "webrouter"]
 
@@ -5351,27 +5351,18 @@ wheels = [
 
 [[package]]
 name = "webrouter"
-version = "0.14.0"
+version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "httpx" },
+    { name = "nimble-python" },
     { name = "pydantic" },
+    { name = "tavily-python" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/53/9d/08cd5e52d9fdea4e1ad8890a17fa2c3d542212e9bdc15f2157c72be5a3f2/webrouter-0.14.0.tar.gz", hash = "sha256:0380bc412187af5943dd1a0cd7c0b59d88b692d2ed290fb6194a02a4a5ea686a", size = 2137016, upload-time = "2026-11-19T09:15:55.073Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b5/99/36761b9dc59da714220c9932d5834d482100b3b2cab255c7f929be5f8dad/webrouter-0.16.0.tar.gz", hash = "sha256:26adcd03503a5f7459f495f84735992c2720951932d986004eeeb99d8dd747f9", size = 2590504, upload-time = "2026-11-26T10:54:16.157Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2c/69/7f85820e21ddb8a704ea2c6da4b06a8e9a986368753e2585a27ab6992a01/webrouter-0.14.0-py3-none-any.whl", hash = "sha256:14783fc6cc8efa6969082b52fddbd845457e6dc57d0660a3c179abca59b9767a", size = 1779626, upload-time = "2026-11-19T09:15:53.472Z" },
-]
-
-[package.optional-dependencies]
-extract = [
-    { name = "httpx" },
-    { name = "nimble-python" },
-    { name = "tavily-python" },
-]
-search = [
-    { name = "httpx" },
-    { name = "nimble-python" },
-    { name = "tavily-python" },
+    { url = "https://files.pythonhosted.org/packages/ae/a4/6f828230bad39ef6ac37ec0246fb4480611199b63f330e7dc2953af86e37/webrouter-0.16.0-py3-none-any.whl", hash = "sha256:3ee89bae0fd054501914447e42ace2d93f239295c3e1a9b01b3eeead204f311d", size = 2164450, upload-time = "2026-11-26T10:54:14.553Z" },
 ]
 
 [[package]]
