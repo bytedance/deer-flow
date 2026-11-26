@@ -995,3 +995,20 @@ def test_same_file_compares_symlink_status_and_target(tmp_path):
     before = snapshot(snap(symlink=False, target=None))
     after = snapshot(snap(symlink=True, target=None))
     assert get_changed_paths(before, after) == {"/mnt/user-data/workspace/link"}
+
+    # Both targets unrecorded (dangling link metadata): the metadata fallback
+    # still detects a recreated link with the same target path.
+    before = snapshot(snap(symlink=True, target=None))
+    after = snapshot(snap(symlink=True, target=None))
+    assert get_changed_paths(before, after) == set()
+
+    recreated = FileSnapshot(
+        path="/mnt/user-data/workspace/link",
+        root="workspace",
+        size=7,
+        mtime_ns=2_000,
+        sha256=None,
+        symlink=True,
+        symlink_target=None,
+    )
+    assert get_changed_paths(before, snapshot(recreated)) == {"/mnt/user-data/workspace/link"}
