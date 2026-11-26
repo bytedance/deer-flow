@@ -140,15 +140,16 @@ def render_project_block(snapshot: Mapping[str, Any] | None, *, include_memory: 
     instructions omit the instructions body but keep the project identity —
     the block always carries the pinned ``id``/``name`` (§7.2). Instructions
     are untrusted user text and pass through ``neutralize_untrusted_tags`` so a
-    literal ``</project>`` cannot close the block early; attribute values are
-    escaped for quotes, ampersands and angle brackets.
+    literal ``</project>`` cannot close the block early; the name attribute is
+    folded to one line and attribute values are escaped for quotes, ampersands
+    and angle brackets.
     """
     if not isinstance(snapshot, Mapping):
         return None
     project_id = str(snapshot.get("project_id") or "")
     if not project_id:
         return None
-    name = str(snapshot.get("name") or "")
+    name = _one_line(str(snapshot.get("name") or ""))
     instructions = neutralize_untrusted_tags(str(snapshot.get("instructions") or "")).strip()
     open_tag = f'<project id="{_escape_attribute(project_id)}" name="{_escape_attribute(name)}">'
     from deerflow.projects.memory import render_memory
@@ -188,26 +189,31 @@ def _format_shelf_size(size_bytes: int) -> str:
     return f"{value:.1f} TB"
 
 
+def _one_line(value: str) -> str:
+    """Fold every Unicode line boundary so untrusted text stays on one line."""
+    return " ".join(value.splitlines())
+
+
 def _render_shelf_entry(entry: Mapping[str, Any]) -> str:
     """One line-atomic shelf index entry: ``- id=… | name (size, modified date)[ — summary]``.
 
     The document name is untrusted user text and the summary is
     LLM-processed untrusted document content; both pass through
-    ``neutralize_untrusted_tags`` so neither can forge framework blocks
-    (the summary is additionally guaranteed single-line by the write-time
-    contract). The ID is a server-generated content address
-    rendered verbatim so it stays directly usable by
-    ``read_project_document`` (including for same-name documents).
+    ``neutralize_untrusted_tags`` so neither can forge framework blocks, and
+    both are folded to a single line so neither can forge an extra entry.
+    The ID is a server-generated content address rendered verbatim so it
+    stays directly usable by ``read_project_document`` (including for
+    same-name documents).
     """
     document_id = str(entry.get("id") or "")
-    name = neutralize_untrusted_tags(str(entry.get("name") or ""))
+    name = _one_line(neutralize_untrusted_tags(str(entry.get("name") or "")))
     size = _format_shelf_size(int(entry.get("size_bytes") or 0))
     updated_at = str(entry.get("updated_at") or "")
     modified = updated_at[:10] if len(updated_at) >= 10 else updated_at
     line = f"- id={document_id} | {name} ({size}, modified {modified})"
     summary = entry.get("summary")
     if summary:
-        line += f" — {neutralize_untrusted_tags(str(summary))}"
+        line += f" — {_one_line(neutralize_untrusted_tags(str(summary)))}"
     return line
 
 

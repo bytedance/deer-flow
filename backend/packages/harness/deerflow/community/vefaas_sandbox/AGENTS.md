@@ -29,3 +29,10 @@ uv run pytest tests/test_vefaas_sandbox_provider.py tests/blocking_io/test_vefaa
   `redact_secret`, and `reject_url_userinfo` rather than restating them.
 - **Scope TOS mounts by `derive_sandbox_scope_token`.** Never pass raw
   `user_id` or `thread_id` segments into `InstanceTosMountConfig.BucketPath`.
+- **Fence pause/snapshot/resume through ownership leases.** Hold and refresh
+  `claim(..., for_destroy=True)` across idle pause/snapshot transitions (re-checking
+  before `KillSandbox`), defer shutdown while manual snapshots settle, never pause
+  or snapshot dirty sandboxes, and verify `deer_flow_provider` + `deer_flow_sandbox_id`
+  client-side before restoring or pruning snapshots.
+- **Keep startup image precaching off the event loop.** Run `precache_on_startup`
+  on a background daemon thread joined by `shutdown()` before closing the client.

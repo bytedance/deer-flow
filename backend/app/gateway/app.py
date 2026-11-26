@@ -40,6 +40,7 @@ from app.gateway.routers import (
     integrations,
     knowledge,
     mcp,
+    mcp_agent_auth,
     mcp_tasks,
     mcp_user_oauth,
     memory,
@@ -1374,6 +1375,8 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # MCP API is mounted at /api/mcp
     app.include_router(capabilities.router)
+    # Runtime MCP agent credential grants (admin) at /api/mcp/agent-auth
+    app.include_router(mcp_agent_auth.router)
     app.include_router(mcp.router)
     app.include_router(personal_mcp.router)
     app.include_router(mcp_user_oauth.router)

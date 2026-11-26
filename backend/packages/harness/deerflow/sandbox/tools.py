@@ -16,6 +16,7 @@ from pathlib import Path
 from langchain.tools import tool
 from langchain_core.messages import ToolMessage
 
+from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.authz.sandbox_authz import (
     authorize_sandbox_execution,
@@ -31,6 +32,7 @@ from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.command_scope import command_owner
 from deerflow.sandbox.exceptions import (
     SandboxAuthorizationError,
+    SandboxCapacityExceededError,
     SandboxError,
     SandboxFileNotFoundError,
     SandboxNotFoundError,
@@ -2401,6 +2403,36 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     return sandbox
 
 
+def _sandbox_capacity_result(runtime: Runtime, error: SandboxCapacityExceededError, tool_name: str | None) -> str | ToolMessage:
+    reason = {
+        "capacity": "The sandbox pool is busy",
+        "capacity_backend": "The sandbox capacity service is unavailable",
+        "capacity_initializing": "The sandbox capacity service is initializing",
+        "shutdown": "The sandbox provider is shutting down",
+    }.get(error.reason, "Sandbox capacity is temporarily unavailable")
+    retry_after = error.retry_after_seconds
+    content = f"Error: {reason}. Retry in about {retry_after:g} seconds. If the sandbox is still unavailable, tell the user to try again later."
+    call_id = getattr(runtime, "tool_call_id", None)
+    if not isinstance(call_id, str) or not call_id:
+        return content
+    return ToolMessage(
+        content=content,
+        name=tool_name,
+        tool_call_id=call_id,
+        status="error",
+        additional_kwargs={
+            TOOL_META_KEY: {
+                "status": "error",
+                "error_type": "capacity",
+                "recoverable_by_model": True,
+                "recommended_next_action": "retry_later",
+                "retry_after_seconds": retry_after,
+                "source": "tool_return",
+            }
+        },
+    )
+
+
 async def _run_sync_tool_after_async_sandbox_init(
     func: Callable[..., str | ToolMessage] | None,
     runtime: Runtime,
@@ -2421,6 +2453,10 @@ async def _run_sync_tool_after_async_sandbox_init(
             if func is bash_tool.func and owner and getattr(sandbox, "supports_command_cancellation", False):
                 signal_cancel = partial(sandbox.request_command_cancel, owner)
             return await run_sync_lifecycle_operation(func, runtime, *args, _on_cancel=signal_cancel)
+    except SandboxCapacityExceededError as e:
+        # Built-in tool callbacks are named <tool name>_tool.
+        tool_name = getattr(func, "__name__", "").removesuffix("_tool") or None
+        return _sandbox_capacity_result(runtime, e, tool_name)
     except SandboxError as e:
         text = f"Error: {e}"
         return _error_result(text, e) if _error_result else text
@@ -2923,6 +2959,8 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str | To
         )
         content = _truncate_bash_output(mask_secret_values(output, injected_env), max_chars)
         return _bash_command_result(runtime, output, content)
+    except SandboxCapacityExceededError as e:
+        return _sandbox_capacity_result(runtime, e, "bash")
     except SandboxError as e:
         return mask_secret_values(f"Error: {e}", redaction_env)
     except PermissionError as e:
@@ -2965,7 +3003,7 @@ bash_tool.coroutine = _bash_tool_async
 
 
 @tool("ls", parse_docstring=True)
-def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
+def ls_tool(runtime: Runtime, path: str, description: str = "") -> str | ToolMessage:
     """List the contents of a directory up to 2 levels deep in tree format.
 
     Args:
@@ -3018,6 +3056,8 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
         except Exception:
             max_chars = 20000
         return _truncate_ls_output(output, max_chars)
+    except SandboxCapacityExceededError as e:
+        return _sandbox_capacity_result(runtime, e, "ls")
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
@@ -3029,7 +3069,7 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
         return f"Error: Unexpected error listing directory: {_sanitize_error(e, runtime)}"
 
 
-async def _ls_tool_async(runtime: Runtime, path: str, description: str = "") -> str:
+async def _ls_tool_async(runtime: Runtime, path: str, description: str = "") -> str | ToolMessage:
     return await _run_sync_tool_after_async_sandbox_init(ls_tool.func, runtime, path, description)
 
 
@@ -3044,7 +3084,7 @@ def glob_tool(
     description: str = "",
     include_dirs: bool = False,
     max_results: int = _DEFAULT_GLOB_MAX_RESULTS,
-) -> str:
+) -> str | ToolMessage:
     """Find files or directories that match a glob pattern under a root directory.
 
     Args:
@@ -3082,6 +3122,8 @@ def glob_tool(
         # so a root above a disabled skill still surfaces its files.
         matches = _drop_disabled_skill_paths(matches, user_id=user_id)
         return _format_glob_results(requested_path, matches, truncated)
+    except SandboxCapacityExceededError as e:
+        return _sandbox_capacity_result(runtime, e, "glob")
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
@@ -3102,7 +3144,7 @@ async def _glob_tool_async(
     description: str = "",
     include_dirs: bool = False,
     max_results: int = _DEFAULT_GLOB_MAX_RESULTS,
-) -> str:
+) -> str | ToolMessage:
     return await _run_sync_tool_after_async_sandbox_init(
         glob_tool.func,
         runtime,
@@ -3127,7 +3169,7 @@ def grep_tool(
     literal: bool = False,
     case_sensitive: bool = False,
     max_results: int = _DEFAULT_GREP_MAX_RESULTS,
-) -> str:
+) -> str | ToolMessage:
     """Search for matching lines inside a text file or files under a root directory.
 
     Args:
@@ -3183,6 +3225,8 @@ def grep_tool(
         allowed = set(_drop_disabled_skill_paths([match.path for match in matches], user_id=user_id))
         matches = [match for match in matches if match.path in allowed]
         return _format_grep_results(requested_path, matches, truncated)
+    except SandboxCapacityExceededError as e:
+        return _sandbox_capacity_result(runtime, e, "grep")
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
@@ -3207,7 +3251,7 @@ async def _grep_tool_async(
     literal: bool = False,
     case_sensitive: bool = False,
     max_results: int = _DEFAULT_GREP_MAX_RESULTS,
-) -> str:
+) -> str | ToolMessage:
     return await _run_sync_tool_after_async_sandbox_init(
         grep_tool.func,
         runtime,
@@ -3373,6 +3417,8 @@ def read_file_tool(
                 if max_chars == 0 or len(numbered) <= max_chars:
                     output = numbered
         return _read_file_result(runtime, output, status="partial_success" if max_chars != 0 and len(content) > max_chars else "success")
+    except SandboxCapacityExceededError as e:
+        return _sandbox_capacity_result(runtime, e, "read_file")
     except SandboxError as e:
         return _read_file_failure(runtime, f"Error: {e}", e)
     except FileNotFoundError as e:
@@ -3444,7 +3490,7 @@ def write_file_tool(
     content: str,
     description: str = "",
     append: bool = False,
-) -> str:
+) -> str | ToolMessage:
     """Write text content to a file. By default this overwrites the target file; set append=True to add content to the end without replacing existing content.
 
     READ-BEFORE-WRITE (issue #3857): if the target file already exists (including
@@ -3516,6 +3562,8 @@ def write_file_tool(
         with get_file_operation_lock(sandbox, path):
             sandbox.write_file(path, content, append)
         return "OK"
+    except SandboxCapacityExceededError as e:
+        return _sandbox_capacity_result(runtime, e, "write_file")
     except SandboxError as e:
         return _format_write_file_error(requested_path, e, runtime)
     except PermissionError:
@@ -3540,7 +3588,7 @@ async def _write_file_tool_async(
     content: str,
     description: str = "",
     append: bool = False,
-) -> str:
+) -> str | ToolMessage:
     placeholder_error = _reject_elision_placeholder_content(content)
     if placeholder_error is not None:
         return placeholder_error
@@ -3579,7 +3627,7 @@ def str_replace_tool(
     new_str: str,
     description: str = "",
     replace_all: bool = False,
-) -> str:
+) -> str | ToolMessage:
     """Replace a substring in a file with another substring.
     If `replace_all` is False (default), the substring to replace must appear **exactly once** in the file.
 
@@ -3618,6 +3666,8 @@ def str_replace_tool(
                 content = content.replace(old_str, new_str, 1)
             sandbox.write_file(path, content)
         return "OK"
+    except SandboxCapacityExceededError as e:
+        return _sandbox_capacity_result(runtime, e, "str_replace")
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
@@ -3635,7 +3685,7 @@ async def _str_replace_tool_async(
     new_str: str,
     description: str = "",
     replace_all: bool = False,
-) -> str:
+) -> str | ToolMessage:
     return await _run_sync_tool_after_async_sandbox_init(
         str_replace_tool.func,
         runtime,

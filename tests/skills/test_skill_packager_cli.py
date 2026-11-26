@@ -80,8 +80,8 @@ def test_packager_reports_input_errors_on_stderr(tmp_path, source, diagnostic):
     assert diagnostic not in result.stdout
 
 
-def test_init_creates_skill_under_requested_root(tmp_path):
-    name = "example-" + "2" * 32
+@pytest.mark.parametrize("name", ["example-" + "2" * 32, "com0", "nul-report"])
+def test_init_creates_skill_under_requested_root(tmp_path, name):
     root = tmp_path / "skills"
     result = run_cli("init_skill", name, "--path", root, cwd=tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -141,6 +141,15 @@ def test_init_rejects_invalid_name_before_creating_directories(tmp_path, name):
     result = run_cli("init_skill", name, "--path", tmp_path / "skills", cwd=tmp_path)
     assert result.returncode == 1, result.stdout + result.stderr
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("name", ["con", "prn", "aux", "nul", "com1", "com9", "lpt1", "lpt9"])
+def test_init_rejects_windows_device_names_before_creating_directories(tmp_path, name):
+    root = tmp_path / "skills"
+    result = run_cli("init_skill", name, "--path", root, cwd=tmp_path)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"Skill name {name!r} is a reserved Windows device name" in result.stderr
+    assert not root.exists()
 
 
 def test_init_rejects_existing_directory_link(tmp_path):
