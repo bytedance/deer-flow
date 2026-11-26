@@ -17,7 +17,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.command_scope import COMMAND_OWNER_ENV, CommandScopeCancelled, command_lock, current_command_scope
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
 from deerflow.sandbox.download import download_limit, read_download_stream
-from deerflow.sandbox.read_file_contract import split_file_lines
+from deerflow.sandbox.read_file_contract import slice_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
@@ -1210,8 +1210,9 @@ class AioSandbox(Sandbox):
         """Read the content of a file in the sandbox.
 
         A full read returns line endings as stored. A ranged read ends lines
-        only at ``"\\n"``, drops a trailing ``"\\r"`` and joins the selected
-        lines with ``"\\n"``, as ``LocalSandbox.read_file`` does.
+        only at ``"\\n"``, drops the ``"\\r"`` characters that end a line and
+        joins the selected lines with ``"\\n"``, as ``LocalSandbox.read_file``
+        does.
 
         Args:
             path: The absolute path of the file to read.
@@ -1263,12 +1264,7 @@ class AioSandbox(Sandbox):
             return f"Error: {e}"
         if start_line is None and end_line is None:
             return content
-        lines = split_file_lines(content)
-        # Clamp like LocalSandbox.read_file: a negative start would otherwise
-        # wrap around through Python's negative-index slicing.
-        start = max(start_line or 1, 1)
-        end = max(end_line, 0) if end_line is not None else len(lines)
-        return "\n".join(lines[start - 1 : end])
+        return slice_file_lines(content, start_line, end_line)
 
     def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
         """Download file bytes from the sandbox.
