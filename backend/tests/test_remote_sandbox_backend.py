@@ -388,7 +388,7 @@ def test_discover_failure_redacts_key_from_log(monkeypatch, caplog):
 
     monkeypatch.setattr(requests, "get", mock_get)
 
-    with caplog.at_level(logging.DEBUG):
+    with caplog.at_level(logging.DEBUG, logger="deerflow.community.aio_sandbox.remote_backend"):
         assert backend.discover("abc123") is None
     assert "secret" not in caplog.text
     assert "[REDACTED]" in caplog.text
