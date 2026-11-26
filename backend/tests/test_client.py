@@ -29,7 +29,7 @@ from app.gateway.routers.threads import ThreadGoalResponse
 from app.gateway.routers.uploads import UploadResponse
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import DeltaThreadState, ThreadState
-from deerflow.client import DeerFlowClient, StreamEvent
+from deerflow.client import DeerFlowClient, StreamEvent, _CachedAgent
 from deerflow.config.agents_config import AgentConfig
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 from deerflow.config.database_config import DatabaseConfig
@@ -104,7 +104,7 @@ class TestClientInit:
         assert client._agent_name is None
         assert client._available_skills is None
         assert client._checkpointer is None
-        assert client._agent is None
+        assert client._agent_cache is None
 
     def test_custom_params(self, mock_app_config):
         mock_middleware = MagicMock()
@@ -302,8 +302,7 @@ class TestStream:
         agent = _make_agent_mock(chunks)
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t1"))
 
@@ -326,8 +325,7 @@ class TestStream:
         )
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t-custom"))
 
@@ -349,8 +347,7 @@ class TestStream:
 
         client._agent_name = "test-agent-1"
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             list(client.stream("hi", thread_id="t1"))
 
@@ -380,8 +377,7 @@ class TestStream:
 
         with (
             patch.object(client, "_get_runnable_config", return_value=config),
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             list(client.stream("hi", thread_id="t-mode"))
 
@@ -413,8 +409,7 @@ class TestStream:
         agent = _make_agent_mock([])
 
         with (
-            patch.object(client, "_ensure_agent") as ensure_agent,
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)) as ensure_agent,
             pytest.raises(CheckpointModeMismatchError, match="requires delta mode"),
         ):
             list(client.stream("hi", thread_id="t-delta"))
@@ -431,8 +426,7 @@ class TestStream:
         ]
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             list(client.stream("first", thread_id="t1"))
             list(client.stream("second", thread_id="t1"))
@@ -479,7 +473,7 @@ class TestStream:
 
         agent = MagicMock()
         agent.stream.side_effect = stream_turn
-        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+        with patch.object(client, "_ensure_agent", return_value=(agent, None)):
             events = list(client.stream("second turn", thread_id="t-resumed"))
 
         assert {event.data.get("id") for event in events if event.type == "messages-tuple"} == {"ai-new"}
@@ -503,8 +497,7 @@ class TestStream:
         )
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t-custom-enum"))
 
@@ -527,8 +520,7 @@ class TestStream:
         agent = _make_agent_mock(chunks)
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("list files", thread_id="t2"))
 
@@ -546,8 +538,7 @@ class TestStream:
         agent = _make_agent_mock(chunks)
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t3"))
 
@@ -563,7 +554,7 @@ class TestStream:
         chunks = [{"messages": messages, "summary_text": summary} for summary in summaries]
         agent = _make_agent_mock([("values", chunk) for chunk in chunks] if mode_tagged else chunks)
 
-        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+        with patch.object(client, "_ensure_agent", return_value=(agent, None)):
             events = list(client.stream("hi", thread_id="summary-stream"))
 
         values_events = [event for event in events if event.type == "values"]
@@ -577,7 +568,7 @@ class TestStream:
         chunk = {"messages": [HumanMessage(content="hi", id="h-1")]}
         agent = _make_agent_mock([("values", chunk) if mode_tagged else chunk])
 
-        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+        with patch.object(client, "_ensure_agent", return_value=(agent, None)):
             events = list(client.stream("hi", thread_id="no-summary"))
 
         values_events = [event for event in events if event.type == "values"]
@@ -593,8 +584,7 @@ class TestStream:
         agent = _make_agent_mock(chunks)
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t4"))
 
@@ -606,8 +596,7 @@ class TestStream:
         agent = _make_agent_mock([{"messages": [AIMessage(content="ok", id="ai-1")]}])
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi"))
 
@@ -648,8 +637,7 @@ class TestStream:
         )
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t-stream"))
 
@@ -720,8 +708,7 @@ class TestStream:
         )
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t-stream-tools"))
 
@@ -754,8 +741,7 @@ class TestStream:
         )
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t-stream-kwargs"))
 
@@ -779,8 +765,7 @@ class TestStream:
         agent = _make_agent_mock(chunks)
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             outcome = _RunOutcome()
             for event in client.stream("hi", thread_id="t-stream-fallback"):
@@ -805,8 +790,7 @@ class TestStream:
         agent = _make_agent_mock(chunks)
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t-stream-replaced"))
 
@@ -824,7 +808,7 @@ class TestStream:
                 ("values", {"messages": [message.model_copy()]}),
             ]
         )
-        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+        with patch.object(client, "_ensure_agent", return_value=(agent, None)):
             events = list(client.stream("hi", thread_id="t-first-streamed-snapshot"))
 
         ai_events = [event.data for event in events if event.type == "messages-tuple" and event.data.get("type") == "ai"]
@@ -846,8 +830,7 @@ class TestStream:
         )
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t-stream-rewritten"))
 
@@ -865,8 +848,7 @@ class TestStream:
         )
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t-stream-attributed"))
 
@@ -908,8 +890,7 @@ class TestStream:
         )
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t-stream-kwargs-delta"))
 
@@ -933,8 +914,7 @@ class TestStream:
         )
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             result = client.chat("hi", thread_id="t-chat-stream")
 
@@ -957,8 +937,7 @@ class TestStream:
         )
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("ls", thread_id="t-tool-stream"))
 
@@ -997,8 +976,7 @@ class TestStream:
         )
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("deploy", thread_id="t-tool-artifact"))
 
@@ -1024,8 +1002,7 @@ class TestStream:
         agent = _make_agent_mock(chunks)
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t5"))
 
@@ -1073,8 +1050,7 @@ class TestStream:
         )
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t-order-canary"))
 
@@ -1136,8 +1112,7 @@ class TestStream:
         )
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t-golden"))
 
@@ -1200,8 +1175,7 @@ class TestStream:
         agent.stream.return_value = iter(chunks)
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             start = time.monotonic()
             result = client.chat("go", thread_id="t-perf")
@@ -1263,8 +1237,7 @@ class TestStream:
         )
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t-none-id-limitation"))
 
@@ -1300,7 +1273,7 @@ class TestChat:
         # id-less responses would bypass reconciliation and mask a regression.
         model = FakeMessagesListChatModel(responses=[AIMessage(content="Hello", id="ai-1")])
         graph = create_agent(model=model, middleware=[AppendTextMiddleware()], state_schema=ThreadState)
-        with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", graph):
+        with patch.object(client, "_ensure_agent", return_value=(graph, None)):
             assert client.chat("hi", thread_id="t-first-snapshot") == "Hello" + suffix
 
     @pytest.mark.parametrize(
@@ -1362,10 +1335,8 @@ class TestChat:
         outer_model = FakeMessagesListChatModel(responses=[AIMessage(content="OUTER MODEL")])
         delegate_model = FakeMessagesListChatModel(responses=[AIMessage(content="DELEGATE MODEL")])
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", create_agent(model=outer_model, state_schema=ThreadState)),
-            patch.object(delegate, "_ensure_agent"),
-            patch.object(delegate, "_agent", create_agent(model=delegate_model, state_schema=ThreadState)),
+            patch.object(client, "_ensure_agent", return_value=(create_agent(model=outer_model, state_schema=ThreadState), None)),
+            patch.object(delegate, "_ensure_agent", return_value=(create_agent(model=delegate_model, state_schema=ThreadState), None)),
             patch.object(client, "stream", delegate.stream),
         ):
             assert client.chat("q", thread_id="t-delegated-stream") == "DELEGATE MODEL"
@@ -1379,8 +1350,7 @@ class TestChat:
         graph = create_agent(model=model, state_schema=ThreadState)
         wrapper = MagicMock(side_effect=lambda wrapped, instance, args, kwargs: wrapped(*args, **kwargs))
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", graph),
+            patch.object(client, "_ensure_agent", return_value=(graph, None)),
             patch.object(client, "stream", FunctionWrapper(client.stream, wrapper)),
         ):
             assert client.chat("q", thread_id="t-wrapped-stream") == "answer"
@@ -1398,8 +1368,7 @@ class TestChat:
         agent = _make_agent_mock(chunks)
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             result = client.chat("q", thread_id="t6")
 
@@ -1431,8 +1400,7 @@ class TestChat:
         )
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", graph),
+            patch.object(client, "_ensure_agent", return_value=(graph, None)),
             patch.object(client, "_serialize_message", wraps=client._serialize_message) as serialize_message,
         ):
             result = client.chat("q", thread_id="t-loop-stop")
@@ -1447,8 +1415,7 @@ class TestChat:
         agent = _make_agent_mock(chunks)
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             result = client.chat("q", thread_id="t7")
 
@@ -1566,7 +1533,7 @@ class TestClientMcpSelection:
             config = client._get_runnable_config("t1")
             config["metadata"] = {"existing": "preserved", "mcp_plugins": ["installation-B"]}
             client._ensure_agent(config)
-            keys.append(client._agent_config_key)
+            keys.append(client._agent_cache.key)
             assert config["metadata"] == {"existing": "preserved", "mcp_plugins": selection, "tool_groups": None}
 
             # Changing the saved config takes effect only after reset_agent().
@@ -1581,6 +1548,80 @@ class TestClientMcpSelection:
 
 
 class TestEnsureAgent:
+    @pytest.mark.parametrize("saved_effort", [None, "high"])
+    def test_reasoning_effort_reaches_provider(self, client, tmp_path, monkeypatch, saved_effort):
+        import httpx
+
+        from deerflow.client import inject_langfuse_metadata
+        from deerflow.config.app_config import AppConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+
+        paths = Paths(tmp_path)
+        monkeypatch.setattr("deerflow.config.paths._paths", paths)
+        if saved_effort is not None:
+            agent_dir = paths.user_agent_dir("test-user", "researcher")
+            agent_dir.mkdir(parents=True)
+            (agent_dir / "config.yaml").write_text(f"name: researcher\nreasoning_effort: {saved_effort}\n", encoding="utf-8")
+        requests = []
+
+        def respond(request):
+            requests.append(json.loads(request.content))
+            chunk = {"id": "chatcmpl-effort", "choices": [{"index": 0, "delta": {"content": "Done"}, "finish_reason": "stop"}]}
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n")
+
+        with httpx.Client(transport=httpx.MockTransport(respond)) as transport:
+            config = AppConfig(
+                models=[
+                    {
+                        "name": "offline",
+                        "use": "langchain_openai:ChatOpenAI",
+                        "model": "offline",
+                        "api_key": "synthetic-test-key",
+                        "http_client": transport,
+                        "use_responses_api": False,
+                        "reasoning": {"thinking": "optional", "effort": {"values": ["low", "medium", "high"], "default": "medium"}},
+                    }
+                ],
+                tools=[],
+                sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            )
+            config.tool_search.enabled = False
+            monkeypatch.setattr("deerflow.config.app_config._app_config", config)
+            monkeypatch.setattr("deerflow.config.app_config._app_config_is_custom", True)
+            client._app_config = config
+            client._agent_name = "researcher" if saved_effort is not None else None
+            with (
+                patch("deerflow.client.build_middlewares", return_value=[]),
+                patch("deerflow.client.apply_prompt_template", return_value="Answer briefly."),
+                patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+                patch.object(ExtensionsConfig, "from_file", return_value=ExtensionsConfig()),
+                patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+            ):
+                for overrides in ({}, {"reasoning_effort": "low"}, {}, {"reasoning_effort": None}, {}):
+                    assert client.chat("Hello", thread_id="effort-probe", user_id="test-user", **overrides) == "Done"
+
+                low_assembled = threading.Event()
+                resume_low = threading.Event()
+
+                def pause_before_stream(config, *, thread_id, **kwargs):
+                    if thread_id == "effort-low":
+                        low_assembled.set()
+                        assert resume_low.wait(timeout=10), "low-effort call was not released"
+                    return inject_langfuse_metadata(config, thread_id=thread_id, **kwargs)
+
+                with (
+                    patch("deerflow.client.inject_langfuse_metadata", side_effect=pause_before_stream),
+                    concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor,
+                ):
+                    low = executor.submit(client.chat, "Low turn", thread_id="effort-low", user_id="test-user", reasoning_effort="low")
+                    try:
+                        assert low_assembled.wait(timeout=10), "low-effort call did not assemble its graph"
+                        assert client.chat("High turn", thread_id="effort-high", user_id="test-user", reasoning_effort="high") == "Done"
+                    finally:
+                        resume_low.set()
+                    assert low.result(timeout=10) == "Done"
+            assert [request.get("reasoning_effort") for request in requests] == [saved_effort or "medium", "low", saved_effort or "medium", "medium", saved_effort or "medium", "high", "low"]
+
     @pytest.mark.parametrize(
         ("selection", "saved_model", "when_thinking_disabled"),
         [
@@ -1732,7 +1773,7 @@ class TestEnsureAgent:
                 patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
             ):
                 client._ensure_agent(client._get_runnable_config("group-test"), context={"user_id": "test-user"})
-                with patch.object(client._agent, "stream", wraps=client._agent.stream) as stream:
+                with patch.object(client._agent_cache.graph, "stream", wraps=client._agent_cache.graph.stream) as stream:
                     assert client.chat("Hello", thread_id="group-test", user_id="test-user") == "Done"
                     assert client.chat("Again", thread_id="group-test", user_id="test-user") == "Done"
                 (agent_dir / "config.yaml").write_text(json.dumps({"name": "researcher", "tool_groups": ["file:write"]}), encoding="utf-8")
@@ -2065,7 +2106,7 @@ class TestEnsureAgent:
             client._available_skills = {"test_skill"}
             client._ensure_agent(config)
 
-        assert client._agent is mock_agent
+        assert client._agent_cache.graph is mock_agent
         # Verify agent_name propagation
         mock_build_middlewares.assert_called_once()
         assert mock_build_middlewares.call_args.kwargs.get("agent_name") == "custom-agent"
@@ -2168,10 +2209,10 @@ class TestEnsureAgent:
         from deerflow.runtime.user_context import get_effective_user_id
 
         mock_agent = MagicMock()
-        client._agent = mock_agent
-        client._agent_config_key = (
+        key = (
             None,
             True,
+            None,
             False,
             False,
             None,
@@ -2187,11 +2228,12 @@ class TestEnsureAgent:
             None,
         )
 
+        client._agent_cache = _CachedAgent(key, mock_agent, None)
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)
 
         # Should still be the same mock — no recreation
-        assert client._agent is mock_agent
+        assert client._agent_cache.graph is mock_agent
 
     def test_recreates_agent_when_subagent_limits_change(self, client):
         """Subagent limit changes alter prompt/middleware and must invalidate the cached agent."""
@@ -2611,7 +2653,7 @@ class TestThreadQueries:
     def test_get_thread(self, client):
         mock_checkpointer = MagicMock()
         client._checkpointer = mock_checkpointer
-        client._agent = MagicMock()
+        agent = MagicMock()
 
         msg1 = HumanMessage(content="Hello", id="m1")
         msg2 = AIMessage(content="Hi there", id="m2")
@@ -2638,7 +2680,7 @@ class TestThreadQueries:
         accessor.history.return_value = snapshots
 
         with (
-            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
             patch("deerflow.client.CheckpointStateAccessor.bind", return_value=accessor),
         ):
             result = client.get_thread("t1")
@@ -2671,8 +2713,7 @@ class TestThreadQueries:
         mock_checkpointer.list.return_value = [raw_checkpoint]
         mock_checkpointer.get_tuple.return_value = raw_checkpoint
         client._checkpointer = mock_checkpointer
-        client._agent = MagicMock()
-        client._ensure_agent = MagicMock()
+        client._ensure_agent = MagicMock(return_value=(MagicMock(), None))
 
         snapshot = MagicMock()
         snapshot.values = {
@@ -2707,11 +2748,11 @@ class TestThreadQueries:
         mock_checkpointer = MagicMock()
         accessor = MagicMock()
         accessor.history.return_value = []
-        client._agent = MagicMock()
+        agent = MagicMock()
 
         with (
             patch("deerflow.runtime.checkpointer.provider.get_checkpointer", return_value=mock_checkpointer),
-            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
             patch("deerflow.client.CheckpointStateAccessor.bind", return_value=accessor),
         ):
             result = client.get_thread("t99")
@@ -2799,8 +2840,7 @@ async def test_update_mcp_config_post_commit_failure_still_resets_agent(
     log = harness._session_log()
     await harness._initialize(monkeypatch, cfg, {"A": harness._stdio("cmd-A")}, log)
 
-    client._agent = "cached-agent"
-    client._agent_config_key = ("old",)
+    client._agent_cache = _CachedAgent(("old",), MagicMock(), None)
 
     def _boom(*_args, **_kwargs):
         raise RuntimeError("prepare failed")
@@ -2813,7 +2853,7 @@ async def test_update_mcp_config_post_commit_failure_still_resets_agent(
     # The config was committed...
     assert json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["A"]["command"] == "cmd-A2"
     # ...so the old agent must not be reusable, and the local pool is retired.
-    assert client._agent is None
+    assert client._agent_cache is None
     assert session_pool_module.get_session_pool() is not pool
 
 
@@ -2843,7 +2883,7 @@ class TestMcpConfig:
 
         try:
             # Pre-set agent to verify it gets invalidated
-            client._agent = MagicMock()
+            client._agent_cache = _CachedAgent((), MagicMock(), None)
 
             with (
                 patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=tmp_path),
@@ -2854,7 +2894,7 @@ class TestMcpConfig:
 
             assert "mcp_servers" in result
             assert "new-server" in result["mcp_servers"]
-            assert client._agent is None  # M2: agent invalidated
+            assert client._agent_cache is None  # M2: agent invalidated
 
             # Verify file was actually written
             with open(tmp_path) as f:
@@ -2970,7 +3010,7 @@ class TestSkillsManagement:
 
         try:
             # Pre-set agent to verify it gets invalidated
-            client._agent = MagicMock()
+            client._agent_cache = _CachedAgent((), MagicMock(), None)
 
             # ``update_skill`` reads the skill list twice (find + reload) and
             # ``UserScopedSkillStorage.load_skills`` internally calls
@@ -2986,7 +3026,7 @@ class TestSkillsManagement:
             ):
                 result = client.update_skill("test-skill", enabled=False)
             assert result["enabled"] is False
-            assert client._agent is None  # M2: agent invalidated
+            assert client._agent_cache is None  # M2: agent invalidated
             persisted = json.loads(tmp_path.read_text(encoding="utf-8"))
             assert persisted["skills"]["untouched-skill"] == {"enabled": False}
         finally:
@@ -3890,8 +3930,7 @@ class TestScenarioMultiTurnConversation:
         ]
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             r1 = client.chat("who are you?", thread_id="thread-multi")
             r2 = client.chat("what language?", thread_id="thread-multi")
@@ -3920,8 +3959,7 @@ class TestScenarioMultiTurnConversation:
         agent = _make_agent_mock(chunks)
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("search", thread_id="t-full"))
 
@@ -3984,8 +4022,7 @@ class TestScenarioToolChain:
         agent = _make_agent_mock(chunks)
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("list and save", thread_id="t-chain"))
 
@@ -4126,7 +4163,7 @@ class TestScenarioConfigManagement:
 
             reloaded_config = ExtensionsConfig(mcp_servers={"my-mcp": McpServerConfig(enabled=True, type="sse")})
 
-            client._agent = MagicMock()  # Simulate existing agent
+            client._agent_cache = _CachedAgent((), MagicMock(), None)  # Simulate existing agent
             with (
                 patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
                 patch("deerflow.client.get_extensions_config", return_value=current_config),
@@ -4134,7 +4171,7 @@ class TestScenarioConfigManagement:
             ):
                 mcp_result = client.update_mcp_config({"my-mcp": {"enabled": True}})
             assert "my-mcp" in mcp_result["mcp_servers"]
-            assert client._agent is None  # Agent invalidated
+            assert client._agent_cache is None  # Agent invalidated
 
             # --- Skill toggle ---
             skill = MagicMock()
@@ -4153,7 +4190,7 @@ class TestScenarioConfigManagement:
 
             ext_config = ExtensionsConfig()
 
-            client._agent = MagicMock()  # Simulate re-created agent
+            client._agent_cache = _CachedAgent((), MagicMock(), None)  # Simulate re-created agent
             with (
                 patch("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills", side_effect=[[skill], [toggled]]),
                 patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
@@ -4162,7 +4199,7 @@ class TestScenarioConfigManagement:
             ):
                 skill_result = client.update_skill("code-gen", enabled=False)
             assert skill_result["enabled"] is False
-            assert client._agent is None  # Agent invalidated again
+            assert client._agent_cache is None  # Agent invalidated again
 
 
 class TestScenarioAgentRecreation:
@@ -4190,10 +4227,10 @@ class TestScenarioAgentRecreation:
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
         ):
             client._ensure_agent(config_a)
-            first_agent = client._agent
+            first_agent = client._agent_cache.graph
 
             client._ensure_agent(config_b)
-            second_agent = client._agent
+            second_agent = client._agent_cache.graph
 
         assert len(agents_created) == 2
         assert first_agent is not second_agent
@@ -4260,7 +4297,7 @@ class TestScenarioAgentRecreation:
         def fake_ensure(config, **kwargs):
             key = tuple(config.get("configurable", {}).get(k) for k in ["model_name", "thinking_enabled", "is_plan_mode", "subagent_enabled"])
             agents_created.append(key)
-            client._agent = agent
+            return agent, None
 
         with patch.object(client, "_ensure_agent", side_effect=fake_ensure):
             list(client.stream("hi", thread_id="t1"))
@@ -4277,7 +4314,7 @@ class TestScenarioAgentRecreation:
 
         def fake_ensure(config, *, context):
             captured.update(context)
-            client._agent = agent
+            return agent, None
 
         with patch.object(client, "_ensure_agent", side_effect=fake_ensure):
             list(
@@ -4308,7 +4345,7 @@ class TestScenarioAgentRecreation:
 
         def fake_ensure(config, *, context):
             captured.update(context)
-            client._agent = agent
+            return agent, None
 
         with patch.object(client, "_ensure_agent", side_effect=fake_ensure):
             list(client.stream("hi", thread_id="t1"))
@@ -4324,7 +4361,7 @@ class TestScenarioAgentRecreation:
 
         def fake_ensure(config, *, context):
             captured.update(context)
-            client._agent = agent
+            return agent, None
 
         with patch.object(client, "_ensure_agent", side_effect=fake_ensure):
             list(client.stream("hi", thread_id="t1"))
@@ -4498,8 +4535,7 @@ class TestScenarioEdgeCases:
         agent = _make_agent_mock([{"messages": []}])
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t-empty"))
 
@@ -4513,8 +4549,7 @@ class TestScenarioEdgeCases:
         agent = _make_agent_mock([{"messages": []}])
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             result = client.chat("hi", thread_id="t-empty-chat")
 
@@ -4531,8 +4566,7 @@ class TestScenarioEdgeCases:
         agent = _make_agent_mock(chunks)
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t-titles"))
 
@@ -4558,8 +4592,7 @@ class TestScenarioEdgeCases:
         agent = _make_agent_mock(chunks)
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("do things", thread_id="t-parallel"))
 
@@ -5148,8 +5181,7 @@ class TestStreamHardening:
         agent.stream.side_effect = RuntimeError("model quota exceeded")
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             with pytest.raises(RuntimeError, match="model quota exceeded"):
                 list(client.stream("hi", thread_id="t-err"))
@@ -5180,8 +5212,7 @@ class TestStreamHardening:
         set_sandbox_provider(provider)
         try:
             with (
-                patch.object(client, "_ensure_agent"),
-                patch.object(client, "_agent", agent),
+                patch.object(client, "_ensure_agent", return_value=(agent, None)),
                 pytest.raises(RuntimeError, match="model quota exceeded"),
             ):
                 list(client.stream("hi", thread_id="t-err-lease"))
@@ -5219,8 +5250,7 @@ class TestStreamHardening:
         set_sandbox_provider(provider)
         try:
             with (
-                patch.object(client, "_ensure_agent"),
-                patch.object(client, "_agent", agent),
+                patch.object(client, "_ensure_agent", return_value=(agent, None)),
             ):
                 stream = client.stream("hi", thread_id="t-abandoned-lease")
                 assert next(stream).type == "values"
@@ -5242,8 +5272,7 @@ class TestStreamHardening:
         agent = _make_agent_mock(chunks)
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t-noid"))
 
@@ -5268,8 +5297,7 @@ class TestStreamHardening:
         agent = _make_agent_mock(chunks)
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             result = client.chat("do it", thread_id="t-tc-only")
 
@@ -5289,8 +5317,7 @@ class TestStreamHardening:
         agent = _make_agent_mock(chunks)
 
         with (
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", agent),
+            patch.object(client, "_ensure_agent", return_value=(agent, None)),
         ):
             events = list(client.stream("hi", thread_id="t-dup-noid"))
 
@@ -5881,13 +5908,12 @@ class TestBugListUploadsDeadCode:
 
 class TestBugAgentInvalidationInconsistency:
     """Regression: update_skill and update_mcp_config must reset both
-    _agent and _agent_config_key, just like reset_agent() does.
+    _agent_cache, just like reset_agent() does.
     """
 
     def test_update_mcp_resets_config_key(self, client):
-        """After update_mcp_config, both _agent and _agent_config_key are None."""
-        client._agent = MagicMock()
-        client._agent_config_key = ("model", True, False, False)
+        """After update_mcp_config, _agent_cache is None."""
+        client._agent_cache = _CachedAgent(("model", True, False, False), MagicMock(), None)
 
         current_config = ExtensionsConfig()
         reloaded = ExtensionsConfig()
@@ -5903,13 +5929,11 @@ class TestBugAgentInvalidationInconsistency:
             ):
                 client.update_mcp_config({})
 
-        assert client._agent is None
-        assert client._agent_config_key is None
+        assert client._agent_cache is None
 
     def test_update_skill_resets_config_key(self, client):
-        """After update_skill, both _agent and _agent_config_key are None."""
-        client._agent = MagicMock()
-        client._agent_config_key = ("model", True, False, False)
+        """After update_skill, _agent_cache is None."""
+        client._agent_cache = _CachedAgent(("model", True, False, False), MagicMock(), None)
 
         skill = MagicMock()
         skill.name = "s1"
@@ -5936,5 +5960,4 @@ class TestBugAgentInvalidationInconsistency:
             ):
                 client.update_skill("s1", enabled=False)
 
-        assert client._agent is None
-        assert client._agent_config_key is None
+        assert client._agent_cache is None
