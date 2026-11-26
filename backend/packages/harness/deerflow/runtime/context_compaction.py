@@ -15,7 +15,7 @@ from deerflow.config.agents_config import validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.runtime.checkpoint_history import recent_checkpoint_history
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
-from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE
+from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE, checkpoint_rewrite_metadata
 from deerflow.runtime.goal import _call_checkpointer_method
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
@@ -257,8 +257,13 @@ async def compact_thread_context(
         return ThreadCompactionResult(thread_id=thread_id, compacted=False, reason="not_enough_messages")
 
     update_config = dict(snapshot.config)
+    preserved_metadata = checkpoint_rewrite_metadata(getattr(snapshot, "metadata", None))
     if binding_known:
-        update_config["metadata"] = {CHECKPOINT_AGENT_NAME_METADATA_KEY: (DEFAULT_AGENT_NAME_METADATA_VALUE if checkpoint_agent_name is None else checkpoint_agent_name)}
+        preserved_metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] = DEFAULT_AGENT_NAME_METADATA_VALUE if checkpoint_agent_name is None else checkpoint_agent_name
+    else:
+        preserved_metadata.pop(CHECKPOINT_AGENT_NAME_METADATA_KEY, None)
+    if preserved_metadata:
+        update_config["metadata"] = preserved_metadata
     updated_config = await accessor.aupdate(
         update_config,
         {
