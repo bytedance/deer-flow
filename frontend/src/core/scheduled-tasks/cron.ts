@@ -625,7 +625,7 @@ export function onceRunAtInstant(runAt: string, timezone: string): string {
   // Reuse the local timestamp grammar for Python's optional seconds and
   // comma fractions. Browsers need explicit seconds and offset minutes.
   const local =
-    /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::([0-5]\d))?([.,]\d+)?([+-]\d{2})?$/.exec(
+    /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::([0-5]\d))?([.,]\d+)?([+-]\d{2})?$/i.exec(
       value,
     );
   if (local?.[5]) {

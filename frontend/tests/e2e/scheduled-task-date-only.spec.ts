@@ -22,6 +22,11 @@ for (const { runAt, time, nextRunAt } of [
     time: "09:00",
     nextRunAt: "2027-12-07T14:00:00.500Z",
   },
+  {
+    runAt: "2027-12-07t09:00:00-05",
+    time: "09:00",
+    nextRunAt: "2027-12-07T14:00:00Z",
+  },
   { runAt: "2027-12-07", time: "00:00", nextRunAt: "2027-12-07T05:00:00Z" },
   {
     runAt: "2027-12-07T09:00.5",
