@@ -2,6 +2,11 @@
 
 Tool steps mark explicit execution failures. Scheduled-task steps show completed
 operations only after a valid response, rather than when the request is issued.
+A step's label uses the call's `description` argument when it is a non-empty
+string. When it is missing, empty or another type, such as an object, the label
+falls back to the step's default, and for an MCP tool that is
+`Use "<tool>" tool`. A subagent's search step without a string `query` shows its
+description or the tool name instead.
 
 In the chat UI, enable **Token Usage → Debug** to inspect generic/MCP tool calls.
 Each **Tool details** panel starts collapsed and shows the tool name, call ID,

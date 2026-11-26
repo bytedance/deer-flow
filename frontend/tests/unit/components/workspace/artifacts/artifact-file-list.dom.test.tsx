@@ -1,3 +1,4 @@
+import type { Message } from "@langchain/langgraph-sdk";
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
@@ -50,6 +51,7 @@ import { ArtifactFileList } from "@/components/workspace/artifacts/artifact-file
 import { ArtifactRequestError } from "@/core/artifacts/api";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
+import { extractPresentFilesFromMessage } from "@/core/messages/utils";
 
 const files = [
   "/mnt/user-data/outputs/report.md",
@@ -86,6 +88,38 @@ function renderList(
 afterEach(cleanup);
 afterEach(() => {
   rs.restoreAllMocks();
+});
+
+// `present_files` args are the model's output, and the same extraction runs
+// when a thread is reopened, so one bad entry must not hide the valid files.
+it("renders the valid presented files next to malformed entries", () => {
+  const presented = [
+    {
+      type: "ai",
+      content: "",
+      tool_calls: [
+        {
+          id: "present-1",
+          name: "present_files",
+          args: {
+            filepaths: [{ path: "/mnt/user-data/outputs/bad.md" }, files[0], 7],
+          },
+        },
+        { id: "present-2", name: "present_files", args: null },
+      ],
+    },
+  ] as unknown as Message[];
+
+  renderList({
+    files: presented.flatMap((message) =>
+      extractPresentFilesFromMessage(message),
+    ),
+  });
+
+  expect(
+    screen.getByRole("button", { name: "report.md Markdown" }),
+  ).toBeTruthy();
+  expect(screen.queryByText("bad.md")).toBeNull();
 });
 
 describe("ArtifactFileList archive download", () => {

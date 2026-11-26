@@ -1095,11 +1095,19 @@ export function extractPresentFilesFromMessage(message: Message) {
   }
   const files: string[] = [];
   for (const toolCall of message.tool_calls ?? []) {
-    if (
-      toolCall.name === "present_files" &&
-      Array.isArray(toolCall.args.filepaths)
-    ) {
-      files.push(...(toolCall.args.filepaths as string[]));
+    if (toolCall.name !== "present_files") {
+      continue;
+    }
+    // The args are the model's output, and the file list splits each path,
+    // so keep only string entries; one bad entry must not hide the others.
+    const filepaths = (toolCall.args as Record<string, unknown> | null)
+      ?.filepaths;
+    if (Array.isArray(filepaths)) {
+      files.push(
+        ...filepaths.filter(
+          (filepath): filepath is string => typeof filepath === "string",
+        ),
+      );
     }
   }
   return files;

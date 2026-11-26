@@ -99,15 +99,17 @@ export function collectRenderedSubtasks(
             group.messages,
             groupIsLoading,
           );
+          // Persisted or mid-stream calls can arrive without an args object.
+          const args = (toolCall.args ?? {}) as Record<string, unknown>;
           const task: Subtask = {
             id: toolCall.id,
-            subagent_type: toolCall.args.subagent_type,
+            subagent_type: args.subagent_type as string,
             description: resolveSubtaskDescription(
-              toolCall.args.description,
-              toolCall.args.prompt,
+              args.description,
+              args.prompt,
               subtaskLabel,
             ),
-            prompt: toolCall.args.prompt,
+            prompt: args.prompt as string,
             status,
             ...(status === "failed" ? { error: failedLabel } : {}),
           };
