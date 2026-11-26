@@ -34,6 +34,7 @@ from deerflow.agents.middlewares.dynamic_context_middleware import (
     DynamicContextMiddleware,
 )
 from deerflow.config.memory_config import MemoryConfig
+from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 
 pytestmark = pytest.mark.asyncio
@@ -481,7 +482,7 @@ async def test_legacy_backend_timeout_preserves_read_policy(read_policy):
     """The real read path honors legacy policy without waiting for its worker."""
     cfg = MemoryConfig(manager_class=f"{__name__}:_LegacyBackend", backend_config={"failure_policy": {"read": read_policy}})
     backend = _LegacyBackend.from_config(cfg.backend_config)
-    mw = DynamicContextMiddleware(app_config=SimpleNamespace(memory=cfg))
+    mw = DynamicContextMiddleware(app_config=SimpleNamespace(memory=cfg, pii_redaction=PiiRedactionConfig()))
     executor = ThreadPoolExecutor(max_workers=1)
     try:
         with (
@@ -527,7 +528,7 @@ async def test_cold_policy_resolution_stays_off_event_loop(monkeypatch, tmp_path
         seen.append("config")
         return cfg
 
-    mw = DynamicContextMiddleware(app_config=SimpleNamespace(memory=cfg) if explicit_config else None)
+    mw = DynamicContextMiddleware(app_config=SimpleNamespace(memory=cfg, pii_redaction=PiiRedactionConfig()) if explicit_config else None)
     release = threading.Event()
     finished = threading.Event()
 
@@ -558,7 +559,7 @@ async def test_cold_saturated_timeout_never_starts_discovery(monkeypatch, disabl
     cfg = MemoryConfig(manager_class="openviking")
     if disabled_field:
         setattr(cfg, disabled_field, False)
-    mw = DynamicContextMiddleware(app_config=SimpleNamespace(memory=cfg))
+    mw = DynamicContextMiddleware(app_config=SimpleNamespace(memory=cfg, pii_redaction=PiiRedactionConfig()))
     executor = ThreadPoolExecutor(max_workers=1)
     release = threading.Event()
     try:

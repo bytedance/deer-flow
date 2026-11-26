@@ -330,12 +330,17 @@ class SubagentDateContextMiddleware(AgentMiddleware):
             return None
 
 
-def _derive_injection_query(message: object) -> str | None:
+def _derive_injection_query(message: object, pii_redaction_config: PiiRedactionConfig | None = None) -> str | None:
     """Extract a bounded text query from the user message being injected on.
 
     Prefer the original user text preserved by UploadsMiddleware so file
     descriptions cannot consume the query budget. Otherwise handle plain
     text and multimodal lists. An empty original request remains query-less.
+
+    Thread state keeps the user's raw text and a remote backend can send the
+    query to its service, so the configured PII policy applies here, as it
+    does to memory capture. Redaction runs before truncation: a cut through a
+    value would leave a fragment that the detectors no longer match.
     """
     content = getattr(message, "content", None)
     additional_kwargs = getattr(message, "additional_kwargs", None)
@@ -358,7 +363,7 @@ def _derive_injection_query(message: object) -> str | None:
     text = text.strip()
     if not text:
         return None
-    return text[:_INJECTION_QUERY_MAX_CHARS]
+    return redact_text(text, pii_redaction_config)[:_INJECTION_QUERY_MAX_CHARS]
 
 
 class DynamicContextMiddleware(AgentMiddleware):
@@ -595,7 +600,8 @@ class DynamicContextMiddleware(AgentMiddleware):
             target_idx = next((i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])), None)
             if target_idx is None:
                 return {"messages": memory_removals} if memory_removals else None
-            date_reminder, memory_block = self._build_full_reminder(runtime, query=_derive_injection_query(messages[target_idx]))
+            query = _derive_injection_query(messages[target_idx], self._pii_redaction_config())
+            date_reminder, memory_block = self._build_full_reminder(runtime, query=query)
             logger.info(
                 "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into last HumanMessage id=%r",
                 memory_block is not None,

@@ -1,16 +1,24 @@
-"""Memory-queue PII redaction (#3190 vector 5, follow-up to #5527)."""
+"""Memory PII redaction: the capture queue (#3190 vector 5, follow-up to #5527) and the recall query."""
 
+import json
 from unittest.mock import MagicMock
 
+import httpx
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.human_input import HUMAN_INPUT_RESPONSE_KEY
+from deerflow.agents.memory.backends.mem0.client import Mem0Client
+from deerflow.agents.memory.backends.mem0.mem0_manager import Mem0Manager
 from deerflow.agents.middlewares import memory_middleware as memory_middleware_module
+from deerflow.agents.middlewares.dynamic_context_middleware import _INJECTION_QUERY_MAX_CHARS, DynamicContextMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
+from deerflow.config.app_config import AppConfig
 from deerflow.config.memory_config import MemoryConfig
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
+from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 _TOKEN_SECRET = "unit-test-deployment-secret-0123456789"
@@ -302,3 +310,60 @@ def test_human_input_response_redacted_in_compaction_flush_hook(monkeypatch):
     )
     assert EMAIL_TOKEN in queued[0].additional_kwargs[HUMAN_INPUT_RESPONSE_KEY]["value"]
     assert "alice@example.com" not in str(queued[0].additional_kwargs[HUMAN_INPUT_RESPONSE_KEY])
+
+
+# The first-turn recall query leaves the process when a remote backend searches
+# with it. Thread state keeps the raw user text, so the query is redacted under
+# the same policy as the capture queue before it reaches the provider.
+
+
+def _mem0_search_queries(monkeypatch, pii_config, user_text):
+    """Run first-turn injection into a real mem0 client and return the search queries it sent."""
+    monkeypatch.setenv("MEM0_API_KEY", "test-key")
+    queries = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v3/memories/search/":
+            queries.append(json.loads(request.content)["query"])
+            return httpx.Response(200, json={"results": [{"id": "m1", "memory": "prefers email contact", "score": 0.9}]})
+        return httpx.Response(200, json={"results": []})
+
+    manager = Mem0Manager(backend_config={}, mode="middleware")
+    manager._client = Mem0Client(base_url="https://api.mem0.ai", api_key="test-key", transport=httpx.MockTransport(handler))
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+    monkeypatch.setattr("deerflow.agents.middlewares.dynamic_context_middleware.resolve_runtime_user_id", lambda runtime: "runtime-user")
+    config = AppConfig(
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+        memory=MemoryConfig(enabled=True, injection_enabled=True, manager_class="mem0"),
+        pii_redaction=pii_config,
+    )
+    try:
+        DynamicContextMiddleware(app_config=config).before_agent({"messages": [HumanMessage(user_text, id="msg-1")]}, None)
+    finally:
+        manager.close()
+    return queries
+
+
+def test_recall_query_redacted_before_remote_search(monkeypatch):
+    queries = _mem0_search_queries(monkeypatch, PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET), "reach alice@example.com")
+    # The placeholder matches the one capture stored, so recall still finds the fact.
+    assert queries == [f"reach {EMAIL_TOKEN}"]
+
+
+@pytest.mark.parametrize(
+    "pii_config",
+    [PiiRedactionConfig(enabled=False), PiiRedactionConfig(enabled=True, redact_email=False, token_secret=_TOKEN_SECRET)],
+    ids=["disabled", "detector_off"],
+)
+def test_recall_query_follows_redaction_policy(monkeypatch, pii_config):
+    assert _mem0_search_queries(monkeypatch, pii_config, "reach alice@example.com") == ["reach alice@example.com"]
+
+
+def test_recall_query_redacts_value_cut_by_length_cap(monkeypatch):
+    # The cap falls inside the address. Truncating first would leave
+    # "alice@example", which the email detector no longer matches.
+    prefix = "x" * (_INJECTION_QUERY_MAX_CHARS - len("alice@example") - 1) + " "
+    [query] = _mem0_search_queries(monkeypatch, PiiRedactionConfig(enabled=True, token_secret=_TOKEN_SECRET), prefix + "alice@example.com")
+    assert query.startswith(prefix)
+    assert len(query) == _INJECTION_QUERY_MAX_CHARS
+    assert "alice" not in query and "example" not in query

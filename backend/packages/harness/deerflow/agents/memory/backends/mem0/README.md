@@ -37,7 +37,9 @@ network.
 ## Recall
 
 Prompt injection passes the current user message to the backend as a query
-hint. The backend then runs a mem0 semantic search over the user's bucket and
+hint. When `pii_redaction` is enabled, DeerFlow redacts the hint first, so
+mem0 receives the same placeholders that memory capture stored. The backend
+then runs a mem0 semantic search over the user's bucket and
 injects the best `top_k` matches with a score of at least `score_threshold`, in
 relevance order. When there is no hint, for example for an attachment-only
 message, or when the search finds no match, the backend injects the bucket's
