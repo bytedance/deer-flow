@@ -23,6 +23,30 @@ class _InvokeACPAgentInput(BaseModel):
     prompt: str = Field(description="The concise task prompt to send to the agent")
 
 
+class _ModelSelectionError(ValueError):
+    """A local model-selection check failed, without including agent-supplied text."""
+
+
+async def _select_session_model(conn, session, model: str) -> None:
+    select_options = [option for option in (getattr(session, "config_options", None) or []) if option.type == "select"]
+    model_option = next((option for option in select_options if option.category == "model"), None)
+    if model_option is None:
+        # The category is optional; a conventional ID can identify the
+        # selector, but an option explicitly categorized otherwise cannot.
+        model_option = next((option for option in select_options if option.category is None and option.id == "model"), None)
+    if model_option is None:
+        await conn.set_session_model(model_id=model, session_id=session.session_id)
+        return
+
+    # ACP exposes either a list of choices or a list of named choice groups.
+    if not any(choice.value == model for item in model_option.options for choice in getattr(item, "options", (item,))):
+        raise _ModelSelectionError("The configured model is not an advertised choice")
+
+    result = await conn.set_config_option(config_id=model_option.id, session_id=session.session_id, value=model)
+    if not any(option.id == model_option.id and option.type == "select" and option.current_value == model for option in result.config_options):
+        raise _ModelSelectionError("The agent did not confirm the configured model")
+
+
 def _get_work_dir(thread_id: str | None) -> str:
     """Get the per-thread ACP workspace directory.
 
@@ -204,6 +228,8 @@ def _format_invocation_error(agent: str, cmd: str, exc: Exception) -> str:
     """Return a user-facing ACP invocation error with actionable remediation."""
     if isinstance(exc, TimeoutError):
         return f"Error invoking ACP agent '{agent}': SDK transport timed out"
+    if isinstance(exc, _ModelSelectionError):
+        return f"Error invoking ACP agent '{agent}': {exc}. Check `acp_agents.{agent}.model` in config.yaml."
     if not isinstance(exc, FileNotFoundError):
         return f"Error invoking ACP agent '{agent}' ({type(exc).__name__}). Check the agent's configuration and authentication."
 
@@ -331,9 +357,9 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 client_info=Implementation(name="deerflow", title="DeerFlow", version="0.1.0"),
             )
             session_kwargs: dict[str, Any] = {"cwd": physical_cwd, "mcp_servers": mcp_servers}
-            if agent_config.model:
-                session_kwargs["model"] = agent_config.model
             session = await conn.new_session(**session_kwargs)
+            if agent_config.model:
+                await _select_session_model(conn, session, agent_config.model)
             await conn.prompt(
                 session_id=session.session_id,
                 prompt=[text_block(prompt)],

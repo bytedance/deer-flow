@@ -179,8 +179,8 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
     config = bootstrap._get_alembic_config(engine, postgres_schema=schema)
     previous = "0059_coordination_grants"
     run_settings_revision = "0060_coordination_run_settings"
-    coordinator_revision = "0061_coordination_coordinator"
-    revision = "0062_coordination_channel_origin"
+    mcp_agent_grants_revision = "0062_mcp_agent_grants"
+    revision = "0063_coordination_channel_origin"
     await asyncio.to_thread(command.upgrade, config, "0055_thread_shares")
     await asyncio.to_thread(command.upgrade, config, previous)
     async with engine.begin() as conn:
@@ -192,7 +192,7 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
         )
     repo = CoordinationTaskRepository(async_sessionmaker(engine))
     await asyncio.to_thread(command.upgrade, config, run_settings_revision)
-    await asyncio.to_thread(command.upgrade, config, coordinator_revision)
+    await asyncio.to_thread(command.upgrade, config, mcp_agent_grants_revision)
     await asyncio.to_thread(command.upgrade, config, revision)
     async with engine.connect() as conn:
 
@@ -215,10 +215,11 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
     assert configured["coordinator"] is True
     assert (await repo.get("alice", configured["id"]))["run_settings"] == settings
 
-    await asyncio.to_thread(command.downgrade, config, coordinator_revision)
+    await asyncio.to_thread(command.downgrade, config, mcp_agent_grants_revision)
     async with engine.connect() as conn:
         columns = await conn.run_sync(lambda sync: {item["name"] for item in inspect(sync).get_columns("coord_tasks")})
         assert "channel_origin" not in columns
+        assert await conn.run_sync(lambda sync: inspect(sync).has_table("mcp_agent_grants"))
         assert "coordinator" in columns
     await asyncio.to_thread(command.upgrade, config, revision)
     assert (await repo.get("alice", configured["id"]))["coordinator"] is True
