@@ -30,7 +30,7 @@ from app.channels import buzz_run_policy as _buzz_run_policy  # noqa: F401
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.capabilities import CHANNEL_CAPABILITIES
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
-from app.channels.connection_identity import lookup_thread_id
+from app.channels.connection_identity import fallback_store_channel, lookup_thread_id
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
 from app.channels.goal_status import goal_reply_text, goal_status_text, is_active_goal_state
 from app.channels.message_bus import (
@@ -2327,10 +2327,7 @@ class ChannelManager:
           ``ClarificationMiddleware`` would otherwise dead-end a webhook
           run waiting for a synchronous reply that only arrives as a
           later, separate webhook delivery.
-        * Channel-specific credentials provider — e.g. the GitHub channel
-          installs a token-mint callable so ``bash_tool`` can resolve a
-          fresh installation token on every invocation (longer than the
-          1h GitHub TTL).
+        * Optional channel-specific credentials provider.
 
         ``recursion_limit`` is applied inside :meth:`_resolve_run_params`
         instead because it lives on ``run_config`` (not ``run_context``)
@@ -2917,7 +2914,7 @@ class ChannelManager:
             return
 
         await self.store.set_thread_id(
-            msg.channel_name,
+            fallback_store_channel(msg.channel_name, msg.topic_id, self._connection_repo),
             msg.chat_id,
             thread_id,
             topic_id=msg.topic_id,
@@ -2935,7 +2932,7 @@ class ChannelManager:
                 external_topic_id=msg.topic_id,
                 thread_id=thread_id,
             )
-        return await self.store.claim_thread_id(msg.channel_name, msg.chat_id, thread_id, topic_id=msg.topic_id, user_id=msg.user_id)
+        return await self.store.claim_thread_id(fallback_store_channel(msg.channel_name, msg.topic_id, self._connection_repo), msg.chat_id, thread_id, topic_id=msg.topic_id, user_id=msg.user_id)
 
     def _remember_thread_agent(self, thread_id: str, agent_name: str | None) -> None:
         if len(self._thread_agent_names) > IN_PROCESS_CACHE_MAX_ENTRIES:
@@ -3411,11 +3408,7 @@ class ChannelManager:
         pinned_model_value = run_context.get("model_name")
         expected_pin = pinned_model_value.strip() if isinstance(pinned_model_value, str) and pinned_model_value.strip() else None
 
-        # Apply per-channel policy: credentials provider (e.g. GitHub
-        # installation-token mint) and the non-interactive flag for
-        # webhook channels. Driven by CHANNEL_RUN_POLICY so each new
-        # webhook channel is a one-row registration, not a fresh
-        # if-branch here.
+        # Apply the run policy registered by the channel.
         policy = await self._apply_channel_policy(msg, run_context)
 
         # If the inbound message contains file attachments, let the channel

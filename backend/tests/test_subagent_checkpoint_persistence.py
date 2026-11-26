@@ -9,11 +9,16 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.util
+import json
+import shutil
+import sqlite3
+import subprocess
 import sys
 import threading
 from collections import defaultdict
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from langchain.agents.middleware import AgentMiddleware
@@ -23,12 +28,14 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
 from langchain_core.tools import tool
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.runtime.checkpointer.async_provider import make_checkpointer
+from scripts.subagent_history_inventory import inspect_thread
 
 
 class _OfflineModel(BaseChatModel):
@@ -437,6 +444,139 @@ async def test_parallel_children_reopen_with_execution_identity(native_executor,
             assert any(isinstance(message, ToolMessage) and "child evidence" in message.content for message in messages)
             assert any(message.content == "CHILD_FINAL" for message in messages)
             assert all(message.content not in {"Delegate", "PARENT_FINAL"} for message in messages if isinstance(message.content, str))
+
+    # Inspect the closed database through the operator entry point. LangGraph
+    # can append a numeric segment to a second invocation's raw namespace.
+    db_path = Path(app_config.database.sqlite_path)
+    rows = inspect_thread(db_path, "history-thread")
+    assert len(rows) == len(completed)
+    assert {row["checkpoint_ns"] for row in rows} == namespaces
+    assert {(row["parent_run_id"], row["execution_id"]) for row in rows} == set(completed)
+    for row in rows:
+        entries = groups[row["execution_id"]]
+        assert row["checkpoint_ns"] == entries[0].config["configurable"]["checkpoint_ns"]
+        assert row["checkpoint_rows"] == len(entries)
+        assert row["write_rows"] == sum(len(entry.pending_writes) for entry in entries)
+        assert row["status"] == "unknown / retained"
+        assert row["reason"]
+    assert inspect_thread(db_path, "another-thread") == []
+
+
+def test_inventory_uses_one_wal_snapshot(tmp_path, monkeypatch):
+    db_path = tmp_path / "live.sqlite"
+    execution_id = str(uuid4())
+    namespace = f"delegate:parent|deerflow_subagent:{execution_id}"
+    metadata = json.dumps({"deerflow_subagent_execution_id": execution_id}).encode()
+    connect = sqlite3.connect
+
+    with closing(connect(db_path)) as writer:
+        SqliteSaver(writer).setup()
+        assert writer.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+
+        def append_checkpoint(checkpoint_id):
+            with writer:
+                writer.execute(
+                    "INSERT INTO checkpoints(thread_id, checkpoint_ns, checkpoint_id, metadata) VALUES ('live', ?, ?, ?)",
+                    (namespace, checkpoint_id, metadata),
+                )
+                writer.executemany(
+                    "INSERT INTO writes(thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel) VALUES ('live', ?, ?, 'task', ?, ?)",
+                    [(namespace, checkpoint_id, 0, "messages"), (namespace, checkpoint_id, 1, "state")],
+                )
+
+        append_checkpoint("one")
+        committed = False
+
+        def on_row_read():
+            nonlocal committed
+            if not committed:
+                append_checkpoint("two")
+                committed = True
+            return 1
+
+        def connect_reader(*args, **kwargs):
+            reader = connect(*args, **kwargs)
+            reader.create_function("on_row_read", 0, on_row_read)
+            # The function fires during a real SQLite read, after its snapshot
+            # exists. The separate writer can commit immediately in WAL mode.
+            for table in ("checkpoints", "writes"):
+                reader.execute(f"CREATE TEMP VIEW {table} AS SELECT * FROM main.{table} WHERE on_row_read()")
+            return reader
+
+        with monkeypatch.context() as patch:
+            patch.setattr(sqlite3, "connect", connect_reader)
+            [before] = inspect_thread(db_path, "live")
+
+        assert committed
+        assert before["parent_run_id"] is None
+        assert (before["checkpoint_rows"], before["write_rows"]) == (1, 2)
+        [after] = inspect_thread(db_path, "live")
+        assert (after["checkpoint_rows"], after["write_rows"]) == (2, 4)
+
+
+def test_inventory_cli_reads_database_and_rejects_missing_path(tmp_path):
+    script = shutil.copy(Path(__file__).resolve().parents[1] / "scripts" / "subagent_history_inventory.py", tmp_path)
+    db_path = tmp_path / "existing #.sqlite"
+    with closing(sqlite3.connect(db_path)) as db:
+        SqliteSaver(db).setup()
+
+    def run_cli(path):
+        return subprocess.run([sys.executable, script, "--db", path, "--thread-id", "thread-1"], cwd=tmp_path, capture_output=True, text=True)
+
+    ok = run_cli(db_path)
+    assert ok.returncode == 0, ok.stderr
+    assert json.loads(ok.stdout) == {"thread_id": "thread-1", "histories": []}
+
+    missing = tmp_path / "missing.sqlite"
+    failed = run_cli(missing)
+    assert failed.returncode != 0
+    assert failed.stderr and not failed.stdout
+    assert not missing.exists()
+
+
+def test_inventory_keeps_unverified_namespaces_separate(tmp_path):
+    db_path = tmp_path / "partial.sqlite"
+    execution_id = str(uuid4())
+    valid = {"deerflow_subagent_execution_id": execution_id, "deerflow_parent_run_id": "parent"}
+    # An exact namespace still identifies evidence when its metadata cannot
+    # substantiate the execution. Preserve the counts without guessing its owner.
+    conflict_ns = f"delegate:conflict|deerflow_subagent:{execution_id}"
+    malformed_ns = f"delegate:malformed|deerflow_subagent:{uuid4()}"
+    intact_ns = "delegate:intact|deerflow_subagent:intact"
+    writes_only_ns = f"delegate:attempt|deerflow_subagent:{uuid4()}"
+    with closing(sqlite3.connect(db_path)) as db:
+        SqliteSaver(db).setup()
+        db.executemany(
+            "INSERT INTO checkpoints(thread_id, checkpoint_ns, checkpoint_id, metadata) VALUES (?, ?, ?, ?)",
+            [
+                ("target", conflict_ns, "1", json.dumps(valid).encode()),
+                ("target", conflict_ns, "2", json.dumps({**valid, "deerflow_subagent_execution_id": str(uuid4())}).encode()),
+                ("target", malformed_ns, "3", b"{bad-json"),
+                ("target", malformed_ns, "4", b'{"deerflow_subagent_execution_id":"\xff"}'),
+                ("target", intact_ns, "5", rb'{"deerflow_subagent_execution_id":"intact","deerflow_parent_run_id":"\ud800"}'),
+                ("target", "", "root", b"{}"),
+                ("target", "ordinary-subgraph", "subgraph", b"{}"),
+                ("target", f"{conflict_ns}|unrelated-node:next", "descendant", json.dumps(valid).encode()),
+                ("other", conflict_ns, "1", json.dumps(valid).encode()),
+            ],
+        )
+        db.executemany(
+            "INSERT INTO writes(thread_id, checkpoint_ns, checkpoint_id, task_id, idx, channel) VALUES (?, ?, '1', 'task', 0, 'messages')",
+            [("target", writes_only_ns), ("other", conflict_ns)],
+        )
+        db.commit()
+
+    rows = inspect_thread(db_path, "target")
+    assert {(r["checkpoint_ns"], r["checkpoint_rows"], r["write_rows"]) for r in rows} == {
+        (conflict_ns, 2, 0),
+        (malformed_ns, 2, 0),
+        (intact_ns, 1, 0),
+        (writes_only_ns, 0, 1),
+    }
+    for row in rows:
+        assert row["execution_id"] == ("intact" if row["checkpoint_ns"] == intact_ns else None)
+        assert row["parent_run_id"] is None
+        assert row["status"] == "unknown / retained" and row["reason"]
 
 
 @pytest.mark.asyncio

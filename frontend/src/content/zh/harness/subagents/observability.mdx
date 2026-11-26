@@ -46,7 +46,7 @@ Run worker 把上述事件持久化到运行事件存储，类别为 `subagent`�
 | `subagent.step`  | `task_id`、`message_index`、`kind`（`ai` 或 `tool`）、`text`、`truncated`；助手步骤附 `tool_calls`，工具步骤附 `tool_name` |
 | `subagent.end`   | `task_id`、`status`（`completed` / `failed` / `cancelled` / `timed_out`）、`model_name`、`usage`、`result` 或 `error` 及其截断标记 |
 
-步骤文本最多 8,192 字符。事件按 25 条一批写入，`subagent.end` 立即刷盘；写入失败时重新缓冲等待下次重试，不会丢步骤。
+步骤文本最多 8,192 字符。事件按 25 条一批写入，`subagent.end` 立即刷盘。只有存储明确确认整批未提交时才重新缓冲重试（包括数据库提交前的暂时性故障和 JSONL I/O 失败后的成功回滚）。连续三次写入失败、结果不确定的异常或存储自身取消，会停止该次运行后续子 Agent 事件的持久化并释放待写负载。实时流继续，但刷新后的历史可能不完整。收尾日志记录未确认与跳过的事件数量，以及有数量上限的受影响任务 ID 样本；未确认批次可能已经写入，不能把其数量当作确定丢失的事件数。
 
 查询接口：
 

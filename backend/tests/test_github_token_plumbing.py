@@ -1,19 +1,4 @@
-"""Tests for the GitHub App installation-token plumbing.
-
-Covers the end-to-end path that lets a GitHub-driven agent actually push
-code and open PRs:
-
-  dispatcher carries ``installation_id`` + a deterministic
-  ``preferred_thread_id`` in ``InboundMessage.metadata``
-    -> ChannelManager mints an installation token and injects it into
-       ``run_context["github_token"]``
-    -> the value flows through ``context=`` into ``runtime.context``
-    -> the bash tool exposes it as ``GH_TOKEN`` / ``GITHUB_TOKEN`` via a
-       per-call ``env`` overlay on ``Sandbox.execute_command``
-
-The per-call overlay (rather than mutating ``os.environ``) is what keeps
-concurrent runs on different repos from clobbering each other's token.
-"""
+"""Sandbox environment overlays and GitHub webhook run policy."""
 
 from __future__ import annotations
 
@@ -31,7 +16,7 @@ from app.channels.manager import ChannelManager
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
 from app.channels.store import JsonChannelStore
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
-from deerflow.sandbox.tools import _github_env_from_runtime, bash_tool
+from deerflow.sandbox.tools import bash_tool
 
 
 def _new_aio_sandbox_with_session_state():
@@ -314,69 +299,11 @@ def test_aio_sandbox_rejects_invalid_env_key() -> None:
 
 
 # ---------------------------------------------------------------------------
-# bash_tool token read-through
+# Bash command environment
 # ---------------------------------------------------------------------------
 
 
-def test_github_env_from_runtime_returns_token_pair() -> None:
-    runtime = SimpleNamespace(context={"github_token": "tok-abc"})
-    env = _github_env_from_runtime(runtime)
-    assert env == {"GH_TOKEN": "tok-abc", "GITHUB_TOKEN": "tok-abc"}
-
-
-def test_github_env_from_runtime_resolves_provider_callable() -> None:
-    """A callable in context["github_token"] is invoked per bash call.
-
-    This is the refresh seam: long autonomous github runs that span past
-    the 60-minute installation-token TTL need every bash invocation to
-    re-ask the provider, which transparently re-mints via the app-side
-    cache when the token's leeway tripped.
-    """
-    calls = {"n": 0}
-
-    def _provider() -> str:
-        calls["n"] += 1
-        return f"tok-call-{calls['n']}"
-
-    runtime = SimpleNamespace(context={"github_token": _provider})
-
-    env_1 = _github_env_from_runtime(runtime)
-    assert env_1 == {"GH_TOKEN": "tok-call-1", "GITHUB_TOKEN": "tok-call-1"}
-
-    env_2 = _github_env_from_runtime(runtime)
-    assert env_2 == {"GH_TOKEN": "tok-call-2", "GITHUB_TOKEN": "tok-call-2"}
-    assert calls["n"] == 2  # called once per bash invocation
-
-
-def test_github_env_from_runtime_returns_none_when_provider_raises() -> None:
-    """A misbehaving provider must NOT crash the bash tool — it just falls
-    back to the no-token path so the run can still execute read-only.
-    """
-
-    def _broken() -> str:
-        raise RuntimeError("mint failed")
-
-    runtime = SimpleNamespace(context={"github_token": _broken})
-    assert _github_env_from_runtime(runtime) is None
-
-
-def test_github_env_from_runtime_returns_none_when_provider_returns_empty() -> None:
-    runtime = SimpleNamespace(context={"github_token": lambda: ""})
-    assert _github_env_from_runtime(runtime) is None
-
-
-def test_github_env_from_runtime_none_when_no_token() -> None:
-    runtime = SimpleNamespace(context={"thread_id": "t1"})
-    assert _github_env_from_runtime(runtime) is None
-
-
-def test_github_env_from_runtime_none_when_empty() -> None:
-    runtime = SimpleNamespace(context={"github_token": ""})
-    assert _github_env_from_runtime(runtime) is None
-
-
-def test_bash_tool_passes_token_as_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When runtime.context carries github_token, bash forwards it to the sandbox."""
+def test_bash_tool_ignores_legacy_run_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = SimpleNamespace(
         state={"sandbox": {"sandbox_id": "aio:xyz"}},  # non-local -> simpler branch
         context={"thread_id": "t1", "github_token": "tok-from-manager"},
@@ -394,10 +321,10 @@ def test_bash_tool_passes_token_as_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: _Sandbox())
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
 
-    result = bash_tool.func(runtime=runtime, description="push", command="git push")
+    result = bash_tool.func(runtime=runtime, description="List files", command="ls")
 
     assert "done" in result
-    assert captured["env"] == {"GH_TOKEN": "tok-from-manager", "GITHUB_TOKEN": "tok-from-manager"}
+    assert captured["env"] is None
 
 
 def test_bash_tool_no_env_without_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -472,12 +399,7 @@ def test_bash_tool_routes_subagent_command_to_its_shell_scope(
 
 
 # ---------------------------------------------------------------------------
-# ChannelManager._apply_channel_policy — the unified per-channel run-policy
-# hook. The github channel registers (is_interactive=False,
-# default_recursion_limit=250, credentials_provider=inject_github_credentials,
-# requires_bound_identity=False) via CHANNEL_RUN_POLICY; this section
-# exercises that one hook for github and the no-op path for unregistered
-# channels (Slack, Telegram, …).
+# GitHub webhook policy and thread routing
 # ---------------------------------------------------------------------------
 
 
@@ -510,83 +432,6 @@ def _new_manager() -> ChannelManager:
     return ChannelManager(bus=bus, store=store)
 
 
-@pytest.mark.asyncio
-async def test_run_context_after_apply_channel_policy_is_json_serializable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Regression pin: ``run_context`` survives the langgraph SDK's JSON encoder.
-
-    The channel path calls ``client.runs.wait(thread_id, assistant_id,
-    context=run_context, …)``. The SDK encodes the body with ``orjson``
-    before sending it over HTTP. Anything in ``run_context`` that is not
-    JSON-serializable (notably the previous closure-based token provider)
-    raises ``TypeError: Type is not JSON serializable: function`` and the
-    entire delivery fails. This test pins the contract so we never
-    silently regress to shipping a closure again.
-    """
-    import json
-
-    manager = _new_manager()
-    mint = AsyncMock(return_value="ghs_installation_token")
-    monkeypatch.setattr("app.gateway.github.app_auth.mint_installation_token", mint)
-
-    run_context: dict = {"thread_id": "t1", "user_id": "u1"}
-    await manager._apply_channel_policy(_github_msg(), run_context)
-
-    # Will raise TypeError if anything in run_context is not JSON-serializable.
-    encoded = json.dumps(run_context)
-    assert '"github_token": "ghs_installation_token"' in encoded
-
-
-@pytest.mark.asyncio
-async def test_apply_channel_policy_degrades_on_mint_failure(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    """A failed mint must not crash the run; the agent proceeds read-only.
-
-    ``_apply_channel_policy`` catches credential-provider exceptions and
-    logs a warning so a transient GitHub API outage or a misconfigured
-    installation_id degrades to "no token injected" rather than dropping
-    the delivery.
-    """
-    manager = _new_manager()
-
-    async def boom(_installation_id):
-        raise RuntimeError("GITHUB_APP_ID not set")
-
-    monkeypatch.setattr("app.gateway.github.app_auth.mint_installation_token", boom)
-
-    run_context: dict = {}
-    with caplog.at_level("WARNING", logger="app.channels.manager"):
-        await manager._apply_channel_policy(_github_msg(), run_context)
-
-    # Must not crash, must not set a token, must warn.
-    assert "github_token" not in run_context
-    assert any("credentials_provider raised" in r.message for r in caplog.records)
-
-
-@pytest.mark.asyncio
-async def test_apply_channel_policy_skips_token_without_installation_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A binding with no ``installation_id`` runs without a minted token —
-    no mint call, no ``github_token`` in run_context. The non-interactive
-    flag still gets set because that is decided by the channel-policy
-    entry, not by the credentials provider.
-    """
-    manager = _new_manager()
-    mint = AsyncMock(return_value="should-not-be-called")
-    monkeypatch.setattr("app.gateway.github.app_auth.mint_installation_token", mint)
-
-    run_context: dict = {}
-    await manager._apply_channel_policy(_github_msg(installation_id=None), run_context)
-
-    mint.assert_not_awaited()
-    assert "github_token" not in run_context
-    # disable_clarification is set unconditionally for github (it is on
-    # the policy entry, not the credentials provider).
-    assert run_context["disable_clarification"] is True
-
-
-# ---------------------------------------------------------------------------
-# ChannelRunPolicy registration + _apply_channel_policy
-# ---------------------------------------------------------------------------
-
-
 def test_github_policy_is_registered_on_import() -> None:
     """Importing the gateway.github subpackage registers the run policy.
 
@@ -604,18 +449,11 @@ def test_github_policy_is_registered_on_import() -> None:
     assert policy is not None
     assert policy.is_interactive is False
     assert policy.default_recursion_limit == 250
-    assert policy.credentials_provider is not None
+    assert policy.credentials_provider is None
 
 
 @pytest.mark.asyncio
-async def test_apply_channel_policy_installs_token_for_github(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The unified policy hook installs the github credentials and the
-    non-interactive flag — both in one call.
-
-    The token in ``run_context`` is the minted **string**, not a closure,
-    so the value survives the langgraph SDK's JSON encoder on its way to
-    ``client.runs.wait(context=…)``.
-    """
+async def test_github_channel_applies_webhook_flags_without_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = _new_manager()
     mint = AsyncMock(return_value="ghs_unified")
     monkeypatch.setattr("app.gateway.github.app_auth.mint_installation_token", mint)
@@ -623,9 +461,9 @@ async def test_apply_channel_policy_installs_token_for_github(monkeypatch: pytes
     run_context: dict = {}
     await manager._apply_channel_policy(_github_msg(), run_context)
 
-    mint.assert_awaited_once_with(140594274)
-    assert run_context["github_token"] == "ghs_unified"
-    # Non-interactive flag is set in the same call — one method, one place.
+    mint.assert_not_awaited()
+    assert "github_token" not in run_context
+    assert run_context["interaction_mode"] == "webhook"
     assert run_context["disable_clarification"] is True
 
 

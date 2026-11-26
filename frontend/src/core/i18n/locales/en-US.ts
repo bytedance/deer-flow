@@ -205,6 +205,7 @@ export const enUS: Translations = {
         "en-US",
       ),
       lightrag: bundledCopy("deerflow-extension-lightrag", "en-US"),
+      runPostmortem: bundledCopy("deerflow-extension-run-postmortem", "en-US"),
       weknora: bundledCopy("deerflow-extension-weknora", "en-US"),
       example: bundledCopy("deerflow-extension-example", "en-US"),
     },
@@ -220,6 +221,21 @@ export const enUS: Translations = {
 
   capabilities: {
     toolsAndIntegrations: "Tools & integrations",
+    mcpConnections: {
+      title: "My MCP connections",
+      action: (action, name) => `${action} ${name}`,
+      disconnect: "Disconnect",
+      reconnect: "Reconnect",
+      actionFailed: "Could not change the connection. Try again.",
+      loadFailed: "Could not load your MCP connections.",
+      status: {
+        disconnected: "Not connected",
+        connected: "Connected",
+        reconnect_required: "Reconnect to use this server.",
+        removed: "User authorization is no longer enabled for this server.",
+        unavailable: "Connection unavailable. Contact your administrator.",
+      },
+    },
     icon: {
       title: "Plugin icon",
       upload: "Upload plugin icon",
@@ -609,19 +625,22 @@ export const enUS: Translations = {
     voiceInputStartLabel: "Dictate with voice",
     voiceInputStopLabel: "Stop voice input",
     voiceInputStart:
-      "Dictate with voice. DeerFlow receives only transcribed text; audio is handled by your browser or system speech service.",
+      "Record audio and send it to the configured transcription service.",
     voiceInputStop: "Stop voice input",
-    voiceInputListening: "Listening... Click to stop voice input.",
+    voiceInputListening: "Recording… Finish to review or polish your text.",
+    voiceInputStarting: "Waiting for microphone…",
+    voiceInputFinishing: "Transcribing audio…",
+    voiceInputCancel: "Cancel voice input",
     voiceInputUnsupported:
-      "Voice input is not supported in this browser. Try Chrome or Edge.",
+      "Recording requires HTTPS (or localhost) and a browser that supports microphone recording.",
     voiceInputPermissionDenied:
       "Microphone access was denied. Allow microphone access and try again.",
     voiceInputMicrophoneUnavailable:
       "No microphone was detected. Check your device input and try again.",
-    voiceInputUnsupportedLanguage:
-      "Voice input does not support the current language in this browser.",
-    voiceInputNetworkError:
-      "Voice input could not reach the browser speech service.",
+    voiceInputTooLarge:
+      "Recording exceeds the size limit. Please try a shorter recording.",
+    voiceInputUnavailable:
+      "Voice input is no longer enabled. Your draft has been kept.",
     voiceInputNoSpeech: "No speech was detected. Please try again.",
     voiceInputFailed: "Voice input failed. Please try again.",
     mode: "Mode",
@@ -785,6 +804,7 @@ export const enUS: Translations = {
       },
     ],
     pleaseWaitStreaming: "Please wait for the current response to finish.",
+    send: "Send",
     runInputMode: "Send while working",
     queueMode: "Queue",
     steerMode: "Steer",

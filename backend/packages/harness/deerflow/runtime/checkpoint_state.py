@@ -236,7 +236,22 @@ class CheckpointStateAccessor:
         if limit is not None and limit <= 0:
             return []
         result = []
-        async for snapshot in self.graph.aget_state_history(prepared, limit=limit):
+        walk_config = prepared
+        before = None
+        if prepared["configurable"].get("checkpoint_id"):
+            # Savers match config.checkpoint_id exactly in ``list``, so
+            # get_state_history would return only the anchor. Treat it as the
+            # inclusive start of the walk, like the Gateway's raw accessor.
+            async for anchor in self.graph.aget_state_history(prepared, limit=1):
+                raise_if_snapshot_incompatible(anchor, self.mode)
+                result.append(anchor)
+            before = prepared
+            walk_config = {**prepared, "configurable": {k: v for k, v in prepared["configurable"].items() if k != "checkpoint_id"}}
+            if limit is not None and len(result) >= limit:
+                return result
+        remaining = None if limit is None else limit - len(result)
+        walk_kwargs = {"before": before} if before is not None else {}
+        async for snapshot in self.graph.aget_state_history(walk_config, limit=remaining, **walk_kwargs):
             raise_if_snapshot_incompatible(snapshot, self.mode)
             result.append(snapshot)
             if limit is not None and len(result) >= limit:

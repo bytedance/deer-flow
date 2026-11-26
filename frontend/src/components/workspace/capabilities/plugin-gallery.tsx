@@ -27,6 +27,7 @@ import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { cn } from "@/lib/utils";
 
 import { MCPPluginManager } from "./mcp-plugin-manager";
+import { MCPUserConnections } from "./mcp-user-connections";
 import { pluginSettingsAdapters } from "./plugin-adapters";
 import {
   catalogText,
@@ -269,6 +270,14 @@ export function PluginGallery({ query }: { query: string }) {
           </h2>
           <p className="text-muted-foreground text-sm">{labels.platformHint}</p>
         </div>
+        {user && canManage && (
+          <MCPUserConnections
+            key={user.id}
+            userId={user.id}
+            query={query}
+            callbackFailed={params.get("mcp_oauth") === "failed"}
+          />
+        )}
         {canManagePlatform ? (
           <MCPPluginManager
             key={`deployment:${user?.id}`}

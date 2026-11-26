@@ -160,27 +160,14 @@ describe("InputBox stop gating (runs:cancel)", () => {
 
   it("keeps stop enabled for an unresolved permission list (default)", () => {
     const onStop = rs.fn();
-    const { container } = renderComposer({ onStop });
+    renderComposer({ onStop });
 
-    const submit = getSubmitButton(container);
-    expect(submit.disabled).toBe(false);
+    const stop = screen.getByRole<HTMLButtonElement>("button", {
+      name: "Stop current task",
+    });
+    expect(stop.disabled).toBe(false);
 
-    fireEvent.click(submit);
+    fireEvent.click(stop);
     expect(onStop).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps the base Submit accessible name when stop is not denied", () => {
-    // Regression: passing an explicitly-undefined aria-label clobbered
-    // PromptInputSubmit's default aria-label="Submit" via JSX spread,
-    // stripping the submit control's accessible name in every
-    // non-denied state (e2e locates the button by that name). Query by
-    // role + name so the assertion resolves the accessible name the
-    // same way e2e and assistive tech do, not via the raw attribute.
-    renderComposer({ onStop: rs.fn() });
-
-    // getByRole throws when no button exposes the "Submit" accessible
-    // name, which is exactly the regression being guarded.
-    const submit = screen.getByRole("button", { name: "Submit" });
-    expect(submit.tagName).toBe("BUTTON");
   });
 });

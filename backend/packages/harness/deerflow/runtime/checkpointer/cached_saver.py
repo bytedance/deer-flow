@@ -1,9 +1,8 @@
 """Read-through delta-history cache wrapper for a canonical BaseCheckpointSaver.
 
-The inner saver must return delta history in ascending ``(task_id, idx)``
-order per checkpoint, with each task's ``pending_writes`` in ``idx`` order.
-The in-repo memory, sqlite, and postgres backends satisfy this contract;
-the base saver's default history walk alone does not guarantee it.
+The inner saver must return each checkpoint's ``pending_writes`` in the
+same order used by its delta history walk. The supported memory, SQLite,
+and PostgreSQL savers use ``writes_sort_key(task_path, task_id, idx)``.
 
 Correctness argument (spec §3): a checkpoint's delta history is a pure
 function of its sealed ancestor chain — the LangGraph contract excludes the
@@ -53,22 +52,13 @@ def _checkpoint_ref(tup: CheckpointTuple) -> tuple[str, str, str]:
 def _channel_writes(tup: CheckpointTuple, channel: str) -> list[PendingWrite]:
     """Writes for one channel in the inner saver's canonical delta order.
 
-    The wrapper assumes the inner saver's ``get_delta_channel_history`` uses
-    ascending ``(task_id, idx)`` order per checkpoint; the base implementation
-    instead iterates ``pending_writes`` in storage order. For supported savers,
-    ``CheckpointTuple.pending_writes`` carries each task's writes in ``idx``
-    order, but across tasks it follows
-    *storage/completion* order, which the InMemorySaver backend leaves in task
-    arrival order rather than ``task_id`` order. Composing from that raw order
-    makes the cached history disagree with the inner saver on fan-out
-    supersteps (several parallel tasks writing one channel). A stable sort by
-    ``task_id`` restores the canonical ``(task_id, idx)`` order while preserving
-    each task's internal ``idx`` sequence; it is a no-op on backends that
-    already return writes ``ORDER BY task_id, idx`` (sqlite, postgres).
+    ``InMemorySaver`` sorts stored writes with ``writes_sort_key``. SQLite's
+    ``load_pending_writes`` and PostgreSQL's ``_load_writes`` apply the same
+    key to writes returned by the database. Filtering preserves the delta
+    walk's replay order. Sorting by ``task_id`` alone can reorder parallel
+    writes whose task paths sort differently and change the reducer's result.
     """
-    writes = [w for w in (tup.pending_writes or []) if w[1] == channel]
-    writes.sort(key=lambda w: w[0])
-    return writes
+    return [w for w in (tup.pending_writes or []) if w[1] == channel]
 
 
 class CachedHistorySaver(BaseCheckpointSaver):

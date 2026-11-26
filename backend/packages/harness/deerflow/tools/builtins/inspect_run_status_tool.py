@@ -80,7 +80,7 @@ def snapshot_run_status(state: Mapping[str, Any], context: Mapping[str, Any], *,
         for item in todos:
             if not isinstance(item, Mapping):
                 continue
-            if item.get("status") == "pending":
+            if item.get("status") in (None, "pending"):
                 pending += 1
             elif item.get("status") == "in_progress":
                 in_progress += 1

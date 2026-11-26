@@ -71,6 +71,7 @@ from deerflow.agents.middlewares.audit_context import (
     TOOL_PROGRESS_RECORDER_CONTEXT_KEY,
     resolve_audit_recorder,
 )
+from deerflow.agents.middlewares.model_response import is_empty_stop_response
 from deerflow.agents.middlewares.tool_result_meta import (
     PROGRESS_GUARD_ERROR_TYPE,
     TOOL_META_KEY,
@@ -213,6 +214,7 @@ def _format_hint(meta: ToolResultMeta) -> str:
     action_map = {
         "rewrite_query": "Try rephrasing your search query with different keywords or approach.",
         "try_alternative": "Consider using a different tool or strategy.",
+        "retry_later": "Wait before retrying. If the failure persists, tell the user to try again later.",
         "summarize": "Consider summarizing your current findings and moving forward.",
         "stop": "Do not retry this operation — it is not recoverable.",
         # Near-duplicate success results: recommended_next_action is "continue" by default,
@@ -224,6 +226,7 @@ def _format_hint(meta: ToolResultMeta) -> str:
         "not_found": "[PROGRESS HINT] The resource was not found repeatedly.",
         "rate_limited": "[PROGRESS HINT] The tool is being rate-limited.",
         "transient": "[PROGRESS HINT] The tool encountered repeated transient failures.",
+        "capacity": "[PROGRESS HINT] Sandbox capacity is temporarily unavailable.",
         "partial_success": "[PROGRESS HINT] The tool has returned incomplete results multiple times.",
         # Jaccard near-duplicate success: the tool is returning the same content repeatedly.
         "success": "[PROGRESS HINT] The tool is returning duplicate results.",
@@ -598,11 +601,11 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
             return self._pending.pop(key, [])
 
     def _restore_pending(self, runtime: Runtime, hints: list[str], *, entry_epoch: object | None = None) -> None:
-        """Requeue hints taken for a model call that raised.
+        """Requeue hints taken for a model call that raised or came back empty.
 
         LLMErrorHandlingMiddleware sits outside this middleware and retries a
-        failed call by running this wrap again, so the retry must still find
-        the hints.
+        failed call, or an empty stop response, by running this wrap again, so
+        the retry must still find the hints.
         """
         if not hints:
             return
@@ -770,10 +773,13 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         entry_epoch = self._entry_epoch(request.runtime)
         hints = self._drain_pending(request.runtime)
         try:
-            return handler(self._inject_hints(request, hints))
+            response = handler(self._inject_hints(request, hints))
         except Exception:
             self._restore_pending(request.runtime, hints, entry_epoch=entry_epoch)
             raise
+        if is_empty_stop_response(response):
+            self._restore_pending(request.runtime, hints, entry_epoch=entry_epoch)
+        return response
 
     @override
     async def awrap_model_call(
@@ -784,10 +790,13 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         entry_epoch = self._entry_epoch(request.runtime)
         hints = self._drain_pending(request.runtime)
         try:
-            return await handler(self._inject_hints(request, hints))
+            response = await handler(self._inject_hints(request, hints))
         except Exception:
             self._restore_pending(request.runtime, hints, entry_epoch=entry_epoch)
             raise
+        if is_empty_stop_response(response):
+            self._restore_pending(request.runtime, hints, entry_epoch=entry_epoch)
+        return response
 
     # ------------------------------------------------------------------
     # before_agent: clean up stale pending hints from previous runs

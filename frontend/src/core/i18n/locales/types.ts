@@ -154,6 +154,7 @@ export interface Translations {
       | "knowledgePlatform"
       | "knowledgeCenter"
       | "skillEvolution"
+      | "runPostmortem"
       | "weknora"
       | "lightrag"
       | "example",
@@ -175,6 +176,21 @@ export interface Translations {
 
   capabilities: {
     toolsAndIntegrations: string;
+    mcpConnections: {
+      title: string;
+      action: (action: string, name: string) => string;
+      disconnect: string;
+      reconnect: string;
+      actionFailed: string;
+      loadFailed: string;
+      status: {
+        disconnected: string;
+        connected: string;
+        reconnect_required: string;
+        removed: string;
+        unavailable: string;
+      };
+    };
     icon: {
       title: string;
       upload: string;
@@ -524,11 +540,14 @@ export interface Translations {
     voiceInputStart: string;
     voiceInputStop: string;
     voiceInputListening: string;
+    voiceInputStarting: string;
+    voiceInputFinishing: string;
+    voiceInputCancel: string;
     voiceInputUnsupported: string;
     voiceInputPermissionDenied: string;
     voiceInputMicrophoneUnavailable: string;
-    voiceInputUnsupportedLanguage: string;
-    voiceInputNetworkError: string;
+    voiceInputTooLarge: string;
+    voiceInputUnavailable: string;
     voiceInputNoSpeech: string;
     voiceInputFailed: string;
     mode: string;
@@ -635,6 +654,7 @@ export interface Translations {
         }
     )[];
     pleaseWaitStreaming: string;
+    send: string;
     runInputMode: string;
     queueMode: string;
     steerMode: string;

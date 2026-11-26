@@ -232,17 +232,10 @@ def test_bash_tool_description_guides_backgrounding_long_lived_processes():
     assert "server" in description
 
 
-def test_bash_tool_description_guides_safe_cross_platform_local_environment_probes():
-    """The model-visible bash contract must recover from local path-guard failures (#4999)."""
+def test_bash_tool_description_identifies_the_execution_environment():
     from deerflow.sandbox.tools import bash_tool
 
-    description = " ".join(bash_tool.description.lower().split())
-    assert "local host" in description
-    assert "uname -s" in description
-    assert "sw_vers" in description
-    assert "only when the active sandbox policy permits it" in description
-    assert "do not repeat the rejected command" in description
-    assert "command-only probes" in description
+    assert "configured isolated sandbox" in bash_tool.description
 
 
 @posix_only

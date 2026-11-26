@@ -1209,11 +1209,12 @@ class TestGroupMessageMarkdownFormat:
                     return FakeResponse()
 
             with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
-                await channel._send_group_message("bot", "conv1", "hello")
+                await channel._send_group_message("bot", "conv1", "Use `` `--flag` ``.")
 
             assert len(captured_json) == 1
             payload = captured_json[0]
             assert payload["msgKey"] == "sampleMarkdown"
+            assert json.loads(payload["msgParam"])["text"] == "Use **`--flag`**."
 
         _run(go())
 
@@ -1233,10 +1234,22 @@ class TestAdaptMarkdownForDingtalk:
         assert "```" not in result
         assert "> plain code" in result
 
-    def test_inline_code_to_bold(self):
-        text = "Use `pip install` to install"
-        result = _adapt_markdown_for_dingtalk(text)
-        assert result == "Use **pip install** to install"
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("Use `pip install` to install", "Use **pip install** to install"),
+            ("Use ``a`b`` and `pwd`.", "Use **a`b** and **pwd**."),
+            ("Use ```a``b```.", "Use **a``b**."),
+            ("Use `` cmd ``.", "Use **cmd**."),
+            ("Use `` `--flag` ``.", "Use **`--flag`**."),
+            ("Keep `  cmd  `.", "Keep ** cmd **."),
+            ("Keep ` cmd` and `   `.", "Keep ** cmd** and **   **."),
+            ("Keep ``unfinished and use `pwd`.", "Keep ``unfinished and use **pwd**."),
+            ("Keep ``one\ntwo`` across lines.", "Keep ``one\ntwo`` across lines."),
+        ],
+    )
+    def test_inline_code_to_bold(self, text, expected):
+        assert _adapt_markdown_for_dingtalk(text) == expected
 
     def test_horizontal_rule_to_unicode(self):
         text = "Above\n---\nBelow"
@@ -1265,6 +1278,24 @@ class TestAdaptMarkdownForDingtalk:
 
 
 class TestConvertMarkdownTable:
+    @pytest.mark.parametrize("separator", ["|---|---|", "|---|---|---|---|", "|---||---|"])
+    def test_invalid_three_column_table_preserves_text(self, separator):
+        text = f"| A | B | C |\n{separator}\n| 1 | 2 | 3 |"
+        assert _adapt_markdown_for_dingtalk(text) == text
+
+    def test_table_in_fenced_code_remains_literal(self):
+        text = "```text\n| A | B |\n|---|---|\n| 1 | 2 |\n```"
+        assert _adapt_markdown_for_dingtalk(text) == "> **text**\n> | A | B |\n> |---|---|\n> | 1 | 2 |\n"
+
+    def test_tab_padded_delimiter_cells(self):
+        text = "| Key | Value |\n|\t---\t|\t:---:\t|\n| a | b |"
+        assert _adapt_markdown_for_dingtalk(text) == "> **Key**: a\n> **Value**: b\n"
+
+    @pytest.mark.parametrize("separator", ["| : | : |", "| --- | |", "| -- -- | --- |"], ids=["missing-hyphens", "empty-cell", "internal-space"])
+    def test_invalid_delimiter_cells_preserve_text(self, separator):
+        text = f"| Key | Value |\n{separator}\n| a | b |"
+        assert _adapt_markdown_for_dingtalk(text) == text
+
     @pytest.mark.parametrize(
         ("header", "row", "expected"),
         [
@@ -1279,6 +1310,13 @@ class TestConvertMarkdownTable:
     )
     def test_cell_boundaries_preserved(self, header, row, expected):
         text = f"{header}\n|---|---|\n{row}"
+        assert _convert_markdown_table(text) == expected
+
+    @pytest.mark.parametrize("count", [1, 2, 3, 4])
+    def test_backslashes_before_pipe(self, count):
+        prefix = "path" + "\\" * count
+        text = f"| A | B |\n|---|---|\n|{prefix}|suffix|"
+        expected = f"> **A**: {prefix}|suffix\n" if count % 2 else f"> **A**: {prefix}\n> **B**: suffix\n"
         assert _convert_markdown_table(text) == expected
 
     def test_fallback_adapter_preserves_table_values(self):

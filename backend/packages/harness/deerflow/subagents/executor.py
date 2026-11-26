@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 import threading
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from concurrent.futures import Future
@@ -45,6 +46,7 @@ from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import (
     SubagentCapacityError,
     SubagentExecutionCapacity,
+    configured_subagent_queue_timeout_seconds,
     get_subagent_execution_capacity,
 )
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
@@ -120,6 +122,15 @@ class SubagentStatus(Enum):
 
 
 @dataclass
+class _ExecutionTimeout:
+    seconds: float
+    status: SubagentStatus
+    error: str
+    admitted: asyncio.Event = field(default_factory=asyncio.Event)
+    deadline: float | None = None
+
+
+@dataclass
 class SubagentResult:
     """Result of a subagent execution.
 
@@ -184,6 +195,7 @@ class SubagentResult:
     bash_executions: list[dict[str, Any]] | None = field(default=None, kw_only=True)
     knowledge_sources: list[dict[str, Any]] = field(default_factory=list, kw_only=True)
     _knowledge_messages: list[Any] = field(default_factory=list, init=False, repr=False)
+    _execution_timeout: _ExecutionTimeout | None = field(default=None, init=False, repr=False, compare=False)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     execution_done_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -290,6 +302,13 @@ class SubagentResult:
         with self._state_lock:
             if self.status.is_terminal:
                 return False
+
+            # Finalization can run past the deadline without yielding to the
+            # watcher. Decide before publishing a success or its payload.
+            timeout = self._execution_timeout
+            if status is SubagentStatus.COMPLETED and timeout is not None and timeout.deadline is not None and time.monotonic() >= timeout.deadline:
+                status, error = timeout.status, timeout.error
+                result, stop_reason = None, None
 
             if result is not None:
                 self.result = result
@@ -1782,6 +1801,10 @@ class SubagentExecutor:
         from deerflow.subagents.checkpoints import SubagentCheckpointError, subagent_checkpoint_scope
 
         with ensure_trace_context(self.deerflow_trace_id):
+            # Read the handoff before the first await: the delegating wrapper
+            # clears the field as soon as it stops waiting, while this
+            # execution may still be running under supervision.
+            timeout = result._execution_timeout
             try:
                 capacity = self.execution_capacity or get_subagent_execution_capacity()
                 slot = capacity.slot(wait=False) if self.input_gate is not None and not self.input_gate.can_queue else capacity.slot()
@@ -1789,6 +1812,11 @@ class SubagentExecutor:
                     subagent_checkpoint_scope(execution_id=result.task_id, run_id=self.run_id, tool_call_id=result.external_task_id, agent_name=self.config.name),
                     slot,
                 ):
+                    if timeout is not None:
+                        # The deadline starts at slot grant and includes
+                        # principal revalidation and any time before the watcher wakes.
+                        timeout.deadline = time.monotonic() + timeout.seconds
+                        timeout.admitted.set()
                     if self._principal_resolver is not None:
                         # Durable work can wait behind ordinary subagents after
                         # its worker-side check. Revalidate before marking it
@@ -1826,6 +1854,12 @@ class SubagentExecutor:
                 )
                 return result
             finally:
+                # Cover every path that never reached admission (capacity
+                # rejection, terminal short-circuit, cancellation): the
+                # delegating wrapper must not wait for an event that will
+                # never fire.
+                if timeout is not None:
+                    timeout.admitted.set()
                 if self.input_gate is not None:
                     self.input_gate.close()
                 result.execution_done_event.set()
@@ -2328,6 +2362,80 @@ class SubagentExecutor:
 
         return result
 
+    async def _await_admitted_execution(
+        self,
+        execution_task: asyncio.Task[SubagentResult],
+        result: SubagentResult,
+        timeout: _ExecutionTimeout,
+        *,
+        execution_id: str,
+    ) -> tuple[SubagentResult, bool]:
+        """Wait for admission, then apply the execution timeout.
+
+        The capacity controller already bounds queue wait with
+        ``queue_timeout_seconds``; the execution clock must start only once a
+        slot is granted. That start is recorded on the result at admission, not
+        when this watcher is scheduled: synchronous work between the two still
+        consumes the execution budget. Completion is accepted in place of
+        admission so executions supplied by wrappers that never signal
+        admission still return normally.
+
+        Returns the outcome and whether a timed-out execution was detached to
+        the background supervisor for teardown.
+        """
+        admission_waiter = asyncio.create_task(timeout.admitted.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {execution_task, admission_waiter},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if execution_task in done:
+                return execution_task.result(), False
+        finally:
+            if not admission_waiter.done():
+                try:
+                    admission_waiter.cancel()
+                except RuntimeError:
+                    # The isolated loop can close while a detached sync
+                    # wrapper is still being reclaimed; there is no loop left
+                    # to schedule the waiter's cancellation on.
+                    pass
+
+        remaining = timeout.seconds if timeout.deadline is None else timeout.deadline - time.monotonic()
+        if remaining > 0:
+            await asyncio.wait({execution_task}, timeout=remaining)
+
+        if execution_task.done():
+            return execution_task.result(), False
+
+        # Publish the configured hard timeout without waiting for
+        # cancellation-resistant stream cleanup. The detached execution still
+        # owns its capacity slot and sandbox lease until its supervisor
+        # observes full teardown.
+        result.try_set_terminal(
+            timeout.status,
+            error=timeout.error,
+            tool_receipts=result.snapshot_tool_receipts(),
+        )
+        result.cancel_event.set()
+        execution_task.cancel()
+        _supervise_background_execution(execution_id, result, execution_task)
+        return result, True
+
+    def _sync_timeout_backstop_seconds(self) -> int:
+        """Outer bound on the synchronous wait for the isolated loop.
+
+        The admission-aware wrapper owns the execution timeout; this bound
+        exists only for a loop that never settles, so it allows the queue stage
+        and the execution stage plus the same cleanup margin as the poller.
+        The injected capacity's queue bound wins over the process-wide
+        snapshot because it is the controller this executor waits on.
+        """
+        queue_timeout_seconds = getattr(self.execution_capacity, "queue_timeout_seconds", None)
+        if queue_timeout_seconds is None:
+            queue_timeout_seconds = configured_subagent_queue_timeout_seconds()
+        return queue_timeout_seconds + self.config.timeout_seconds + 60
+
     def _execute_in_isolated_loop(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute the subagent on the persistent isolated event loop.
 
@@ -2341,12 +2449,40 @@ class SubagentExecutor:
             result_holder = SubagentResult(task_id=str(uuid.uuid4())[:8], trace_id=self.trace_id, status=SubagentStatus.PENDING)
         future: Future[SubagentResult] | None = None
         parent_context = _copy_isolated_subagent_context()
-        try:
-            future = _submit_to_isolated_loop_in_context(
-                parent_context,
-                lambda: self._aexecute(task, result_holder),
+        timeout = _ExecutionTimeout(self.config.timeout_seconds, SubagentStatus.FAILED, "")
+        result_holder._execution_timeout = timeout
+
+        async def run_with_admission_timeout() -> SubagentResult:
+            execution_task = asyncio.create_task(
+                self._aexecute(task, result_holder),
+                name=f"subagent-{self.config.name}-sync-execution",
             )
-            return future.result(timeout=self.config.timeout_seconds)
+            try:
+                outcome, _ = await self._await_admitted_execution(
+                    execution_task,
+                    result_holder,
+                    timeout,
+                    execution_id=result_holder.task_id,
+                )
+                return outcome
+            except asyncio.CancelledError:
+                if not execution_task.done():
+                    execution_task.cancel()
+                try:
+                    await execution_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                raise
+            finally:
+                result_holder._execution_timeout = None
+
+        try:
+            future = _submit_to_isolated_loop_in_context(parent_context, run_with_admission_timeout)
+            # Backstop only: the admission-aware wrapper owns the execution
+            # timeout. Reaching this bound means the isolated loop itself is
+            # stuck, so allow both stages plus the same cleanup margin as the
+            # poller before giving up on the synchronous call.
+            return future.result(timeout=self._sync_timeout_backstop_seconds())
         except FuturesTimeoutError as exc:
             # Publish the synchronous API's failure before cancellation can
             # reach task-stop observers or win the terminal-state race.
@@ -2367,6 +2503,11 @@ class SubagentExecutor:
                     exc_info=True,
                 )
             raise
+        finally:
+            # Also covers a wrapper that never started (submit failure or a
+            # synchronous raise before its own cleanup), so a reused holder
+            # cannot inherit a stale, already-set admission signal or clock.
+            result_holder._execution_timeout = None
 
     def execute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task synchronously (wrapper around async execution).
@@ -2463,46 +2604,39 @@ class SubagentExecutor:
                 )
                 _mark_background_execution_done(execution_id, result)
                 return result
-            execution_task = asyncio.create_task(
-                self._aexecute(task, result),
-                name=f"subagent-{self.config.name}-execution",
+            timeout = _ExecutionTimeout(
+                self.config.timeout_seconds,
+                SubagentStatus.TIMED_OUT,
+                f"Execution timed out after {self.config.timeout_seconds} seconds",
             )
+            result._execution_timeout = timeout
+            execution_task = None
+            execution_detached = False
             try:
-                done, _ = await asyncio.wait(
-                    {execution_task},
-                    timeout=self.config.timeout_seconds,
+                execution_task = asyncio.create_task(
+                    self._aexecute(task, result),
+                    name=f"subagent-{self.config.name}-execution",
                 )
-                if execution_task in done:
-                    return execution_task.result()
-
-                # Publish the configured hard timeout without waiting for
-                # cancellation-resistant stream cleanup. The detached execution
-                # still owns its capacity slot and sandbox lease until its
-                # supervisor observes full teardown.
-                result.cancel_event.set()
-                result.try_set_terminal(
-                    SubagentStatus.TIMED_OUT,
-                    error=f"Execution timed out after {self.config.timeout_seconds} seconds",
-                    tool_receipts=result.snapshot_tool_receipts(),
-                )
-                execution_task.cancel()
-                _supervise_background_execution(
-                    execution_id,
-                    result,
+                outcome, supervised = await self._await_admitted_execution(
                     execution_task,
+                    result,
+                    timeout,
+                    execution_id=execution_id,
                 )
-                execution_task = None
-                return result
+                if supervised:
+                    execution_detached = True
+                return outcome
             except asyncio.CancelledError:
                 result.cancel_event.set()
-                if not execution_task.done():
-                    execution_task.cancel()
-                try:
-                    await execution_task
-                except (asyncio.CancelledError, Exception):
-                    # The child can fail before cancellation reaches it. Keep
-                    # its terminal write, or publish cancellation below.
-                    pass
+                if execution_task is not None:
+                    if not execution_task.done():
+                        execution_task.cancel()
+                    try:
+                        await execution_task
+                    except (asyncio.CancelledError, Exception):
+                        # The child can fail before cancellation reaches it. Keep
+                        # its terminal write, or publish cancellation below.
+                        pass
                 result.try_set_terminal(
                     SubagentStatus.CANCELLED,
                     error="Cancelled by user",
@@ -2511,18 +2645,19 @@ class SubagentExecutor:
                 return result
             except Exception as exc:
                 logger.exception("[trace=%s] Subagent %s async execution failed", self.trace_id, self.config.name)
-                if not execution_task.done():
+                if execution_task is not None and not execution_task.done():
                     execution_task.cancel()
                     _supervise_background_execution(
                         execution_id,
                         result,
                         execution_task,
                     )
-                    execution_task = None
+                    execution_detached = True
                 result.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
                 return result
             finally:
-                if execution_task is not None:
+                result._execution_timeout = None
+                if not execution_detached:
                     _mark_background_execution_done(execution_id, result)
 
         try:
