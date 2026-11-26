@@ -215,3 +215,85 @@ async def test_async_init_error_sanitization_drains_on_cancellation(monkeypatch:
             task.cancel()
         with contextlib.suppress(BaseException):
             await task
+
+
+async def test_async_write_and_replace_readonly_guard_stays_off_event_loop_with_cold_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cold skills-path cache reads during async write/replace preflight must stay off-loop."""
+    config_file = tmp_path / "config.yaml"
+    await asyncio.to_thread(config_file.write_text, "skills:\n  container_path: /mnt/skills\n", "utf-8")
+
+    loop_tid = threading.get_ident()
+    config_reads_on_loop: list[bool] = []
+
+    def tracked_get_app_config():
+        config_reads_on_loop.append(threading.get_ident() == loop_tid)
+        # Perform real stat/read so the strict Blockbuster gate also fails if run on-loop.
+        config_file.stat()
+        config_file.read_text(encoding="utf-8")
+        return SimpleNamespace(
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+            sandbox=SimpleNamespace(mounts=[], write_file_max_bytes=0),
+        )
+
+    class FakeRemoteSandbox:
+        id = "remote-blocking-io-1"
+
+        def __init__(self) -> None:
+            self.files: dict[str, str] = {}
+
+        def read_file(self, target: str) -> str:
+            return self.files[target]
+
+        def write_file(self, target: str, content: str, append: bool = False) -> None:
+            self.files[target] = (self.files.get(target, "") + content) if append else content
+
+    remote_sandbox = FakeRemoteSandbox()
+    init_calls: list[str] = []
+
+    async def fake_ensure_async(_rt):
+        init_calls.append("async")
+        return remote_sandbox
+
+    def fake_ensure_sync(_rt):
+        init_calls.append("sync")
+        return remote_sandbox
+
+    async def _noop_authz(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr("deerflow.config.get_app_config", tracked_get_app_config)
+    monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized_async", fake_ensure_async)
+    monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", fake_ensure_sync)
+    monkeypatch.setattr(sandbox_tools, "ensure_thread_directories_exist", lambda _rt: None)
+    monkeypatch.setattr(sandbox_tools, "authorize_sandbox_execution_async", _noop_authz)
+
+    def _clear_skills_cache() -> None:
+        if hasattr(sandbox_tools._get_skills_container_path, "_cached"):
+            delattr(sandbox_tools._get_skills_container_path, "_cached")
+
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": remote_sandbox.id}},
+        context={"thread_id": "t1", "user_id": "u1"},
+        config={},
+    )
+
+    try:
+        # 1. Ordinary workspace write and str_replace with a cold cache.
+        _clear_skills_cache()
+        assert await sandbox_tools._write_file_tool_async(runtime, "/mnt/user-data/workspace/note.txt", "hello world") == "OK"
+        _clear_skills_cache()
+        assert await sandbox_tools._str_replace_tool_async(runtime, "/mnt/user-data/workspace/note.txt", "world", "deer") == "OK"
+        assert remote_sandbox.files["/mnt/user-data/workspace/note.txt"] == "hello deer"
+
+        # 2. Rejected read-only paths with a cold cache must stay off-loop and avoid acquisition.
+        init_calls.clear()
+        _clear_skills_cache()
+        assert await sandbox_tools._write_file_tool_async(runtime, "/mnt/skills/public/demo/SKILL.md", "tamper") == "Error: Permission denied writing to file: /mnt/skills/public/demo/SKILL.md"
+        _clear_skills_cache()
+        assert await sandbox_tools._str_replace_tool_async(runtime, "/mnt/skills/public/demo/SKILL.md", "a", "b") == "Error: Permission denied accessing file: /mnt/skills/public/demo/SKILL.md"
+        assert init_calls == []
+
+        assert len(config_reads_on_loop) >= 4
+        assert not any(config_reads_on_loop), "get_app_config() ran on the asyncio event loop thread"
+    finally:
+        _clear_skills_cache()

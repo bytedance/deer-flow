@@ -665,7 +665,7 @@ def test_upload_trees_readonly_handles_empty_categories_and_reupload(installed, 
         local_tar.write_bytes(tar_bytes)
         patched_script = script.replace(remote_tar, str(local_tar))
         completed = subprocess.run(
-            ["bash", "-lc", patched_script],
+            ["bash", "-c", patched_script],
             env={**os.environ, **env, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"},
             capture_output=True,
             text=True,
@@ -732,7 +732,7 @@ def test_upload_trees_readonly_preserves_runtime_readability_after_chown(install
         local_tar.write_bytes(tar_bytes)
         patched_script = script.replace(remote_tar, str(local_tar))
         completed = subprocess.run(
-            ["bash", "-lc", patched_script],
+            ["bash", "-c", patched_script],
             env={**os.environ, **env, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"},
             capture_output=True,
             text=True,

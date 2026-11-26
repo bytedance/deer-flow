@@ -3611,7 +3611,7 @@ async def _write_file_tool_async(
     if placeholder_error is not None:
         return placeholder_error
     try:
-        _reject_readonly_virtual_write_path(path)
+        await run_sync_lifecycle_operation(_reject_readonly_virtual_write_path, path)
     except PermissionError:
         return _truncate_write_file_error_detail(
             f"Error: Permission denied writing to file: {path}",
@@ -3713,7 +3713,7 @@ async def _str_replace_tool_async(
     replace_all: bool = False,
 ) -> str | ToolMessage:
     try:
-        _reject_readonly_virtual_write_path(path)
+        await run_sync_lifecycle_operation(_reject_readonly_virtual_write_path, path)
     except PermissionError:
         return f"Error: Permission denied accessing file: {path}"
     return await _run_sync_tool_after_async_sandbox_init(
