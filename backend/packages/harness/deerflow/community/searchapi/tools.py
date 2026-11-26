@@ -46,6 +46,9 @@ _TIME_PERIOD_BY_TIME_RANGE: dict[SearchTimeRange, str] = {
     "month": "last_month",
     "year": "last_year",
 }
+# Scholar on SearchApi has year bounds (``as_ylo``/``as_yhi``) but no relative window, so a
+# ``time_range`` is not applied there, and the result says so.
+_NO_SCHOLAR_WINDOW = "Google Scholar has no relative time window on SearchApi, so these results are not filtered by date. For recent material, use the search or news vertical."
 _api_key_warned: set[str] = set()
 
 
@@ -198,7 +201,7 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
     Args:
         query: Search keywords describing what you want to find. Be specific for better results.
         max_results: Maximum number of search results to return. Default is 5. One page is fetched, so at most 10 (20 for the scholar vertical).
-        time_range: Optional relative publication/update window. Use only when the request requires recent results.
+        time_range: Optional relative publication/update window. Use only when the request requires recent results. Applied on the search and news verticals; Scholar has no relative window, and the result then says ``time_range.applied: false``.
     """
     config = get_app_config().get_tool_config("web_search")
     extra = (config.model_extra or {}) if config is not None else {}
@@ -220,7 +223,8 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
         if key in extra:
             params[key] = extra[key]
     # Google Scholar has no relative time window on SearchApi; the other two engines take ``time_period``.
-    if time_range is not None and vertical != "scholar":
+    window_applied = time_range is not None and vertical != "scholar"
+    if time_range is not None and window_applied:
         params["time_period"] = _TIME_PERIOD_BY_TIME_RANGE[time_range]
 
     data, error_json = _searchapi_get(api_key, query, params)
@@ -236,9 +240,12 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
     # A page can carry more rows than asked for, so the cap is also applied here.
     normalized_results = [_normalize_row(vertical, row) for row in rows[:max_results]]
 
-    output = {
-        "query": query,
-        "total_results": len(normalized_results),
-        "results": normalized_results,
-    }
+    output: dict[str, object] = {"query": query, "total_results": len(normalized_results)}
+    if time_range is not None:
+        # The caller asked for a window, so the result says whether it was applied.
+        window: dict[str, object] = {"requested": time_range, "applied": window_applied}
+        if not window_applied:
+            window["note"] = _NO_SCHOLAR_WINDOW
+        output["time_range"] = window
+    output["results"] = normalized_results
     return json.dumps(output, indent=2, ensure_ascii=False)

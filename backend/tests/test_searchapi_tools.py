@@ -234,17 +234,20 @@ class TestWebSearchTool:
         with patch("deerflow.community.searchapi.tools.httpx.Client") as mock_client:
             mock_get = mock_client.return_value.__enter__.return_value.get
             mock_get.return_value = _make_response({"organic_results": _search_rows(1)})
-            _run("q", time_range="week")
+            result = _run("q", time_range="week")
 
         assert mock_get.call_args.kwargs["params"]["time_period"] == "last_week"
+        # The result says the window was applied, with no note.
+        assert result["time_range"] == {"requested": "week", "applied": True}
 
     def test_time_range_is_omitted_without_a_window(self, mock_config_with_key):
         with patch("deerflow.community.searchapi.tools.httpx.Client") as mock_client:
             mock_get = mock_client.return_value.__enter__.return_value.get
             mock_get.return_value = _make_response({"organic_results": _search_rows(1)})
-            _run("q")
+            result = _run("q")
 
         assert "time_period" not in mock_get.call_args.kwargs["params"]
+        assert "time_range" not in result
 
     def test_news_vertical_uses_news_engine_and_trims_client_side(self):
         rows = [
@@ -304,6 +307,10 @@ class TestWebSearchTool:
         params = mock_get.call_args.kwargs["params"]
         assert params["engine"] == "google_scholar"
         assert "time_period" not in params
+        # The window was asked for and not applied, and the result says so.
+        assert result["time_range"]["requested"] == "year"
+        assert result["time_range"]["applied"] is False
+        assert "no relative time window" in result["time_range"]["note"]
         assert result["results"][0]["authors"] == ["A Vaswani", "N Shazeer"]
         assert result["results"][0]["cited_by"] == 120000
         assert result["results"][0]["pdf_url"] == "https://arxiv.org/pdf/1706.03762"
