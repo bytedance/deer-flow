@@ -1,148 +1,291 @@
 "use client";
 
-import { ChevronRightIcon } from "lucide-react";
-import { AnimatePresence, motion } from "motion/react";
-import dynamic from "next/dynamic";
+import { GitHubLogoIcon } from "@radix-ui/react-icons";
+import {
+  ArrowRight,
+  ArrowUpRight,
+  BookOpen,
+  GitFork,
+  Star,
+  Terminal,
+} from "lucide-react";
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { type SVGProps, useEffect, useState } from "react";
 
-import { AuroraText } from "@/components/ui/aurora-text";
-import { Button } from "@/components/ui/button";
-import { FlickeringGrid } from "@/components/ui/flickering-grid";
-import { useRenderActivity } from "@/core/dom/render-activity";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
-const Galaxy = dynamic(() => import("@/components/ui/galaxy"), { ssr: false });
+import { ArchitectureDiagram } from "./architecture-diagram";
 
-const HERO_WORDS = [
-  "Deep Research",
-  "Collect Data",
-  "Analyze Data",
-  "Generate Webpages",
-  "Vibe Coding",
-  "Generate Slides",
-  "Generate Images",
-  "Generate Podcasts",
-  "Generate Videos",
-  "Generate Songs",
-  "Organize Emails",
-  "Do Anything",
-  "Learn Anything",
-];
+export type HeroLocale = "en-US" | "zh-CN";
 
-export function Hero({ className }: { className?: string }) {
-  const galaxyContainerRef = useRef<HTMLDivElement>(null);
-  const renderGalaxy = useRenderActivity(galaxyContainerRef);
+export type HeroProps = {
+  className?: string;
+  locale?: HeroLocale;
+};
+
+type GitHubStats = {
+  stars: number | null;
+  forks: number | null;
+};
+
+type HeroCopy = {
+  eyebrow: string;
+  headline: string;
+  description: string;
+  partnership: string;
+  starsLabel: string;
+  forksLabel: string;
+  getStarted: string;
+  quickStart: string;
+  docs: string;
+  openSource: string;
+};
+
+const HERO_COPY: Record<HeroLocale, HeroCopy> = {
+  "en-US": {
+    eyebrow: "DEERFLOW · OPEN SOURCE",
+    headline: "DeerFlow: Open-Source SuperAgent Harness.",
+    description:
+      "Sandboxes, persistent memory, progressive skills, MCP tools, and parallel subagents unified in one harness—built for deep research, coding, and creation tasks that span minutes to hours.",
+    partnership: "In partnership with",
+    starsLabel: "GitHub Stars",
+    forksLabel: "Forks",
+    getStarted: "Get Started",
+    quickStart: "Quick Start",
+    docs: "Docs",
+    openSource: "Open Source",
+  },
+  "zh-CN": {
+    eyebrow: "DEERFLOW · 开源超级智能体",
+    headline: "DeerFlow：开源超级智能体引擎",
+    description:
+      "将隔离沙箱、长期记忆、渐进式技能、MCP 工具与并行子智能体统一在一个引擎中，稳定执行耗时数分钟至数小时的深度研究、编程与创作任务。",
+    partnership: "技术合作",
+    starsLabel: "GitHub Stars",
+    forksLabel: "Forks",
+    getStarted: "立即开始",
+    quickStart: "快速上手",
+    docs: "文档",
+    openSource: "开源仓库",
+  },
+};
+
+function isValidCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function formatMetricCount(value: number): string {
+  if (value >= 1000) {
+    const truncated = Math.floor(value / 100) / 10;
+    const formatted = Number.isInteger(truncated)
+      ? String(truncated)
+      : truncated.toFixed(1);
+    return `${formatted}K+`;
+  }
+  return String(value);
+}
+
+export function Hero({ className, locale = "en-US" }: HeroProps) {
+  const copy = HERO_COPY[locale];
+  const docsLang = locale === "zh-CN" ? "zh" : "en";
+  const [stats, setStats] = useState<GitHubStats>({
+    stars: null,
+    forks: null,
+  });
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch("/github-stars", { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok || response.status === 204) return;
+        const data = (await response.json()) as {
+          stars?: unknown;
+          forks?: unknown;
+        };
+        if (controller.signal.aborted) return;
+        const stars = isValidCount(data.stars) ? data.stars : null;
+        const forks = isValidCount(data.forks) ? data.forks : null;
+        if (stars !== null || forks !== null) {
+          setStats({ stars, forks });
+        }
+      })
+      .catch(() => {
+        // Hide the optional metrics row when the endpoint is unavailable.
+      });
+    return () => controller.abort();
+  }, []);
+
+  const hasMetrics = stats.stars !== null || stats.forks !== null;
+  const isStaticWebsite = env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
 
   return (
-    <div
+    <section
       className={cn(
-        "relative flex size-full flex-col items-center justify-center",
+        "relative flex min-h-[100svh] w-full flex-col justify-center overflow-x-clip bg-[var(--df-bg,#f6f2e8)] pt-[var(--df-header-height,105px)] text-[var(--df-ink,#171511)]",
         className,
       )}
     >
+      {/* Subtle 72px editorial grid background */}
       <div
-        ref={galaxyContainerRef}
-        className="absolute inset-0 z-0 bg-black/40"
-      >
-        {renderGalaxy && (
-          <Galaxy
-            mouseRepulsion={false}
-            starSpeed={0.2}
-            density={0.6}
-            glowIntensity={0.35}
-            twinkleIntensity={0.3}
-            speed={0.5}
-          />
-        )}
-      </div>
-      <FlickeringGrid
-        className="absolute inset-0 z-0 mask-[url(/images/deer.svg)] mask-size-[100vw] mask-center mask-no-repeat md:mask-size-[72vh]"
-        squareSize={4}
-        gridGap={4}
-        color={"white"}
-        maxOpacity={0.3}
-        flickerChance={0.25}
+        aria-hidden="true"
+        className="landing-grid-bg pointer-events-none absolute inset-0 z-0"
+        style={{
+          backgroundImage:
+            "linear-gradient(90deg, var(--df-grid, rgba(35, 31, 25, 0.055)) 1px, transparent 1px), linear-gradient(var(--df-grid-soft, rgba(35, 31, 25, 0.045)) 1px, transparent 1px)",
+          backgroundSize: "72px 72px",
+        }}
       />
-      <div className="container-md relative z-10 mx-auto flex min-h-[92svh] flex-col items-center justify-center px-4 pt-20 pb-14">
-        <h1 className="text-center text-5xl leading-tight font-bold break-words md:text-6xl">
-          DeerFlow
-        </h1>
-        <div className="mt-3 flex w-full max-w-full min-w-0 items-center justify-center gap-x-2 text-center text-2xl font-semibold md:text-4xl">
-          <HeroWordRotate words={HERO_WORDS} />
-          <span className="whitespace-nowrap">SuperAgent</span>
-        </div>
-        {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY && (
-          <a
-            href="https://byteplus.com"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <div className="mt-4 flex size-fit items-center rounded-lg border border-white px-3 text-center text-shadow-sm">
-              <span>In partnership with</span>&nbsp;
-              <BytePlusIcon className="h-4" />
+      {/* Soft vignette beneath the sticky header */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-0 top-0 z-0 h-40 bg-gradient-to-b from-[var(--df-bg,#f6f2e8)] to-transparent"
+      />
+
+      <div className="relative z-10 mx-auto w-full max-w-[1520px] px-4 py-10 sm:px-10 sm:py-14 lg:px-14 xl:px-20 2xl:px-24">
+        <div className="grid grid-cols-1 items-center gap-10 lg:grid-cols-[minmax(0,1fr)_minmax(460px,540px)] lg:gap-10 xl:grid-cols-[minmax(0,1fr)_560px] xl:gap-16">
+          {/* Left column: editorial copy, live metrics, entry-point CTAs */}
+          <div className="flex min-w-0 flex-col items-center text-center lg:items-start lg:text-left">
+            <p className="font-mono text-xs font-medium tracking-[0.26em] text-[var(--df-accent,#0a7c93)] uppercase">
+              {copy.eyebrow}
+            </p>
+
+            <h1 className="mt-4 font-serif text-[2.25rem] leading-[1.02] font-semibold tracking-normal text-balance text-[var(--df-ink,#171511)] sm:text-[3.1rem] lg:text-[3.4rem] xl:text-[3.85rem]">
+              {copy.headline}
+            </h1>
+
+            <p className="mt-5 max-w-xl text-sm leading-6 text-[var(--df-muted-fg,#625b50)] sm:text-base sm:leading-7">
+              {copy.description}
+            </p>
+
+            {isStaticWebsite && (
+              <a
+                href="https://byteplus.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="focus-visible:ring-ring/50 mt-5 inline-flex min-h-9 items-center gap-2 rounded-full border border-[var(--df-border-strong,#bdb3a2)] bg-[var(--df-panel,#fffaf1)]/85 px-3.5 py-1.5 text-xs font-medium text-[var(--df-text-soft,#3a352d)] transition-colors duration-150 hover:border-[var(--df-accent,#0a7c93)] hover:text-[var(--df-ink,#171511)] focus-visible:ring-2 focus-visible:outline-none"
+              >
+                <span>{copy.partnership}</span>
+                <BytePlusIcon className="h-3.5 w-auto" />
+                <ArrowUpRight
+                  className="size-3.5 opacity-70"
+                  aria-hidden="true"
+                />
+              </a>
+            )}
+
+            {hasMetrics && (
+              <div
+                data-testid="hero-github-metrics"
+                className="mt-7 flex items-stretch justify-center gap-6 lg:justify-start"
+              >
+                {stats.stars !== null && (
+                  <a
+                    href="https://github.com/bytedance/deer-flow"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={stats.stars.toLocaleString("en-US")}
+                    className="group focus-visible:ring-ring/50 flex flex-col items-center rounded-sm focus-visible:ring-2 focus-visible:outline-none lg:items-start"
+                  >
+                    <span className="inline-flex items-center gap-1.5">
+                      <Star
+                        className="size-4 text-[var(--df-accent,#0a7c93)]"
+                        aria-hidden="true"
+                      />
+                      <span className="font-mono text-xl leading-none font-semibold text-[var(--df-ink,#171511)] tabular-nums transition-colors group-hover:text-[var(--df-accent,#0a7c93)]">
+                        {formatMetricCount(stats.stars)}
+                      </span>
+                    </span>
+                    <span className="mt-1.5 text-xs text-[var(--df-muted-fg,#625b50)]">
+                      {copy.starsLabel}
+                    </span>
+                  </a>
+                )}
+
+                {stats.stars !== null && stats.forks !== null && (
+                  <div
+                    aria-hidden="true"
+                    className="w-px self-stretch bg-[var(--df-border,#d8d0c2)]"
+                  />
+                )}
+
+                {stats.forks !== null && (
+                  <a
+                    href="https://github.com/bytedance/deer-flow/forks"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={stats.forks.toLocaleString("en-US")}
+                    className="group focus-visible:ring-ring/50 flex flex-col items-center rounded-sm focus-visible:ring-2 focus-visible:outline-none lg:items-start"
+                  >
+                    <span className="inline-flex items-center gap-1.5">
+                      <GitFork
+                        className="size-4 text-[var(--df-accent,#0a7c93)]"
+                        aria-hidden="true"
+                      />
+                      <span className="font-mono text-xl leading-none font-semibold text-[var(--df-ink,#171511)] tabular-nums transition-colors group-hover:text-[var(--df-accent,#0a7c93)]">
+                        {formatMetricCount(stats.forks)}
+                      </span>
+                    </span>
+                    <span className="mt-1.5 text-xs text-[var(--df-muted-fg,#625b50)]">
+                      {copy.forksLabel}
+                    </span>
+                  </a>
+                )}
+              </div>
+            )}
+
+            {/* Explicit entry points: Workspace, Quick Start, Docs, Open Source */}
+            <div className="mt-8 grid w-full max-w-md grid-cols-2 gap-2.5 sm:flex sm:w-auto sm:max-w-none sm:flex-wrap sm:items-center sm:justify-center sm:gap-3 lg:justify-start">
+              <Link
+                href="/workspace/chats/new"
+                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-[var(--df-cta,#0a7c93)] px-4 text-sm font-medium whitespace-nowrap text-[var(--df-cta-fg,#ffffff)] shadow-[0_4px_14px_-5px_color-mix(in_srgb,var(--df-cta,#0a7c93)_60%,transparent)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-[var(--df-cta-hover,#086a7e)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
+              >
+                <span>{copy.getStarted}</span>
+                <ArrowRight className="size-4 shrink-0" aria-hidden="true" />
+              </Link>
+
+              <Link
+                href={`/${docsLang}/docs/application/quick-start`}
+                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong,#bdb3a2)] bg-transparent px-4 text-sm font-medium whitespace-nowrap text-[var(--df-ink,#171511)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[var(--df-cta,#0a7c93)] hover:bg-[var(--df-cta,#0a7c93)] hover:text-[var(--df-cta-fg,#ffffff)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
+              >
+                <Terminal className="size-4 shrink-0" aria-hidden="true" />
+                <span>{copy.quickStart}</span>
+              </Link>
+
+              <Link
+                href={`/${docsLang}/docs`}
+                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong,#bdb3a2)] bg-transparent px-4 text-sm font-medium whitespace-nowrap text-[var(--df-ink,#171511)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[var(--df-cta,#0a7c93)] hover:bg-[var(--df-cta,#0a7c93)] hover:text-[var(--df-cta-fg,#ffffff)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
+              >
+                <BookOpen className="size-4 shrink-0" aria-hidden="true" />
+                <span>{copy.docs}</span>
+              </Link>
+
+              <a
+                href="https://github.com/bytedance/deer-flow"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-md border border-[var(--df-border-strong,#bdb3a2)] bg-transparent px-4 text-sm font-medium whitespace-nowrap text-[var(--df-ink,#171511)] transition-all duration-200 hover:-translate-y-0.5 hover:border-[var(--df-cta,#0a7c93)] hover:bg-[var(--df-cta,#0a7c93)] hover:text-[var(--df-cta-fg,#ffffff)] focus-visible:ring-2 focus-visible:outline-none sm:px-5"
+              >
+                <GitHubLogoIcon
+                  className="size-4 shrink-0"
+                  aria-hidden="true"
+                />
+                <span>{copy.openSource}</span>
+              </a>
             </div>
-          </a>
-        )}
-        <p className="text-muted-foreground mt-8 max-w-4xl text-center text-base leading-7 text-shadow-sm sm:text-xl md:text-2xl">
-          An open-source SuperAgent harness that researches, codes, and creates.
-          With the help of sandboxes, memories, tools, skills and subagents, it
-          handles different levels of tasks that could take minutes to hours.
-        </p>
-        <Link href="/workspace">
-          <Button className="mt-8 h-11 px-5" size="lg">
-            <span className="text-md">Get Started with 2.0</span>
-            <ChevronRightIcon className="size-4" />
-          </Button>
-        </Link>
+          </div>
+
+          {/* Right column: Interactive DeerFlow architecture diagram */}
+          <div className="w-full min-w-0">
+            <ArchitectureDiagram locale={locale} />
+          </div>
+        </div>
       </div>
-    </div>
+    </section>
   );
 }
 
-function HeroWordRotate({
-  words,
-  duration = 2200,
-}: {
-  words: string[];
-  duration?: number;
-}) {
-  const [index, setIndex] = useState(0);
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setIndex((prevIndex) => (prevIndex + 1) % words.length);
-    }, duration);
-
-    return () => clearInterval(interval);
-  }, [words, duration]);
-
-  return (
-    <div className="relative max-w-full min-w-0 overflow-hidden py-2">
-      <AnimatePresence mode="popLayout">
-        <motion.div
-          key={index}
-          className="max-w-full"
-          initial={{ opacity: 0, y: -50, filter: "blur(16px)" }}
-          animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-          exit={{ opacity: 0, y: 50, filter: "blur(16px)" }}
-          transition={{ duration: 0.3, ease: "easeOut" }}
-        >
-          <AuroraText
-            className="max-w-full [overflow-wrap:anywhere] whitespace-normal"
-            speed={3}
-            colors={["#efefbb", "#e9c665", "#e3a812"]}
-          >
-            {words[index]}
-          </AuroraText>
-        </motion.div>
-      </AnimatePresence>
-    </div>
-  );
-}
-
-function BytePlusIcon(props: React.SVGProps<SVGSVGElement>) {
+function BytePlusIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <svg
       width={80}
@@ -150,6 +293,7 @@ function BytePlusIcon(props: React.SVGProps<SVGSVGElement>) {
       viewBox="0 0 120 24"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
+      aria-label="BytePlus"
       {...props}
     >
       <path
