@@ -373,6 +373,11 @@ def _write_openai_image(payload: dict, output_file: str) -> str:
         else:
             image_bytes = _download_image(image_url)
 
+    # A provider can answer 200 with no bytes, or hand back an empty data URL.
+    # Fail before the output is opened so an existing image is preserved.
+    if not image_bytes:
+        raise ValueError("Provider returned an empty image")
+
     _ensure_output_dir(output_file)
     with open(output_file, "wb") as f:
         f.write(image_bytes)

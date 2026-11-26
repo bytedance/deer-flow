@@ -458,6 +458,67 @@ def test_openai_compatible_download_requires_2xx(
 
 
 @pytest.mark.parametrize(
+    "existing", [False, True], ids=["new-output", "existing-output"]
+)
+def test_openai_compatible_empty_download_preserves_output(
+    monkeypatch, tmp_path, existing
+):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp(
+            {"data": [{"url": "https://cdn.example/image.png"}]}
+        ),
+    )
+    monkeypatch.setattr(
+        img.requests,
+        "get",
+        lambda *args, **kwargs: FakeResp(content=b""),
+    )
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("a red deer", encoding="utf-8")
+    output = tmp_path / "image.png"
+    if existing:
+        output.write_bytes(b"previous image")
+
+    with pytest.raises(ValueError, match="empty image"):
+        img.generate_image(str(prompt), [], str(output))
+    if existing:
+        assert output.read_bytes() == b"previous image"
+    else:
+        assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "existing", [False, True], ids=["new-output", "existing-output"]
+)
+def test_openai_compatible_empty_data_url_preserves_output(
+    monkeypatch, tmp_path, existing
+):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp({"data": [{"url": "data:image/png;base64,"}]}),
+    )
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("a red deer", encoding="utf-8")
+    output = tmp_path / "image.png"
+    if existing:
+        output.write_bytes(b"previous image")
+
+    with pytest.raises(ValueError, match="empty image"):
+        img.generate_image(str(prompt), [], str(output))
+    if existing:
+        assert output.read_bytes() == b"previous image"
+    else:
+        assert not output.exists()
+
+
+@pytest.mark.parametrize(
     ("provider", "key", "edit"),
     [
         ("gemini", "GEMINI_API_KEY", False),

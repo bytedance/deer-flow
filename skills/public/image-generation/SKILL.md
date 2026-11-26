@@ -159,6 +159,9 @@ Gemini image data is base64-decoded before the output directory or
 file is created. If decoding fails, an existing output image is preserved and no
 empty output file is left behind.
 
+The OpenAI-compatible path rejects an empty download or an empty data URL before
+the output directory or file is created, so an existing image is preserved too.
+
 The legacy MiniMax `/v1/image_generation` writer opens the destination before
 decoding. If decoding fails, it can leave an empty file or erase an existing
 image. Use a fresh `--output-file` path when you need to keep the previous image.
