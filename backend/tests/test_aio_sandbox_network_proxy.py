@@ -629,3 +629,126 @@ async def test_oversized_method_is_truncated_in_storage_and_denials_stay_bounded
     for index in range(300):
         network_proxy.record_denial(f"host-{index}.example", 80, "X" * 60_000)
     assert db_path.stat().st_size < 1_000_000
+
+
+def test_recently_answered_old_card_survives_history_pruning(tmp_path, monkeypatch) -> None:
+    """Resolved history must be ordered by when the decision was applied.
+
+    An old card can be answered after newer cards. Ordering retention by the
+    denial timestamp would delete the just-applied decision on the next prune,
+    and a resumed run re-applying it would get False from decide() and raise.
+    """
+    monkeypatch.setattr(network_proxy, "POLICY_DB", tmp_path / "policy.sqlite3")
+    monkeypatch.setattr(network_proxy, "MAX_EVENTS", 5)
+    monkeypatch.setenv("DEERFLOW_NETWORK_MODE", "allowlist")
+
+    old = network_proxy.record_denial("old.example", 443, "CONNECT")
+    assert [event["request_id"] for event in network_proxy.pending_events()] == [old]
+    for index in range(10):
+        network_proxy.record_denial(f"newer-{index}.example", 443, "CONNECT")
+    network_proxy.deny_pending_events()
+
+    # The old card is answered last, after all the newer decisions exist.
+    assert network_proxy.decide(old, "allow_temporary", ttl=60)
+
+    # A flood forces pruning well past the cap.
+    for index in range(20):
+        network_proxy.record_denial(f"flood-{index}.example", 443, "CONNECT")
+
+    # The replayed decision still resolves, and the grant still applies.
+    assert network_proxy.decide(old, "allow_temporary", ttl=60)
+    assert network_proxy.policy_allows("old.example", 443)
+
+
+def test_full_history_trims_itself_instead_of_evicting_pending_denials(tmp_path, monkeypatch) -> None:
+    """Pending approvals reserve capacity once resolved history fills the cap.
+
+    With the cap full of decided rows, two denials arriving before the next
+    poll must both survive: evicting the older one would reverse the
+    oldest-first order pending_events() surfaces cards in.
+    """
+    monkeypatch.setattr(network_proxy, "POLICY_DB", tmp_path / "policy.sqlite3")
+    monkeypatch.setattr(network_proxy, "MAX_EVENTS", 5)
+
+    for index in range(10):
+        network_proxy.record_denial(f"history-{index}.example", 443, "CONNECT")
+    network_proxy.deny_pending_events()
+
+    first = network_proxy.record_denial("first.example", 443, "CONNECT")
+    second = network_proxy.record_denial("second.example", 443, "CONNECT")
+
+    # The oldest denial is surfaced first, and the newer one is superseded
+    # rather than silently deleted by pruning.
+    assert [event["request_id"] for event in network_proxy.pending_events()] == [first]
+    with network_proxy._connect_db() as db:
+        row = db.execute("SELECT decision FROM events WHERE request_id = ?", (second,)).fetchone()
+    assert row == ("superseded",)
+
+
+def test_pre_decided_at_database_migrates_and_keeps_old_decisions(tmp_path, monkeypatch) -> None:
+    """A database created before decided_at existed must migrate on connect.
+
+    CREATE TABLE IF NOT EXISTS does not add columns to an existing table, so
+    the sidecar adds decided_at explicitly. Old decided rows have no decision
+    timestamp; retention falls back to created_at for them and their replay
+    still resolves.
+    """
+    db_path = tmp_path / "old.sqlite3"
+    legacy = sqlite3.connect(db_path)
+    legacy.execute("CREATE TABLE events (request_id TEXT PRIMARY KEY, host TEXT NOT NULL, port INTEGER NOT NULL, method TEXT NOT NULL, created_at REAL NOT NULL, surfaced INTEGER NOT NULL DEFAULT 0, decision TEXT)")
+    legacy.execute("INSERT INTO events VALUES ('r1', 'old.example', 443, 'CONNECT', 1.0, 1, 'allow_temporary')")
+    legacy.commit()
+    legacy.close()
+
+    monkeypatch.setattr(network_proxy, "POLICY_DB", db_path)
+    monkeypatch.setattr(network_proxy, "MAX_EVENTS", 5)
+    for index in range(20):
+        network_proxy.record_denial(f"flood-{index}.example", 443, "CONNECT")
+
+    with network_proxy._connect_db() as db:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(events)")}
+        row = db.execute("SELECT decision, decided_at FROM events WHERE request_id = 'r1'").fetchone()
+    assert "decided_at" in columns
+    assert row == ("allow_temporary", None)
+    assert network_proxy.decide("r1", "allow_temporary", ttl=60)
+
+
+@pytest.mark.anyio
+async def test_lookup_failure_does_not_create_an_approval_card(tmp_path, monkeypatch) -> None:
+    """A transient lookup failure must not record a denial.
+
+    Recording can succeed on a fresh connection after the lookup failed. The
+    destination may already hold a sandbox-lifetime grant, and answering the
+    spurious card with "Allow temporarily" would replace that grant with an
+    expiring one. Lookup errors fail closed without creating an event.
+    """
+    monkeypatch.setattr(network_proxy, "POLICY_DB", tmp_path / "policy.sqlite3")
+    monkeypatch.setenv("DEERFLOW_NETWORK_MODE", "allowlist")
+    monkeypatch.setenv("DEERFLOW_ALLOW_DOMAINS_JSON", json.dumps([]))
+    monkeypatch.setenv("DEERFLOW_RECORD_DENIALS", "1")
+
+    def failing_lookup(host: str, port: int) -> bool:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(network_proxy, "policy_allows", failing_lookup)
+
+    proxy = await asyncio.start_server(network_proxy.handle_proxy, "127.0.0.1", 0)
+    proxy_port = proxy.sockets[0].getsockname()[1]
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+        writer.write(b"CONNECT granted.example:443 HTTP/1.1\r\nHost: granted.example:443\r\n\r\n")
+        await writer.drain()
+        response = await asyncio.wait_for(reader.read(), timeout=2)
+        writer.close()
+        await writer.wait_closed()
+
+        assert b"403 Forbidden" in response
+        assert b"Sandbox network policy denied granted.example:443" in response
+        assert b"(request " not in response
+    finally:
+        proxy.close()
+        await proxy.wait_closed()
+
+    with network_proxy._connect_db() as db:
+        total = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    assert total == 0

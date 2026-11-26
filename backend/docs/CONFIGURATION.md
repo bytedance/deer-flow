@@ -2000,14 +2000,17 @@ runs auto-deny without opening a card or waiting for input.
 The sidecar records denials in a fixed-size tmpfs, so it keeps that history
 bounded: a sandbox can request an unlimited number of unique hosts, and a full
 tmpfs would stop both denial recording and approval handling. Once the limit is
-reached it drops denials that were superseded by another approval card and then
-the oldest resolved ones. A card that is currently awaiting a decision is never
-dropped, so a burst of unanswered cards can exceed the limit, but reaching that
-needs one poll per tool call rather than a flood. Persisted request fields are
-truncated (the method to 16 characters), so the row limit also bounds the bytes
-on disk. Recording is best effort: if
-the policy database cannot be read or written, the request is still denied with
-the policy message instead of the connection being closed.
+reached it drops denials that were superseded by another approval card, then
+trims resolved history — ordered by when each decision was applied, so a card
+answered just now is kept — to leave room for pending approvals. A card that is
+currently awaiting a decision is never dropped, so a burst of unanswered cards
+can exceed the limit, but reaching that needs one poll per tool call rather
+than a flood. Persisted request fields are truncated (the method to 16
+characters), so the row limit also bounds the bytes on disk. Recording is best
+effort: if the policy database cannot be read or written, the request is still
+denied with the policy message instead of the connection being closed. A failed
+policy lookup denies without recording, so a transient database error cannot
+create an approval card for a destination that already holds a grant.
 
 The sidecar rejects hostnames that policy does not allow before DNS resolution;
 allowed hostnames that resolve to loopback, private, link-local, multicast,

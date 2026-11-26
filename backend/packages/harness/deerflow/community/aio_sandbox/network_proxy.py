@@ -67,10 +67,15 @@ def _connect_db() -> sqlite3.Connection:
             method TEXT NOT NULL,
             created_at REAL NOT NULL,
             surfaced INTEGER NOT NULL DEFAULT 0,
-            decision TEXT
+            decision TEXT,
+            decided_at REAL
         )
         """
     )
+    # Databases created before decided_at existed keep their rows; retention
+    # falls back to created_at for them.
+    if "decided_at" not in {row[1] for row in db.execute("PRAGMA table_info(events)")}:
+        db.execute("ALTER TABLE events ADD COLUMN decided_at REAL")
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS grants (
@@ -196,11 +201,16 @@ def _prune_events(db: sqlite3.Connection) -> None:
       for a superseded request, so dropping them up front changes no outcome.
       This is what keeps the flood from crowding out real, still-undecided
       denials.
-    * Decided rows are history. The newest ``MAX_EVENTS`` are kept so a resumed
-      run can re-apply a recent decision to the same request_id.
-    * Undecided rows that were never surfaced are dropped last, oldest first,
-      only as far as needed to get under ``MAX_EVENTS``. They are unreachable:
-      ``pending_events`` supersedes all of them except the row it surfaces.
+    * Decided rows are history. The newest ``MAX_EVENTS`` are kept, ordered by
+      when the decision was applied (``decided_at``), not when the destination
+      was denied: an old card answered just now must survive a resumed run
+      re-applying its decision. Pending approvals reserve capacity first, so a
+      full history trims itself rather than evicting an unsurfaced denial and
+      reversing the oldest-first order ``pending_events`` surfaces cards in.
+    * Undecided rows that were never surfaced are dropped only when they alone
+      exceed ``MAX_EVENTS`` and no history remains to trim, oldest first. They
+      are unreachable: ``pending_events`` supersedes all of them except the row
+      it surfaces.
 
     A row that has been surfaced but not yet decided is the card a user is
     looking at. It is never deleted -- removing it would leave their decision
@@ -214,12 +224,23 @@ def _prune_events(db: sqlite3.Connection) -> None:
     if total <= MAX_EVENTS:
         return
     db.execute("DELETE FROM events WHERE decision = 'superseded'")
+    # Pending approvals reserve capacity: trim resolved history to the room
+    # they leave, so a full history trims itself instead of evicting an
+    # unsurfaced denial and reversing the oldest-first order pending_events
+    # surfaces cards in.
+    pending = db.execute("SELECT COUNT(*) FROM events WHERE decision IS NULL").fetchone()[0]
+    keep_decided = max(MAX_EVENTS - pending, 0)
+    # History is ordered by when the decision was applied, so an old card
+    # answered just now survives a resumed run re-applying its decision. The
+    # most recent decision is always kept, even when pending rows alone fill
+    # the cap: deleting a just-applied decision would make its replay fail.
     db.execute(
-        "DELETE FROM events WHERE decision IS NOT NULL AND request_id NOT IN (SELECT request_id FROM events WHERE decision IS NOT NULL ORDER BY created_at DESC LIMIT ?)",
-        (MAX_EVENTS,),
+        "DELETE FROM events WHERE decision IS NOT NULL AND request_id NOT IN (SELECT request_id FROM events WHERE decision IS NOT NULL ORDER BY COALESCE(decided_at, created_at) DESC LIMIT ?)",
+        (max(keep_decided, 1),),
     )
+    decided_left = db.execute("SELECT COUNT(*) FROM events WHERE decision IS NOT NULL").fetchone()[0]
     overflow = db.execute("SELECT COUNT(*) FROM events").fetchone()[0] - MAX_EVENTS
-    if overflow > 0:
+    if overflow > 0 and decided_left == 0:
         db.execute(
             "DELETE FROM events WHERE request_id IN ( SELECT request_id FROM events WHERE surfaced = 0 AND decision IS NULL ORDER BY created_at LIMIT ?)",
             (overflow,),
@@ -269,7 +290,7 @@ def pending_events() -> list[dict[str, object]]:
             # One Human Input card makes one destination decision. Close any
             # sibling denials from the same tool call so a later retry records
             # a fresh event instead of leaving an invisible surfaced request.
-            db.execute("UPDATE events SET decision = 'superseded' WHERE surfaced = 0 AND decision IS NULL")
+            db.execute("UPDATE events SET decision = 'superseded', decided_at = ? WHERE surfaced = 0 AND decision IS NULL", (time.time(),))
     if row is None:
         return []
     return [{"request_id": row[0], "host": row[1], "port": row[2], "method": row[3], "created_at": row[4]}]
@@ -279,7 +300,7 @@ def deny_pending_events() -> int:
     """Atomically deny every event that has not been surfaced to a user."""
     with _connect_db() as db:
         db.execute("BEGIN IMMEDIATE")
-        result = db.execute("UPDATE events SET surfaced = 1, decision = 'deny' WHERE surfaced = 0 AND decision IS NULL")
+        result = db.execute("UPDATE events SET surfaced = 1, decision = 'deny', decided_at = ? WHERE surfaced = 0 AND decision IS NULL", (time.time(),))
         return max(result.rowcount, 0)
 
 
@@ -303,7 +324,7 @@ def decide(request_id: str, decision: str, ttl: int) -> bool:
             )
         elif decision != "deny":
             return False
-        db.execute("UPDATE events SET decision = ? WHERE request_id = ?", (decision, request_id))
+        db.execute("UPDATE events SET decision = ?, decided_at = ? WHERE request_id = ?", (decision, time.time(), request_id))
         return True
 
 
@@ -623,10 +644,14 @@ async def handle_proxy(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
         allowed = policy_allows(host, port)
     except sqlite3.Error as exc:
         # The policy lookup reads grants and may rewrite an expired one, so it
-        # can fail when the tmpfs holding the database is full. A denial must
-        # still reach the sandbox: fail closed instead of closing the connection.
+        # can fail when the tmpfs holding the database is full. Fail closed
+        # without recording: a transient lookup failure must not create an
+        # approval card for a destination that may already hold a grant, since
+        # answering it with "Allow temporarily" would replace a sandbox-lifetime
+        # grant with an expiring one.
         print(f"network policy lookup for {host}:{port} failed: {exc}", file=sys.stderr)
-        allowed = False
+        await _reject(writer, "403 Forbidden", f"Sandbox network policy denied {host}:{port}")
+        return
     if not allowed:
         detail = ""
         if os.environ.get("DEERFLOW_RECORD_DENIALS") == "1":
