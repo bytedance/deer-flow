@@ -394,6 +394,13 @@ async with runtime:
 
 `SubagentRuntime.stop()` waits for its owned batch service to finish before propagating caller cancellation, including repeated cancellation. This drain has no timeout; repository operations and child cleanup must terminate. If service shutdown also fails or is cancelled, the first caller cancellation is preserved with the service failure as its cause.
 
+When a graph includes `batch_task`, `create_deerflow_agent` keeps the private
+`compacted_batch_receipt_ids` state field even if summarization is disabled.
+If you assemble the graph directly with LangChain's `create_agent`, inherit
+from `deerflow.agents.thread_state.BatchReceiptState` in your custom state
+schema. Keep that base when rebuilding the graph so resumed threads can reuse
+verified receipts already stored in their checkpoints.
+
 Custom SDK repositories can keep their original `create_batch` signature. The
 built-in SQL repository verifies submission digests and resolves replays before
 applying new batch limits. Adapters that forward the execution snapshot to SQL

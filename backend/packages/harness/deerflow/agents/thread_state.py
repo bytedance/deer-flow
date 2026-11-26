@@ -20,6 +20,7 @@ import deerflow.checkpoint_patches as _checkpoint_patches  # noqa: F401 - import
 from deerflow.agents.goal_state import GoalOutcomeState, GoalState
 from deerflow.agents.task_continuity.state import TaskNotesChannel, merge_task_notes
 from deerflow.config.database_config import DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY, CheckpointChannelMode
+from deerflow.subagents.batch_runtime import COMPACTED_BATCH_RECEIPTS_CHANNEL
 from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
 
 
@@ -463,7 +464,23 @@ def merge_tool_artifacts(existing: list[ArtifactEntry] | None, new: list[Artifac
 
 
 class BatchReceiptState(AgentState):
+    """State for graphs that checkpoint compacted batch receipts."""
+
     compacted_batch_receipt_ids: Annotated[NotRequired[list[str]], PrivateStateAttr]
+
+
+@cache
+def with_batch_receipt_state(schema: type) -> type:
+    """Keep the receipt channel available with a caller-provided state schema."""
+    annotations = get_type_hints(schema, include_extras=True)
+    if COMPACTED_BATCH_RECEIPTS_CHANNEL in annotations:
+        return schema
+    receipt_annotation = get_type_hints(BatchReceiptState, include_extras=True)[COMPACTED_BATCH_RECEIPTS_CHANNEL]
+    return TypedDict(
+        f"{schema.__name__}WithBatchReceipts",
+        {**annotations, COMPACTED_BATCH_RECEIPTS_CHANNEL: receipt_annotation},
+        total=getattr(schema, "__total__", True),
+    )
 
 
 class ThreadState(BatchReceiptState):

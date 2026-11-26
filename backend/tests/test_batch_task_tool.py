@@ -20,7 +20,7 @@ from langgraph.types import Command
 from deerflow.agents.factory import create_deerflow_agent
 from deerflow.agents.features import RuntimeFeatures
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
-from deerflow.agents.thread_state import adapt_state_schema_for_mode, normalize_middleware_state_schemas
+from deerflow.agents.thread_state import BatchReceiptState, adapt_state_schema_for_mode, normalize_middleware_state_schemas
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
@@ -84,6 +84,10 @@ class _ScriptedModel(GenericFakeChatModel):
 
 class _CompactionState(AgentState):
     summary_text: NotRequired[str]
+
+
+class _BatchCompactionState(BatchReceiptState, _CompactionState):
+    pass
 
 
 def _dispatch(job: int, *, call_id: str = "call_0") -> AIMessage:
@@ -346,6 +350,27 @@ async def test_upgrade_recovers_legacy_checkpoint_without_duplicate_batches(batc
                 compacted = (await compacting_graph.aget_state(config)).values
                 assert not any(isinstance(message, ToolMessage) for message in compacted["messages"])
                 assert set(compacted[COMPACTED_BATCH_RECEIPTS_CHANNEL]) == {original["id"], second_id, third_id}
+
+                tools = tool_module.bind_batch_tools(service)
+                model = _ScriptedModel(messages=iter([_dispatch(4), AIMessage(content="Done")]))
+                if checkpoint_mode == "full":
+                    rebuilt_graph = create_deerflow_agent(model, tools, state_schema=schema, middleware=[], checkpointer=saver)
+                else:
+                    # Persisted delta graphs created directly with LangChain declare
+                    # the receipt channel in their custom schema.
+                    resumed_schema = adapt_state_schema_for_mode(_BatchCompactionState, checkpoint_mode)
+                    rebuilt_graph = create_agent(model=model, tools=tools, state_schema=resumed_schema, checkpointer=saver)
+
+                state = await rebuilt_graph.ainvoke({"messages": [HumanMessage("Submit a fourth job")]}, config, context={**context, "run_id": "new-run"}, durability=durability)
+                [fourth] = [message for message in state["messages"] if isinstance(message, ToolMessage)]
+                assert fourth.status == "success"
+                assert ancestry_walks == 1
+                assert state["summary_text"] == "Earlier work summarized"
+                fourth_id = fourth.additional_kwargs["subagent_batch_id"]
+                assert {batch["id"] for batch in await repository.list_by_thread("thread-1", user_id="user-1")} == {original["id"], second_id, third_id, fourth_id}
+                assert [item["item_key"] for item in await repository.list_items(fourth_id, user_id="user-1")] == ["job-4"]
+                assert COMPACTED_BATCH_RECEIPTS_CHANNEL not in state
+                assert set((await rebuilt_graph.aget_state(config)).values[COMPACTED_BATCH_RECEIPTS_CHANNEL]) == {original["id"], second_id, third_id}
 
 
 @pytest.mark.asyncio
