@@ -32,6 +32,12 @@ RELAY_TOKEN_ENV = "DEERFLOW_RELAY_TOKEN"
 # denial recording and approval handling for the rest of its lifetime. At the
 # real row size (roughly 140 bytes) this holds the database well under 1 MiB.
 MAX_EVENTS = 4000
+# The request line has no token-length limit of its own, so a method can be
+# nearly MAX_HEADER_BYTES long. Persisting it verbatim would let a few hundred
+# rows fill the tmpfs long before MAX_EVENTS is reached. The longest standard
+# method is CONNECT (7 characters); anything longer is kept only as a prefix
+# for the approval card.
+MAX_METHOD_CHARS = 16
 
 
 class _InvalidHttpRequest(ValueError):
@@ -222,6 +228,10 @@ def _prune_events(db: sqlite3.Connection) -> None:
 
 def record_denial(host: str, port: int, method: str) -> str:
     now = time.time()
+    # Truncate before persisting so the row-count cap also bounds bytes: an
+    # oversized method stored verbatim could fill the tmpfs in a few hundred
+    # rows. The denial response itself is unaffected.
+    method = method[:MAX_METHOD_CHARS]
     with _connect_db() as db:
         # Serialize the read-before-insert deduplication so simultaneous proxy
         # requests cannot create multiple approval cards for one destination.

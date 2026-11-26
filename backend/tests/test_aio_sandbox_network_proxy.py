@@ -586,3 +586,46 @@ def test_flood_does_not_evict_fresh_denials_or_break_deduplication(tmp_path, mon
 
     assert again == first
     assert [event["request_id"] for event in network_proxy.pending_events()] == [first]
+
+
+@pytest.mark.anyio
+async def test_oversized_method_is_truncated_in_storage_and_denials_stay_bounded(tmp_path, monkeypatch) -> None:
+    """The row cap only bounds bytes if persisted fields are bounded too.
+
+    The request line has no token-length limit of its own, so a method can be
+    nearly MAX_HEADER_BYTES long. Stored verbatim, a few hundred such rows
+    would fill the 16 MiB tmpfs long before MAX_EVENTS is reached. The method
+    is truncated for storage; the denial response is unchanged.
+    """
+    db_path = tmp_path / "policy.sqlite3"
+    monkeypatch.setattr(network_proxy, "POLICY_DB", db_path)
+    monkeypatch.setenv("DEERFLOW_NETWORK_MODE", "allowlist")
+    monkeypatch.setenv("DEERFLOW_ALLOW_DOMAINS_JSON", json.dumps(["allowed.example"]))
+    monkeypatch.setenv("DEERFLOW_RECORD_DENIALS", "1")
+
+    oversized_method = b"X" * 60_000
+    proxy = await asyncio.start_server(network_proxy.handle_proxy, "127.0.0.1", 0)
+    proxy_port = proxy.sockets[0].getsockname()[1]
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+        writer.write(oversized_method + b" http://denied.example/ HTTP/1.1\r\nHost: denied.example\r\n\r\n")
+        await writer.drain()
+        response = await asyncio.wait_for(reader.read(), timeout=2)
+        writer.close()
+        await writer.wait_closed()
+
+        assert b"403 Forbidden" in response
+        assert b"Sandbox network policy denied denied.example:80" in response
+    finally:
+        proxy.close()
+        await proxy.wait_closed()
+
+    with network_proxy._connect_db() as db:
+        stored = db.execute("SELECT method FROM events").fetchone()[0]
+    assert stored == "X" * network_proxy.MAX_METHOD_CHARS
+
+    # A burst of oversized-method denials stays small on disk: the row cap and
+    # the field truncation together bound the bytes, not just the row count.
+    for index in range(300):
+        network_proxy.record_denial(f"host-{index}.example", 80, "X" * 60_000)
+    assert db_path.stat().st_size < 1_000_000

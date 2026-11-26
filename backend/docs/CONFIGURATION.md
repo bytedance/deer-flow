@@ -2003,7 +2003,9 @@ tmpfs would stop both denial recording and approval handling. Once the limit is
 reached it drops denials that were superseded by another approval card and then
 the oldest resolved ones. A card that is currently awaiting a decision is never
 dropped, so a burst of unanswered cards can exceed the limit, but reaching that
-needs one poll per tool call rather than a flood. Recording is best effort: if
+needs one poll per tool call rather than a flood. Persisted request fields are
+truncated (the method to 16 characters), so the row limit also bounds the bytes
+on disk. Recording is best effort: if
 the policy database cannot be read or written, the request is still denied with
 the policy message instead of the connection being closed.
 
