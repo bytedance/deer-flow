@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import replace as dc_replace
-from typing import override
+from typing import Any, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -67,23 +67,30 @@ _REMOTE_CONTENT_TOOL_NAMES: frozenset[str] = frozenset(
 def _has_untrusted_json_text(
     value: object,
     neutralize: Callable[[str], str],
-    seen: set[int],
 ) -> bool:
     """Return whether *value* contains any string key or value that *neutralize* rewrites."""
-    if isinstance(value, str):
-        return neutralize(value) != value
-    if isinstance(value, (list, tuple)):
-        obj_id = id(value)
-        if obj_id in seen:
-            return False
-        seen.add(obj_id)
-        return any(_has_untrusted_json_text(item, neutralize, seen) for item in value)
-    if isinstance(value, dict):
-        obj_id = id(value)
-        if obj_id in seen:
-            return False
-        seen.add(obj_id)
-        return any((isinstance(key, str) and neutralize(key) != key) or _has_untrusted_json_text(item, neutralize, seen) for key, item in value.items())
+    seen: set[int] = set()
+    stack: list[object] = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, str):
+            if neutralize(current) != current:
+                return True
+        elif isinstance(current, (list, tuple)):
+            obj_id = id(current)
+            if obj_id in seen:
+                continue
+            seen.add(obj_id)
+            stack.extend(current)
+        elif isinstance(current, dict):
+            obj_id = id(current)
+            if obj_id in seen:
+                continue
+            seen.add(obj_id)
+            for key, item in current.items():
+                if isinstance(key, str) and neutralize(key) != key:
+                    return True
+                stack.append(item)
     return False
 
 
@@ -100,62 +107,86 @@ def _disambiguate_sanitized_key(base_key: object, used_keys: set[object]) -> str
 def _clone_neutralized_json(
     value: object,
     neutralize: Callable[[str], str],
-    memo: dict[int, object],
 ) -> object:
-    """Clone a structured JSON-like payload with every string key and value neutralized."""
-    if isinstance(value, str):
-        return neutralize(value)
-    if isinstance(value, list):
-        obj_id = id(value)
-        if obj_id in memo:
-            return memo[obj_id]
-        rebuilt_list: list[object] = []
-        memo[obj_id] = rebuilt_list
-        for item in value:
-            rebuilt_list.append(_clone_neutralized_json(item, neutralize, memo))
-        return rebuilt_list
-    if isinstance(value, tuple):
-        obj_id = id(value)
-        if obj_id in memo:
-            return memo[obj_id]
-        # A tuple can self-reference only through a mutable descendant; a placeholder
-        # list breaks that cycle without leaking unsanitized references.
-        placeholder: list[object] = []
-        memo[obj_id] = placeholder
-        items = [_clone_neutralized_json(item, neutralize, memo) for item in value]
-        placeholder.extend(items)
-        rebuilt_tuple = tuple(items)
-        memo[obj_id] = rebuilt_tuple
-        return rebuilt_tuple
-    if isinstance(value, dict):
-        obj_id = id(value)
-        if obj_id in memo:
-            return memo[obj_id]
-        rebuilt_dict: dict[object, object] = {}
-        memo[obj_id] = rebuilt_dict
-        # Reserve unchanged keys first so a rewritten key colliding with an
-        # existing clean key never displaces or silently overwrites it.
-        reserved_keys: set[object] = set()
-        transformed_entries: list[tuple[object, object, object]] = []
-        for key, item in value.items():
-            new_key = neutralize(key) if isinstance(key, str) else key
-            if new_key == key:
-                reserved_keys.add(key)
-            transformed_entries.append((key, new_key, _clone_neutralized_json(item, neutralize, memo)))
+    """Clone a structured JSON-like payload iteratively with every string key and value neutralized."""
+    memo: dict[int, object] = {}
+    root_box: list[object] = [None]
+    # Stack frames are either:
+    # - (False, node, container, slot): visit *node* and write clone to container[slot]
+    # - (True, obj_id, placeholder, container, slot): finalize tuple from *placeholder*
+    stack: list[tuple[Any, ...]] = [(False, value, root_box, 0)]
 
-        used_keys: set[object] = set(reserved_keys)
-        for key, new_key, sanitized_item in transformed_entries:
-            if new_key == key:
-                final_key = key
-            elif new_key not in used_keys:
-                final_key = new_key
-                used_keys.add(final_key)
-            else:
-                final_key = _disambiguate_sanitized_key(new_key, used_keys)
-                used_keys.add(final_key)
-            rebuilt_dict[final_key] = sanitized_item
-        return rebuilt_dict
-    return value
+    while stack:
+        frame = stack.pop()
+        if frame[0]:
+            _, obj_id, placeholder, container, slot = frame
+            rebuilt_tuple = tuple(placeholder)
+            memo[obj_id] = rebuilt_tuple
+            container[slot] = rebuilt_tuple
+            continue
+
+        _, current, container, slot = frame
+        if isinstance(current, str):
+            container[slot] = neutralize(current)
+        elif isinstance(current, list):
+            obj_id = id(current)
+            if obj_id in memo:
+                container[slot] = memo[obj_id]
+                continue
+            rebuilt_list: list[object] = [None] * len(current)
+            memo[obj_id] = rebuilt_list
+            container[slot] = rebuilt_list
+            for idx in range(len(current) - 1, -1, -1):
+                stack.append((False, current[idx], rebuilt_list, idx))
+        elif isinstance(current, tuple):
+            obj_id = id(current)
+            if obj_id in memo:
+                container[slot] = memo[obj_id]
+                continue
+            # A tuple can self-reference only through a mutable descendant; a
+            # placeholder list breaks that cycle without leaking unsanitized
+            # references and is replaced with the finalized tuple once populated.
+            placeholder: list[object] = [None] * len(current)
+            memo[obj_id] = placeholder
+            stack.append((True, obj_id, placeholder, container, slot))
+            for idx in range(len(current) - 1, -1, -1):
+                stack.append((False, current[idx], placeholder, idx))
+        elif isinstance(current, dict):
+            obj_id = id(current)
+            if obj_id in memo:
+                container[slot] = memo[obj_id]
+                continue
+            rebuilt_dict: dict[object, object] = {}
+            memo[obj_id] = rebuilt_dict
+            container[slot] = rebuilt_dict
+            # Reserve unchanged keys first so a rewritten key colliding with an
+            # existing clean key never displaces or silently overwrites it.
+            reserved_keys: set[object] = set()
+            key_pairs: list[tuple[object, object, object]] = []
+            for key, item in current.items():
+                new_key = neutralize(key) if isinstance(key, str) else key
+                if new_key == key:
+                    reserved_keys.add(key)
+                key_pairs.append((key, new_key, item))
+            used_keys: set[object] = set(reserved_keys)
+            final_entries: list[tuple[object, object]] = []
+            for key, new_key, item in key_pairs:
+                if new_key == key:
+                    final_key = key
+                elif new_key not in used_keys:
+                    final_key = new_key
+                    used_keys.add(final_key)
+                else:
+                    final_key = _disambiguate_sanitized_key(new_key, used_keys)
+                    used_keys.add(final_key)
+                rebuilt_dict[final_key] = None
+                final_entries.append((final_key, item))
+            for final_key, item in reversed(final_entries):
+                stack.append((False, item, rebuilt_dict, final_key))
+        else:
+            container[slot] = current
+
+    return root_box[0]
 
 
 def _neutralize_json_value(
@@ -163,9 +194,9 @@ def _neutralize_json_value(
     neutralize: Callable[[str], str],
 ) -> tuple[object, bool]:
     """Neutralize string keys and values in a structured JSON payload without mutating it."""
-    if not _has_untrusted_json_text(value, neutralize, set()):
+    if not _has_untrusted_json_text(value, neutralize):
         return value, False
-    return _clone_neutralized_json(value, neutralize, {}), True
+    return _clone_neutralized_json(value, neutralize), True
 
 
 def _neutralize_content_checked(content: object) -> tuple[object, bool]:
