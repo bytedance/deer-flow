@@ -1446,9 +1446,11 @@ asked for Apify by name. All five tools read `APIFY_API_TOKEN` or
 the tool's `api_key`; `config.example.yaml` lists their options.
 
 Actor runs spend Apify credits. `max_total_charge_usd` on `apify_actor_start`
-caps the cost of a pay-per-event run, and `timeout_secs` and `memory_mbytes` set
-the run's limits on Apify. When `apify_actor_await` reaches its own
-`timeout_secs`, the run keeps going on Apify and the agent can call await again.
+caps the cost of a pay-per-event run. It must be a positive number: Apify reads
+0 as no cap, so the tool refuses to start a run when the value is 0 or cannot be
+read. `timeout_secs` and `memory_mbytes` set the run's limits on Apify. When
+`apify_actor_await` reaches its own `timeout_secs`, the run keeps going on Apify
+and the agent can call await again.
 Results of `apify_actor_await` and `apify_actor_discover` hold third-party
 content, so the tool-result sanitization and PII redaction middlewares treat them like `web_fetch`
 output. Offline tests use HTTPX mock transports and need no token.

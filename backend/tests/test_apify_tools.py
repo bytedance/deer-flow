@@ -329,13 +329,23 @@ class TestStart:
         assert dict(request.url.params) == {"timeout": "120", "memory": "1024", "maxTotalChargeUsd": "0.5"}
         assert payload == {"action": "start", "runs": [{"runId": "run-1", "actorId": "apify/instagram-scraper", "datasetId": "ds-1", "status": "READY", "description": "NASA"}]}
 
-    async def test_invalid_config_numbers_are_dropped_with_a_warning(self, config, apify, caplog):
-        config(timeout_secs=True, memory_mbytes="lots", max_total_charge_usd=-1)
+    async def test_invalid_run_limits_are_dropped_with_a_warning(self, config, apify, caplog):
+        config(timeout_secs=True, memory_mbytes="lots")
         apify.on("POST", "/v2/acts/o~a/runs", _data({"id": "r", "defaultDatasetId": "d", "status": "READY"}))
         with caplog.at_level(logging.WARNING, logger=apify_tools.__name__):
             await apify_tools.apify_actor_start_tool.ainvoke({"actor_id": "o/a", "run_input": "{}"})
         assert dict(apify.requests[0].url.params) == {}
-        assert caplog.text.count("Invalid Apify") == 3
+        assert caplog.text.count("Invalid Apify") == 2
+
+    # Apify reads a cap of 0 as no cap, so 0 must not reach it either.
+    @pytest.mark.parametrize("cap", [0, "0", -1, "lots", "", True, "inf", "nan"])
+    async def test_an_invalid_cost_cap_refuses_to_start_the_run(self, config, apify, cap):
+        config(max_total_charge_usd=cap)
+        apify.on("POST", "/v2/acts/o~a/runs", _data({"id": "r", "defaultDatasetId": "d", "status": "READY"}))
+        result = await apify_tools.apify_actor_start_tool.ainvoke({"actor_id": "o/a", "run_input": "{}"})
+        assert result.startswith("Error: tools[apify_actor_start].max_total_charge_usd")
+        assert "The run was not started" in result
+        assert apify.requests == []
 
     @pytest.mark.parametrize(("run_input", "error"), [("not json", "not valid JSON"), ('["a"]', "must be a JSON object"), ('"text"', "must be a JSON object")])
     async def test_run_input_must_be_a_json_object(self, config, apify, run_input, error):

@@ -97,26 +97,38 @@ def _missing_key_error(tool_name: str) -> str:
     )
 
 
-def _config_number(extra: dict[str, Any], key: str, default: float | None, *, integer: bool) -> float | None:
-    """Read a positive number from a tool's config extras.
+def _positive_number(value: object, *, integer: bool) -> float | None:
+    """Return *value* as a positive, finite number, or None when it is not one.
 
     A ``$VAR`` reference resolves to a string, so ``"300"`` is accepted. A boolean,
     a value that is not positive and finite, or a fraction for an integer setting
-    falls back to the default with a warning instead of failing the tool call.
+    is not a number here.
+    """
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0 or (integer and not number.is_integer()):
+        return None
+    return int(number) if integer else number
+
+
+def _config_number(extra: dict[str, Any], key: str, default: float | None, *, integer: bool) -> float | None:
+    """Read a positive number from a tool's config extras.
+
+    An invalid value falls back to the default with a warning instead of failing
+    the tool call.
     """
     value = extra.get(key)
     if value is None:
         return default
-    try:
-        if isinstance(value, bool):
-            raise ValueError
-        number = float(value)
-        if not math.isfinite(number) or number <= 0 or (integer and not number.is_integer()):
-            raise ValueError
-    except (TypeError, ValueError):
+    number = _positive_number(value, integer=integer)
+    if number is None:
         logger.warning("Invalid Apify %s=%r; using default %s", key, value, default)
         return default
-    return int(number) if integer else number
+    return number
 
 
 def _text(value: object) -> str:
@@ -457,10 +469,19 @@ async def apify_actor_start_tool(actor_id: str, run_input: str, description: str
         return f"Error: {_missing_key_error('apify_actor_start')}"
 
     params: dict[str, Any] = {}
-    for key, param, integer in (("timeout_secs", "timeout", True), ("memory_mbytes", "memory", True), ("max_total_charge_usd", "maxTotalChargeUsd", False)):
-        value = _config_number(extra, key, None, integer=integer)
+    for key, param in (("timeout_secs", "timeout"), ("memory_mbytes", "memory")):
+        value = _config_number(extra, key, None, integer=True)
         if value is not None:
             params[param] = value
+    # A cost cap that cannot be read must not start the run without one. Apify reads
+    # a cap of 0 as no cap at all, so 0 is refused like any other invalid value.
+    configured_cap = extra.get("max_total_charge_usd")
+    if configured_cap is not None:
+        cap = _positive_number(configured_cap, integer=False)
+        if cap is None:
+            logger.error("Invalid Apify max_total_charge_usd=%r; refusing to start the run without a cost cap", configured_cap)
+            return "Error: tools[apify_actor_start].max_total_charge_usd in config.yaml must be a positive number of US dollars. The run was not started. Ask the operator to fix the setting."
+        params["maxTotalChargeUsd"] = cap
 
     try:
         async with await _new_client(_API_TIMEOUT_SECS) as client:
