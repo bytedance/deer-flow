@@ -59,19 +59,19 @@ def _nestdaddy_search(query: str, limit: int, api_key: str) -> tuple[dict | None
         response.raise_for_status()
         body = response.json()
     except httpx.HTTPStatusError as e:
-        logger.error("NestDaddy API returned HTTP %s: %s", e.response.status_code, (e.response.text or "")[:500])
+        # Status only: the response body may echo the query or other payload values.
+        logger.error("NestDaddy API returned HTTP %s", e.response.status_code)
         return None, f"NestDaddy API error: HTTP {e.response.status_code}"
     except Exception as e:
-        logger.error("NestDaddy request failed: %s: %s", type(e).__name__, str(e)[:500])
-        return None, str(e)[:500]
+        logger.error("NestDaddy request failed: %s", type(e).__name__)
+        return None, f"NestDaddy request failed: {type(e).__name__}"
 
     if not isinstance(body, dict):
         logger.error("NestDaddy returned an unexpected payload type: %s", type(body).__name__)
         return None, "NestDaddy returned an unexpected response format"
     if body.get("success") is False:
-        message = body.get("error") or body.get("message") or "request failed"
-        logger.error("NestDaddy reported an error: %s", str(message)[:500])
-        return None, f"NestDaddy API error: {str(message)[:200]}"
+        logger.error("NestDaddy reported an unsuccessful response")
+        return None, "NestDaddy API error: the request was not successful"
     return body, None
 
 

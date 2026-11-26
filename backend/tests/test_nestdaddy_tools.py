@@ -185,31 +185,35 @@ class TestWebSearchTool:
             output = json.loads(web_search_tool.invoke({"query": "q"}))
         assert output["error"] == "NestDaddy returned an unexpected response format"
 
-    def test_success_false_reports_api_error(self, mock_config_with_key):
+    def test_success_false_reports_stable_error_without_upstream_detail(self, mock_config_with_key, caplog):
         from deerflow.community.nestdaddy.tools import web_search_tool
 
-        ctx, _ = _patch_client(_make_response({"success": False, "error": "Quota exceeded"}))
-        with ctx:
+        ctx, _ = _patch_client(_make_response({"success": False, "error": "secret-detail-from-upstream"}))
+        with ctx, caplog.at_level(logging.ERROR):
             output = json.loads(web_search_tool.invoke({"query": "q"}))
-        assert output["error"] == "NestDaddy API error: Quota exceeded"
+        assert output["error"] == "NestDaddy API error: the request was not successful"
+        assert "secret-detail-from-upstream" not in caplog.text
 
-    def test_http_error_reports_status(self, mock_config_with_key):
+    def test_http_error_reports_status_and_keeps_body_out_of_logs(self, mock_config_with_key, caplog):
         from deerflow.community.nestdaddy.tools import web_search_tool
 
         request = httpx.Request("GET", "https://nestdaddy.com/api/v1/search")
-        response = httpx.Response(401, request=request, text="unauthorized")
+        response = httpx.Response(503, request=request, text="upstream body with the query q=private")
         failing = MagicMock()
-        failing.raise_for_status.side_effect = httpx.HTTPStatusError("401", request=request, response=response)
+        failing.raise_for_status.side_effect = httpx.HTTPStatusError("503", request=request, response=response)
         ctx, _ = _patch_client(failing)
-        with ctx:
+        with ctx, caplog.at_level(logging.ERROR):
             output = json.loads(web_search_tool.invoke({"query": "q"}))
-        assert output["error"] == "NestDaddy API error: HTTP 401"
+        assert output["error"] == "NestDaddy API error: HTTP 503"
+        assert "HTTP 503" in caplog.text
+        assert "upstream body" not in caplog.text
 
-    def test_network_error_is_returned(self, mock_config_with_key):
+    def test_network_error_returns_exception_class_only(self, mock_config_with_key, caplog):
         from deerflow.community.nestdaddy.tools import web_search_tool
 
-        ctx, _ = _patch_client(side_effect=httpx.ConnectError("boom"))
-        with ctx:
+        ctx, _ = _patch_client(side_effect=httpx.ConnectError("connect to 10.0.0.5 failed: private detail"))
+        with ctx, caplog.at_level(logging.ERROR):
             output = json.loads(web_search_tool.invoke({"query": "q"}))
-        assert output["error"] == "boom"
+        assert output["error"] == "NestDaddy request failed: ConnectError"
         assert output["query"] == "q"
+        assert "private detail" not in caplog.text
