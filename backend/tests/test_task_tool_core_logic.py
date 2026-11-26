@@ -3710,10 +3710,10 @@ def test_task_tool_completed_without_criteria_stamps_no_acceptance_verdict(monke
 
 
 def test_task_tool_acceptance_check_failure_is_isolated(monkeypatch):
-    def exploding_check(*_args, **_kwargs):
+    async def exploding_check(*_args, **_kwargs):
         raise RuntimeError("checker blew up")
 
-    monkeypatch.setattr(task_tool_module, "check_acceptance_criteria", exploding_check)
+    monkeypatch.setattr(task_tool_module, "check_acceptance_criteria_async", exploding_check)
 
     class DummyExecutor:
         def __init__(self, **kwargs):
