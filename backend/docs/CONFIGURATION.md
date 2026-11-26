@@ -1023,7 +1023,7 @@ and `time_range`; the filters do not apply to `web_fetch` or other search provid
 
 #### Hosted reader URLs
 
-Apify, GroundRoute, InfoQuest, Jina, Sofya, SpecStream, Tavily, Unbrowse and the
+GroundRoute, InfoQuest, Jina, Sofya, SpecStream, Tavily, Unbrowse and the
 official Exa API accept absolute HTTP(S) URLs for `web_fetch`. The tool checks
 the URL locally before contacting the reader.
 Malformed URLs, embedded user credentials, local hostnames such as `localhost`,
@@ -1433,33 +1433,38 @@ DEER_FLOW_RUN_LIVE_TESTS=1 uv run pytest tests/test_deepseek_search_live.py -q
 
 #### Apify Actor tools
 
-Apify's `web_search` and `web_fetch` call the `apify/web-search` and
-`apify/web-fetch` Actors. Three more tools let the agent use any Actor in Apify
-Store, for example an Instagram, Google Maps or e-commerce scraper:
-`apify_actor_discover` searches the Store or returns an Actor's input schema,
-`apify_actor_start` starts a run and returns at once, and `apify_actor_await`
-waits for the run and returns up to `max_items` dataset items. The agent starts
-several runs, then awaits each, to scrape in parallel. The `apify-scraper` skill
-routes common platforms to known Actors. When the Actor tools are not enabled, the
-skill sends the agent to `web_search` and `web_fetch` instead, unless the user
-asked for Apify by name. All five tools read `APIFY_API_TOKEN` or
-the tool's `api_key`; `config.example.yaml` lists their options.
+Three tools let the agent use any Actor in Apify Store, for example an
+Instagram, Google Maps or e-commerce scraper: `apify_actor_discover` searches the
+Store or returns an Actor's input schema, `apify_actor_start` starts a run and
+returns at once, and `apify_actor_await` waits for the run and returns up to
+`max_items` dataset items. The agent starts several runs, then awaits each, to
+scrape in parallel. The `apify-scraper` skill routes common platforms to known
+Actors. When the Actor tools are not enabled, the skill sends the agent to
+`web_search` and `web_fetch` instead, unless the user asked for Apify by name.
+The tools read `APIFY_API_TOKEN` or the tool's `api_key`; `config.example.yaml`
+lists their options.
 
 Actor runs spend Apify credits. `max_total_charge_usd` on `apify_actor_start`
-caps the cost of a pay-per-event run. It must be a positive number: Apify reads
+caps what one run can cost: Apify aborts the run when its Actor charges and
+platform usage reach the cap. Pay-per-result Actors are the exception, because
+Apify limits their results by item count, which the tool does not set. Without
+the setting, a run has no cap of its own and is limited only by the Apify
+account's monthly usage limit. The value must be a positive number: Apify reads
 0 as no cap, so the tool refuses to start a run when the value is 0 or cannot be
-read. `timeout_secs` and `memory_mbytes` set the run's limits on Apify. When
-`apify_actor_await` reaches its own `timeout_secs`, the run keeps going on Apify
-and the agent can call await again. That result reports the run's status message
-and item count rather than an error, so loop detection lets the agent keep
-waiting on a run that makes progress and still stops it on a stalled one.
+read. `timeout_secs` and `memory_mbytes` set the run's limits on Apify.
+
+When `apify_actor_await` reaches its own `timeout_secs`, the run keeps going on
+Apify and the agent can call await again. That result reports the run's status
+message and item count rather than an error, so loop detection lets the agent
+keep waiting on a run that makes progress and still stops it on a stalled one.
 Results of `apify_actor_await` and `apify_actor_discover`, and the errors of
 `apify_actor_start`, hold third-party content, so the tool-result sanitization
-and PII redaction middlewares treat them like `web_fetch` output. Offline tests use HTTPX mock transports and need no token.
+and PII redaction middlewares treat them like `web_fetch` output. Offline tests
+use HTTPX mock transports and need no token.
 
 **Built-in Tools**:
-- `web_search` - Search the web (Apify, DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, DeepSeek, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
-- `web_fetch` - Fetch web pages (Apify, Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Tavily, Unbrowse)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, DeepSeek, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
+- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Tavily, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
 - `ls` - List directory contents
@@ -2332,7 +2337,7 @@ models:
 - `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`
-- `APIFY_API_TOKEN` - [Apify](https://apify.com) API token for `web_search`, `web_fetch` and the `apify_actor_*` tools. Create one for DeerFlow in [Apify Console](https://console.apify.com/settings/integrations?createApiToken=true&for=DeerFlow&utm_source=deerflow&utm_medium=integrations) and copy it right after creating it, because it is shown only once.
+- `APIFY_API_TOKEN` - [Apify](https://apify.com) API token for the `apify_actor_*` tools. Create one for DeerFlow in [Apify Console](https://console.apify.com/settings/integrations?createApiToken=true&for=DeerFlow&utm_source=deerflow&utm_medium=integrations) and copy it right after creating it, because it is shown only once.
 - `SPECSTREAM_API_KEY` - [SpecStream](https://specstream.ai) key for `web_search` and `web_fetch`
 - `UNBROWSE_API_KEY` - [Unbrowse](https://unbrowse.ai) key for `web_fetch`
 - `YDC_API_KEY` - You.com Search API key for `web_search` (optional: without it the provider uses You.com's keyless free-tier endpoint)

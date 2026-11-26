@@ -89,12 +89,12 @@ def _error(status: int, message: str, error_type: str = "invalid-input") -> http
 class TestCredentials:
     async def test_configured_key_is_stripped(self, config):
         config({"api_key": "  configured-key\n"})
-        assert apify_tools._tool_settings("web_search")[0] == "configured-key"
+        assert apify_tools._tool_settings("apify_actor_start")[0] == "configured-key"
 
     async def test_blank_configured_key_falls_back_to_stripped_environment_key(self, config, monkeypatch):
         config({"api_key": "   "})
         monkeypatch.setenv("APIFY_API_TOKEN", "  env-apify-key\n")
-        assert apify_tools._tool_settings("web_search")[0] == "env-apify-key"
+        assert apify_tools._tool_settings("apify_actor_start")[0] == "env-apify-key"
 
     async def test_unconfigured_tool_reads_the_environment(self, monkeypatch):
         monkeypatch.setattr(apify_tools, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda _name: None))
@@ -105,128 +105,38 @@ class TestCredentials:
         config({})
         monkeypatch.delenv("APIFY_API_TOKEN", raising=False)
 
-        payload = json.loads(await apify_tools.web_search_tool.ainvoke({"query": "q"}))
+        message = await apify_tools.apify_actor_start_tool.ainvoke({"actor_id": "o/a", "run_input": "{}"})
 
-        message = payload["error"]
-        assert "tools[web_search].api_key" in message and "APIFY_API_TOKEN" in message and "shown only once" in message
+        assert "tools[apify_actor_start].api_key" in message and "APIFY_API_TOKEN" in message and "shown only once" in message
         link = urlparse(re.search(r"https://console\.apify\.com\S+?(?=\))", message).group(0))
         assert link.path == "/settings/integrations"
         assert parse_qs(link.query) == {"createApiToken": ["true"], "for": ["DeerFlow"], "utm_source": ["deerflow"], "utm_medium": ["integrations"]}
         assert apify.requests == []
 
     async def test_rejected_token_points_to_the_create_token_form_without_echoing_it(self, config, apify):
-        apify.on("POST", "https://web-search.apify.actor/", _error(401, f"Token {TOKEN} is not valid", "user-or-token-not-found"))
+        apify.on("POST", "/v2/acts/o~a/runs", _error(401, f"Token {TOKEN} is not valid", "user-or-token-not-found"))
 
-        message = json.loads(await apify_tools.web_search_tool.ainvoke({"query": "q"}))["error"]
+        message = await apify_tools.apify_actor_start_tool.ainvoke({"actor_id": "o/a", "run_input": "{}"})
 
         assert "HTTP 401" in message and apify_tools.APIFY_CREATE_TOKEN_URL in message
         assert TOKEN not in message and "[REDACTED]" in message
 
     async def test_requests_carry_the_token_and_the_integration_header(self, config, apify):
-        apify.on("POST", "https://web-search.apify.actor/", httpx.Response(200, json={"results": []}))
+        apify.on("POST", "/v2/acts/o~a/runs", _data({"id": "r", "defaultDatasetId": "d", "status": "READY"}, 201))
 
-        await apify_tools.web_search_tool.ainvoke({"query": "q"})
+        await apify_tools.apify_actor_start_tool.ainvoke({"actor_id": "o/a", "run_input": "{}"})
 
         (request,) = apify.requests
         assert request.headers["Authorization"] == f"Bearer {TOKEN}"
         assert request.headers["x-apify-integration-platform"] == "deerflow"
 
-
-class TestWebSearch:
-    async def test_sends_the_query_and_normalizes_results(self, config, apify):
-        hits = [
-            {"position": 1, "url": "https://example.com/a", "title": "A", "snippet": "first"},
-            "not an object",
-            {"position": 2, "url": "http://169.254.169.254/latest/meta-data", "title": "Metadata", "snippet": "blocked"},
-        ]
-        apify.on("POST", "https://web-search.apify.actor/", httpx.Response(200, json={"query": "q", "results": hits}))
-
-        payload = json.loads(await apify_tools.web_search_tool.ainvoke({"query": "langgraph news"}))
-
-        assert json.loads(apify.requests[0].content) == {"query": "langgraph news", "maxResults": 5}
-        assert payload["total_results"] == 2
-        assert payload["results"] == [
-            {"title": "A", "url": "https://example.com/a", "snippet": "first"},
-            {"title": "Metadata", "url": "", "snippet": "blocked"},
-        ]
-
-    @pytest.mark.parametrize(("configured", "requested", "sent"), [("3", None, 3), (5, 7, 7), (5, 50, 10), (True, None, 5)])
-    async def test_result_count_comes_from_the_call_then_config_and_is_capped(self, config, apify, configured, requested, sent):
-        config(max_results=configured)
-        apify.on("POST", "https://web-search.apify.actor/", httpx.Response(200, json={"results": [{"url": f"https://e.com/{i}"} for i in range(12)]}))
-        args = {"query": "q"} if requested is None else {"query": "q", "max_results": requested}
-
-        payload = json.loads(await apify_tools.web_search_tool.ainvoke(args))
-
-        assert json.loads(apify.requests[0].content)["maxResults"] == sent
-        assert payload["total_results"] == sent
-
-    async def test_empty_results_are_reported_as_no_results(self, config, apify):
-        apify.on("POST", "https://web-search.apify.actor/", httpx.Response(200, json={"results": []}))
-        assert json.loads(await apify_tools.web_search_tool.ainvoke({"query": "q"}))["error"] == "No results found"
-
-    @pytest.mark.parametrize("body", [{"results": {"url": "x"}}, {"results": ["a", "b"]}, ["not", "an", "object"]])
-    async def test_malformed_containers_are_format_errors(self, config, apify, body, caplog):
-        apify.on("POST", "https://web-search.apify.actor/", httpx.Response(200, json=body))
-        with caplog.at_level(logging.ERROR, logger=apify_tools.__name__):
-            payload = json.loads(await apify_tools.web_search_tool.ainvoke({"query": "secret query"}))
-        assert payload["error"] == "Apify web search returned an unexpected response format"
-        assert "secret query" not in caplog.text
-
-    async def test_actor_input_errors_reach_the_model(self, config, apify):
-        apify.on("POST", "https://web-search.apify.actor/", httpx.Response(400, json={"code": "INVALID_QUERY", "error": "Query is too long"}))
-        message = json.loads(await apify_tools.web_search_tool.ainvoke({"query": "q"}))["error"]
-        assert message == "Apify web search failed with HTTP 400: Query is too long (code: INVALID_QUERY)"
-
-    async def test_transport_failure_is_an_error_result(self, config, apify):
-        def fail(request: httpx.Request) -> httpx.Response:
-            raise httpx.ConnectError("connection refused", request=request)
-
-        apify.on("POST", "https://web-search.apify.actor/", fail)
-        assert "connection refused" in json.loads(await apify_tools.web_search_tool.ainvoke({"query": "q"}))["error"]
-
-    async def test_a_timeout_without_a_message_is_still_named(self, config, apify):
+    async def test_a_transport_error_without_a_message_is_still_named(self, config, apify):
         def time_out(request: httpx.Request) -> httpx.Response:
             raise httpx.ReadTimeout("", request=request)
 
-        apify.on("POST", "https://web-search.apify.actor/", time_out)
-        error = json.loads(await apify_tools.web_search_tool.ainvoke({"query": "q"}))["error"]
-        assert error == "Apify web search failed: ReadTimeout"
-
-
-class TestWebFetch:
-    async def test_returns_the_title_from_metadata_and_the_markdown(self, config, apify):
-        body = {"fetch": {"loadedUrl": "https://apify.com/", "httpStatusCode": 200}, "metadata": {"title": "Apify: Marketplace"}, "markdown": "Body text"}
-        apify.on("POST", "https://web-fetch.apify.actor/", httpx.Response(200, json=body))
-
-        result = await apify_tools.web_fetch_tool.ainvoke({"url": "https://apify.com"})
-
-        assert result == "# Apify: Marketplace\n\nBody text"
-        assert json.loads(apify.requests[0].content) == {"url": "https://apify.com", "formats": ["markdown"]}
-
-    async def test_long_content_is_truncated(self, config, apify):
-        apify.on("POST", "https://web-fetch.apify.actor/", httpx.Response(200, json={"metadata": {}, "markdown": "x" * 5000}))
-        result = await apify_tools.web_fetch_tool.ainvoke({"url": "https://example.com"})
-        assert result == f"# Untitled\n\n{'x' * 4096}\n\n[Content truncated]"
-
-    async def test_the_page_status_is_checked_not_only_the_actor_status(self, config, apify):
-        apify.on("POST", "https://web-fetch.apify.actor/", httpx.Response(200, json={"fetch": {"httpStatusCode": 404}, "markdown": "Not found page"}))
-        assert await apify_tools.web_fetch_tool.ainvoke({"url": "https://example.com/missing"}) == "Error: The page returned HTTP 404"
-
-    async def test_empty_content_is_reported(self, config, apify):
-        apify.on("POST", "https://web-fetch.apify.actor/", httpx.Response(200, json={"metadata": {"title": "T"}, "markdown": "  "}))
-        assert await apify_tools.web_fetch_tool.ainvoke({"url": "https://example.com"}) == "Error: No content found"
-
-    @pytest.mark.parametrize("body", [["list"], {"fetch": "ok", "markdown": "x"}, {"metadata": ["t"], "markdown": "x"}])
-    async def test_malformed_containers_are_format_errors(self, config, apify, body):
-        apify.on("POST", "https://web-fetch.apify.actor/", httpx.Response(200, json=body))
-        assert await apify_tools.web_fetch_tool.ainvoke({"url": "https://example.com"}) == "Error: Apify web fetch returned an unexpected response format"
-
-    @pytest.mark.parametrize("url", ["http://169.254.169.254/latest/meta-data", "http://localhost:8001/api", "ftp://example.com/file", "example.com"])
-    async def test_non_public_urls_are_refused_before_calling_apify(self, config, apify, url):
-        result = await apify_tools.web_fetch_tool.ainvoke({"url": url})
-        assert result.startswith("Error: ")
-        assert apify.requests == []
+        apify.on("POST", "/v2/acts/o~a/runs", time_out)
+        message = await apify_tools.apify_actor_start_tool.ainvoke({"actor_id": "o/a", "run_input": "{}"})
+        assert message == "Error: Apify Actor start failed: ReadTimeout"
 
 
 class TestDiscover:

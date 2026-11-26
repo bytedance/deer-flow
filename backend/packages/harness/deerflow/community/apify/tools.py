@@ -1,15 +1,13 @@
-"""Web search, web fetch and Actor tools powered by Apify.
+"""Actor tools powered by Apify.
 
-``web_search`` and ``web_fetch`` call Apify's Standby Actors ``apify/web-search``
-(Google results) and ``apify/web-fetch`` (a page as markdown) over HTTP.
 ``apify_actor_discover``, ``apify_actor_start`` and ``apify_actor_await`` find,
 start and wait for any Actor in Apify Store, so the agent can collect structured
 data from sites that have a dedicated scraper. The ``apify-scraper`` skill routes
 common platforms to known Actors.
 
-The module uses httpx only, without the Apify SDK. Every tool is async: a run or
-a Standby request can take a minute, and a sync tool would hold an executor
-thread for that long. An API token is required; see ``APIFY_CREATE_TOKEN_URL``.
+The module uses httpx only, without the Apify SDK. Every tool is async: waiting
+for a run can take minutes, and a sync tool would hold an executor thread for
+that long. An API token is required; see ``APIFY_CREATE_TOKEN_URL``.
 """
 
 import asyncio
@@ -27,8 +25,8 @@ from langchain.tools import tool
 from langgraph.config import get_stream_writer
 
 from deerflow.community.provider_credentials import redact_secret, resolve_api_key
-from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
-from deerflow.community.url_safety import safe_public_result_url, validate_hosted_fetch_url
+from deerflow.community.search_max_results import coerce_max_results
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -38,23 +36,14 @@ logger = logging.getLogger(__name__)
 APIFY_CREATE_TOKEN_URL = "https://console.apify.com/settings/integrations?createApiToken=true&for=DeerFlow&utm_source=deerflow&utm_medium=integrations"
 
 _API_BASE_URL = "https://api.apify.com/v2"
-_WEB_SEARCH_URL = "https://web-search.apify.actor/"
-_WEB_FETCH_URL = "https://web-fetch.apify.actor/"
 # Sent with every request so Apify can attribute the traffic to this integration.
 _INTEGRATION_HEADERS = {"x-apify-integration-platform": "deerflow"}
 
-# apify/web-search spends up to 60 seconds on a query; the rest covers a Standby cold start,
-# which took over 90 seconds in a live run.
-_SEARCH_TIMEOUT_SECS = 120.0
-_FETCH_TIMEOUT_SECS = 120.0
 _API_TIMEOUT_SECS = 30.0
 # apify_actor_await keeps this much of its timeout for the last status check, and
 # bounds every check by the time left, so a slow check cannot outlast the wait.
 _LAST_STATUS_CHECK_SECS = 5.0
-# apify/web-search reads one Google results page, which holds about 10 organic results.
-_SEARCH_MAX_RESULTS_CAP = 10
 _DISCOVER_DEFAULT_RESULTS = 10
-_FETCH_MAX_CHARS = 4096
 _STORE_DESCRIPTION_CHARS = 200
 _ACTOR_DESCRIPTION_CHARS = 500
 _SCHEMA_DESCRIPTION_CHARS = 300
@@ -159,11 +148,7 @@ def _objects(value: object, container: str) -> list[dict[str, Any]] | None:
 
 
 def _error_detail(response: httpx.Response) -> str | None:
-    """Read either error shape Apify returns.
-
-    The API and the Standby gateway send ``{"error": {"message": ...}}``; a Standby
-    Actor's own errors are ``{"error": "...", "code": "..."}``.
-    """
+    """Read the message from an Apify API error body, ``{"error": {"message": ...}}``."""
     try:
         body = response.json()
     except ValueError:
@@ -171,9 +156,6 @@ def _error_detail(response: httpx.Response) -> str | None:
     error = body.get("error") if isinstance(body, dict) else None
     if isinstance(error, dict) and isinstance(error.get("message"), str):
         return error["message"]
-    if isinstance(error, str):
-        code = body.get("code")
-        return f"{error} (code: {code})" if isinstance(code, str) else error
     return None
 
 
@@ -238,100 +220,6 @@ def _error_text(error: Exception, api_key: str | None, action: str) -> str:
         logger.error("Apify %s failed: %s", action, type(error).__name__)
     # Some transport errors, such as httpx.ReadTimeout, carry no message.
     return redact_secret(error, api_key) or f"Apify {action} failed: {type(error).__name__}"
-
-
-@tool("web_search", parse_docstring=True)
-async def web_search_tool(query: str, max_results: int | None = None) -> str:
-    """Search the web for information. Use this tool to find current information, news, articles, and facts from the internet.
-
-    Args:
-        query: Search keywords or a question describing what you want to find. Be specific for better results.
-        max_results: Maximum number of results to return, up to 10. If omitted, uses the configured value (default 5).
-    """
-    api_key, extra = await asyncio.to_thread(_tool_settings, "web_search")
-    # Honor the caller-supplied max_results; fall back to config only when omitted.
-    if max_results is None:
-        max_results = extra.get("max_results")
-    count = min(DEFAULT_MAX_RESULTS if max_results is None else coerce_max_results(max_results, provider="Apify", logger=logger), _SEARCH_MAX_RESULTS_CAP)
-
-    if not api_key:
-        return json.dumps({"error": _missing_key_error("web_search"), "query": query}, ensure_ascii=False)
-
-    try:
-        async with await _new_client(_SEARCH_TIMEOUT_SECS) as client:
-            response = await client.post(_WEB_SEARCH_URL, headers=_auth(api_key), json={"query": query, "maxResults": count})
-        _raise_for_status(response, "Apify web search")
-        body = _json_body(response, "Apify web search")
-    except Exception as e:
-        return json.dumps({"error": _error_text(e, api_key, "web search"), "query": query}, ensure_ascii=False)
-
-    hits = _objects(body.get("results"), "results") if isinstance(body, dict) else None
-    if hits is None:
-        if not isinstance(body, dict):
-            logger.error("Apify web search returned an unexpected payload type: %s", type(body).__name__)
-        return json.dumps({"error": "Apify web search returned an unexpected response format", "query": query}, ensure_ascii=False)
-    if not hits:
-        return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
-
-    results = [
-        {
-            "title": _text(hit.get("title")),
-            "url": safe_public_result_url(hit.get("url")),
-            "snippet": _text(hit.get("snippet")),
-        }
-        for hit in hits[:count]
-    ]
-    return json.dumps({"query": query, "total_results": len(results), "results": results}, indent=2, ensure_ascii=False)
-
-
-@tool("web_fetch", parse_docstring=True)
-async def web_fetch_tool(url: str) -> str:
-    """Fetch the contents of a web page at a given URL.
-    Only fetch EXACT URLs that have been provided directly by the user or have been returned in results from the web_search and web_fetch tools.
-    This tool can NOT access content that requires authentication, such as private Google Docs or pages behind login walls.
-    Do NOT add www. to URLs that do NOT have them.
-    URLs must include the schema: https://example.com is a valid URL while example.com is an invalid URL.
-
-    Args:
-        url: The URL to fetch the contents of.
-    """
-    target_error = validate_hosted_fetch_url(url)
-    if target_error:
-        return target_error
-
-    api_key, _extra = await asyncio.to_thread(_tool_settings, "web_fetch")
-    if not api_key:
-        return f"Error: {_missing_key_error('web_fetch')}"
-
-    try:
-        async with await _new_client(_FETCH_TIMEOUT_SECS) as client:
-            response = await client.post(_WEB_FETCH_URL, headers=_auth(api_key), json={"url": url, "formats": ["markdown"]})
-        _raise_for_status(response, "Apify web fetch")
-        body = _json_body(response, "Apify web fetch")
-    except Exception as e:
-        return f"Error: {_error_text(e, api_key, 'web fetch')}"
-
-    if not isinstance(body, dict):
-        logger.error("Apify web fetch returned an unexpected payload type: %s", type(body).__name__)
-        return "Error: Apify web fetch returned an unexpected response format"
-    fetch = body.get("fetch")
-    metadata = body.get("metadata")
-    if not isinstance(fetch, dict | None) or not isinstance(metadata, dict | None):
-        logger.error("Apify web fetch returned unexpected 'fetch'/'metadata' payload types: %s, %s", type(fetch).__name__, type(metadata).__name__)
-        return "Error: Apify web fetch returned an unexpected response format"
-
-    # A 200 from the Standby Actor means the Actor ran; the page's own status is here.
-    page_status = (fetch or {}).get("httpStatusCode")
-    if isinstance(page_status, int) and not isinstance(page_status, bool) and page_status >= 400:
-        return f"Error: The page returned HTTP {page_status}"
-
-    content = _text(body.get("markdown"))
-    if not content.strip():
-        return "Error: No content found"
-    title = _text((metadata or {}).get("title")).strip() or "Untitled"
-    if len(content) > _FETCH_MAX_CHARS:
-        content = f"{content[:_FETCH_MAX_CHARS]}\n\n[Content truncated]"
-    return f"# {title}\n\n{content}"
 
 
 def _compact_schema(schema: dict[str, Any]) -> dict[str, Any]:

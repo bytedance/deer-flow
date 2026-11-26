@@ -689,7 +689,6 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
         }
         key_providers = {
             "web_search": {
-                "apify": "APIFY_API_TOKEN",
                 "tavily": "TAVILY_API_KEY",
                 "infoquest": "INFOQUEST_API_KEY",
                 "exa": "EXA_API_KEY",
@@ -705,7 +704,6 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "groundroute": "GROUNDROUTE_API_KEY",
             },
             "web_fetch": {
-                "apify": "APIFY_API_TOKEN",
                 "infoquest": "INFOQUEST_API_KEY",
                 "exa": "EXA_API_KEY",
                 "firecrawl": "FIRECRAWL_API_KEY",

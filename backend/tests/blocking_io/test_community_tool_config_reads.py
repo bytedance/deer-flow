@@ -129,8 +129,6 @@ def _with_runtime(tool: Any, **kwargs: Any) -> Callable[[Path], Any]:
 # (module, entry point, config reads per call). Browser navigation also screens
 # the URL through ``validate_browser_url`` in a worker, which reads its policy.
 _CASES = [
-    pytest.param(apify_tools, _call(apify_tools.web_search_tool, query="q"), 1, id="apify-web_search"),
-    pytest.param(apify_tools, _call(apify_tools.web_fetch_tool, url=_HOSTED_URL), 1, id="apify-web_fetch"),
     pytest.param(apify_tools, _call(apify_tools.apify_actor_discover_tool, query="q"), 1, id="apify-actor_discover"),
     pytest.param(apify_tools, _call(apify_tools.apify_actor_start_tool, actor_id="o/a", run_input="{}"), 1, id="apify-actor_start"),
     pytest.param(apify_tools, _call(apify_tools.apify_actor_await_tool, run_id="r", dataset_id="d"), 1, id="apify-actor_await"),
