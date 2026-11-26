@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from app.gateway.scheduled_task_errors import scheduler_error
 from deerflow.persistence.scheduled_task_runs.finalization import is_host_pause_marker
-from deerflow.scheduler.schedules import MAX_INTERVAL_SECONDS, next_run_at, normalize_cron_expression, parse_interval_seconds, validate_timezone
+from deerflow.scheduler.schedules import MAX_INTERVAL_SECONDS, canonical_once_run_at, next_run_at, normalize_cron_expression, parse_interval_seconds, validate_timezone
 from deerflow.scheduler.stop_rule import MAX_STOP_CONDITION_CHARS, normalize_stop_condition
 from deerflow.utils.goal_objective import MAX_GOAL_OBJECTIVE_CHARS, normalize_goal_objective
 
@@ -276,7 +276,7 @@ def _recompute_schedule(existing: dict[str, Any], updates: dict[str, Any], *, sc
             unchanged_definition = (
                 existing["schedule_type"] == "once"
                 and isinstance(previous_spec, dict)
-                and schedule_spec.get("run_at") == previous_spec.get("run_at")
+                and canonical_once_run_at(schedule_spec.get("run_at")) == canonical_once_run_at(previous_spec.get("run_at"))
                 and timezone == existing["timezone"]
                 and existing["status"] not in TERMINAL_TASK_STATUSES
                 and existing.get("next_run_at") is not None
