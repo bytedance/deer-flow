@@ -114,16 +114,63 @@ _compat_signal_pid() {
     fi
 }
 
-# Direct children. GNU/BSD ps can select by parent. Git Bash cannot, and its
-# ps -l columns are PID PPID PGID. Empty output means no child was seen.
-_compat_child_pids() {
-    local pid=$1 raw line child ppid
-    [ -n "$pid" ] || return 0
-    if ps -o pid= --ppid "$pid" >/dev/null 2>&1; then
-        ps -o pid= --ppid "$pid" 2>/dev/null
-        return 0
+# Empty, or every non-blank line's first field is a pid. A header or a UID
+# in that field is not acceptable.
+_compat_lines_are_pids() {
+    local raw=$1 line field
+    [ -n "$raw" ] || return 0
+    while IFS= read -r line; do
+        set -f
+        # shellcheck disable=SC2086
+        set -- $line
+        set +f
+        field=${1:-}
+        [ -n "$field" ] || continue
+        case "$field" in
+            *[!0-9]*) return 1 ;;
+        esac
+    done <<EOF
+$raw
+EOF
+    return 0
+}
+
+# The first field of the first non-blank line.
+_compat_first_field_is() {
+    local raw=$1 want=$2 line field
+    while IFS= read -r line; do
+        set -f
+        # shellcheck disable=SC2086
+        set -- $line
+        set +f
+        field=${1:-}
+        [ -n "$field" ] || continue
+        [ "$field" = "$want" ]
+        return $?
+    done <<EOF
+$raw
+EOF
+    return 1
+}
+
+# Git Bash ps -l starts with PID PPID PGID. Only that header line counts.
+# A data line or an Apple header (UID PID PPID) does not.
+_compat_header_is_gitbash() {
+    local raw=$1 header
+    header=${raw%%$'\n'*}
+    set -f
+    # shellcheck disable=SC2086
+    set -- $header
+    set +f
+    [ "${1:-}" = PID ] && [ "${2:-}" = PPID ] && [ "${3:-}" = PGID ]
+}
+
+# Print pids whose ppid field equals $1. skip_header drops the first line.
+_compat_emit_ppid_matches() {
+    local pid=$1 raw=$2 skip_header=$3 line child ppid
+    if [ "$skip_header" = 1 ]; then
+        raw=${raw#*$'\n'}
     fi
-    raw=$(ps -l 2>/dev/null) || return 0
     while IFS= read -r line; do
         set -f
         # shellcheck disable=SC2086
@@ -143,6 +190,58 @@ _compat_child_pids() {
     done <<EOF
 $raw
 EOF
+}
+
+# Direct children of one pid. GNU ps may select them with --ppid. macOS ps
+# has no --ppid, and its ps -l starts with UID PID PPID, so those positions
+# are never read. BSD ps is asked for pid and ppid of every process, including
+# ones with no controlling terminal. Git Bash ps -l is read by position only
+# when its own header line is PID PPID PGID.
+_compat_child_pids() {
+    local pid=$1 raw status line
+    [ -n "$pid" ] || return 0
+    # GNU --ppid. Exit 0 with only numeric pids (or no rows) is the answer.
+    # A non-numeric row is not this format; do not parse it by position.
+    raw=$(ps -o pid= --ppid "$pid" 2>/dev/null)
+    status=$?
+    if [ "$status" -eq 0 ] && _compat_lines_are_pids "$raw"; then
+        while IFS= read -r line; do
+            set -f
+            # shellcheck disable=SC2086
+            set -- $line
+            set +f
+            case "${1:-}" in
+                ''|*[!0-9]*) continue ;;
+            esac
+            printf '%s\n' "$1"
+        done <<EOF
+$raw
+EOF
+        return 0
+    fi
+    # Named columns are real only when -o prints this shell's own pid.
+    # Exit status alone is not enough: a ps that ignores -o can still return 0.
+    raw=$(ps -o pid= -p "$$" 2>/dev/null)
+    status=$?
+    if [ "$status" -eq 0 ] && _compat_first_field_is "$raw" "$$"; then
+        # -p would list the parent, not its children. -A/-ax includes
+        # processes that have no controlling terminal.
+        raw=$(ps -A -o pid=,ppid= 2>/dev/null)
+        status=$?
+        if [ "$status" -ne 0 ]; then
+            raw=$(ps -ax -o pid=,ppid= 2>/dev/null)
+            status=$?
+        fi
+        [ "$status" -eq 0 ] || return 0
+        _compat_emit_ppid_matches "$pid" "$raw" 0
+        return 0
+    fi
+    # Git Bash has no working -o. Read ps -l by position only for its header.
+    raw=$(ps -l 2>/dev/null)
+    status=$?
+    [ "$status" -eq 0 ] || return 0
+    _compat_header_is_gitbash "$raw" || return 0
+    _compat_emit_ppid_matches "$pid" "$raw" 1
 }
 
 # True when this pid is already the sleep binary. Git Bash leaves a shell at

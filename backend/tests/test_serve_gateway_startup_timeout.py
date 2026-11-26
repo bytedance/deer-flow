@@ -1164,6 +1164,122 @@ exit "$code"
             _kill_pid(bash, pid)
 
 
+def _run_child_pid_fixture(tmp_path: Path, ps_body: str, parent: str) -> subprocess.CompletedProcess[str]:
+    """Call _compat_child_pids with a ps stub. The stub is not exported to other tests."""
+    bash = require_script_bash()
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for name in ("port-listening.sh", "wait-for-port.sh"):
+        shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
+    script = scripts / "wait-for-port.sh"
+    text = script.read_text(encoding="utf-8")
+    marker = 'if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then'
+    if marker not in text:
+        raise AssertionError(f"wait entry point missing from {script}")
+    script.write_text(text.split(marker, 1)[0], encoding="utf-8", newline="\n")
+    launch = (
+        ps_body
+        + """
+source "$TEST_SCRIPT" 8001 5 Gateway
+_compat_child_pids "$TEST_PARENT"
+"""
+    )
+    env = {key: value for key, value in os.environ.items() if key not in {"BASH_ENV", "ENV"}}
+    env.update(TEST_SCRIPT=script.as_posix(), TEST_PARENT=parent)
+    return subprocess.run(
+        [bash, "-c", launch, "child-pids"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=20,
+        check=False,
+    )
+
+
+def _child_pid_lines(result: subprocess.CompletedProcess[str]) -> list[str]:
+    assert result.returncode == 0, result.stdout + result.stderr
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def test_compat_child_pids_do_not_treat_a_macos_uid_as_a_child(tmp_path: Path) -> None:
+    """Apple ps -l starts with UID PID PPID. The UID must not be signaled.
+
+    This fixture is not a macOS ps binary and not Bash 3.2. --ppid is absent,
+    and -o pid= -p $$ returns this shell, so the lookup must use named columns.
+    The ps -l text is the trap: reading it by Git Bash positions yields the UID.
+    """
+    ps_body = r"""
+ps() {
+    if [ "$1" = -o ] && [ "$2" = pid= ] && [ "$3" = --ppid ]; then
+        return 1
+    fi
+    if [ "$1" = -o ] && [ "$2" = pid= ] && [ "$3" = -p ]; then
+        printf '%s\n' "$$"
+        return 0
+    fi
+    if [ "$1" = -A ] || [ "$1" = -ax ]; then
+        printf '%s\n' "4242 1" "4343 4242" "501 1"
+        return 0
+    fi
+    if [ "$1" = -l ]; then
+        printf '%s\n' "UID PID PPID F CPU PRI NI SZ RSS WCHAN S ADDR TTY TIME CMD"
+        printf '%s\n' "501 4242 1 0 0 0 0 0 - S 0 ?? 0:00 bash"
+        printf '%s\n' "501 4343 4242 0 0 0 0 0 - S 0 ?? 0:00 sleep"
+        return 0
+    fi
+    printf 'unexpected ps: %s\n' "$*" >&2
+    return 1
+}
+"""
+    result = _run_child_pid_fixture(tmp_path, ps_body, "4242")
+    assert _child_pid_lines(result) == ["4343"]
+
+
+def test_compat_child_pids_parse_git_bash_ps_l(tmp_path: Path) -> None:
+    """Git Bash ps -l is PID PPID PGID. Column 1 is the child. Not a Bash 3.2 run."""
+    ps_body = r"""
+ps() {
+    if [ "$1" = -o ]; then
+        printf 'unknown option -- o\n' >&2
+        return 1
+    fi
+    if [ "$1" = -l ]; then
+        printf '%s\n' "PID PPID PGID WINPID TTY UID STIME COMMAND"
+        printf '%s\n' "4343 4242 4242 99 ? 501 12:00 /usr/bin/sleep"
+        printf '%s\n' "4242 1 4242 98 ? 501 12:00 /usr/bin/bash"
+        return 0
+    fi
+    printf 'unexpected ps: %s\n' "$*" >&2
+    return 1
+}
+"""
+    result = _run_child_pid_fixture(tmp_path, ps_body, "4242")
+    assert _child_pid_lines(result) == ["4343"]
+
+
+def test_compat_child_pids_skip_a_ps_l_header_that_is_not_git_bash(tmp_path: Path) -> None:
+    """A UID-first ps -l header is not parsed by position. Not a macOS ps run."""
+    ps_body = r"""
+ps() {
+    if [ "$1" = -o ]; then
+        return 1
+    fi
+    if [ "$1" = -l ]; then
+        printf '%s\n' "UID PID PPID F CPU PRI NI SZ RSS WCHAN S ADDR TTY TIME CMD"
+        printf '%s\n' "501 4242 1 0 0 0 0 0 - S 0 ?? 0:00 bash"
+        printf '%s\n' "501 4343 4242 0 0 0 0 0 - S 0 ?? 0:00 sleep"
+        return 0
+    fi
+    printf 'unexpected ps: %s\n' "$*" >&2
+    return 1
+}
+"""
+    result = _run_child_pid_fixture(tmp_path, ps_body, "4242")
+    assert _child_pid_lines(result) == []
+
+
 def test_wait_succeeds_after_two_misses(tmp_path: Path, wait_shell: tuple[str, str, int]) -> None:
     bash, _branch, _major = wait_shell
     netstat = f"""
