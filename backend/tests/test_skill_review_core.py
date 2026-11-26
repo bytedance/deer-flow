@@ -131,14 +131,17 @@ def test_resource_graph_reports_unreferenced_resource(tmp_path):
     assert any(f["rule_id"] == "resource.unreferenced" and f["path"] == "references/unused.md" for f in facts["findings"])
 
 
-def test_resource_graph_tracks_referenced_resource(tmp_path):
-    _write(tmp_path / "SKILL.md", _valid_skill() + "\nRead [guide](references/guide.md).\n")
+@pytest.mark.parametrize("suffix", ["", "?plain=1", "?plain=1#guide", "?target=../missing.md"])
+def test_resource_graph_tracks_referenced_resource(tmp_path, capsys, suffix):
+    _write(tmp_path / "SKILL.md", _valid_skill() + f"\nRead [guide](references/guide.md{suffix}).\n")
     _write(tmp_path / "references" / "guide.md", "# Guide\n")
 
-    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+    result = review_cli_main([str(tmp_path), "--format", "json", "--fail-on", "warning"])
+    facts = json.loads(capsys.readouterr().out)
 
     assert {"source": "SKILL.md", "target": "references/guide.md"} in facts["resources"]["edges"]
     assert "references/guide.md" not in facts["resources"]["orphans"]
+    assert result == 0
 
 
 def test_resource_graph_strips_trailing_sentence_punctuation_from_prose_refs(tmp_path):
@@ -368,6 +371,7 @@ def _elapsed(fn, payload):
             id="no-bogus-ref-from-overlap",
         ),
         pytest.param("[x]([)y](z) [)y](z)", {"[", "z"}, id="blanking-keeps-later-match"),
+        pytest.param("`docs/guide.md?plain=1`", {"docs/guide.md?plain=1"}, id="literal-code-query"),
     ],
 )
 def test_resource_graph_link_scan_matches_finditer(payload, expected):
@@ -390,6 +394,7 @@ def test_resource_graph_link_scan_matches_finditer(payload, expected):
             id="paren-inside-title",
         ),
         pytest.param('[a](foo/bar.md "")', {"foo/bar.md"}, id="empty-title"),
+        pytest.param('[a](foo/bar.md?plain=1#guide "Guide")', {"foo/bar.md"}, id="query-and-fragment"),
         pytest.param('[a](foo/bar.md\t"Title")', {"foo/bar.md"}, id="tab-separator"),
         pytest.param('![a](foo/bar.png "Logo")', {"foo/bar.png"}, id="image-with-title"),
         pytest.param('[a](foo/bar.md "unterminated', set(), id="unterminated-title"),
