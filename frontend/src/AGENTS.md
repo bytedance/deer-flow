@@ -52,6 +52,10 @@ pnpm test:e2e                    # Playwright, for anything that depends on a re
   anchor in `core/messages` and render it once.
 - **Tool failures come from structured status.** Use `core/messages/tool-error.ts`.
   Classifying result text marks normal output as an error.
+- **Tool-call args are model output.** A tool schema can make `description` an
+  object, and a malformed call can carry anything. Read display text with
+  `stringArg` from `core/tools/utils.ts`, because an object rendered as a React
+  child throws and no error boundary keeps it from replacing the page.
 - **Exports read every persisted page.** The loaded window and the compacted
   checkpoint both omit messages.
 
