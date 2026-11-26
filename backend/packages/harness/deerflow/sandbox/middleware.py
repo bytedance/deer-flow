@@ -150,9 +150,12 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             return False
         provider = get_sandbox_provider()
         self._require_projection_support(provider, projection)
-        # AIO mounts the stable projection roots during canonical acquisition.
-        # Upload-based providers still need eager acquire + strict skill sync.
-        return provider.supports_lazy_agent_skill_isolation
+        # Providers that install the view during acquire may defer, unless
+        # the provider needs to refresh an active or initializing remote.
+        if not provider.supports_lazy_agent_skill_isolation:
+            return False
+        thread_id = (runtime.context or {}).get("thread_id")
+        return not provider.requires_eager_agent_skill_sync(thread_id, user_id=resolve_runtime_user_id(runtime))
 
     def _acquire_sandbox(
         self,

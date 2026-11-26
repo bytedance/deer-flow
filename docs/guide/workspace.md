@@ -30,6 +30,11 @@ Dismissing the drawer returns keyboard focus to the control that opened it.
 The Agents gallery header wraps to the available width so its import and create
 actions remain visible beside the compact sidebar on narrow screens.
 
+Screen readers announce the main chat button as **Send** when composing a
+message and **Stop current task** while a response is streaming, in the
+workspace language. Use the separate **Send update** button to queue or steer
+a running task when those controls are available.
+
 ## Search conversations and messages
 
 Use **Search** in the sidebar or **⌘K / Ctrl+K** to find conversation titles and

@@ -373,6 +373,99 @@ def test_aio_cleanup_does_not_report_success_without_pidfd_support():
     assert '"remaining": 0' not in result.stdout
 
 
+def _marked_process(token: str) -> int:
+    needle = f"DEERFLOW_COMMAND_OWNER={token}".encode()
+    for _ in range(1000):
+        for name in os.listdir("/proc"):
+            try:
+                with open(f"/proc/{name}/environ", "rb") as stream:
+                    if needle in stream.read().split(b"\0"):
+                        return int(name)
+            except (OSError, ValueError):
+                continue
+        threading.Event().wait(0.01)
+    raise AssertionError("marked command did not start")
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux") or not hasattr(os, "pidfd_open"), reason="Linux /proc and pidfd")
+@pytest.mark.parametrize("job_control", ["-m", "+m"])
+def test_aio_cleanup_stops_the_rest_of_a_persistent_shell_command(tmp_path, job_control):
+    import json
+    import pty
+    import uuid
+
+    from deerflow.community.aio_sandbox.command_cleanup import cleanup_command
+
+    # The AIO persistent shell is an interactive bash on a PTY that exports the
+    # marker itself, so only its children carry it.
+    token = uuid.uuid4().hex
+    shell, terminal = pty.fork()
+    if shell == 0:
+        os.execve("/bin/bash", ["bash", "--norc", "--noprofile", "-i", job_control], {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "PS1": "$ ", "TERM": "dumb"})
+
+    def drain():
+        try:
+            while os.read(terminal, 4096):
+                pass
+        except OSError:
+            pass
+
+    threading.Thread(target=drain, daemon=True).start()
+    state = tmp_path / "state.txt"
+    try:
+        os.write(terminal, f"cd {shlex.quote(str(tmp_path))}\nexport DEERFLOW_COMMAND_OWNER={token}; sleep 30; echo tail > tail.txt\n".encode())
+        _marked_process(token)
+        command = shlex.split(cleanup_command(token))
+        receipt = subprocess.run([sys.executable, *command[1:]], capture_output=True, text=True, timeout=15, check=True)
+        assert json.loads(receipt.stdout)["remaining"] == 0
+
+        # The shell reads lines in order, so once it answers this probe the
+        # cancelled line has either run its tail or been abandoned.
+        for _ in range(10):
+            os.write(terminal, b'echo "$PWD|$DEERFLOW_COMMAND_OWNER" > state.txt\n')
+            for _ in range(100):
+                if state.exists() and state.read_text().strip():
+                    break
+                threading.Event().wait(0.01)
+            else:
+                continue
+            break
+        assert state.exists() and state.read_text().strip() == f"{tmp_path}|{token}", "the shell must survive with its state"
+        assert not (tmp_path / "tail.txt").exists(), "cancel must stop the rest of the command"
+    finally:
+        try:
+            os.kill(shell, signal.SIGKILL)
+            os.waitpid(shell, 0)
+        except (ProcessLookupError, ChildProcessError):
+            pass
+        os.close(terminal)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux") or not hasattr(os, "pidfd_open"), reason="Linux /proc and pidfd")
+def test_aio_cleanup_stops_the_rest_of_a_one_off_bash_command(tmp_path):
+    import json
+    import uuid
+
+    from deerflow.community.aio_sandbox.command_cleanup import cleanup_command
+
+    # AIO bash.exec runs each env-bearing command as its own `bash -c` session
+    # without a terminal; the script exports the marker after bash started.
+    token = uuid.uuid4().hex
+    script = f"exec < /dev/null\nexport DEERFLOW_COMMAND_OWNER={token}\nsleep 30; echo tail > tail.txt"
+    shell = subprocess.Popen(["/bin/bash", "-c", script], cwd=tmp_path, start_new_session=True)
+    try:
+        _marked_process(token)
+        command = shlex.split(cleanup_command(token))
+        receipt = subprocess.run([sys.executable, *command[1:]], capture_output=True, text=True, timeout=15, check=True)
+        assert json.loads(receipt.stdout)["remaining"] == 0
+        shell.wait(timeout=10)
+        assert not (tmp_path / "tail.txt").exists(), "cancel must stop the rest of the command"
+    finally:
+        if shell.poll() is None:
+            shell.kill()
+            shell.wait()
+
+
 @pytest.mark.parametrize("case", ["missing-command", "missing-stdout-cursor", "missing-stderr-cursor", "completed-without-cursors", "empty-poll"])
 def test_aio_owned_bash_handles_optional_output_fields_without_unsafe_reuse(monkeypatch, case):
     from types import SimpleNamespace as N

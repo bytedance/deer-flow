@@ -33,15 +33,17 @@ log_level: debug # debug | info | warning | error
 
 ## Health checks
 
-Verify each service is responding:
+Use the nginx address and port for your workspace (shown here with the defaults). These checks work from the host with local processes and Docker Compose.
 
 ```bash
-# Gateway health
-curl http://localhost:8001/health
+# Is the Gateway process responding?
+curl -i http://localhost:2026/health
 
-# Through nginx (verifies full proxy chain)
-curl http://localhost:2026/api/models
+# Are the dependencies needed to serve runs ready?
+curl -i http://localhost:2026/health/ready
 ```
+
+If liveness returns 200 but readiness returns 503, inspect the readiness response for the failing dependency.
 
 ## Upgrading an existing checkout
 
