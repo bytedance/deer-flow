@@ -117,9 +117,9 @@ fences, including unclosed fences, in complete and streamed replies.
 
    This launches an interactive wizard that guides you through choosing an LLM provider, optional web search, and execution/safety preferences such as sandbox mode, bash access, and file-write tools. It generates a minimal `config.yaml` and writes your keys to `.env`. Takes about 2 minutes.
 
-   The wizard also lets you configure an optional web search provider, or skip it for now.
+   The wizard asks about `web_search` and `web_fetch` separately. Choosing **Skip for now** omits that tool from the generated `config.yaml`, even if it was previously configured.
 
-   With a `SERPAPI_API_KEY`, you can select [SerpApi Google search and/or Extract](../../backend/docs/CONFIGURATION.md#serpapi-google-search-and-extract). Search uses one page of organic results; fetch returns Markdown for one public URL. Selecting either leaves the other provider unchanged.
+   With a `SERPAPI_API_KEY`, you can select [SerpApi Google search and/or Extract](../../backend/docs/CONFIGURATION.md#serpapi-google-search-and-extract). Search uses one page of organic results; fetch returns Markdown for one public URL. To switch only one tool to SerpApi and keep the other provider, edit just that tool's `use` value in your existing `config.yaml`.
 
    [DeepSeek web search](../../backend/docs/CONFIGURATION.md#deepseek-web-search) uses `deerflow.community.deepseek.tools:web_search_tool`. Configure `DEEPSEEK_API_KEY` in the Gateway environment and replace the active `web_search` entry with the example in `config.example.yaml`. Set `thinking: true` for multi-step thinking search, independently of the main DeerFlow model. The default is `false`. Results include a generated answer and screened, deduplicated source links.
 
