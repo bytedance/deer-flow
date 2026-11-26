@@ -651,13 +651,21 @@ def test_recently_answered_old_card_survives_history_pruning(tmp_path, monkeypat
     # The old card is answered last, after all the newer decisions exist.
     assert network_proxy.decide(old, "allow_temporary", ttl=60)
 
-    # A flood forces pruning well past the cap.
+    pending = network_proxy.record_denial("pending.example", 443, "CONNECT")
+    assert [event["request_id"] for event in network_proxy.pending_events()] == [pending]
+
+    # Exercise pruning with both a recent decision and an open approval card.
     for index in range(20):
         network_proxy.record_denial(f"flood-{index}.example", 443, "CONNECT")
 
-    # The replayed decision still resolves, and the grant still applies.
+    with network_proxy._connect_db() as db:
+        total = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    assert total <= network_proxy.MAX_EVENTS + 1
+
+    # The latest decision can still replay, and the open card is still decidable.
     assert network_proxy.decide(old, "allow_temporary", ttl=60)
     assert network_proxy.policy_allows("old.example", 443)
+    assert network_proxy.decide(pending, "deny", ttl=0)
 
 
 def test_full_history_trims_itself_instead_of_evicting_pending_denials(tmp_path, monkeypatch) -> None:

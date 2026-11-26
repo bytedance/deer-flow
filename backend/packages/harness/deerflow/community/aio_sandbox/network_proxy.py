@@ -207,10 +207,8 @@ def _prune_events(db: sqlite3.Connection) -> None:
       re-applying its decision. Pending approvals reserve capacity first, so a
       full history trims itself rather than evicting an unsurfaced denial and
       reversing the oldest-first order ``pending_events`` surfaces cards in.
-    * Undecided rows that were never surfaced are dropped only when they alone
-      exceed ``MAX_EVENTS`` and no history remains to trim, oldest first. They
-      are unreachable: ``pending_events`` supersedes all of them except the row
-      it surfaces.
+    * If the table is still over ``MAX_EVENTS`` after trimming history, drop
+      unsurfaced undecided rows oldest first. They have no open approval card.
 
     A row that has been surfaced but not yet decided is the card a user is
     looking at. It is never deleted -- removing it would leave their decision
@@ -238,9 +236,8 @@ def _prune_events(db: sqlite3.Connection) -> None:
         "DELETE FROM events WHERE decision IS NOT NULL AND request_id NOT IN (SELECT request_id FROM events WHERE decision IS NOT NULL ORDER BY COALESCE(decided_at, created_at) DESC LIMIT ?)",
         (max(keep_decided, 1),),
     )
-    decided_left = db.execute("SELECT COUNT(*) FROM events WHERE decision IS NOT NULL").fetchone()[0]
     overflow = db.execute("SELECT COUNT(*) FROM events").fetchone()[0] - MAX_EVENTS
-    if overflow > 0 and decided_left == 0:
+    if overflow > 0:
         db.execute(
             "DELETE FROM events WHERE request_id IN ( SELECT request_id FROM events WHERE surfaced = 0 AND decision IS NULL ORDER BY created_at LIMIT ?)",
             (overflow,),
