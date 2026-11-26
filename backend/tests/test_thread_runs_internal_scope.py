@@ -1159,3 +1159,54 @@ def test_browser_session_cannot_cancel_or_stream_other_users_run_on_established_
         assert client.post(base + "/stream?action=interrupt").status_code == 404
 
     assert other_run.status == RunStatus.running
+
+
+@pytest.mark.no_auto_user
+@pytest.mark.parametrize("ownership", ["missing_meta", "null_owner"])
+def test_ownerless_internal_caller_controls_legacy_null_owner_run_on_shared_threads(ownership: str) -> None:
+    """Ownerless internal callers keep join/stream/cancel access to legacy NULL-owner runs."""
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    if ownership == "null_owner":
+        asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=None))
+    run_store = _RecordingRunStore()
+    run_manager = RunManager(store=run_store)
+    legacy_run = asyncio.run(run_manager.create(THREAD_ID, user_id=None))
+    assert legacy_run.user_id is None
+    asyncio.run(run_manager.set_status(legacy_run.run_id, RunStatus.running))
+    _seed_run(run_store, "run-legacy-store-null", user_id=None, status="success")
+    other_run = asyncio.run(run_manager.create(THREAD_ID, user_id=OWNER_RAW))
+    asyncio.run(run_manager.set_status(other_run.run_id, RunStatus.running))
+
+    stream_bridge = MemoryStreamBridge()
+    asyncio.run(stream_bridge.publish_end(legacy_run.run_id))
+    asyncio.run(stream_bridge.publish_end(other_run.run_id))
+
+    client = _make_app(
+        user=_internal_user(None),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        run_manager=run_manager,
+        thread_store=thread_store,
+        stream_bridge=stream_bridge,
+    )
+    legacy_base = f"/api/threads/{THREAD_ID}/runs/{legacy_run.run_id}"
+    other_base = f"/api/threads/{THREAD_ID}/runs/{other_run.run_id}"
+
+    with client:
+        assert client.get(legacy_base + "/join").status_code == 200
+        assert client.get(legacy_base + "/stream").status_code == 200
+        if ownership == "null_owner":
+            assert client.post(legacy_base + "/cancel?action=interrupt").status_code == 202
+            # Store-only legacy NULL-owner terminal run also resolves to 409 (not 404).
+            assert client.post(f"/api/threads/{THREAD_ID}/runs/run-legacy-store-null/cancel?action=interrupt").status_code == 409
+        else:
+            assert client.post(legacy_base + "/stream?action=interrupt").status_code == 200
+
+        # Non-default runs owned by another user remain hidden from ownerless internal callers.
+        assert client.get(other_base + "/join").status_code == 404
+        assert client.get(other_base + "/stream").status_code == 404
+        assert client.post(other_base + "/stream?action=interrupt").status_code == 404
+        assert client.post(other_base + "/cancel?action=interrupt").status_code == 404
+
+    assert legacy_run.status == RunStatus.interrupted
+    assert other_run.status == RunStatus.running

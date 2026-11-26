@@ -1254,11 +1254,35 @@ async def _optional_request_user_id(request: Request) -> str | None:
     return await get_current_user(request)
 
 
-async def _get_scoped_run(run_mgr, run_id: str, *, user_id: str | None) -> RunRecord | None:
-    """Fetch a run by id, passing ``user_id`` only when a caller scope is active."""
+def _allows_legacy_default_owner(request: Request) -> bool:
+    """Whether an ownerless trusted internal caller may match legacy NULL-owner runs."""
+    state = getattr(request, "state", None)
+    user = getattr(state, "user", None)
+    return getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE and get_trusted_internal_owner_user_id(request) is None
+
+
+async def _get_scoped_run(
+    run_mgr,
+    run_id: str,
+    *,
+    user_id: str | None,
+    allow_legacy_default: bool = False,
+) -> RunRecord | None:
+    """Fetch a run by id, passing ``user_id`` only when a caller scope is active.
+
+    When ``allow_legacy_default`` is true (ownerless trusted internal caller
+    scoped to ``"default"``), a legacy record with an empty/``None`` owner stamp
+    matches the same default-owner contract that ``_require_run_visible_to_scope``
+    enforces.
+    """
     if user_id is None:
         return await run_mgr.get(run_id)
-    return await run_mgr.get(run_id, user_id=user_id)
+    record = await run_mgr.get(run_id, user_id=user_id)
+    if record is None and allow_legacy_default and user_id == "default":
+        legacy = await run_mgr.get(run_id)
+        if legacy is not None and not getattr(legacy, "user_id", None):
+            return legacy
+    return record
 
 
 async def _run_scope_user_id(request: Request, thread_id: str) -> str | None:
@@ -1428,7 +1452,12 @@ async def cancel_run(
     await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
     user_id = await _run_scope_user_id(request, thread_id)
-    record = await _get_scoped_run(run_mgr, run_id, user_id=user_id)
+    record = await _get_scoped_run(
+        run_mgr,
+        run_id,
+        user_id=user_id,
+        allow_legacy_default=_allows_legacy_default_owner(request),
+    )
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
@@ -1474,7 +1503,12 @@ async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> Stream
     await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
     user_id = await _run_scope_user_id(request, thread_id)
-    record = await _get_scoped_run(run_mgr, run_id, user_id=user_id)
+    record = await _get_scoped_run(
+        run_mgr,
+        run_id,
+        user_id=user_id,
+        allow_legacy_default=_allows_legacy_default_owner(request),
+    )
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     bridge = get_stream_bridge(request)
@@ -1524,7 +1558,12 @@ async def _stream_existing_run(
     await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
     user_id = await _run_scope_user_id(request, thread_id)
-    record = await _get_scoped_run(run_mgr, run_id, user_id=user_id)
+    record = await _get_scoped_run(
+        run_mgr,
+        run_id,
+        user_id=user_id,
+        allow_legacy_default=_allows_legacy_default_owner(request),
+    )
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     bridge = get_stream_bridge(request)
@@ -1806,7 +1845,12 @@ async def list_run_messages(
 
     if data:
         run_mgr = get_run_manager(request)
-        record = await _get_scoped_run(run_mgr, run_id, user_id=user_id)
+        record = await _get_scoped_run(
+            run_mgr,
+            run_id,
+            user_id=user_id,
+            allow_legacy_default=_allows_legacy_default_owner(request),
+        )
         if record:
             durations = compute_run_durations([record])
             if durations:
