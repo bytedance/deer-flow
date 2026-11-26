@@ -16,6 +16,7 @@ import json
 import os
 import socket
 import sqlite3
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -25,6 +26,12 @@ MAX_HEADER_BYTES = 65_536
 POLICY_DB = Path(os.environ.get("DEERFLOW_POLICY_DB", "/tmp/deerflow-network-policy.sqlite3"))
 RELAY_AUTH_HEADER = "X-DeerFlow-Relay-Token"
 RELAY_TOKEN_ENV = "DEERFLOW_RELAY_TOKEN"
+# The policy database lives on the proxy container's read-only root filesystem,
+# whose only writable space is a 16 MiB /tmp tmpfs. Events are kept bounded so a
+# sandbox that requests many unique hosts cannot fill that tmpfs and break
+# denial recording and approval handling for the rest of its lifetime. At the
+# real row size (roughly 140 bytes) this holds the database well under 1 MiB.
+MAX_EVENTS = 4000
 
 
 class _InvalidHttpRequest(ValueError):
@@ -169,6 +176,50 @@ def policy_allows(host: str, port: int, now: float | None = None) -> bool:
     return _is_granted(host, port, now)
 
 
+def _prune_events(db: sqlite3.Connection) -> None:
+    """Bound the size of the events table so it cannot fill the /tmp tmpfs.
+
+    Runs inside the caller's write transaction, so it adds no extra lock
+    acquisition against the Gateway's CLI reads of the same database.
+
+    Rows fall into three classes, each pruned in its own step:
+
+    * Superseded rows are noise. ``pending_events`` supersedes every unsurfaced
+      row it does not surface, so a flood of unique hosts collapses into one
+      card plus a batch of superseded rows. ``decide`` already reports ``False``
+      for a superseded request, so dropping them up front changes no outcome.
+      This is what keeps the flood from crowding out real, still-undecided
+      denials.
+    * Decided rows are history. The newest ``MAX_EVENTS`` are kept so a resumed
+      run can re-apply a recent decision to the same request_id.
+    * Undecided rows that were never surfaced are dropped last, oldest first,
+      only as far as needed to get under ``MAX_EVENTS``. They are unreachable:
+      ``pending_events`` supersedes all of them except the row it surfaces.
+
+    A row that has been surfaced but not yet decided is the card a user is
+    looking at. It is never deleted -- removing it would leave their decision
+    pointing at a request_id that no longer resolves, and enough of them to
+    matter requires one poll per tool call.
+
+    Pruning runs before the insert so an already-full database recovers instead
+    of failing on every subsequent write.
+    """
+    total = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    if total <= MAX_EVENTS:
+        return
+    db.execute("DELETE FROM events WHERE decision = 'superseded'")
+    db.execute(
+        "DELETE FROM events WHERE decision IS NOT NULL AND request_id NOT IN (SELECT request_id FROM events WHERE decision IS NOT NULL ORDER BY created_at DESC LIMIT ?)",
+        (MAX_EVENTS,),
+    )
+    overflow = db.execute("SELECT COUNT(*) FROM events").fetchone()[0] - MAX_EVENTS
+    if overflow > 0:
+        db.execute(
+            "DELETE FROM events WHERE request_id IN ( SELECT request_id FROM events WHERE surfaced = 0 AND decision IS NULL ORDER BY created_at LIMIT ?)",
+            (overflow,),
+        )
+
+
 def record_denial(host: str, port: int, method: str) -> str:
     now = time.time()
     with _connect_db() as db:
@@ -181,6 +232,10 @@ def record_denial(host: str, port: int, method: str) -> str:
         ).fetchone()
         if recent is not None:
             return str(recent[0])
+        # Prune after the deduplication lookup, before the insert: pruning first
+        # could drop the row this request should have matched, and pruning before
+        # the insert still lets an already-full database recover.
+        _prune_events(db)
         request_id = str(uuid.uuid4())
         db.execute(
             "INSERT INTO events(request_id, host, port, method, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -554,12 +609,25 @@ async def handle_proxy(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
     else:
         await _reject(writer, "403 Forbidden", "IP-literal destinations are not allowed by sandbox network policy")
         return
-    if not policy_allows(host, port):
+    try:
+        allowed = policy_allows(host, port)
+    except sqlite3.Error as exc:
+        # The policy lookup reads grants and may rewrite an expired one, so it
+        # can fail when the tmpfs holding the database is full. A denial must
+        # still reach the sandbox: fail closed instead of closing the connection.
+        print(f"network policy lookup for {host}:{port} failed: {exc}", file=sys.stderr)
+        allowed = False
+    if not allowed:
+        detail = ""
         if os.environ.get("DEERFLOW_RECORD_DENIALS") == "1":
-            request_id = record_denial(host, port, method)
-            detail = f" (request {request_id})"
-        else:
-            detail = ""
+            # Recording is best effort. An exception escaping this handler would
+            # close the connection without a response, so a sandbox would see a
+            # reset where the policy meant a clean denial. sqlite3 errors are not
+            # OSError subclasses, so catch them explicitly.
+            try:
+                detail = f" (request {record_denial(host, port, method)})"
+            except sqlite3.Error as exc:
+                print(f"network policy denial for {host}:{port} was not recorded: {exc}", file=sys.stderr)
         await _reject(writer, "403 Forbidden", f"Sandbox network policy denied {host}:{port}{detail}")
         return
     resolved = await resolve_public(host, port)

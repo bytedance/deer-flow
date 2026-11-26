@@ -4,6 +4,7 @@ import asyncio
 import ipaddress
 import json
 import socket
+import sqlite3
 import ssl
 from unittest.mock import MagicMock
 
@@ -457,3 +458,131 @@ async def test_http_proxy_rejects_ambiguous_field_names_before_policy_check(monk
     finally:
         proxy.close()
         await proxy.wait_closed()
+
+
+@pytest.mark.anyio
+async def test_denied_destination_still_gets_403_when_the_policy_database_fails(tmp_path, monkeypatch) -> None:
+    """A full policy database must degrade to a clean denial, not a bare reset.
+
+    The proxy container's only writable space is a 16 MiB /tmp tmpfs, so the
+    policy database can fill up. An exception escaping ``handle_proxy`` closes
+    the connection with no response at all, which a sandbox cannot distinguish
+    from a network failure. The failure is injected at ``_connect_db`` so that
+    both database touch points are exercised: the policy lookup reads grants
+    (and may rewrite an expired one), and recording the denial writes a row.
+    """
+    monkeypatch.setattr(network_proxy, "POLICY_DB", tmp_path / "policy.sqlite3")
+    monkeypatch.setenv("DEERFLOW_NETWORK_MODE", "allowlist")
+    monkeypatch.setenv("DEERFLOW_ALLOW_DOMAINS_JSON", json.dumps(["allowed.example"]))
+    monkeypatch.setenv("DEERFLOW_RECORD_DENIALS", "1")
+
+    def full_database() -> None:
+        # sqlite3 errors are not OSError subclasses, so this is not caught by the
+        # handler's surrounding OSError handling.
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(network_proxy, "_connect_db", full_database)
+
+    proxy = await asyncio.start_server(network_proxy.handle_proxy, "127.0.0.1", 0)
+    proxy_port = proxy.sockets[0].getsockname()[1]
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+        writer.write(b"CONNECT denied.example:443 HTTP/1.1\r\nHost: denied.example:443\r\n\r\n")
+        await writer.drain()
+        response = await asyncio.wait_for(reader.read(), timeout=2)
+        writer.close()
+        await writer.wait_closed()
+
+        assert b"403 Forbidden" in response
+        assert b"Sandbox network policy denied denied.example:443" in response
+        # The request_id is unavailable, so it is omitted rather than invented.
+        assert b"(request " not in response
+    finally:
+        proxy.close()
+        await proxy.wait_closed()
+
+
+def test_events_are_bounded_under_a_flood_of_unique_hosts(tmp_path, monkeypatch) -> None:
+    """Unique hosts each insert a row, so the cap is what bounds the table.
+
+    The 30 second deduplication in ``record_denial`` only matches a repeated
+    host and port, and the policy check runs before DNS resolution, so a sandbox
+    needs no real network egress to produce unbounded undecided rows.
+    """
+    monkeypatch.setattr(network_proxy, "POLICY_DB", tmp_path / "policy.sqlite3")
+    monkeypatch.setattr(network_proxy, "MAX_EVENTS", 50)
+
+    for index in range(500):
+        network_proxy.record_denial(f"host-{index}.example", 443, "CONNECT")
+
+    with network_proxy._connect_db() as db:
+        total = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+
+    # One row above the cap is the row the triggering insert just added.
+    assert total <= 51
+
+
+def test_pruning_keeps_decided_history_bounded_and_approvals_usable(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(network_proxy, "POLICY_DB", tmp_path / "policy.sqlite3")
+    monkeypatch.setattr(network_proxy, "MAX_EVENTS", 5)
+    for index in range(30):
+        network_proxy.record_denial(f"host-{index}.example", 443, "CONNECT")
+
+    denied = network_proxy.deny_pending_events()
+    assert denied > 0
+    fresh = network_proxy.record_denial("fresh.example", 443, "CONNECT")
+
+    with network_proxy._connect_db() as db:
+        total = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        decided = db.execute("SELECT COUNT(*) FROM events WHERE decision IS NOT NULL").fetchone()[0]
+
+    # One row above the cap is the row the triggering insert just added.
+    assert total <= 6
+    assert decided <= 5
+    # The newest decided rows survive, and approvals still work after the flood.
+    assert [event["request_id"] for event in network_proxy.pending_events()] == [fresh]
+
+
+def test_pruning_never_removes_a_card_a_user_is_currently_viewing(tmp_path, monkeypatch) -> None:
+    """A surfaced, undecided row is a live approval card and must survive pruning.
+
+    Deleting it would leave the user's decision pointing at a request_id that no
+    longer resolves, so ``decide`` would silently return False on their click.
+    """
+    monkeypatch.setattr(network_proxy, "POLICY_DB", tmp_path / "policy.sqlite3")
+    monkeypatch.setenv("DEERFLOW_NETWORK_MODE", "allowlist")
+    surfaced = network_proxy.record_denial("card.example", 443, "CONNECT")
+    assert [event["request_id"] for event in network_proxy.pending_events()] == [surfaced]
+
+    monkeypatch.setattr(network_proxy, "MAX_EVENTS", 5)
+    for index in range(50):
+        network_proxy.record_denial(f"host-{index}.example", 443, "CONNECT")
+
+    with network_proxy._connect_db() as db:
+        row = db.execute("SELECT surfaced, decision FROM events WHERE request_id = ?", (surfaced,)).fetchone()
+
+    assert row == (1, None)
+    assert network_proxy.decide(surfaced, "allow_temporary", ttl=60)
+    assert network_proxy.policy_allows("card.example", 443)
+
+
+def test_flood_does_not_evict_fresh_denials_or_break_deduplication(tmp_path, monkeypatch) -> None:
+    """Superseded flood rows must be pruned before real, undecided denials.
+
+    ``pending_events`` supersedes every unsurfaced row it does not surface, so a
+    flood leaves a batch of superseded rows behind. If pruning instead dropped
+    the oldest undecided rows, a real denial recorded after the flood would be
+    deleted before ``pending_events`` could surface it, and the 30 second
+    deduplication would stop matching.
+    """
+    monkeypatch.setattr(network_proxy, "POLICY_DB", tmp_path / "policy.sqlite3")
+    monkeypatch.setattr(network_proxy, "MAX_EVENTS", 100)
+    for index in range(300):
+        network_proxy.record_denial(f"noise-{index}.example", 443, "CONNECT")
+    network_proxy.pending_events()
+
+    first = network_proxy.record_denial("pypi.org", 443, "CONNECT")
+    again = network_proxy.record_denial("pypi.org", 443, "CONNECT")
+
+    assert again == first
+    assert [event["request_id"] for event in network_proxy.pending_events()] == [first]
