@@ -193,16 +193,25 @@ For scenarios where visual accuracy is critical, **use the `image_search` tool f
 
 This approach significantly improves generation quality by providing the model with concrete visual guidance rather than relying solely on text descriptions.
 
-## Providers (Gemini / MiniMax / OpenAI-compatible)
+## Providers (Gemini / MiniMax / OpenAI-compatible / BytePlus Agent Plan)
 
 This skill auto-selects the provider by environment variables (no CLI change):
 
 - `GEMINI_API_KEY` set → use Gemini (default, unchanged).
 - Otherwise, `MINIMAX_API_KEY` set → use MiniMax (`/v1/image_generation`, model `image-01`).
 - Otherwise, `IMAGE_GENERATION_API_KEY` set → use an OpenAI-compatible Images API.
-- Force one explicitly with `IMAGE_GENERATION_PROVIDER=gemini|minimax|openai`.
-  `openai-compatible` is also accepted as an alias for `openai`.
+- Otherwise, `BYTEPLUS_AGENTPLAN_API_KEY` set → use BytePlus Agent Plan Seedream (`/api/plan/v3/images/generations`, default model `dola-seedream-5.0-pro`; also powers `ppt-generation` slide decks with the same key).
+- Force one explicitly with `IMAGE_GENERATION_PROVIDER=gemini|minimax|openai|byteplus_agentplan`.
+  `openai-compatible` is accepted as an alias for `openai`; `byteplus`, `byteplus-agentplan`, and `seedream` are accepted as aliases for `byteplus_agentplan`.
   If the selected provider's key is missing, the CLI names it on stderr and exits with status 1.
+
+BytePlus Agent Plan settings:
+
+- `BYTEPLUS_AGENTPLAN_API_KEY` (required; available on all Personal and Enterprise Agent Plan tiers)
+- `BYTEPLUS_AGENTPLAN_BASE_URL` (default `https://ark.ap-southeast.bytepluses.com/api/plan/v3`)
+- `BYTEPLUS_AGENTPLAN_IMAGE_MODEL` (default `dola-seedream-5.0-pro`; also supports `dola-seedream-5.5` and `dola-seedream-5.0-flash`)
+- `BYTEPLUS_AGENTPLAN_IMAGE_SIZE` (optional fixed-size override such as `2K` or `2048x2048`; by default maps `--aspect-ratio` to Seedream 2K dimensions)
+- Reference images passed via `--reference-images` are sent as data URLs in the JSON `image` field of `POST {base_url}/images/generations` (single string for one image, list for multiple images). Responses decode base64 before opening the destination file, preserving any existing output on decode or download failure.
 
 OpenAI-compatible settings:
 

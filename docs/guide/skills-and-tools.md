@@ -161,6 +161,20 @@ Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
 
+For BytePlus Agent Plan, the [video-generation skill](../../skills/public/video-generation/SKILL.md)
+accepts `BYTEPLUS_AGENTPLAN_API_KEY` (auto-selected when neither Gemini nor
+MiniMax keys are set, or forced with `VIDEO_GENERATION_PROVIDER=byteplus_agentplan`)
+and submits Seedance 2.5 tasks to `https://ark.ap-southeast.bytepluses.com/api/plan/v3/contents/generations/tasks`
+(default model `dreamina-seedance-2.5`; override with `BYTEPLUS_AGENTPLAN_VIDEO_MODEL`,
+`BYTEPLUS_AGENTPLAN_VIDEO_RESOLUTION`, `BYTEPLUS_AGENTPLAN_VIDEO_DURATION` in
+`4..30` or `-1`, and `BYTEPLUS_AGENTPLAN_GENERATE_AUDIO`). All `--reference-images`
+are forwarded as `role: "reference_image"` data URLs. Video downloads trust
+BytePlus Ark TOS storage endpoints by default (`tos-ap-southeast-1.volces.com`,
+`tos-ap-southeast-1.bytepluses.com`, `tos-cn-beijing.volces.com`) and honor
+exact extra hostnames listed in `BYTEPLUS_AGENTPLAN_VIDEO_DOWNLOAD_HOSTS`.
+Seedance 2.5 video generation requires BytePlus Agent Plan Large, Max, or
+Enterprise Shared Package; HTTP 403 tier rejections surface an upgrade hint.
+
 For MiniMax, the [video-generation skill](../../skills/public/video-generation/SKILL.md)
 accepts `MINIMAX_VIDEO_RESOLUTION` and `MINIMAX_VIDEO_DURATION` (integer seconds).
 Unset overrides use the provider defaults. Invalid duration strings fail before
@@ -304,16 +318,20 @@ Skill projection manifest saves preserve the original error or interruption even
 └── lark-cli/lark-doc/SKILL.md      ← managed, read-only
 ```
 
-The built-in `image-generation` skill supports Gemini, MiniMax, and
-OpenAI-compatible Images APIs. Select the latter with
-`IMAGE_GENERATION_PROVIDER=openai`, then configure
+The built-in `image-generation` skill supports Gemini, MiniMax,
+OpenAI-compatible Images APIs, and BytePlus Agent Plan (Seedream). Select
+OpenAI-compatible with `IMAGE_GENERATION_PROVIDER=openai`, then configure
 `IMAGE_GENERATION_API_KEY`, `IMAGE_GENERATION_BASE_URL`, and
-`IMAGE_GENERATION_MODEL`. If the explicitly selected provider's API key is missing,
+`IMAGE_GENERATION_MODEL`. For BytePlus Agent Plan, set
+`BYTEPLUS_AGENTPLAN_API_KEY` (and optionally `IMAGE_GENERATION_PROVIDER=byteplus_agentplan`,
+`BYTEPLUS_AGENTPLAN_IMAGE_MODEL` defaulting to `dola-seedream-5.0-pro`, and
+`BYTEPLUS_AGENTPLAN_IMAGE_SIZE`) — the same key also powers `ppt-generation`
+slide rendering. If the explicitly selected provider's API key is missing,
 the CLI reports the missing key on stderr and exits with status 1.
 Run the skill's script in an isolated sandbox such as
-Docker/AIO, the Kubernetes provisioner, or E2B, and pass the variables through
-`sandbox.environment`. Sandbox commands do not inherit API keys from the Gateway
-process.
+Docker/AIO, the Kubernetes provisioner, E2B, or veFaaS, and pass the variables
+through `sandbox.environment`. Sandbox commands do not inherit API keys from
+the Gateway process.
 
 The local provider applies the skill view through its workspace file tools.
 Script-based skills require an isolated sandbox provider on Windows as well.

@@ -13,6 +13,17 @@ import requests
 MINIMAX_DEFAULT_HOST = "https://api.minimaxi.com"
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 OPENAI_DEFAULT_MODEL = "gpt-image-2.5-flare"
+BYTEPLUS_AGENTPLAN_DEFAULT_BASE_URL = "https://ark.ap-southeast.bytepluses.com/api/plan/v3"
+BYTEPLUS_AGENTPLAN_DEFAULT_IMAGE_MODEL = "dola-seedream-5.0-pro"
+BYTEPLUS_AGENTPLAN_ASPECT_SIZES = {
+    "1:1": "2048x2048",
+    "16:9": "2560x1440",
+    "9:16": "1440x2560",
+    "4:3": "2304x1728",
+    "3:4": "1728x2304",
+    "3:2": "2496x1664",
+    "2:3": "1664x2496",
+}
 MAX_REDIRECTS = 5
 # MiniMax image-01 caps the prompt at 1500 characters and rejects longer requests
 # with a generic "invalid params" error, so validate before calling the API.
@@ -41,7 +52,7 @@ def _resolve_provider(
 
     1. Explicit <SKILL>_PROVIDER override wins.
     2. Otherwise prefer the existing provider when its credentials are present.
-    3. Otherwise fall back to MiniMax, then the OpenAI-compatible provider.
+    3. Otherwise fall back to MiniMax, OpenAI-compatible, then BytePlus Agent Plan.
     """
     override = os.getenv(override_env)
     if override:
@@ -52,9 +63,12 @@ def _resolve_provider(
         return "minimax"
     if os.getenv("IMAGE_GENERATION_API_KEY"):
         return "openai"
+    if os.getenv("BYTEPLUS_AGENTPLAN_API_KEY"):
+        return "byteplus_agentplan"
     raise ValueError(
         f"No credentials found. Set GEMINI_API_KEY for {existing_provider}, "
-        "MINIMAX_API_KEY for minimax, or IMAGE_GENERATION_API_KEY for openai "
+        "MINIMAX_API_KEY for minimax, IMAGE_GENERATION_API_KEY for openai, "
+        "or BYTEPLUS_AGENTPLAN_API_KEY for byteplus_agentplan "
         f"(optionally force with {override_env})."
     )
 
@@ -65,6 +79,21 @@ def _minimax_host() -> str:
 
 def _openai_base_url() -> str:
     return os.getenv("IMAGE_GENERATION_BASE_URL", OPENAI_DEFAULT_BASE_URL).rstrip("/")
+
+
+def _byteplus_agentplan_base_url() -> str:
+    return (
+        os.getenv("BYTEPLUS_AGENTPLAN_BASE_URL", BYTEPLUS_AGENTPLAN_DEFAULT_BASE_URL)
+        .strip()
+        .rstrip("/")
+    )
+
+
+def _byteplus_agentplan_size(aspect_ratio: str) -> str:
+    override = os.getenv("BYTEPLUS_AGENTPLAN_IMAGE_SIZE", "").strip()
+    if override:
+        return override
+    return BYTEPLUS_AGENTPLAN_ASPECT_SIZES.get(aspect_ratio.strip(), "2048x2048")
 
 
 def _openai_size(aspect_ratio: str, model: str) -> str:
@@ -440,6 +469,41 @@ def _generate_image_openai(
     return _write_openai_image(response.json(), output_file)
 
 
+def _generate_image_byteplus_agentplan(
+    prompt: str, reference_images: list[str], output_file: str, aspect_ratio: str
+) -> str:
+    bearer_value = os.getenv("BYTEPLUS_AGENTPLAN_API_KEY", "").strip()
+    if not bearer_value:
+        raise ValueError("BYTEPLUS_AGENTPLAN_API_KEY is not set")
+
+    url = f"{_byteplus_agentplan_base_url()}/images/generations"
+    model = (
+        os.getenv("BYTEPLUS_AGENTPLAN_IMAGE_MODEL", "").strip()
+        or BYTEPLUS_AGENTPLAN_DEFAULT_IMAGE_MODEL
+    )
+    body: dict[str, object] = {
+        "model": model,
+        "prompt": _minimax_prompt(prompt),
+        "size": _byteplus_agentplan_size(aspect_ratio),
+        "response_format": "b64_json",
+        "watermark": False,
+    }
+    if reference_images:
+        encoded_refs = [_to_data_url(path) for path in reference_images]
+        body["image"] = encoded_refs[0] if len(encoded_refs) == 1 else encoded_refs
+
+    response = _post_image(
+        url,
+        headers={
+            "Authorization": f"Bearer {bearer_value}",
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=180,
+    )
+    return _write_openai_image(response.json(), output_file)
+
+
 def generate_image(
     prompt_file: str,
     reference_images: list[str],
@@ -451,6 +515,10 @@ def generate_image(
     provider = _resolve_provider(
         "IMAGE_GENERATION_PROVIDER", "gemini", bool(os.getenv("GEMINI_API_KEY"))
     )
+    if provider in ("byteplus", "byteplus_agentplan", "byteplus-agentplan", "seedream"):
+        return _generate_image_byteplus_agentplan(
+            prompt, reference_images, output_file, aspect_ratio
+        )
     if provider in ("openai", "openai-compatible"):
         return _generate_image_openai(
             prompt, reference_images, output_file, aspect_ratio
@@ -465,7 +533,7 @@ def generate_image(
         )
     raise ValueError(
         f"Unknown image provider: {provider!r} "
-        "(use 'gemini', 'minimax', 'openai', or 'openai-compatible')"
+        "(use 'gemini', 'minimax', 'openai', 'openai-compatible', or 'byteplus_agentplan')"
     )
 
 
@@ -473,7 +541,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Generate images using Gemini, MiniMax, or an OpenAI-compatible API"
+        description="Generate images using Gemini, MiniMax, OpenAI-compatible, or BytePlus Agent Plan (Seedream) API"
     )
     parser.add_argument(
         "--prompt-file", required=True, help="Absolute path to JSON prompt file"

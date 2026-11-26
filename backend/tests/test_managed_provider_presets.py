@@ -32,6 +32,7 @@ def store(tmp_path, monkeypatch):
         ("deepseek", "https://api.deepseek.com", "deerflow.models.patched_deepseek:PatchedChatDeepSeek"),
         ("qwen-cn", "https://dashscope.aliyuncs.com/compatible-mode/v1", "deerflow.models.patched_deepseek:PatchedChatDeepSeek"),
         ("doubao", "https://ark.cn-beijing.volces.com/api/v3", "deerflow.models.patched_deepseek:PatchedChatDeepSeek"),
+        ("byteplus-agent-plan", "https://ark.ap-southeast.bytepluses.com/api/plan/v3", "deerflow.models.patched_deepseek:PatchedChatDeepSeek"),
         ("moonshot-cn", "https://api.moonshot.cn/v1", "deerflow.models.patched_deepseek:PatchedChatDeepSeek"),
         ("zai", "https://api.z.ai/api/paas/v4", "deerflow.models.patched_deepseek:PatchedChatDeepSeek"),
         ("minimax", "https://api.minimax.io/v1", "deerflow.models.patched_minimax:PatchedChatMiniMax"),
@@ -261,7 +262,7 @@ async def test_probe_and_chat_share_real_sdk_protocol_and_auth(store, wire, prov
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider,model", [("deepseek", "deepseek-v4-flash"), ("anthropic", "claude-sonnet-4-5-20250929"), ("minimax", "MiniMax-M3"), ("moonshot-cn", "kimi-k2.5")])
+@pytest.mark.parametrize("provider,model", [("deepseek", "deepseek-v4-flash"), ("anthropic", "claude-sonnet-4-5-20250929"), ("minimax", "MiniMax-M3"), ("moonshot-cn", "kimi-k2.5"), ("byteplus-agent-plan", "dola-seed-2.1-turbo")])
 async def test_known_optional_thinking_disabled_only_for_probe(store, wire, provider, model):
     profile = ManagedModel(provider=provider, model=model, api_key="secret-test-key")
     config = profile.runtime_config()

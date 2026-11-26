@@ -179,6 +179,53 @@ models:
   #       thinking:
   #         type: disabled
 
+  # Example: BytePlus Agent Plan (Personal & Enterprise — one key for LLM + Seedream images/slides + Seedance 2.5 video)
+  # Endpoint: https://ark.ap-southeast.bytepluses.com/api/plan/v3
+  # Subscribe or manage seats/shared packages at:
+  #   https://console.byteplus.com/ark/region:ap-southeast-1/subscription/agent-plan
+  # Also forward BYTEPLUS_AGENTPLAN_API_KEY in sandbox.environment below so
+  # image-generation (Seedream), ppt-generation, and video-generation (Seedance 2.5, Large/Max/Shared) work with the same key.
+  #
+  # - name: dola-seed-2.1-turbo-ap
+  #   display_name: Dola-Seed-2.1-Turbo (BytePlus Agent Plan)
+  #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+  #   model: dola-seed-2.1-turbo
+  #   api_base: https://ark.ap-southeast.bytepluses.com/api/plan/v3
+  #   api_key: $BYTEPLUS_AGENTPLAN_API_KEY
+  #   timeout: 600.0
+  #   max_retries: 2
+  #   supports_thinking: true
+  #   supports_vision: true
+  #   supports_reasoning_effort: true
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
+  #
+  # - name: deepseek-v4-pro-ap
+  #   display_name: DeepSeek-V4-Pro (BytePlus Agent Plan)
+  #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+  #   model: deepseek-v4-pro
+  #   api_base: https://ark.ap-southeast.bytepluses.com/api/plan/v3
+  #   api_key: $BYTEPLUS_AGENTPLAN_API_KEY
+  #   timeout: 600.0
+  #   max_retries: 2
+  #   supports_thinking: true
+  #   supports_vision: false
+  #   supports_reasoning_effort: true
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
+
   # Example: Volcengine Coding Plan (one key, multi-vendor gateway)
   # The Coding Plan endpoint (/api/coding/v3) lets you access models from
   # Doubao, GLM, DeepSeek, Kimi, and MiniMax with a single API key.
@@ -1914,6 +1961,12 @@ sandbox:
 #   #   IMAGE_GENERATION_BASE_URL: $IMAGE_GENERATION_BASE_URL
 #   #   IMAGE_GENERATION_MODEL: $IMAGE_GENERATION_MODEL
 #   #   IMAGE_GENERATION_SIZE: $IMAGE_GENERATION_SIZE  # Optional fixed-size override
+#   #   # BytePlus Agent Plan multimodal skills (Seedream images/slides + Seedance 2.5 video):
+#   #   BYTEPLUS_AGENTPLAN_API_KEY: $BYTEPLUS_AGENTPLAN_API_KEY
+#   #   # BYTEPLUS_AGENTPLAN_IMAGE_MODEL: dola-seedream-5.0-pro
+#   #   # BYTEPLUS_AGENTPLAN_VIDEO_MODEL: dreamina-seedance-2.5
+#   #   # BYTEPLUS_AGENTPLAN_VIDEO_RESOLUTION: 720p
+#   #   # BYTEPLUS_AGENTPLAN_VIDEO_DURATION: "6"
 #
 #   # Optional: Cross-instance container ownership (issue #4206).
 #   #

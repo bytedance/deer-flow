@@ -29,6 +29,7 @@ class TestProviders:
         providers = {provider.name: provider for provider in LLM_PROVIDERS}
 
         expected = {
+            "byteplus_agentplan",
             "volcengine",
             "zai",
             "openai",
@@ -57,6 +58,29 @@ class TestProviders:
         assert providers["mimo"].use == "deerflow.models.patched_mimo:PatchedChatMiMo"
         assert providers["deepseek"].use == "deerflow.models.patched_deepseek:PatchedChatDeepSeek"
         assert providers["volcengine"].extra_config["api_base"] == "https://ark.cn-beijing.volces.com/api/v3"
+        assert providers["byteplus_agentplan"].extra_config["api_base"] == "https://ark.ap-southeast.bytepluses.com/api/plan/v3"
+        assert providers["byteplus_agentplan"].sandbox_env_vars == ("BYTEPLUS_AGENTPLAN_API_KEY",)
+
+    def test_byteplus_agentplan_vision_and_sandbox_env_wiring(self):
+        provider = next(p for p in LLM_PROVIDERS if p.name == "byteplus_agentplan")
+        assert provider.default_model == "dola-seed-2.1-turbo"
+        assert provider.extra_config_for("dola-seed-2.1-turbo")["supports_vision"] is True
+        assert provider.extra_config_for("deepseek-v4-pro")["supports_vision"] is False
+
+        content = build_minimal_config(
+            provider_use=provider.use,
+            model_name=provider.default_model,
+            display_name=f"{provider.display_name} / {provider.default_model}",
+            api_key_field=provider.api_key_field,
+            env_var=provider.env_var,
+            extra_model_config=provider.extra_config_for(provider.default_model),
+            sandbox_env_vars=provider.sandbox_env_vars,
+        )
+        data = yaml.safe_load(content)
+        model = data["models"][0]
+        assert model["api_base"] == "https://ark.ap-southeast.bytepluses.com/api/plan/v3"
+        assert model["api_key"] == "$BYTEPLUS_AGENTPLAN_API_KEY"
+        assert data["sandbox"]["environment"]["BYTEPLUS_AGENTPLAN_API_KEY"] == "$BYTEPLUS_AGENTPLAN_API_KEY"
 
     def test_zai_glm_flash_declares_the_reasoning_contract(self):
         """GLM-5.3-Flash cannot disable thinking and only accepts low/high/max (issue #5073).
