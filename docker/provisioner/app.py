@@ -1290,6 +1290,20 @@ def _sandbox_access_url(sandbox_id: str, *, tolerate_read_errors: bool = False) 
     return _url_from_service(svc, sandbox_id)
 
 
+def _service_confirmed_absent(sandbox_id: str) -> bool:
+    """Whether the sandbox Service is confirmed missing.
+
+    A Service write that reports an error may still have committed: a peer
+    that discovers the Service can already serve the sandbox Pod through it.
+    Only a 404 confirms absence; any other outcome keeps the Pod.
+    """
+    try:
+        core_v1.read_namespaced_service(_svc_name(sandbox_id), K8S_NAMESPACE)
+    except ApiException as exc:
+        return exc.status == 404
+    return False
+
+
 def _pod_shell_capacity(pod) -> int:
     containers = getattr(getattr(pod, "spec", None), "containers", None) or []
     sandbox_container = next((container for container in containers if getattr(container, "name", None) == "sandbox"), None)
@@ -1481,10 +1495,12 @@ def create_sandbox(req: CreateSandboxRequest):
         logger.info(f"Created Service {_svc_name(sandbox_id)}")
     except ApiException as exc:
         if exc.status != 409:
-            # Roll back only the Pod this request created. On a 409 Pod race
-            # the Pod belongs to the concurrent creator; deleting it would
-            # tear down a sandbox another Gateway is waiting on.
-            if pod_created:
+            # Roll back only the Pod this request created, and only once the
+            # Service is confirmed absent. On a 409 Pod race the Pod belongs
+            # to the concurrent creator, and a Service write that errored may
+            # still have committed; deleting either would tear down a sandbox
+            # another Gateway is waiting on or already using.
+            if pod_created and _service_confirmed_absent(sandbox_id):
                 try:
                     core_v1.delete_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
                 except ApiException:

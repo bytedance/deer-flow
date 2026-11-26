@@ -325,6 +325,40 @@ def test_service_failure_rolls_back_the_pod_this_request_created(monkeypatch, pr
     delete_pod.assert_called_once_with("sandbox-sandbox-own-pod", provisioner_module.K8S_NAMESPACE)
 
 
+def test_service_failure_keeps_pod_when_service_committed_despite_the_error(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: None)
+    # The Service write commits even though the create call reports an error.
+    # A peer can already serve this Pod through it, so it must not be rolled
+    # back.
+    core.service_sandboxes.add("sandbox-svc-committed")
+    monkeypatch.setattr(core, "create_namespaced_service", MagicMock(side_effect=ApiException(status=500)))
+    delete_pod = MagicMock()
+    monkeypatch.setattr(core, "delete_namespaced_pod", delete_pod)
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-svc-committed"))
+    assert error.value.status_code == 500
+    assert core.created_pods == ["sandbox-svc-committed"]
+    delete_pod.assert_not_called()
+
+
+def test_service_failure_keeps_pod_when_service_state_is_unknown(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: None)
+    monkeypatch.setattr(core, "create_namespaced_service", MagicMock(side_effect=ApiException(status=500)))
+    # The read-back also fails, so absence cannot be confirmed.
+    monkeypatch.setattr(core, "read_namespaced_service", MagicMock(side_effect=ApiException(status=500)))
+    delete_pod = MagicMock()
+    monkeypatch.setattr(core, "delete_namespaced_pod", delete_pod)
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-svc-unknown"))
+    assert error.value.status_code == 500
+    assert core.created_pods == ["sandbox-svc-unknown"]
+    delete_pod.assert_not_called()
+
+
 def test_double_already_exists_race_reads_winner_without_rollback(monkeypatch, provisioner_module):
     core = _RecordingCoreV1(event_loop_thread_id=-1)
     monkeypatch.setattr(provisioner_module, "core_v1", core)

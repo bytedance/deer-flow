@@ -455,8 +455,10 @@ chart's `provisioner.replicas`; compose runs a single container):
   `MAX_SHELL_SESSIONS`, so a lower-capacity winner is still reported to the
   Gateway as `409`). Several Gateway Pods already run this race against a
   single provisioner. When the loser's Service create fails for another
-  reason, it rolls back only a Pod it created itself; a Pod it lost the `409`
-  race for belongs to the winner and is left running.
+  reason, it rolls back only a Pod it created itself, and only once the
+  Service is confirmed absent: a Service write that errored may still have
+  committed, and a Pod behind a live Service belongs to whoever already
+  uses it.
 - `DELETE /api/sandboxes/{sandbox_id}` tolerates `404`, so two replicas
   deleting the same sandbox both return success.
 - NodePorts are allocated by the API server when the Service is created; the
