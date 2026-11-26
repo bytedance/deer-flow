@@ -20,6 +20,17 @@ logger = logging.getLogger(__name__)
 _SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
+def validate_injected_skill_storage(storage: SkillStorage, *, container_root: str, user_id: str | None = None) -> None:
+    """Keep an injected catalog within the configured mount and owner scope."""
+    from deerflow.config.paths import make_safe_user_id
+
+    if storage.get_container_root() != container_root:
+        raise ValueError("Injected skill storage container root must match skills.container_path")
+    storage_owner = getattr(storage, "user_id", None)
+    if storage_owner is not None and user_id is not None and storage_owner != make_safe_user_id(user_id):
+        raise ValueError("Injected skill storage owner must match the run user")
+
+
 def walk_skill_directories(root: Path) -> Iterable[tuple[str, list[str], list[str]]]:
     """Follow directory links, but prune links back to the current ancestors.
 
@@ -79,13 +90,27 @@ class SkillStorage(ABC):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def validate_skill_name(name: str) -> str:
-        """Validate and normalise a skill name; return the normalised form."""
+    def validate_skill_name(name: str, *, for_creation: bool = False) -> str:
+        """Validate and normalise a skill name; return the normalised form.
+
+        ``for_creation`` also refuses names that cannot be created as a host
+        path component. The hyphen-case grammar admits Windows reserved device
+        names (``nul``, ``con``, ``com1``, ...); a skill name is a directory
+        under ``custom/``, so creating one of those "succeeds" on Windows
+        without producing a directory and the first write inside it fails with
+        ``FileNotFoundError``. Only creation paths set this, so reading and
+        deleting a skill an older release created on a Linux host keeps
+        working.
+        """
         normalized = name.strip()
         if not _SKILL_NAME_PATTERN.fullmatch(normalized):
             raise ValueError("Skill name must be hyphen-case using lowercase letters, digits, and hyphens only.")
         if len(normalized) > 64:
             raise ValueError("Skill name must be 64 characters or fewer.")
+        if for_creation:
+            reason = windows_incompatible_segment(normalized)
+            if reason is not None:
+                raise ValueError(f"Skill name {normalized!r} is not portable to Windows: {reason}.")
         return normalized
 
     @staticmethod

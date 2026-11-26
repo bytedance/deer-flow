@@ -1,114 +1,70 @@
-# E2B lifecycle
+# E2B sandbox provider (`deerflow/community/e2b_sandbox/`)
 
-Fresh VM creation restores owner/thread-scoped workspace, uploads, outputs and
-ACP files from Gateway-visible `Paths` directories before registering the VM.
-Do not use `host_*` paths: those address the Docker host, not Gateway storage.
-Restoration is required and shares the creation upload budget with optional
-skills and mounts. Errors discard the VM through ownership-fenced cleanup and
-retain capacity if destruction is unconfirmed. Active, warm and discovered VM
-reuse must never replay persisted files over live contents.
-Reject symlinked resource roots/ancestors; skip nested symlinks, special files,
-upload staging files and output-sync temporary files. Directory scan failures
-must propagate rather than masquerading as empty directories. Release sync is
-still copy-only; deletion reconciliation is a separate contract.
-Capacity breaches raise `_ThreadResourceRestoreLimitError` with the logical tree,
-cap and operator remediation; deadlines remain ordinary restore errors. Do not
-silently truncate required resources or imply unchanged over-limit data can succeed
-on retry. Log restore failures with owner/thread context and the exception chain;
-caller-facing errors identify the logical tree without exposing host paths.
-Regressions: `tests/test_e2b_sandbox_provider.py` exercises release, expiry and
-recreation using saved bytes, plus isolation, reuse and failed restoration.
+Runs sandboxes as E2B cloud VMs: creation with file restoration, warm reuse,
+lease renewal, reconciliation with the remote inventory, and shutdown. General
+sandbox rules are in the [sandbox guide](../../sandbox/AGENTS.md).
 
-Reconciliation floors active-client TTL renewals at the SDK's default timeout
-and twice the sum of the configured reconciliation interval and pass budget
-(subject to the E2B timeout cap). Release still uses the configured idle timeout.
-Sweeping old local warm entries must not release deployment capacity: a peer
-may have renewed the VM. Leave shared removal to revision-checked remote
-inventory and its missing-entry grace period; partial/failed inventory cannot
-prove absence.
+## Verify
 
-Per-VM `_sandbox_lifecycle` locks have independent `timeout` and `ownership`
-domains. Timeout locks serialize active TTL writes with removal from the active
-map. Ownership locks serialize publication/claim/renewal/release with warm-entry
-cleanup. Never hold both domains: slow E2B timeout requests must not block lease
-heartbeats for this VM or subsequent VMs in the renewal pass.
-Snapshot readers recheck sandbox identity, parked-entry identity and acquisition
-intent under that lock before acting. Lock order is thread key, lifecycle, then `_lock`;
-never wait for a lifecycle lock while holding the metadata lock or perform
-remote I/O under `_lock`. Holders and waiters retain one refcounted RLock per domain/ID,
-reclaimed on the last exit. Cleanup remains available during shutdown without
-an executor or a permanent per-sandbox lock table.
+```bash
+cd backend
+python -m pytest tests -q -k "e2b or sandbox_search_contract"
+make test-blocking-io
+```
 
-Release must own the final idle-TTL write, and cleanup must finish before a new
-lease can be published. Do not renew ownership removed by a concurrent cleanup.
-Release only needs the VM lock while leaving active state; do not hold it
-during output sync, which must not prevent ownership heartbeats.
-Track that release in `_remote_ops_in_progress` until it completes so
-reconciliation cannot probe or re-adopt a VM between active and warm states.
-Acquire drops the lease of a VM it finds gone (dead cached client, reaped
-warm entry): no later path sees that ID, and the renewer re-claims any lapsed
-lease it still tracks.
+## Restoration
 
-Shutdown owns both maintenance workers as well as sandbox registries. After
-signalling the lease-renewal and reconciliation threads, a bounded join is only
-a wait budget: verify each worker actually exited before clearing registries or
-tearing down resources. If either worker is still alive, keep admission fenced
-and preserve all tracked state so a later `shutdown()` can retry cleanup.
-That fence covers cached sync/async acquisition too: recheck after serializer
-waits and immediately before exposing a reused client. Signal-triggered shutdown
-may report deferred cleanup, but it must still forward the process's original
-SIGTERM/SIGINT/SIGHUP action while retaining the pending E2B state. Under
-`hold_sandbox_shutdown_ownership()` (Gateway lifespan) only SIGHUP is
-installed; the lifespan shuts the provider down after the run drain.
+- **A new VM restores the thread's files before it is registered.** Read them
+  from the Gateway-visible `Paths` directories. The `host_*` paths address the
+  Docker host, not Gateway storage.
+- **A reused VM keeps its live contents.** Persisted files are never replayed
+  over an active, warm or discovered VM.
+- **A failed restore discards the VM** through ownership-fenced cleanup, and keeps
+  the capacity charged when destruction is not confirmed.
+- **A scan failure propagates.** It must not read as an empty directory. A
+  required resource over the limit raises with the remedy; it is not truncated.
+- **Reject a symlinked resource root or ancestor**, and skip nested symlinks and
+  special files.
+- **Caller-facing errors name the logical tree, not a host path.**
+
+## Locks and leases
+
+- **Each VM has two lock domains, `timeout` and `ownership`, and they are never
+  held together.** A slow E2B timeout request must not block lease heartbeats.
+- **Lock order is thread key, then lifecycle, then `_lock`.** Do no remote I/O
+  under `_lock`.
+- **After a lock wait, check the sandbox identity and the acquisition intent
+  again** before you act on a snapshot.
+- **Sweeping old local warm entries does not release deployment capacity.** A
+  peer may have renewed the VM. Shared removal follows the revision-checked
+  remote inventory, and a partial or failed inventory proves no absence.
+- **Release owns the final idle-timeout write, and cleanup finishes before a new
+  lease is published.** Do not hold the VM lock during output sync.
+
+## Shutdown
+
+- **A bounded join is a wait budget, not proof.** Check that the renewal and the
+  reconciliation thread have exited before you clear registries. If one is
+  alive, keep admission closed and keep the state, so a later `shutdown()` can
+  retry.
+- **A signal-triggered shutdown still forwards the original signal action.**
+  Under the Gateway lifespan the provider is shut down after the run drain.
 
 ## File search
 
-Quote the complete `grep --include=<pattern>` argument with `shlex.quote` before
-passing it to the shell. The shell must not split or expand filename patterns;
-grep owns basename globbing and `path_matches` owns root-relative directory
-scoping. `tests/test_sandbox_search_contract.py` pins this across providers using
-real temporary files and offline shell transports.
-
-Use `grep --null` to separate the filename from `line:text`, then parse the
-line number only after that NUL delimiter. Colons are valid path characters,
-so never split the whole record on them. Real-shell regressions in
-`tests/test_e2b_sandbox_provider.py` cover colon-containing files and directories.
-
-Split `grep` and `glob` output records only on `"\n"`, matching
-`parse_remote_search_output`. Do not use `splitlines()`: its other boundaries
-(carriage returns, vertical tabs, form feeds, and control/Unicode separators)
-can occur inside filenames or matched text. The real-shell tests cover these
-characters in filenames, parent directories, and grep content; their transport
-decodes captured bytes without universal-newline conversion.
+- **Quote the whole `--include=<pattern>` argument**, so the shell does not expand
+  the pattern.
+- **Use `grep --null` and parse the line number after the NUL.** A colon is a
+  valid path character.
+- **Split output records on `"\n"` only.** `splitlines()` also splits on
+  characters that can occur inside a file name.
 
 ## Mount uploads
 
-E2B uploads host mounts during sandbox creation using binary file objects.
-Per-mount limits: 100 MiB/file, 512 MiB total, 2,000 files. The full creation
-pass shares a 512 MiB / 2,000-file budget across skill projections and mounts.
-
-The pass has a cooperative deadline controlled by
-``mount_upload_deadline_seconds`` (default: 120 seconds). The provider checks it before
-each mount, during directory preflight, and before each SDK write. The deadline
-does not interrupt active filesystem or E2B SDK calls.
-
-The provider checks mount limits before upload. It rechecks each opened file descriptor against its preflight size before SDK upload.
-
-For policy-scoped turns, clearing the four managed remote skill categories and
-uploading their prepared projection is one per-user/thread/skills-root critical
-section, shared with acquire and release. The provider snapshots that canonical
-root at startup and carries it through warm-pool identity and E2B metadata; a VM
-from another root is never adopted. A second policy sync cannot reset the remote
-tree until the first upload pass has completed.
-
-An invalid mount does not block later mounts.
-
-Each successful upload logs its source, destination, file count, byte count, and elapsed time.
-
-A stopped pass logs its limit reason and elapsed time. It reports attempted and completed upload totals separately.
-
-After creation, ``E2BSandbox.mount_upload_result`` holds a ``MountUploadResult``.
-``result.truncated`` is true only for resource-limit stops (deadline, file count,
-bytes), not logged mount failures (missing paths, SDK errors). A provider-level
-map preserves creation results within the Gateway process; ``None`` on a
-reclaimed sandbox means unavailable.
+- **The upload deadline is cooperative.** It is checked between steps and does
+  not interrupt an SDK call that is running.
+- **`mount_upload_result.truncated` reports a resource-limit stop only.** A mount
+  that failed is logged, and it does not block later mounts.
+- **Clearing the managed remote skill categories and uploading the new projection
+  is one critical section**, shared with acquire and release. A VM that was
+  created from another skills root is never adopted.

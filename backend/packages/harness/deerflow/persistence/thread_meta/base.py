@@ -97,6 +97,7 @@ class ThreadMetaStore(abc.ABC):
         self,
         *,
         metadata: dict[str, Any] | None = None,
+        query: str | None = None,
         status: str | None = None,
         archived: bool | None = None,
         project_id: str | None | _ProjectFilterUnset = PROJECT_FILTER_UNSET,

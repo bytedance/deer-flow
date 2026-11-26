@@ -31,16 +31,24 @@ from app.gateway.artifact_archive import ArtifactArchiveError, ArtifactArchiveRe
 from app.gateway.authz import require_cancel_permission_if, require_permission
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
+    CheckpointLineageTimeoutError,
     CheckpointParentMissingError,
     checkpoint_configurable,
     checkpoint_messages,
-    find_checkpoint_before_message,
     find_checkpoint_before_message_chronologically,
+    find_replay_checkpoint_before_message,
     history_parent_index,
     is_duration_only_checkpoint,
     parent_from_history_index,
+    replay_lineage_timeout_http_error,
     resolve_history_versions,
     resolve_stamp_candidate_versions,
+)
+from app.gateway.checkpoint_mode_errors import (
+    CHECKPOINT_MODE_ERRORS as _CHECKPOINT_MODE_ERRORS,
+)
+from app.gateway.checkpoint_mode_errors import (
+    checkpoint_mode_http_error as _checkpoint_mode_http_error,
 )
 from app.gateway.context_usage import build_context_usage
 from app.gateway.conversation_reader import (
@@ -66,16 +74,19 @@ from app.gateway.services import (
     wait_for_run_completion,
 )
 from app.gateway.sse_headers import sse_response_headers
+from app.gateway.tool_approvals import ApprovalResponseBody, answer_approval, list_approvals, revoke_approval_grants
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
 from deerflow.authz.sandbox_authz import safe_app_config_async
 from deerflow.config.paths import get_paths, make_safe_user_id
+from deerflow.constants import DELIVERY_PRESENTATION_TOOL_NAMES
 from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus, ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.goal import is_active_goal
 from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.exceptions import SandboxAuthorizationError
 from deerflow.utils.llm_text import strip_leading_think_blocks
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.utils.thread_id import ThreadId
@@ -83,6 +94,24 @@ from deerflow.workspace_changes import get_workspace_changes_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
+
+
+@router.get("/{thread_id}/tool-approvals")
+@require_permission("threads", "read", owner_check=True, require_existing=True)
+async def get_tool_approvals(thread_id: ThreadId, request: Request):
+    return await list_approvals(thread_id, request)
+
+
+@router.post("/{thread_id}/runs/{run_id}/tool-approvals/{request_id}")
+@require_permission("runs", "create", owner_check=True, require_existing=True)
+async def submit_tool_approval(thread_id: ThreadId, run_id: str, request_id: str, body: ApprovalResponseBody, request: Request):
+    return await answer_approval(thread_id, run_id, request_id, body, request)
+
+
+@router.delete("/{thread_id}/tool-approvals/grants")
+@require_permission("runs", "create", owner_check=True, require_existing=True)
+async def revoke_tool_approval_grants(thread_id: ThreadId, request: Request):
+    return await revoke_approval_grants(thread_id, request)
 
 
 @router.post("/{thread_id}/runs/{run_id}/inputs")
@@ -711,8 +740,8 @@ async def _find_target_run_id(
     if len(rows) >= REGENERATE_HISTORY_SCAN_LIMIT:
         logger.warning(
             "Could not find source run for regenerate message %s in recent run events for thread %s (limit=%s)",
-            message_id,
-            thread_id,
+            sanitize_log_param(message_id),
+            sanitize_log_param(thread_id),
             REGENERATE_HISTORY_SCAN_LIMIT,
         )
     raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
@@ -725,18 +754,18 @@ async def _find_base_checkpoint_before_human(
     *,
     head_checkpoint: Any | None = None,
 ) -> Any:
-    accessor, base_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
+    try:
+        accessor, base_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
     if head_checkpoint is not None:
         try:
-            return await find_checkpoint_before_message(
-                accessor,
-                head_checkpoint,
-                human_message_id,
-                max_depth=REGENERATE_HISTORY_RAW_SCAN_LIMIT,
-            )
+            return await find_replay_checkpoint_before_message(accessor, head_checkpoint, human_message_id)
+        except CheckpointLineageTimeoutError as exc:
+            raise replay_lineage_timeout_http_error(thread_id, exc) from exc
         except CheckpointParentMissingError:
-            # Old checkpoints and imported histories may not have parent links.
-            # Preserve the bounded chronological fallback for those records.
+            # Some legacy or imported heads have no recorded parent link.
+            # Only those heads can use the chronological compatibility scan.
             logger.debug(
                 "Could not resolve parent lineage for regenerate thread %s; falling back to history scan",
                 sanitize_log_param(thread_id),
@@ -759,6 +788,8 @@ async def _find_base_checkpoint_before_human(
             versions, parent_versions = await resolve_stamp_candidate_versions(accessor, item, parent, version_cache)
             if not _is_duration_only_checkpoint(item, history_index, versions=versions, parent_versions=parent_versions):
                 checkpoints.append(item)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
     except Exception as exc:
         logger.exception("Failed to list checkpoints for regenerate thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
@@ -775,8 +806,8 @@ async def _find_base_checkpoint_before_human(
     if len(checkpoints) >= REGENERATE_HISTORY_SCAN_LIMIT:
         logger.warning(
             "Could not locate target user message %s in recent checkpoint history for thread %s (limit=%s)",
-            human_message_id,
-            thread_id,
+            sanitize_log_param(human_message_id),
+            sanitize_log_param(thread_id),
             REGENERATE_HISTORY_SCAN_LIMIT,
         )
     raise HTTPException(
@@ -849,9 +880,14 @@ async def _find_interrupted_target_run_id(
 
 
 async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: Request) -> RegeneratePrepareResponse:
-    accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
     try:
+        accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
         latest_checkpoint = await accessor.aget(latest_config)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    except HTTPException:
+        # Config-loading and other route-level errors keep their status/detail.
+        raise
     except Exception as exc:
         logger.exception("Failed to read latest checkpoint for regenerate thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to read latest checkpoint") from exc
@@ -941,9 +977,14 @@ async def _prepare_edit_regenerate_payload(
     if not normalized_text:
         raise HTTPException(status_code=409, detail="Edited message cannot be empty")
 
-    accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
     try:
+        accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
         latest_checkpoint = await accessor.aget(latest_config)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    except HTTPException:
+        # Config-loading and other route-level errors keep their status/detail.
+        raise
     except Exception as exc:
         logger.exception("Failed to read latest checkpoint for edit replay thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to read latest checkpoint") from exc
@@ -1801,8 +1842,15 @@ def _presented_files_from_delivery(events: list[dict]) -> list[str]:
         raise HTTPException(status_code=409, detail="This response has no verified artifact delivery")
     content = events[0].get("content")
     by_tool = content.get("by_tool") if isinstance(content, dict) else None
-    presented = by_tool.get("present_files") if isinstance(by_tool, dict) else None
-    if not isinstance(presented, list) or not presented or any(not isinstance(path, str) for path in presented):
+    if not isinstance(by_tool, dict):
+        raise HTTPException(status_code=409, detail="This response has no verified artifact delivery")
+    presented: list[str] = []
+    for tool_name in DELIVERY_PRESENTATION_TOOL_NAMES:
+        paths = by_tool.get(tool_name, [])
+        if not isinstance(paths, list):
+            raise HTTPException(status_code=409, detail="This response has no verified artifact delivery")
+        presented.extend(paths)
+    if not presented or any(not isinstance(path, str) for path in presented):
         raise HTTPException(status_code=409, detail="This response has no verified artifact delivery")
     return presented
 
@@ -1854,7 +1902,10 @@ async def create_run_artifact_archive(
 
     raw_owner_user_id = get_trusted_internal_owner_user_id(request)
     effective_user_id = make_safe_user_id(raw_owner_user_id) if raw_owner_user_id else get_effective_user_id()
-    app_config = await safe_app_config_async()
+    try:
+        app_config = await safe_app_config_async()
+    except SandboxAuthorizationError as exc:
+        raise HTTPException(status_code=503, detail="Artifact archive is temporarily unavailable") from exc
     custom_tool_output_dir = getattr(getattr(app_config, "tool_output", None), "storage_subdir", None)
     extra_reserved_dir_names = {custom_tool_output_dir} if isinstance(custom_tool_output_dir, str) else set()
     paths = get_paths()

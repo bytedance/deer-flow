@@ -1,4 +1,5 @@
 import asyncio
+import signal
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
@@ -26,6 +27,47 @@ class SandboxProvider(ABC):
     # Opt in only when acquire/reuse itself exposes the prepared thread view,
     # without a separate sync_agent_skills upload before tools can access it.
     supports_lazy_agent_skill_isolation: bool = False
+
+    _signal_handlers_deferred = False
+
+    def requires_eager_agent_skill_sync(self, thread_id: str, *, user_id: str | None) -> bool:
+        """Whether this scope needs eager synchronization on a lazy provider.
+
+        Providers can require eager acquisition and strict ``sync_agent_skills``
+        when an active or initializing remote could reuse an older skill view.
+        This lookup reads only in-memory state.
+        """
+        return False
+
+    def _register_signal_handlers(self) -> None:
+        """Install process signal handlers for providers that own sandbox resources."""
+
+    def _register_or_defer_signal_handlers(self) -> None:
+        if threading.current_thread() is threading.main_thread():
+            self._register_signal_handlers()
+        else:
+            self._signal_handlers_deferred = True
+
+    @contextmanager
+    def gateway_signal_handlers(self) -> Iterator[None]:
+        """Install a worker-built provider's SIGHUP fallback for the Gateway lifespan."""
+        if not self._signal_handlers_deferred or not hasattr(signal, "SIGHUP") or threading.current_thread() is not threading.main_thread():
+            yield
+            return
+
+        previous = signal.getsignal(signal.SIGHUP)
+        if previous is None:  # A native handler cannot be restored with signal.signal().
+            yield
+            return
+        self._register_signal_handlers()
+        installed = signal.getsignal(signal.SIGHUP)
+        self._signal_handlers_deferred = False
+        try:
+            yield
+        finally:
+            if signal.getsignal(signal.SIGHUP) is installed:
+                signal.signal(signal.SIGHUP, previous)
+            self._signal_handlers_deferred = True
 
     @abstractmethod
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:

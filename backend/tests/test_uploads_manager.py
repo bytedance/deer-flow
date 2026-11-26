@@ -86,6 +86,30 @@ class TestNormalizeFilename:
         with pytest.raises(ValueError, match="NUL"):
             normalize_filename("report\x00.pdf")
 
+    @pytest.mark.parametrize(
+        "filename",
+        ["notes.txt:hidden", "doc:hidden", "folder/doc.txt:hidden", "a:b:c.txt"],
+    )
+    def test_rejects_colon_ads_names(self, filename):
+        """A colon in a basename addresses an NTFS Alternate Data Stream on
+        Windows (invisible to directory listings) instead of a new file,
+        matching the skill-archive installer's own rule."""
+        with pytest.raises(ValueError, match="colon"):
+            normalize_filename(filename)
+
+    def test_colon_name_rejected_before_writing_upload(self, tmp_path):
+        with pytest.raises(ValueError, match="colon"):
+            write_upload_file_no_symlink(tmp_path, "notes.txt:hidden", b"secret")
+        assert list(tmp_path.iterdir()) == []
+
+    def test_drive_reference_platform_behavior(self):
+        assert normalize_filename("C:/reports/report.txt") == "report.txt"
+        if os.name == "nt":
+            assert normalize_filename("C:report.txt") == "report.txt"
+        else:
+            with pytest.raises(ValueError, match="colon"):
+                normalize_filename("C:report.txt")
+
     @pytest.mark.parametrize("filename", [".upload-notes.part", ".upload-.part", "folder/.upload-notes.part"])
     def test_rejects_reserved_staging_names(self, filename):
         with pytest.raises(ValueError, match="reserved upload staging"):
@@ -199,6 +223,62 @@ class TestDeduplicateFilename:
     def test_short_names_keep_existing_dedupe_shape(self):
         seen = {"data.txt"}
         assert claim_unique_filename("data.txt", seen) == "data_1.txt"
+
+    @pytest.mark.parametrize(
+        ("name", "expected"),
+        [
+            ("report.tar.gz", "report_1.tar.gz"),
+            ("report.tar.bz2", "report_1.tar.bz2"),
+            ("report.tar.xz", "report_1.tar.xz"),
+            ("report.tar.zst", "report_1.tar.zst"),
+            ("report.tar.lz", "report_1.tar.lz"),
+            ("report.tar.lz4", "report_1.tar.lz4"),
+            ("report.tar.lzma", "report_1.tar.lzma"),
+            ("report.tar.z", "report_1.tar.z"),
+            ("report.tar.br", "report_1.tar.br"),
+            ("report.tgz", "report_1.tgz"),
+            ("report.tbz2", "report_1.tbz2"),
+            ("report.txz", "report_1.txz"),
+            ("report.tzst", "report_1.tzst"),
+        ],
+    )
+    def test_compound_archive_suffix_keeps_counter_before_suffix(
+        self,
+        name: str,
+        expected: str,
+    ):
+        """The ``_N`` counter lands before the whole archive suffix, not
+        inside it (``report.tar_1.gz`` is wrong)."""
+        seen = {name}
+        assert claim_unique_filename(name, seen) == expected
+        assert expected in seen
+
+    def test_plain_tar_suffix_keeps_original_dedupe_shape(self):
+        """A plain ``.tar`` (single suffix, not in the compound list) still
+        dedupes as ``report_1.tar``."""
+        seen = {"report.tar"}
+        assert claim_unique_filename("report.tar", seen) == "report_1.tar"
+        assert "report_1.tar" in seen
+
+    def test_compound_suffix_counter_escalation(self):
+        """A second collision re-enters the compound split, producing
+        ``report_2.tar.gz`` rather than mangling the suffix."""
+        seen = {"report.tar.gz", "report_1.tar.gz"}
+        assert claim_unique_filename("report.tar.gz", seen) == "report_2.tar.gz"
+        assert "report_2.tar.gz" in seen
+
+    def test_compound_suffix_collision_is_case_insensitive(self):
+        seen = {"Report.Tar.Gz"}
+        assert claim_unique_filename("report.tar.gz", seen) == "report_1.tar.gz"
+
+    def test_compound_suffix_max_length_stays_within_filename_limit(self):
+        # 250-byte stem + 7-byte ".tar.gz" = 257 bytes; dedupe must truncate
+        # the stem so the counter + suffix still fit in 255 bytes.
+        name = "a" * 250 + ".tar.gz"
+        seen = {name}
+        deduped = claim_unique_filename(name, seen)
+        assert deduped.endswith(".tar.gz")
+        assert len(deduped.encode("utf-8")) <= 255
 
 
 # ---------------------------------------------------------------------------

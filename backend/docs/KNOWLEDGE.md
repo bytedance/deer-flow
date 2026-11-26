@@ -51,6 +51,32 @@ may retain `search(query)` when it uses an operator-owned connection with a
 fixed resource visibility. User/tenant mappings and resource authorization
 remain provider responsibilities; DeerFlow does not infer tenants from client
 metadata or create a second ACL store.
+The optional `authenticated_user_id` field carries separate host authentication
+provenance and defaults to `None`. Gateway binds it only for verified sessions
+and PATs, never internal-service or auth-disabled synthetic identities. Generic
+retrieval tools and catalog routes read it from a dedicated task-local binding;
+client flags, runtime `user_id`, saved assistant configuration and storage owner
+restoration cannot create it. Child tasks, threads and ordinary isolated
+subagents launched from an authenticated execution inherit its proof; a
+lost/fresh context denies shared access. Durable batch items are launched from
+the Gateway's startup poller and do not inherit the submitting request's proof,
+even within the same process. Like scheduled-task and IM-channel runs, they
+cannot use authenticated shared retrieval merely by carrying an owner `user_id`.
+Trusted embedding hosts may use `bind_authenticated_user()` from
+`deerflow.runtime.user_context` only after authenticating the end user, and must
+bind `None` for non-user callers.
+The bound value must be exactly the same nonempty string that
+`resolve_runtime_user_id()` returns for the execution. LangGraph Server
+identities from `runtime.server_info.user.identity` or
+`configurable.langgraph_auth_user_id` take precedence over runtime context and
+are normalized with `make_safe_user_id()`. A trusted embedding host must bind
+that same resolved ID after authentication, rather than a raw identity such as
+an email address. Binding a different representation denies shared access;
+providers must not normalize the two values independently to bypass the mismatch.
+Providers opting into shared access must require a nonempty exact match with
+`context.user_id` and still enforce their connection/resource/Agent policy.
+The WeKnora extension's explicit `access_mode: authenticated` uses this field
+for dynamic-user shared retrieval; its default exact-user mode is unchanged.
 `agent_name` identifies the current executor: the selected assistant name,
 defaulting to `lead_agent`, or the executing subagent's configured name from
 its server runtime `agent_id`. It does not identify the parent assistant.
@@ -200,9 +226,13 @@ Inline shared references accept both the raw `#knowledge-source-ID` and the
 sanitized `#user-content-knowledge-source-ID`; the sanitizer's DOM-clobbering
 protection stays enabled. Missing or malformed references render inert labels.
 
-`format_result` budgets chunk text and source evidence together: a cited hit
-that cannot fit is omitted as a whole. Results display at most 100 hits, matching
-the bounded artifact readers. Only displayed excerpts enter artifacts.
+`format_result` budgets chunk text and source evidence together: a hit
+that cannot fit is omitted as a whole, and later fitting hits remain eligible.
+It examines only the first 100 input hits in provider order, including skipped
+hits. Per-chunk truncation precedes packing; the remaining total budget does
+not shorten a retained excerpt or change its source ID. Only displayed excerpts
+enter artifacts. Omission notices use leftover space rather than displacing
+complete evidence that fits.
 The global tool-output budget prunes evidence removed by truncation or
 externalization and replaces complete orphan citations with their labels.
 Subagents accumulate at most 100 validated sources across values frames before

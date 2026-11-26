@@ -95,7 +95,7 @@ class SummarizationConfig(BaseModel):
 
     summary_prompt: str | None = Field(
         default=None,
-        description="Custom prompt template for generating summaries. If not provided, uses the default LangChain prompt.",
+        description="Custom prompt template for generating summaries. Null selects DeerFlow's built-in prompt.",
     )
     skill_file_read_tool_names: list[str] = Field(
         default_factory=lambda: list(DEFAULT_SKILL_FILE_READ_TOOL_NAMES),

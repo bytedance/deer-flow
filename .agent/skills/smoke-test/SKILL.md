@@ -97,14 +97,14 @@ smoke-test/
 2. **Check frontend service** - Visit `http://localhost:2026` and verify that the page loads
 3. **Check API Gateway** - Verify the `http://localhost:2026/health` endpoint
 4. **Check LangGraph-compatible API** - Verify the `/api/langgraph/*` route exposed by Gateway
-5. **Frontend route smoke check** - Run `bash .agent/skills/smoke-test/scripts/frontend_check.sh` to verify key routes under `/workspace`. The script auto-detects whether authentication is enabled and, if so, registers / logs in a smoke-test user so the real pages are verified rather than the login redirect.
+5. **Frontend route smoke check** - Run `bash .agent/skills/smoke-test/scripts/frontend_check.sh` to verify key routes under `/workspace`. When authentication is enabled, first finish setup and supply credentials for an existing test account as described below.
 
 **Docker mode health check** (when using Docker):
 1. **Check container status** - Run `docker ps` and confirm that all containers are running
 2. **Check frontend service** - Visit `http://localhost:2026` and verify that the page loads
 3. **Check API Gateway** - Verify the `http://localhost:2026/health` endpoint
 4. **Check LangGraph-compatible API** - Verify the `/api/langgraph/*` route exposed by Gateway
-5. **Frontend route smoke check** - Run `bash .agent/skills/smoke-test/scripts/frontend_check.sh` to verify key routes under `/workspace`. The script auto-detects whether authentication is enabled and, if so, registers / logs in a smoke-test user so the real pages are verified rather than the login redirect.
+5. **Frontend route smoke check** - Run `bash .agent/skills/smoke-test/scripts/frontend_check.sh` to verify key routes under `/workspace`. When authentication is enabled, first finish setup and supply credentials for an existing test account as described below.
 
 ### Optional Functional Verification
 
@@ -136,7 +136,7 @@ smoke-test/
 The following warnings can appear during smoke testing and do not block a successful result:
 - Feishu/Lark SSL errors in Gateway logs (certificate verification failure) can be ignored if that channel is not enabled
 - Warnings in Gateway logs about missing methods in the custom checkpointer, such as `adelete_for_runs` or `aprune`, do not affect the core functionality
-- The `frontend_check.sh` script automatically handles authentication. When auth is enabled it registers / logs in a smoke-test user (`smoke-test@deerflow.dev` by default) to verify the real `/workspace/*` pages. The registration may produce a log entry from the auth provider, which is expected and harmless.
+- With authentication enabled, set `SMOKE_TEST_EMAIL` and `SMOKE_TEST_PASSWORD` for an existing test account with a local DeerFlow password and workspace access. The script uses local sign-in and removes its temporary cookie jar on exit. With authentication disabled, it checks the routes anonymously.
 
 ## Key Tools
 

@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 
@@ -41,6 +42,16 @@ class SubagentExecutionCapacity:
         self._lock = asyncio.Lock()
         self._running = 0
         self._waiters: deque[asyncio.Future[None]] = deque()
+
+    @property
+    def queue_timeout_seconds(self) -> int:
+        """The queue bound this controller applies to waiting executions.
+
+        Exposed so a caller that injects its own controller (the SDK runtime
+        does not install a process-wide one) can size its wait budget from the
+        capacity it actually waits on instead of the startup snapshot.
+        """
+        return self._config.queue_timeout_seconds
 
     def snapshot(self) -> SubagentCapacitySnapshot:
         # snapshot() is read from non-loop threads (notably
@@ -76,18 +87,22 @@ class SubagentExecutionCapacity:
                 timeout=self._config.queue_timeout_seconds,
             )
         except (TimeoutError, asyncio.CancelledError) as exc:
-            async with self._lock:
-                try:
-                    self._waiters.remove(waiter)
-                except ValueError:
-                    # A release transferred the slot just as the timeout fired.
-                    # If the future completed, this caller owns that transfer and
-                    # must release it before reporting the timeout.
-                    if waiter.done() and not waiter.cancelled():
-                        self._release_locked()
+            # Caller cancellation during timeout cleanup takes precedence over
+            # reporting a queue timeout, once waiter and slot ownership settle.
+            await self._run_cancellation_safe(self._remove_abandoned_waiter(waiter))
             if isinstance(exc, asyncio.CancelledError):
                 raise
             raise SubagentCapacityTimeout(f"Timed out after {self._config.queue_timeout_seconds}s waiting for a subagent execution slot") from exc
+
+    async def _remove_abandoned_waiter(self, waiter: asyncio.Future[None]) -> None:
+        async with self._lock:
+            try:
+                self._waiters.remove(waiter)
+            except ValueError:
+                # A release transferred the slot just as abandonment began.
+                # A completed, non-cancelled future owns the transferred slot.
+                if waiter.done() and not waiter.cancelled():
+                    self._release_locked()
 
     def _release_locked(self) -> None:
         while self._waiters:
@@ -107,22 +122,32 @@ class SubagentExecutionCapacity:
 
     async def _release_cancellation_safe(self) -> None:
         """Release an acquired slot before propagating repeated cancellation."""
-        release_task = asyncio.create_task(self._release())
+        await self._run_cancellation_safe(self._release())
+
+    @staticmethod
+    async def _run_cancellation_safe(operation: Coroutine[Any, Any, None]) -> None:
+        """Drain owned capacity bookkeeping before propagating cancellation.
+
+        The drain waits for the capacity lock without a separate deadline.
+        Further cancellations cannot interrupt it or replace the first one
+        received during the drain.
+        """
+        cleanup_task = asyncio.create_task(operation)
         cancellation: asyncio.CancelledError | None = None
-        while not release_task.done():
+        while not cleanup_task.done():
             try:
-                await asyncio.shield(release_task)
+                await asyncio.shield(cleanup_task)
             except asyncio.CancelledError as exc:
                 if cancellation is None:
                     cancellation = exc
 
         if cancellation is not None:
             try:
-                release_task.result()
+                cleanup_task.result()
             except Exception as exc:
                 raise cancellation from exc
             raise cancellation
-        release_task.result()
+        cleanup_task.result()
 
     @asynccontextmanager
     async def slot(self, *, wait=True) -> AsyncIterator[None]:
@@ -183,3 +208,14 @@ def configured_subagent_max_running() -> int:
     """Return the startup snapshot without requiring an event loop."""
     with _state_lock:
         return _config.max_running
+
+
+def configured_subagent_queue_timeout_seconds() -> int:
+    """Return the queue bound without requiring an event loop.
+
+    Pollers live on the parent loop and must size their wait budget for the
+    queue stage, but reading it through ``get_subagent_execution_capacity()``
+    would bind or rebind the controller to the parent loop.
+    """
+    with _state_lock:
+        return _config.queue_timeout_seconds

@@ -759,6 +759,33 @@ def format_memory_for_injection(
     return result
 
 
+def _content_to_text(content: Any) -> str:
+    """Normalize LangChain message content for the memory prompt.
+
+    Mirrors ``deerflow/utils/messages.py:message_content_to_text``, the mem0
+    ``message_filtering`` copy, and ``message_processing.extract_message_text``:
+    a content-less message is empty rather than the truthy literal ``"None"``,
+    and a block list without text blocks contributes no text. ``str(content)``
+    on such a list would embed its Python repr in the extraction prompt,
+    including a ``data:`` URL's base64 payload for an image-only turn.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_parts = []
+        for p in content:
+            if isinstance(p, str):
+                text_parts.append(p)
+            elif isinstance(p, dict):
+                text_val = p.get("text")
+                if isinstance(text_val, str):
+                    text_parts.append(text_val)
+        return " ".join(text_parts)
+    return str(content)
+
+
 def format_conversation_for_update(messages: list[Any]) -> str:
     """Format conversation messages for memory update prompt.
 
@@ -771,27 +798,17 @@ def format_conversation_for_update(messages: list[Any]) -> str:
     lines = []
     for msg in messages:
         role = getattr(msg, "type", "unknown")
-        content = getattr(msg, "content", str(msg))
-
-        # Handle content that might be a list (multimodal)
-        if isinstance(content, list):
-            text_parts = []
-            for p in content:
-                if isinstance(p, str):
-                    text_parts.append(p)
-                elif isinstance(p, dict):
-                    text_val = p.get("text")
-                    if isinstance(text_val, str):
-                        text_parts.append(text_val)
-            content = " ".join(text_parts) if text_parts else str(content)
+        content = _content_to_text(getattr(msg, "content", str(msg)))
 
         # Strip the upload-context tag from human messages to avoid persisting
         # ephemeral file path info into long-term memory.  Skip the turn entirely
-        # when nothing remains after stripping (upload-only message).
+        # when nothing remains after stripping (upload-only message). Turns with
+        # no text at all (content-less AI message, image-only blocks) are skipped
+        # the same way instead of rendering a bare "Assistant: " line.
         if role == "human":
-            content = re.sub(r"<current_uploads>[\s\S]*?</current_uploads>\n*", "", str(content)).strip()
-            if not content:
-                continue
+            content = re.sub(r"<current_uploads>[\s\S]*?</current_uploads>\n*", "", content).strip()
+        if not content.strip():
+            continue
 
         # Truncate very long messages: keep the head (topic / opening) and the
         # tail (conclusion / "remember X" instruction), dropping the middle.

@@ -16,16 +16,28 @@ Add tools to `config.yaml`:
 ```yaml
 tools:
   # Web search
-  - use: deerflow.community.ddg_search.tools:web_search_tool
+  - name: web_search
+    group: web
+    use: deerflow.community.ddg_search.tools:web_search_tool
 
   # Web content fetching
-  - use: deerflow.community.jina_ai.tools:web_fetch_tool
+  - name: web_fetch
+    group: web
+    use: deerflow.community.jina_ai.tools:web_fetch_tool
 
   # Sandbox file operations
-  - use: deerflow.sandbox.tools:ls_tool
-  - use: deerflow.sandbox.tools:read_file_tool
-  - use: deerflow.sandbox.tools:write_file_tool
-  - use: deerflow.sandbox.tools:bash_tool
+  - name: ls
+    group: file:read
+    use: deerflow.sandbox.tools:ls_tool
+  - name: read_file
+    group: file:read
+    use: deerflow.sandbox.tools:read_file_tool
+  - name: write_file
+    group: file:write
+    use: deerflow.sandbox.tools:write_file_tool
+  - name: bash
+    group: bash
+    use: deerflow.sandbox.tools:bash_tool
 ```
 
 ## Enabling skills

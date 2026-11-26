@@ -89,7 +89,7 @@ for (const width of [1280, 390]) {
     await page
       .getByPlaceholder(/how can i assist you/i)
       .fill("Find the leave policy");
-    await page.getByRole("button", { name: "Submit" }).click();
+    await page.getByRole("button", { name: "Send", exact: true }).click();
     await expect.poll(() => submitted).toBeDefined();
     expect(submitted).toMatchObject({
       assistant_id: "researcher",
@@ -116,7 +116,7 @@ for (const width of [1280, 390]) {
     await page
       .getByPlaceholder(/how can i assist you/i)
       .fill("Do not search knowledge");
-    await page.getByRole("button", { name: "Submit" }).click();
+    await page.getByRole("button", { name: "Send", exact: true }).click();
     await expect.poll(() => submitted).toBeDefined();
     expect(submitted).toMatchObject({
       input: {

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_progress_middleware import (
@@ -45,7 +45,7 @@ def _meta_kwargs(
     error_type: str | None = None,
     recoverable_by_model: bool = True,
     recommended_next_action: str = "continue",
-    source: str = "content_analysis",
+    source: str = "tool_return",
 ) -> dict[str, object]:
     return {
         TOOL_META_KEY: {
@@ -211,6 +211,23 @@ def test_normal_call_no_hint_phase_active():
     assert mw._phase_states["t1"]["web_search"].consecutive_problems == 0
 
 
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_provider_exit_code_metadata_keeps_progress_tracking(exit_code):
+    mw = _make_mw()
+    request = _make_tool_request(tool_name="bash")
+    status = "error" if exit_code else "success"
+    metadata = _meta_kwargs(status=status, error_type="unknown" if exit_code else None)
+    metadata[TOOL_META_KEY]["exit_code"] = exit_code
+    message = _make_tool_message(tool_name="bash", meta_kwargs=metadata)
+    message.status = status
+
+    assert mw.wrap_tool_call(request, lambda _: message) is message
+
+    state = mw._phase_states["t1"]["bash"]
+    assert state.phase == "active"
+    assert state.consecutive_problems == (1 if exit_code else 0)
+
+
 # ---------------------------------------------------------------------------
 # Scenario 2: consecutive no_results → hint injected, phase=warned
 
@@ -316,13 +333,20 @@ def test_recoverable_errors_stay_warned_indefinitely():
     assert state.consecutive_problems == 10
 
 
-def test_recoverable_error_re_injects_hint_past_escalation():
+@pytest.mark.parametrize(
+    ("error_type", "action", "hint_text"),
+    [
+        ("no_results", "rewrite_query", "rephrasing your search"),
+        ("capacity", "retry_later", "try again later"),
+    ],
+)
+def test_recoverable_error_re_injects_hint_past_escalation(error_type, action, hint_text):
     # After crossing threshold+escalation for a recoverable error, each additional
     # problem call should still queue a hint.
     mw = _make_mw(stagnation_threshold=2, warn_escalation_count=1, inject_assessment=True)
     rt = _make_runtime()
     req = _make_tool_request(runtime=rt)
-    error_msg = _make_error_message()
+    error_msg = _make_error_message(error_type=error_type, recommended_next_action=action)
 
     def handler(_r):
         return error_msg
@@ -336,7 +360,7 @@ def test_recoverable_error_re_injects_hint_past_escalation():
     # not just the initial WARNED hint at call 2.
     hints = mw._drain_pending(rt)
     assert len(hints) >= 2
-    assert all("PROGRESS HINT" in h for h in hints)
+    assert all("PROGRESS HINT" in hint and hint_text in hint for hint in hints)
 
 
 # ---------------------------------------------------------------------------
@@ -1345,7 +1369,9 @@ async def test_awrap_tool_call_malformed_meta_passthrough():
     assert mw._phase_states.get("t1", {}).get("web_search") is None
 
 
-def test_hint_survives_a_failed_sync_model_call():
+@pytest.mark.parametrize("failure", ["provider-error", "empty-response"])
+def test_hint_survives_a_failed_sync_model_call(failure):
+    """A call that raises or returns an empty stop response is retried by LLMErrorHandlingMiddleware through this wrap; the hint must still be sent."""
     mw = _make_mw(stagnation_threshold=2, warn_escalation_count=5)
     rt = _make_runtime()
     req = _make_tool_request(runtime=rt)
@@ -1359,19 +1385,27 @@ def test_hint_survives_a_failed_sync_model_call():
     def flaky_handler(r):
         sent.append(r.messages)
         if len(sent) == 1:
+            if failure == "empty-response":
+                return AIMessage(content="", response_metadata={"finish_reason": "stop"})
             raise RuntimeError("503 Service Unavailable")
-        return MagicMock()
+        return AIMessage(content="answer")
 
-    with pytest.raises(RuntimeError):
+    if failure == "empty-response":
         mw.wrap_model_call(model_req, flaky_handler)
+    else:
+        with pytest.raises(RuntimeError):
+            mw.wrap_model_call(model_req, flaky_handler)
+    mw.wrap_model_call(model_req, flaky_handler)
     mw.wrap_model_call(model_req, flaky_handler)
 
-    assert [any(isinstance(m, HumanMessage) and "PROGRESS HINT" in m.content for m in messages) for messages in sent] == [True, True]
+    # The answered call spends the hint; a later call goes out without it.
+    assert [any(isinstance(m, HumanMessage) and "PROGRESS HINT" in m.content for m in messages) for messages in sent] == [True, True, False]
 
 
 @pytest.mark.anyio
-async def test_hint_survives_a_failed_model_call():
-    """A call that raises is retried by LLMErrorHandlingMiddleware through this wrap; the hint must still be sent."""
+@pytest.mark.parametrize("failure", ["provider-error", "empty-response"])
+async def test_hint_survives_a_failed_model_call(failure):
+    """A call that raises or returns an empty stop response is retried by LLMErrorHandlingMiddleware through this wrap; the hint must still be sent."""
     mw = _make_mw(stagnation_threshold=2, warn_escalation_count=5)
     rt = _make_runtime()
     req = _make_tool_request(runtime=rt)
@@ -1385,14 +1419,21 @@ async def test_hint_survives_a_failed_model_call():
     async def flaky_handler(r):
         sent.append(r.messages)
         if len(sent) == 1:
+            if failure == "empty-response":
+                return AIMessage(content="", response_metadata={"finish_reason": "stop"})
             raise RuntimeError("503 Service Unavailable")
-        return MagicMock()
+        return AIMessage(content="answer")
 
-    with pytest.raises(RuntimeError):
+    if failure == "empty-response":
         await mw.awrap_model_call(model_req, flaky_handler)
+    else:
+        with pytest.raises(RuntimeError):
+            await mw.awrap_model_call(model_req, flaky_handler)
+    await mw.awrap_model_call(model_req, flaky_handler)
     await mw.awrap_model_call(model_req, flaky_handler)
 
-    assert [any(isinstance(m, HumanMessage) and "PROGRESS HINT" in m.content for m in messages) for messages in sent] == [True, True]
+    # The answered call spends the hint; a later call goes out without it.
+    assert [any(isinstance(m, HumanMessage) and "PROGRESS HINT" in m.content for m in messages) for messages in sent] == [True, True, False]
 
 
 @pytest.mark.anyio
@@ -1874,7 +1915,7 @@ def test_tool_progress_and_loop_detection_coexist_without_interfering():
 
     def capture_handler(r):
         captured.extend(r.messages)
-        return MagicMock()
+        return AIMessage(content="answer")
 
     tp_mw.wrap_model_call(model_req, capture_handler)
     injected = [m for m in captured if isinstance(m, HumanMessage)]

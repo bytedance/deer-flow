@@ -4,7 +4,53 @@ import ipaddress
 
 import pytest
 
-from deerflow.community.url_safety import is_blocked_address, validate_delegated_backend_url, validate_public_http_url
+from deerflow.community.url_safety import is_blocked_address, validate_delegated_backend_url, validate_hosted_fetch_url, validate_public_http_url
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "relative/path",
+        "ftp://example.com/report",
+        "https:///report",
+        "https://example.com:invalid/report",
+        "https://example.com:65536/report",
+        "https://example.com:invalid/catalog?tag[]=api",
+        "https://example.com/catalog[old]?tag[]=api",
+        "https://example.com/catalog?tag[]=bad%zz",
+        "https://example.com/catalog#details?tag[]=api",
+        "https://example.com/report\n",
+        "https://example.com/one\x7ftwo",
+        "https://reader@example.com/report",
+        "https://reader:password@example.com/report",
+        "http://localhost/",
+        "http://app.localhost./",
+        "http://metadata.google.internal/",
+        "http://192.168.1.1/",
+        "http://[::1]/",
+    ],
+)
+def test_hosted_fetch_rejects_unsupported_targets(url):
+    error = validate_hosted_fetch_url(url)
+
+    assert error is not None
+    assert url not in error
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://docs.example/report%2F2026?sig=Ab%2B0%3D",
+        "https://docs.example/catalog?filter[tag][]=api&filter[tag][]=guides#details",
+        "http://bücher.example:8080/katalog",
+        "https://8.8.8.8/",
+        "https://[2606:4700:4700::1111]/?tag[]=api",
+    ],
+)
+def test_hosted_fetch_accepts_public_targets_without_dns(monkeypatch, url):
+    monkeypatch.setattr("socket.getaddrinfo", lambda *args: pytest.fail("hosted reader target was resolved locally"))
+
+    assert validate_hosted_fetch_url(url) is None
 
 
 @pytest.mark.parametrize(
@@ -89,3 +135,87 @@ def test_delegated_backend_allows_private_when_isolation_confirmed():
 
 def test_delegated_backend_rejects_non_http_scheme():
     assert validate_delegated_backend_url("ftp://example.com") == "Error: Only http:// and https:// backend URLs are supported"
+
+
+def _must_not_resolve(_host):
+    raise AssertionError("a malformed URL must be rejected before DNS resolution")
+
+
+# A raw bracket in the userinfo slot is malformed per RFC 3986. urlparse()
+# rejects some of these forms itself; the others are caught by the userinfo
+# check in _parse_url(), which mirrors the SkillScan host parser (#8017).
+# One list drives both validators so a newly discovered malformed shape is
+# covered by both at once.
+_MALFORMED_URLS = [
+    "http://[::1/api",  # unmatched IPv6 bracket: urlparse() raises ValueError
+    "http://[::1]@Example.COM/api",  # bracketed userinfo: urlparse() raises on some versions
+    "http://[]@example.com/api",  # empty bracketed host in userinfo: urlparse() raises
+    "http://[@[::1]/",  # raw "[" in userinfo: urlparse() succeeds, userinfo check fires
+    "http://u]@[::1]/",  # raw "]" in userinfo: exercises the closing-bracket half
+    "http://a@b[c]@[2606:4700:4700::1111]/",  # the last "@" separates userinfo from host
+]
+
+
+@pytest.mark.parametrize("url", _MALFORMED_URLS)
+def test_public_validator_returns_error_for_malformed_url(url):
+    error = validate_public_http_url(url, resolver=_must_not_resolve)
+
+    assert error == "Error: URL could not be parsed"
+
+
+@pytest.mark.parametrize("url", _MALFORMED_URLS)
+def test_delegated_backend_validator_returns_error_for_malformed_url(url):
+    error = validate_delegated_backend_url(url, resolver=_must_not_resolve)
+
+    assert error == "Error: Backend URL could not be parsed"
+
+
+@pytest.mark.parametrize("value", [b"http://example.com", None, 123, ["http://example.com"]])
+def test_public_validator_returns_error_for_non_string_input(value):
+    # The signature says str, but these guards must never raise: a non-string
+    # value is malformed input, not an exception. Mirrors the isinstance guard
+    # in safe_public_result_url().
+    error = validate_public_http_url(value, resolver=_must_not_resolve)
+
+    assert error == "Error: URL could not be parsed"
+
+
+@pytest.mark.parametrize("value", [b"http://example.com", None, 123, ["http://example.com"]])
+def test_delegated_backend_validator_returns_error_for_non_string_input(value):
+    error = validate_delegated_backend_url(value, resolver=_must_not_resolve)
+
+    assert error == "Error: Backend URL could not be parsed"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        # A plain userinfo must still pass through to address classification.
+        ("https://user:pass@[2606:4700:4700::1111]/", None),
+        # ...and must not hide a private host.
+        ("http://user@[::1]/", "Error: Refusing to fetch a private, loopback, or metadata address"),
+    ],
+)
+def test_public_validator_keeps_legitimate_userinfo(url, expected):
+    assert validate_public_http_url(url, resolver=_must_not_resolve) == expected
+
+
+def test_delegated_backend_validator_keeps_legitimate_userinfo():
+    assert validate_delegated_backend_url("https://user:pass@[2606:4700:4700::1111]/", resolver=_must_not_resolve) is None
+
+    error = validate_delegated_backend_url("http://user@[::1]/", resolver=_must_not_resolve)
+
+    assert error is not None
+    assert "network_isolation_confirmed" in error
+
+
+@pytest.mark.parametrize("url", ["http://[::1/api", "http://[@[::1]/"])
+def test_public_validator_rejects_malformed_url_before_bypassing_private_checks(url):
+    # Parsing must happen before the allow_private_addresses escape hatch: a
+    # malformed URL is not a usable URL at all.
+    assert validate_public_http_url(url, allow_private_addresses=True) == "Error: URL could not be parsed"
+
+
+@pytest.mark.parametrize("url", ["http://[::1/api", "http://[@[::1]/"])
+def test_delegated_backend_validator_rejects_malformed_url_before_isolation_bypass(url):
+    assert validate_delegated_backend_url(url, network_isolation_confirmed=True) == "Error: Backend URL could not be parsed"

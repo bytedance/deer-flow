@@ -116,8 +116,10 @@ def test_strip_think_blocks_handles_many_unclosed_tags_in_bounded_time(tag: str,
 # ---------------------------------------------------------------------------
 
 
-def test_strip_markdown_code_fence_unwraps_language_fence() -> None:
-    assert strip_markdown_code_fence('```json\n{"a": 1}\n```') == '{"a": 1}'
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n", "\r"])
+def test_strip_markdown_code_fence_unwraps_language_fence(line_ending: str) -> None:
+    payload = '{"a": 1, "text": "first\u0085second\u2028third\u2029last"}'
+    assert strip_markdown_code_fence(f"```json{line_ending}{payload}{line_ending}```") == payload
 
 
 def test_strip_markdown_code_fence_unwraps_bare_fence() -> None:
@@ -162,7 +164,9 @@ def test_strip_markdown_code_fence_leaves_unterminated_fence_unchanged() -> None
     ],
     ids=["separate-blocks", "trailing-prose", "short-close", "closing-info", "invalid-opening-info", "indented-early-close"],
 )
-def test_strip_markdown_code_fence_preserves_non_wrapping_fences(text: str) -> None:
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n", "\r"])
+def test_strip_markdown_code_fence_preserves_non_wrapping_fences(text: str, line_ending: str) -> None:
+    text = text.replace("\n", line_ending)
     assert strip_markdown_code_fence(text) == text
 
 
@@ -176,7 +180,10 @@ def test_strip_markdown_code_fence_preserves_non_wrapping_fences(text: str) -> N
     ],
     ids=["nested-shorter-fence", "longer-close", "indented-close", "fence-like-body"],
 )
-def test_strip_markdown_code_fence_unwraps_matching_outer_fence(text: str, expected: str) -> None:
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n", "\r"])
+def test_strip_markdown_code_fence_unwraps_matching_outer_fence(text: str, expected: str, line_ending: str) -> None:
+    text = text.replace("\n", line_ending)
+    expected = expected.replace("\n", line_ending)
     assert strip_markdown_code_fence(text) == expected
 
 

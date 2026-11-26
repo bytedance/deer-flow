@@ -2,10 +2,12 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 
 from firecrawl import AsyncFirecrawlApp
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
 from deerflow.community.url_safety import safe_public_result_url, validate_delegated_backend_url, validate_public_http_url
 from deerflow.config import get_app_config
@@ -83,10 +85,12 @@ def _get_firecrawl_client(
     """
     if cfg is None:
         cfg = _get_tool_config_extra(tool_name)
-    api_key = cfg.get("api_key")
+    api_key = resolve_api_key(cfg.get("api_key")) or resolve_api_key(os.getenv("FIRECRAWL_API_KEY"))
     if api_url is None:
         api_url = cfg.get("base_url")
-    kwargs = {"api_key": api_key}
+    # The SDK re-reads FIRECRAWL_API_KEY unstripped when api_key is None; "" makes
+    # a blank value act as a missing key.
+    kwargs = {"api_key": api_key or ""}
     if api_url:
         kwargs["api_url"] = api_url
     return AsyncFirecrawlApp(**kwargs)  # type: ignore[arg-type]

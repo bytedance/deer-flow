@@ -22,6 +22,9 @@ sandbox:
   # request_timeout: 30
   # ready_timeout: 30
   # use_server_proxy: false
+  # secure_access: false
+  # resource: {cpu: "2", memory: 4Gi}          # limits; default 1 CPU / 2Gi
+  # resource_requests: {cpu: "1", memory: 2Gi} # requests; default from the server
   # sandbox_timeout: 14400  # remote lifetime; 0 means explicit cleanup only
   # bash_command_timeout: 600  # default command timeout
   # replicas: 3             # active + warm sandboxes per gateway process
@@ -34,6 +37,30 @@ sandbox:
 `OPEN_SANDBOX_DOMAIN` are set. `use_server_proxy` is useful when DeerFlow can
 reach the OpenSandbox management service but cannot directly reach sandbox
 `execd` endpoints.
+
+Use unquoted `true` or `false` for `use_server_proxy` and `secure_access`.
+Omitted and `null` values default to `false`. Quoted booleans and other
+non-boolean values cause a provider startup error.
+
+`secure_access: true` creates each sandbox with OpenSandbox
+[Secure Access](https://github.com/opensandbox-group/OpenSandbox/blob/main/docs/guides/secure-access.md):
+the ingress gateway, and the server proxy, then reject endpoint requests that
+lack the sandbox's access token. The server issues the token with the endpoint
+and the SDK attaches it to every execd and file request, so no token setting is
+needed in DeerFlow. The server must run the Kubernetes runtime with
+`[ingress] mode = "gateway"`; the Docker runtime and other ingress modes reject
+the create with HTTP 400.
+
+`resource` sets each sandbox's limits and `resource_requests` its requests,
+as maps of resource names to Kubernetes quantities. Without `resource`, the
+SDK default of 1 CPU and 2Gi applies to every sandbox. Without
+`resource_requests`, the server decides the requests. Only Kubernetes runtimes
+apply `resource_requests`; Docker ignores them. Kubernetes uses the limit for
+any request you omit, and a request must not exceed its limit, including the
+SDK default limits when `resource` is unset (a request of 2 CPU without
+`resource` fails at sandbox creation). Positive numbers are passed as strings;
+blank names or quantities, zero, negative or non-finite numbers, and other
+value types cause a provider startup error.
 
 Values in `sandbox.environment` that start with `$` are resolved from the
 Gateway process environment once, when `config.yaml` loads; a missing variable
@@ -80,6 +107,25 @@ count against the file limit. Each release revisits retained outputs, including
 unchanged files; equal file size does not prove equal content. Large accumulated
 output directories may reach the pass limits before all files are mirrored.
 
+Skill synchronization is required before a new or reclaimed sandbox is exposed
+to the run. OpenSandbox stages the enabled skill view under `skills.container_path`;
+an explicit Agent policy replaces the four managed directories with its own view,
+including an empty view for an empty list. The provider refuses symlinks in the
+skills root or its ancestors. Within a package it preserves relative links to
+files and directories in the same package, and skips unsafe links and
+non-portable path components with a warning.
+
+A pass uploads at most 2,000 files and links, 512 MiB of file content, and
+100 MiB per file. Its 120-second deadline is cooperative: it is checked
+between operations, and an in-flight SDK file call is bounded separately by
+`request_timeout`. The remote image needs `mkdir`, `rm`, `mv`, `rmdir`, and
+`ln -sT` for staging and publication. Unlike output mirroring, a skill sync
+failure fails the acquire or turn. A failed upload before publication leaves
+an existing sandbox unavailable to tools in the same scope's warm pool, where
+normal expiry and eviction still apply. A retry clears the abandoned staging
+directory before uploading again. Failure to set up or publish the staged tree
+discards the sandbox rather than making an uncertain skill view available.
+
 Create returns only after the SDK readiness check and DeerFlow's
 `/mnt/user-data/{workspace,uploads,outputs}` bootstrap succeed. A bootstrap
 failure explicitly destroys the newly created remote sandbox.
@@ -104,7 +150,7 @@ The full DeerFlow surface is implemented:
   signal status need additional deadline information before it can safely be
   normalized to 124.
 - Text and binary file operations use OpenSandbox's native filesystem API.
-  Append is serialized as a read-modify-write because SDK 0.1.x has no append
+  Append is serialized as a read-modify-write because the SDK has no append
   primitive.
 - `list_dir`, `glob`, and `grep` use portable `find`/`grep` commands and the
   shared DeerFlow result parsers.

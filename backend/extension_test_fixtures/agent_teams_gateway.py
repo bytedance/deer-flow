@@ -1,4 +1,4 @@
-"""Loopback-only team UI preview: real plugin routes, SQLite and graph checkpoints.
+"""Loopback-only team UI preview with real routes, storage and graph checkpoints.
 
 Identity and AgentRuns admission are synthetic. This is a browser fixture, not
 production authentication or a substitute for Gateway run-control tests.
@@ -130,10 +130,11 @@ class PreviewRuns:
         return Bound()
 
 
-def create_app(directory):
+def create_app(directory, *, storage_url=None, storage_schema="agent_teams"):
     os.environ["DEER_FLOW_HOME"] = str(directory)
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-agent-teams"))
-    extensions, diagnostics = load_extensions([ExtensionSpec(use="deerflow_extension_agent_teams:install", config={"enabled": True, "storage_path": str(Path(directory) / "teams.sqlite")}, required=True)])
+    storage = {"storage_url": storage_url, "storage_schema": storage_schema} if storage_url else {"storage_path": str(Path(directory) / "teams.sqlite")}
+    extensions, diagnostics = load_extensions([ExtensionSpec(use="deerflow_extension_agent_teams:install", config={"enabled": True, **storage}, required=True)])
     assert not diagnostics
     ((_, plugin),) = extensions.plugins
     service = plugin.backend[0].handler.__self__

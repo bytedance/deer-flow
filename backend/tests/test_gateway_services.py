@@ -243,6 +243,40 @@ def test_external_goal_outcome_is_rejected(boundary):
     assert error.value.detail == "External goal_outcome state is not allowed"
 
 
+@pytest.mark.parametrize("boundary", ["run", "state"])
+def test_external_loop_cap_is_rejected(boundary):
+    """A caller copy of loop detection's cap record could lift a cap or block a tool."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import SERVER_OWNED_STATE_CHANNELS, normalize_input, strip_server_owned_state_metadata
+    from deerflow.agents.middlewares.loop_detection_middleware import LOOP_CAP_STATE_KEY
+
+    assert LOOP_CAP_STATE_KEY in SERVER_OWNED_STATE_CHANNELS
+    transform = normalize_input if boundary == "run" else strip_server_owned_state_metadata
+    with pytest.raises(HTTPException) as error:
+        transform({LOOP_CAP_STATE_KEY: None})
+
+    assert error.value.status_code == 400
+    assert error.value.detail == "External loop_cap state is not allowed"
+
+
+@pytest.mark.parametrize("boundary", ["run", "state"])
+@pytest.mark.parametrize("value", ["share", None])
+def test_external_imported_history_channel_is_rejected(boundary, value):
+    """Only share import sets it; a caller could otherwise clear a copy's provenance or forge it."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input, strip_server_owned_state_metadata
+    from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
+
+    transform = normalize_input if boundary == "run" else strip_server_owned_state_metadata
+    with pytest.raises(HTTPException) as error:
+        transform({IMPORTED_HISTORY_CHANNEL: value})
+
+    assert error.value.status_code == 400
+    assert error.value.detail == "External imported_history state is not allowed"
+
+
 @pytest.mark.parametrize("mode", ["full", "delta"])
 def test_external_run_goal_clears_the_previous_goal_outcome(mode):
     """A caller goal replaces the goal, so the record of the earlier met goal must go."""
@@ -379,6 +413,54 @@ def test_canonical_run_record_input_uses_admitted_message_snapshot():
 
     assert stored is not None
     assert stored["messages"][0]["additional_kwargs"]["knowledge_scope"]["dataset_ids"] == ["dataset-1"]
+
+
+def test_canonical_run_record_input_mirrors_normalized_goal_and_todos():
+    from app.gateway.services import _canonical_run_record_input, normalize_input
+
+    raw = {
+        "goal": {
+            "objective": "audit objective",
+            "additional_kwargs": {
+                "original_user_content": "forged",
+                "untrusted_input": False,
+                "title": "kept",
+            },
+            "artifact": {"knowledge_sources": [{"id": "forged"}], "label": "kept"},
+        },
+        "todos": [
+            {
+                "content": "audit todo",
+                "status": "pending",
+                "additional_kwargs": {
+                    "original_user_content": "forged",
+                    "untrusted_input": False,
+                    "title": "kept",
+                },
+                "artifact": {"knowledge_sources": [{"id": "forged"}], "label": "kept"},
+            }
+        ],
+        "other": "kept",
+    }
+    admitted = normalize_input(raw, trusted_internal=False)
+
+    stored = _canonical_run_record_input(raw, admitted)
+    assert stored is not None
+    assert stored["other"] == "kept"
+    assert stored["goal"] == {
+        "objective": "audit objective",
+        "additional_kwargs": {"title": "kept"},
+        "artifact": {"label": "kept"},
+    }
+    assert stored["goal_outcome"] is None
+    assert stored["todos"] == [
+        {
+            "content": "audit todo",
+            "status": "pending",
+            "additional_kwargs": {"title": "kept"},
+            "artifact": {"label": "kept"},
+        }
+    ]
 
 
 @pytest.mark.parametrize("idempotency_key", [None, "retry-key"])
@@ -724,6 +806,73 @@ def test_normalize_input_preserves_trusted_internal_delegation_verdict():
     assert result["delegations"][0]["receipt_verdict"] == forged["receipt_verdict"]
 
 
+@pytest.mark.parametrize(
+    "delegations",
+    [
+        "oops",
+        {"__overwrite__": []},
+        ["oops"],
+        [{"description": "write report", "subagent_type": "general", "status": "completed"}],
+        [{"id": "call-1", "subagent_type": "general", "status": "completed"}],
+        [{"id": "call-1", "description": "write report", "status": "completed"}],
+        [{"id": "", "description": "write report", "subagent_type": "general", "status": "completed"}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": 3}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "steering"}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "completed", "run_id": ["unhashable"]}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "completed", "result_brief": 3}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "completed", "stop_reason": "nope"}],
+    ],
+    ids=[
+        "non-list-string",
+        "overwrite-marker",
+        "non-object-entry",
+        "missing-id",
+        "missing-description",
+        "missing-subagent-type",
+        "empty-id",
+        "non-string-status",
+        "unknown-status",
+        "unhashable-run-id",
+        "non-string-result-brief",
+        "unknown-stop-reason",
+    ],
+)
+def test_external_delegations_rejected_at_both_boundaries(delegations):
+    """The ledger reducer keys on ``id`` and indexes ``status``: a value it cannot
+    read fails the state merge (or is persisted by the thread-state route and
+    fails every later ledger write), so both caller-writable boundaries must
+    answer 400 instead of passing it through."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input, strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as run_error:
+        normalize_input({"delegations": delegations})
+    assert run_error.value.status_code == 400
+
+    with pytest.raises(HTTPException) as state_error:
+        strip_server_owned_state_metadata({"delegations": delegations})
+    assert state_error.value.status_code == 400
+
+
+def test_external_delegations_accept_the_runtime_shapes():
+    from app.gateway.services import normalize_input, strip_server_owned_state_metadata
+
+    entry = {
+        "id": "call-1",
+        "description": "write report",
+        "subagent_type": "general",
+        "status": "in_progress",
+        "created_at": "1970-01-01T00:00:00+00:00",
+        "run_id": "run-1",
+        "result_brief": "partial",
+        "stop_reason": "token_capped",
+    }
+
+    assert normalize_input({"delegations": [entry]})["delegations"] == [entry]
+    assert strip_server_owned_state_metadata({"delegations": [entry]}) == {"delegations": [entry]}
+
+
 def test_normalize_input_preserves_trusted_internal_original_user_content():
     from app.gateway.services import normalize_input
     from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
@@ -811,6 +960,284 @@ def test_normalize_input_rejects_malformed_message_with_400():
         normalize_input({"messages": [{"role": "human", "content": "ok"}, {"oops": "no role here"}]})
     assert excinfo.value.status_code == 400
     assert "input.messages[1]" in excinfo.value.detail
+
+
+@pytest.mark.parametrize("channel", ["artifacts", "tool_artifact_processed"])
+@pytest.mark.parametrize(
+    "value",
+    ["oops", [["nested"]], ["ok", 3], {"type": "__overwrite__", "value": ["ok"]}],
+    ids=["non-list", "unhashable-entry", "non-string-entry", "overwrite-shaped"],
+)
+def test_normalize_input_rejects_unusable_artifact_state_with_400(channel, value):
+    """A value ``merge_artifacts`` cannot concatenate must be a 400 here.
+
+    The thread-state route persists reducer values with ``Overwrite``, so a
+    non-list shape would be stored before any reducer sees it and the next
+    artifact-producing run would fail on ``existing + new``.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({channel: value})
+
+    assert excinfo.value.status_code == 400
+    assert f"input.{channel}" in excinfo.value.detail
+
+
+@pytest.mark.parametrize("channel", ["artifacts", "tool_artifact_processed"])
+def test_normalize_input_keeps_usable_artifact_lists(channel):
+    from app.gateway.services import normalize_input
+
+    assert normalize_input({channel: ["out/report.md", "out/data.csv"]})[channel] == ["out/report.md", "out/data.csv"]
+
+
+@pytest.mark.parametrize("channel", ["artifacts", "tool_artifact_processed"])
+def test_state_values_reject_unusable_artifact_state_with_400(channel):
+    """The thread-state update route shares the artifact-list boundary."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({channel: "oops"})
+
+    assert excinfo.value.status_code == 400
+    assert f"values.{channel}" in excinfo.value.detail
+
+
+@pytest.mark.parametrize(
+    "tool_artifacts",
+    [
+        "oops",
+        ["oops"],
+        [{"display_name": "report.md"}],
+        [{"handle": 3}],
+        [{"handle": ["h"]}],
+        {"type": "__overwrite__", "value": []},
+    ],
+    ids=["non-list", "non-object-entry", "missing-handle", "non-string-handle", "unhashable-handle", "overwrite-shaped"],
+)
+def test_normalize_input_rejects_unusable_tool_artifacts_with_400(tool_artifacts):
+    """An entry the registry reducer cannot key must be a 400 here.
+
+    ``merge_tool_artifacts`` keys each entry by ``handle``; a missing or
+    unhashable handle raised while the state update merged, and the state route
+    persists reducer values with ``Overwrite``, so the thread stayed broken for
+    every later artifact capture.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"tool_artifacts": tool_artifacts})
+
+    assert excinfo.value.status_code == 400
+    assert "input.tool_artifacts" in excinfo.value.detail
+
+
+def test_normalize_input_keeps_usable_tool_artifacts():
+    from app.gateway.services import normalize_input
+
+    entry = {"handle": "art_00000001", "display_name": "report.md", "artifact_type": "file"}
+
+    assert normalize_input({"tool_artifacts": [entry]})["tool_artifacts"] == [entry]
+
+
+def test_state_values_reject_unusable_tool_artifacts_with_400():
+    """The thread-state update route shares the artifact-registry boundary."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({"tool_artifacts": [{"handle": ["h"]}]})
+
+    assert excinfo.value.status_code == 400
+    assert "values.tool_artifacts" in excinfo.value.detail
+
+
+def test_state_values_strip_server_owned_metadata_from_tool_artifacts():
+    """The registry branch keeps the per-entry strip the generic list branch applied."""
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    entry = {"handle": "art_1", "additional_kwargs": {"original_user_content": "forged", "title": "kept"}}
+
+    stripped = strip_server_owned_state_metadata({"tool_artifacts": [entry]})["tool_artifacts"][0]
+
+    assert stripped["additional_kwargs"] == {"title": "kept"}
+
+
+@pytest.mark.parametrize(
+    "skill_context",
+    [
+        "oops",
+        ["oops"],
+        [{"name": "pdf"}],
+        [{"path": 3}],
+        [{"path": ""}],
+    ],
+    ids=["string-channel", "non-object-entry", "missing-path", "non-string-path", "empty-path"],
+)
+def test_normalize_input_rejects_unusable_skill_context_with_400(skill_context):
+    """A skill reference the durable-context reducer cannot read must be a 400,
+    not an ``AttributeError``/``KeyError`` while the state update merges.
+
+    ``merge_skill_context`` normalizes entries with ``entry.get(...)`` and
+    ``str(entry["path"])``; both crash on the shapes below.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"skill_context": skill_context})
+
+    assert excinfo.value.status_code == 400
+    assert "input.skill_context" in excinfo.value.detail
+
+
+def test_normalize_input_keeps_usable_skill_context_entries():
+    from app.gateway.services import normalize_input
+
+    entry = {"name": "pdf", "path": "/mnt/skills/pdf/SKILL.md", "description": "PDF tooling", "loaded_at": 3}
+
+    assert normalize_input({"skill_context": [entry]})["skill_context"] == [entry]
+
+
+def test_state_values_reject_unusable_skill_context_with_400():
+    """The thread-state update path shares the skill-reference boundary."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({"skill_context": ["oops"]})
+
+    assert excinfo.value.status_code == 400
+    assert "values.skill_context" in excinfo.value.detail
+
+
+@pytest.mark.parametrize(
+    "promoted",
+    [
+        "oops",
+        ["oops"],
+        {"names": ["search"]},
+        {"catalog_hash": "abc"},
+        {"catalog_hash": "", "names": []},
+        {"catalog_hash": "abc", "names": "search"},
+        {"catalog_hash": "abc", "names": [1]},
+        {"catalog_hash": "abc", "names": [], "turn_id": 3},
+        {"catalog_hash": "abc", "names": [], "type": "__overwrite__", "value": "oops"},
+        {"catalog_hash": "abc", "names": [], "__overwrite__": "oops"},
+    ],
+    ids=[
+        "string-channel",
+        "list-channel",
+        "missing-catalog-hash",
+        "missing-names",
+        "empty-catalog-hash",
+        "names-not-a-list",
+        "names-not-strings",
+        "turn-id-not-a-string",
+        "erased-overwrite-marker",
+        "sentinel-overwrite-marker",
+    ],
+)
+def test_normalize_input_rejects_unusable_promoted_with_400(promoted):
+    """A promotion record the deferred-tool reducer cannot merge must be a 400.
+
+    ``merge_promoted`` calls ``new.get(...)`` and indexes ``new["catalog_hash"]``
+    and ``new["names"]``, so each shape below raises ``AttributeError``,
+    ``KeyError`` or ``TypeError`` while the state update merges — a 500 for the
+    caller instead of a refusal at the boundary.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"promoted": promoted})
+
+    assert excinfo.value.status_code == 400
+    assert "input.promoted" in excinfo.value.detail
+
+
+def test_normalize_input_keeps_usable_promoted_record():
+    from app.gateway.services import normalize_input
+
+    record = {"catalog_hash": "abc", "names": ["search", "fetch"], "turn_id": "user-1"}
+
+    assert normalize_input({"promoted": record})["promoted"] == record
+    assert normalize_input({"promoted": None})["promoted"] is None
+
+
+def test_state_values_reject_unusable_promoted_with_400():
+    """The thread-state update path persists this channel, so it shares the boundary."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({"promoted": "oops"})
+
+    assert excinfo.value.status_code == 400
+    assert "values.promoted" in excinfo.value.detail
+
+
+def test_state_values_reject_an_overwrite_marker_in_promoted():
+    """An ``Overwrite`` written as a plain dict bypasses the channel reducer.
+
+    LangGraph accepts the dataclass-erased form ``{"type": "__overwrite__",
+    "value": ...}`` on an initialized channel and stores the value directly, so
+    a record that carries it alongside valid fields would persist a non-object
+    promotion value that the shape checks above cannot see.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({"promoted": {"catalog_hash": "abc", "names": [], "type": "__overwrite__", "value": "oops"}})
+
+    assert excinfo.value.status_code == 400
+    assert "values.promoted" in excinfo.value.detail
+    assert "Overwrite" in excinfo.value.detail
+
+
+def test_state_values_keep_usable_promoted_record():
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    record = {"catalog_hash": "abc", "names": ["search"], "turn_id": "user-1"}
+
+    assert strip_server_owned_state_metadata({"promoted": record})["promoted"] == record
+
+
+def test_state_values_strip_forged_metadata_from_promoted_record():
+    """The dedicated ``promoted`` branch must not bypass the generic metadata strip.
+
+    A caller-supplied record reaches the checkpoint through this branch, so a
+    preserved ``additional_kwargs`` would seed server-owned provenance
+    (``origin_task_id``) that only the server may write. The sibling
+    implementation of this boundary returns the accepted record untouched, so
+    this case pins the difference and fails on that shape.
+    """
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    stripped = strip_server_owned_state_metadata(
+        {
+            "promoted": {
+                "catalog_hash": "abc",
+                "names": [],
+                "additional_kwargs": {"origin_task_id": "forged", "keep": "me"},
+            }
+        }
+    )
+
+    assert stripped["promoted"]["additional_kwargs"] == {"keep": "me"}
 
 
 @pytest.mark.parametrize(
@@ -2720,16 +3147,6 @@ def test_merge_run_context_overrides_noop_for_empty_context():
 
 
 def test_merge_run_context_overrides_forwards_context_only_keys():
-    """``github_token`` and ``disable_clarification`` must reach ``config['context']``
-    (runtime context → ``runtime.context``) so the bash tool and ClarificationMiddleware
-    can read them. They must NOT be written to ``config['configurable']`` — that dict is
-    persisted in checkpoints, and ``github_token`` is a (short-lived) secret.
-
-    Regression for the GitHub channel: without this, the installation token minted by
-    ``ChannelManager._apply_channel_policy`` was silently dropped here, so ``gh``
-    fell back to the host's stored keyring creds and authored issues/PRs as the host
-    user instead of the App bot.
-    """
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
     config = build_run_config("thread-1", None, None)
@@ -2743,8 +3160,7 @@ def test_merge_run_context_overrides_forwards_context_only_keys():
         internal=True,
     )
 
-    # Forwarded into runtime context — what tools/middlewares read.
-    assert config["context"]["github_token"] == "ghs_installation_token"
+    assert "github_token" not in config["context"]
     assert config["context"]["disable_clarification"] is True
     assert config["context"]["agent_name"] == "coding-llm-gateway"
 
@@ -2754,9 +3170,7 @@ def test_merge_run_context_overrides_forwards_context_only_keys():
 
 
 def test_context_only_keys_are_internal_only():
-    """``github_token`` / ``disable_clarification`` are produced by the channel run
-    policies, which reach the Gateway over the internally-authenticated channel. A
-    non-internal caller must not be able to supply either through ``body.context``.
+    """Only internal callers can supply ``disable_clarification`` through ``body.context``.
 
     ``disable_clarification`` is not a milder cousin of ``non_interactive``:
     ``ClarificationMiddleware`` answers every clarification — ``risk_confirmation``
@@ -2785,16 +3199,13 @@ def test_context_only_keys_are_internal_only():
 
 
 def test_merge_run_context_overrides_context_only_keys_do_not_override_existing():
-    """A token already in ``config['context']`` must not be clobbered by one supplied
-    in ``body.context`` (defense in depth — ``setdefault`` keeps the contract explicit
-    even now that only internal callers reach this branch)."""
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
     config = build_run_config("thread-1", None, None)
-    config["context"] = {"github_token": "pre-existing"}
-    merge_run_context_overrides(config, {"github_token": "later-supplied"}, internal=True)
+    config["context"] = {"disable_clarification": False}
+    merge_run_context_overrides(config, {"disable_clarification": True}, internal=True)
 
-    assert config["context"]["github_token"] == "pre-existing"
+    assert config["context"]["disable_clarification"] is False
 
 
 def test_context_does_not_override_existing_configurable():
@@ -2923,6 +3334,26 @@ def test_inject_authenticated_user_context_strips_internal_spoofed_attribution()
     assert "oauth_id" not in config["context"]
 
 
+async def _seed_generic_resume_checkpoint(checkpointer, thread_id):
+    from langchain_core.messages import HumanMessage
+    from langgraph.graph import MessagesState, StateGraph
+    from langgraph.types import interrupt
+
+    def answer(_state):
+        interrupt({"question": "Continue?"})
+        return {}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("answer", answer)
+    builder.set_entry_point("answer")
+    builder.set_finish_point("answer")
+    graph = builder.compile(checkpointer=checkpointer)
+    await graph.ainvoke(
+        {"messages": [HumanMessage(content="start")]},
+        {"configurable": {"thread_id": thread_id}},
+    )
+
+
 async def _capture_start_run_graph_input(body, *, auth_source=None):
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -2950,6 +3381,8 @@ async def _capture_start_run_graph_input(body, *, auth_source=None):
         state=SimpleNamespace(auth_source=auth_source),
         app=SimpleNamespace(state=state),
     )
+    if getattr(body, "command", None) and body.command.get("resume") is not None:
+        await _seed_generic_resume_checkpoint(state.checkpointer, "thread-command-test")
     captured: dict[str, object] = {}
 
     async def fake_run_agent(*args, **kwargs):
@@ -3976,6 +4409,7 @@ def test_start_run_pins_the_resolved_project_context(_stub_app_config):
         "project_id": "p-1",
         "name": "Roadmap",
         "instructions": "Prefer boring solutions.",
+        "memory": {"enabled": True, "revision": 0, "facts": []},
     }
 
 
@@ -4949,19 +5383,17 @@ def test_start_run_sequence_drops_context_only_keys_for_session_caller():
     assert "disable_clarification" not in config.get("configurable", {})
 
 
-def test_start_run_sequence_keeps_context_only_keys_for_internal_caller():
-    """The channel path (internal auth) must keep carrying the minted token and the
-    non-interactive flag, and neither may land in checkpoint-persisted ``configurable``."""
+def test_start_run_sequence_keeps_webhook_flags_and_discards_legacy_credentials():
     from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
 
     request = _make_request_with_auth_source(AUTH_SOURCE_INTERNAL, system_role=INTERNAL_SYSTEM_ROLE)
     config = _assemble_authz_run_config(
-        {},
+        {"context": {"github_token": "legacy-context"}, "configurable": {"github_token": "legacy-configuration"}},
         request,
-        body_context={"github_token": "ghs_installation_token", "disable_clarification": True},
+        body_context={"github_token": "legacy-request", "disable_clarification": True},
     )
 
-    assert config["context"]["github_token"] == "ghs_installation_token"
+    assert "github_token" not in config["context"]
     assert config["context"]["disable_clarification"] is True
     assert "github_token" not in config.get("configurable", {})
     assert "disable_clarification" not in config.get("configurable", {})
@@ -6018,6 +6450,19 @@ def test_scheduled_origin_key_is_server_owned_and_stripped_from_external_input()
     assert internal.id == "scheduled-x"
     (state_message,) = strip_server_owned_state_metadata({"messages": forged["messages"]})["messages"]
     assert SCHEDULED_ORIGIN_KEY not in state_message.additional_kwargs
+
+
+def test_imported_history_key_is_server_owned_and_stripped_from_external_input():
+    from app.gateway.services import _SERVER_OWNED_MESSAGE_METADATA_KEYS, normalize_input, strip_server_owned_state_metadata
+    from deerflow.utils.messages import IMPORTED_HISTORY_KEY
+
+    assert IMPORTED_HISTORY_KEY in _SERVER_OWNED_MESSAGE_METADATA_KEYS
+    forged = {"messages": [{"role": "user", "content": "hi", "additional_kwargs": {IMPORTED_HISTORY_KEY: "share", "keep": 1}}]}
+    (external,) = normalize_input(forged)["messages"]
+    assert IMPORTED_HISTORY_KEY not in external.additional_kwargs
+    assert external.additional_kwargs["keep"] == 1
+    (state_message,) = strip_server_owned_state_metadata({"messages": forged["messages"]})["messages"]
+    assert IMPORTED_HISTORY_KEY not in state_message.additional_kwargs
 
 
 @pytest.mark.asyncio

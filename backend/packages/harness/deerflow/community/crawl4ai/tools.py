@@ -3,6 +3,7 @@ import logging
 
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.url_safety import validate_delegated_backend_url, validate_public_http_url
 from deerflow.config import get_app_config
 
@@ -13,6 +14,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "http://localhost:11235"
 DEFAULT_TIMEOUT_S = 30
 DEFAULT_FILTER = "fit"
+DEFAULT_MAX_CHARS = 4096
 VALID_FILTERS = ("fit", "raw", "bm25", "llm")
 
 
@@ -42,6 +44,31 @@ def _coerce_timeout(value: object, default: int) -> float:
         except ValueError:
             logger.warning("Crawl4AI web_fetch: invalid timeout %r in config; using %ss", value, default)
     return float(default)
+
+
+def _coerce_max_chars(value: object) -> int:
+    """Coerce the ``max_chars`` output cap; anything but a positive integer keeps the default."""
+    if value is None:
+        return DEFAULT_MAX_CHARS
+
+    max_chars = value
+    if isinstance(value, str) and (digits := value.strip()).isdecimal():
+        try:
+            max_chars = int(digits)
+        except ValueError:
+            max_chars = None  # Python can reject an integer string that exceeds its digit limit.
+    if isinstance(max_chars, int) and not isinstance(max_chars, bool) and max_chars > 0:
+        return max_chars
+
+    logger.warning("Crawl4AI web_fetch: invalid max_chars %r in config; using %s", value, DEFAULT_MAX_CHARS)
+    return DEFAULT_MAX_CHARS
+
+
+def _truncate(markdown: str, max_chars: int) -> str:
+    """Cut to ``max_chars`` and say so, so the model knows the page goes on."""
+    if len(markdown) <= max_chars:
+        return markdown
+    return f"{markdown[:max_chars]}\n\n[web_fetch: truncated to the first {max_chars} of {len(markdown)} characters]"
 
 
 def _coerce_bool(value: object, default: bool) -> bool:
@@ -82,7 +109,7 @@ def _build_client(cfg: dict | None) -> Crawl4AiClient:
     timeout_s: float = float(DEFAULT_TIMEOUT_S)
     if cfg is not None:
         base_url = cfg.get("base_url", base_url)
-        token = cfg.get("token", token)
+        token = resolve_api_key(cfg.get("token")) or ""
         timeout_s = _coerce_timeout(cfg.get("timeout"), DEFAULT_TIMEOUT_S)
     return Crawl4AiClient(base_url=base_url, token=token, timeout_s=timeout_s)
 
@@ -134,7 +161,7 @@ async def web_fetch_tool(url: str) -> str:
         if markdown.startswith("Error:"):
             return markdown
 
-        return markdown[:4096]
+        return _truncate(markdown, _coerce_max_chars(cfg.get("max_chars") if cfg is not None else None))
 
     except Exception as e:
         logger.error(f"Error in web_fetch_tool: {e}")

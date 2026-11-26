@@ -9,7 +9,7 @@ The OIDC flow uses the **Authorization Code flow** with PKCE (S256) and nonce va
 ```
 Browser                      Gateway                    OIDC Provider
   │                             │                            │
-  │  1. Click "Login with X"    │                            │
+  │  1. Click "Continue with X" │                            │
   │ ─────────────────────────▶  │                            │
   │                             │  2. Build auth URL         │
   │                             │     + state (signed cookie)│
@@ -53,20 +53,24 @@ Browser                      Gateway                    OIDC Provider
 
 ## Configuration
 
+For local development, open DeerFlow through nginx at `http://localhost:2026`.
+Register the example's `redirect_uri` with the provider exactly as shown. Leave
+`frontend_base_url` unset so the Gateway returns the browser to the same origin
+after sign-in.
+
 ### Step 1: Enable OIDC in `config.yaml`
 
 ```yaml
 auth:
   oidc:
     enabled: true
-    frontend_base_url: http://localhost:3000
     providers:
       keycloak:
         display_name: Keycloak
         issuer: http://localhost:8080/realms/deerflow
         client_id: deerflow
         client_secret: $KEYCLOAK_CLIENT_SECRET
-        redirect_uri: http://localhost:8001/api/v1/auth/callback/keycloak
+        redirect_uri: http://localhost:2026/api/v1/auth/callback/keycloak
         scopes:
           - openid
           - email
@@ -79,16 +83,16 @@ auth:
 export KEYCLOAK_CLIENT_SECRET="your-client-secret"
 ```
 
-Or create a `.env` file in the `backend/` directory:
+Alternatively, add the secret to `.env` in the repository root:
 
 ```
 KEYCLOAK_CLIENT_SECRET=your-client-secret
 ```
 
-### Step 3: Restart the backend
+### Step 3: Start DeerFlow from the repository root
 
 ```bash
-cd backend && make dev
+make dev
 ```
 
 ## Provider Configuration
@@ -190,9 +194,9 @@ docker run -d \
    - **Client ID**: `deerflow`
    - **Client authentication**: On (makes it a confidential client)
    - **Standard flow**: Enabled
-   - **Valid redirect URIs**: `http://localhost:8001/api/v1/auth/callback/keycloak`
-   - **Valid post logout redirect URIs**: `http://localhost:3000/*`
-   - **Web origins**: `http://localhost:8001` (or `+` to allow all redirect URI origins)
+   - **Valid redirect URIs**: `http://localhost:2026/api/v1/auth/callback/keycloak`
+   - **Valid post logout redirect URIs**: `http://localhost:2026/*`
+   - **Web origins**: `http://localhost:2026`
 6. After creating the client, go to the **Credentials** tab
 7. Copy the **Client secret** — this is your `KEYCLOAK_CLIENT_SECRET`
 
@@ -214,14 +218,13 @@ Add to `config.yaml`:
 auth:
   oidc:
     enabled: true
-    frontend_base_url: http://localhost:3000
     providers:
       keycloak:
         display_name: Keycloak
         issuer: http://localhost:8080/realms/deerflow
         client_id: deerflow
         client_secret: $KEYCLOAK_CLIENT_SECRET
-        redirect_uri: http://localhost:8001/api/v1/auth/callback/keycloak
+        redirect_uri: http://localhost:2026/api/v1/auth/callback/keycloak
         scopes:
           - openid
           - email
@@ -236,12 +239,14 @@ export KEYCLOAK_CLIENT_SECRET="the-secret-from-step-2"
 
 ### 5. Restart and Test
 
+From the repository root, start the Gateway, frontend and nginx together:
+
 ```bash
-cd backend && make dev
+make dev
 ```
 
-1. Open http://localhost:3000
-2. On the login page, click **Login with Keycloak**
+1. Open http://localhost:2026/login
+2. Click **Continue with Keycloak**
 3. You'll be redirected to Keycloak's login page
 4. Log in with `testuser` / `testpass123`
 5. After successful authentication, you'll be redirected back to the DeerFlow workspace
@@ -280,7 +285,11 @@ redirects to `/login?error=sso_failed`. A discovery document without a usable
 authorization, token or JWKS endpoint counts as failed unless the provider
 config overrides that endpoint, and it is not cached. A malformed UserInfo body
 is skipped like a failed UserInfo request: the login continues with the ID
-token claims. The cause stays in the Gateway log.
+token claims. The cause stays in the Gateway log. A UserInfo response whose
+`sub` is missing or differs from the ID token's is skipped the same way, since
+OIDC Core requires the two to match. With a provider that omits `sub` from
+UserInfo and sends the email only there, a first login gets `403` because no
+email reaches provisioning. Users already linked by subject still sign in.
 
 ## Frontend Callback Flow
 
@@ -296,7 +305,7 @@ The frontend handles the post-SSO flow at `/auth/callback`:
 - **State cookies** are HttpOnly, SameSite=Lax, Max-Age=300 seconds, and signed with the JWT secret
 - **PKCE** prevents authorization code interception attacks
 - **Nonce** prevents ID token replay attacks
-- **UserInfo sub check** ensures the UserInfo response matches the ID token subject
+- **UserInfo sub check** — UserInfo claims are used only when the response's `sub` equals the ID token subject; a response without a `sub` counts as a mismatch
 - **Reject alg=none** — ID tokens with algorithm "none" are always rejected
 - **No email auto-linking** — SSO accounts are always separate from email/password accounts. An email collision with an existing local account blocks the SSO login (409) rather than merging the two.
 - **Verified email requirement** — SSO users must have verified emails by default

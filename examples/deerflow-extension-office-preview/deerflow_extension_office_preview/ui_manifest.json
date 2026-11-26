@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "entry": "static/dist/index.mjs",
+  "files": [
+    "static/dist/chunks/chunk-OVILVMKS.mjs",
+    "static/dist/chunks/docx-preview-VUQTZ67Q.mjs",
+    "static/dist/chunks/office-3UIRH4NA.mjs",
+    "static/dist/chunks/office-worker.mjs",
+    "static/dist/index.mjs"
+  ]
+}

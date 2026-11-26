@@ -18,7 +18,7 @@ from deerflow.config.memory_config import get_memory_config
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, resolve_trace_id
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, ORIGINAL_USER_CONTENT_KEY, own_messages_for_memory
 
 if TYPE_CHECKING:
     from deerflow.config.memory_config import MemoryConfig
@@ -32,7 +32,8 @@ def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionCon
     Shared by MemoryMiddleware's enqueue boundary and the compaction-triggered
     ``memory_flush_hook``: placeholders are value-derived, so the same identity
     renders the same token across the batch, across enqueues, and across
-    seams; message objects are rebuilt rather than mutated. Structured
+    seams. Changed messages are copied; unchanged/disabled messages are
+    shared with the caller. Queue consumers must not mutate them. Structured
     tool-call arguments are covered too — backends like OpenViking retain the full
     message object, including parsed/invalid calls (and invalid-call errors)
     and provider-raw/legacy arguments in ``additional_kwargs``. Text-bearing provenance metadata is covered as
@@ -42,6 +43,9 @@ def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionCon
     redacted ``content`` alone would still leak either one to the memory
     backend.
     """
+    if pii_redaction_config is None or not pii_redaction_config.enabled:
+        return list(messages)
+
     redactor = _make_redactor(pii_redaction_config)
 
     redacted = []
@@ -53,16 +57,21 @@ def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionCon
         for field in ("tool_calls", "invalid_tool_calls"):
             tool_calls = getattr(message, field, None)
             if tool_calls:
-                rewritten = [_redact_tool_call(call, redactor) for call in tool_calls]
-                if rewritten != tool_calls:
+                rewritten = []
+                calls_changed = False
+                for call in tool_calls:
+                    rewritten_call, call_changed = _redact_tool_call(call, redactor)
+                    rewritten.append(rewritten_call)
+                    calls_changed = calls_changed or call_changed
+                if calls_changed:
                     updates[field] = rewritten
         additional_kwargs = getattr(message, "additional_kwargs", None)
         if isinstance(additional_kwargs, dict):
             new_additional_kwargs = additional_kwargs
             for field in ("tool_calls", "function_call"):
                 if additional_kwargs.get(field):
-                    rewritten = _redact_strings(additional_kwargs[field], redactor)
-                    if rewritten != additional_kwargs[field]:
+                    rewritten, arguments_changed = _redact_strings(additional_kwargs[field], redactor)
+                    if arguments_changed:
                         new_additional_kwargs = {**new_additional_kwargs, field: rewritten}
             original_content = additional_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
             if isinstance(original_content, str) and original_content:
@@ -80,18 +89,20 @@ def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionCon
     return redacted
 
 
-def _redact_tool_call(call: dict, redactor: _Redactor) -> dict:
+def _redact_tool_call(call: dict, redactor: _Redactor) -> tuple[dict, bool]:
     """Redact arguments and invalid-call error text without changing call identity."""
     rewritten = dict(call)
+    changed = False
     for field in ("args", "error"):
         value = rewritten.get(field)
         if value is not None:
-            rewritten[field] = _redact_strings(value, redactor)
-    return rewritten
+            rewritten[field], field_changed = _redact_strings(value, redactor)
+            changed = changed or field_changed
+    return rewritten, changed
 
 
-def _redact_strings(value: object, redactor: _Redactor) -> object:
-    """Redact every string leaf in a JSON-like *value* tree, keys included.
+def _redact_strings(value: object, redactor: _Redactor) -> tuple[object, bool]:
+    """Redact string leaves/keys and track changes without comparing trees.
 
     Tool arguments can carry user data in mapping keys (e.g.
     ``{"contacts": {"alice@example.com": "manager"}}``), so string keys are
@@ -101,16 +112,43 @@ def _redact_strings(value: object, redactor: _Redactor) -> object:
     accepted, since at 128 bits that only happens for identical identities.
     """
     if isinstance(value, str):
-        return redactor.redact(value)
-    if isinstance(value, list):
-        return [_redact_strings(item, redactor) for item in value]
-    if isinstance(value, dict):
-        rebuilt = {}
-        for key, item in value.items():
-            new_key = redactor.redact(key) if isinstance(key, str) else key
-            rebuilt[new_key] = _redact_strings(item, redactor)
-        return rebuilt
-    return value
+        redacted = redactor.redact(value)
+        return redacted, redacted != value
+    if not isinstance(value, (dict, list)):
+        return value, False
+
+    changed = False
+    rebuilt = {} if isinstance(value, dict) else []
+    stack = [(value, iter(value.items()) if isinstance(value, dict) else enumerate(value), rebuilt)]
+    ancestors = {id(value)}
+    while stack:
+        source, items, target = stack[-1]
+        try:
+            key, item = next(items)
+        except StopIteration:
+            ancestors.remove(id(source))
+            stack.pop()
+            continue
+
+        new_key = redactor.redact(key) if isinstance(key, str) else key
+        if isinstance(key, str):
+            changed = changed or new_key != key
+        if isinstance(item, str):
+            rewritten = redactor.redact(item)
+            changed = changed or rewritten != item
+        elif isinstance(item, (dict, list)):
+            if id(item) in ancestors:
+                raise ValueError("Cyclic tool arguments are not supported JSON")
+            rewritten = {} if isinstance(item, dict) else []
+            ancestors.add(id(item))
+            stack.append((item, iter(item.items()) if isinstance(item, dict) else enumerate(item), rewritten))
+        else:
+            rewritten = item
+        if isinstance(target, dict):
+            target[new_key] = rewritten
+        else:
+            target.append(rewritten)
+    return rebuilt, changed
 
 
 class MemoryMiddlewareState(AgentState):
@@ -170,10 +208,11 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             logger.debug("No thread_id in context, skipping memory update")
             return None
 
-        # Get messages from state
-        messages = state.get("messages", [])
+        # History copied from another person's conversation is context, not
+        # something this user said; leaving it out here covers every backend.
+        messages = own_messages_for_memory(state.get("messages", []), state.get(IMPORTED_HISTORY_CHANNEL))
         if not messages:
-            logger.debug("No messages in state, skipping memory update")
+            logger.debug("No own messages in state, skipping memory update")
             return None
 
         # Capture user_id at enqueue time while the request context is still alive.

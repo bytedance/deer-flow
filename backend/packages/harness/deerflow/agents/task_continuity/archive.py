@@ -150,6 +150,8 @@ def capture(state: dict, runtime, messages, config) -> dict:
         omitted = max(0, len(sources) - config.max_records_per_batch)
         sources = sources[-config.max_records_per_batch :]
         batch = digest([owner, sources])
+        batches = [*[previous for previous in old if previous != batch], batch][-config.max_batches :]
+        placeholders = ",".join("?" for _ in batches)
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with closing(sqlite3.connect(path, timeout=5)) as db, db:
             db.execute("PRAGMA max_page_count=32768")  # 128 MiB at SQLite's default page size.
@@ -161,14 +163,18 @@ def capture(state: dict, runtime, messages, config) -> dict:
             db.execute("BEGIN IMMEDIATE")
             exists = db.execute("SELECT 1 FROM batches WHERE id=?", (batch,)).fetchone()
             created = db.execute("SELECT COALESCE(MAX(created) + 1, 1) FROM batches").fetchone()[0]
-            expired = db.execute("SELECT id FROM batches WHERE id != ? ORDER BY created DESC LIMIT -1 OFFSET ?", (batch, config.max_batches - 1)).fetchall()
+            # Retain the batches referenced by the next checkpoint first. An
+            # earlier capture may have finished writing without publishing its checkpoint.
+            expired = db.execute(
+                f"SELECT id FROM batches WHERE id != ? ORDER BY (id IN ({placeholders})) DESC, created DESC LIMIT -1 OFFSET ?",
+                [batch, *batches, config.max_batches - 1],
+            ).fetchall()
             for (expired_id,) in expired:
                 db.execute("DELETE FROM sources WHERE batch=?", (expired_id,))
                 db.execute("DELETE FROM batches WHERE id=?", (expired_id,))
             if not exists:
                 db.execute("INSERT INTO batches VALUES (?, ?)", (batch, created))
                 db.executemany("INSERT INTO sources VALUES (?, ?, ?, ?)", [(batch, r["id"], json.dumps(r, ensure_ascii=False), index_text(r["text"])) for r in sources])
-        batches = [*[previous for previous in old if previous != batch], batch][-config.max_batches :]
         return {"scope": owner, "batches": batches, "omitted_records": omitted, "status": "available"}
     except (OSError, sqlite3.Error, ValueError):
         logger.warning("Task history capture unavailable; preserving ordinary compaction", exc_info=False)
@@ -189,7 +195,7 @@ async def acapture(*args) -> dict:
         raise
 
 
-def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | None = None, role: str | None = None, excerpts: bool = False) -> dict:
+def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | None = None, role: str | None = None, excerpts: bool = False, latest_first: bool = False) -> dict:
     path, owner = scope(runtime)
     batches = reachable(state, owner)
     active = records(state.get("messages", []), 64000)
@@ -203,6 +209,8 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
     for row in active:
         if (source_id and row["id"] == source_id) or (query is not None and (role is None or row["role"] == role) and any(t in row["text"].casefold() for t in keywords)):
             active_matches.append(row)
+    latest_active = {row["id"]: row for row in reversed(active_matches)} if latest_first else {}
+    archive_limit = max(0, 8 - len(latest_active))
     if batches:
         try:
             with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
@@ -210,16 +218,30 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                 present = db.execute(f"SELECT count(*) FROM batches WHERE id IN ({placeholders})", batches).fetchone()[0]
                 if present != len(batches) and status != "unavailable":
                     status = "partially_expired"
+                rows = ()
                 if source_id:
                     rows = db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? ORDER BY rowid LIMIT 1", [*batches, source_id])
-                else:
+                elif archive_limit:
                     match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
                     role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
-                    parameters = [match, *batches, *([role] if role is not None else []), 8]
-                    rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank LIMIT ?", parameters)
+                    parameters = [match, *batches, *([role] if role is not None else [])]
+                    order_by = "rank"
+                    if latest_first:
+                        # Recapture moves the checkpoint reference while keeping its stored row IDs.
+                        batch_positions = " ".join(f"WHEN ? THEN {position}" for position in range(len(batches)))
+                        order_by = f"CASE batch {batch_positions} END DESC, rowid DESC"
+                        parameters.extend(batches)
+                    # Sort the bounded archive before taking distinct sources.
+                    # A SQL row limit can hide distinct sources behind duplicates.
+                    rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY {order_by}", parameters)
                 for (payload,) in rows:
                     row = json.loads(payload)
-                    found[row["id"]] = row
+                    if row["id"] in latest_active:
+                        continue
+                    # Repeated archives share one result slot in either order.
+                    found.setdefault(row["id"], row)
+                    if len(found) == archive_limit:
+                        break
                 if excerpts and query is not None and found:
                     # A source may be archived at different lengths; select its first stored version, as history_read does.
                     ids = list(found)
@@ -234,15 +256,18 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
     elif history.get("scope") is not None and history["scope"] != owner:
         status = "scope_unavailable"
     archived_matches = list(found.values())
-    archived_ids = {item["id"] for item in archived_matches}
     active_by_id = {row["id"]: row for row in active}
     archived_matches = [active_by_id.get(row["id"], row) for row in archived_matches]
-    active_only_by_id = {}
-    for row in active_matches:
-        if row["id"] not in archived_ids:
-            active_only_by_id.setdefault(row["id"], row)
-    active_only = list(active_only_by_id.values())
-    results = archived_matches[: max(0, 8 - len(active_only))] + active_only[:8]
+    if latest_first:
+        results = [*latest_active.values(), *archived_matches][:8]
+    else:
+        archived_ids = set(found)
+        active_only_by_id = {}
+        for row in active_matches:
+            if row["id"] not in archived_ids:
+                active_only_by_id.setdefault(row["id"], row)
+        active_only = list(active_only_by_id.values())
+        results = archived_matches[: max(0, 8 - len(active_only))] + active_only[:8]
     if excerpts and query is not None:
         excerpts_result = []
         for row in results:

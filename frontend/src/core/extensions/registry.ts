@@ -5,6 +5,7 @@ import {
   FileJsonIcon,
   FileTextIcon,
   PuzzleIcon,
+  UsersIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -17,6 +18,7 @@ import type { FrontendContribution, FrontendExtension } from "./contracts";
 export function extensionIcon(name?: string): LucideIcon {
   const icons: Record<string, LucideIcon> = {
     bell: BellIcon,
+    users: UsersIcon,
     bookmark: BookmarkIcon,
     download: DownloadIcon,
     "file-json": FileJsonIcon,
@@ -87,6 +89,32 @@ export async function loadFrontendExtensions(
             typeof loadedModule.conversationActions !== "function")
         )
           throw new Error("Incompatible browser extension");
+        if (loadedModule.artifactPreviews !== undefined) {
+          const seen = new Set<string>();
+          if (
+            !Array.isArray(loadedModule.artifactPreviews) ||
+            loadedModule.artifactPreviews.length > 16
+          )
+            throw new Error("Invalid artifact previews");
+          for (const renderer of loadedModule.artifactPreviews) {
+            if (
+              !renderer ||
+              typeof renderer.id !== "string" ||
+              !/^[a-z][a-z0-9-]{0,63}$/.test(renderer.id) ||
+              seen.has(renderer.id) ||
+              typeof renderer.mount !== "function" ||
+              !Array.isArray(renderer.extensions) ||
+              renderer.extensions.length === 0 ||
+              renderer.extensions.length > 32 ||
+              renderer.extensions.some(
+                (ext) =>
+                  typeof ext !== "string" || !/^[a-z0-9]{1,16}$/.test(ext),
+              )
+            )
+              throw new Error("Invalid artifact preview renderer");
+            seen.add(renderer.id);
+          }
+        }
         if (loadedModule.mentionProviders !== undefined) {
           const seen = new Set<string>();
           if (

@@ -3,11 +3,14 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+pytestmark = pytest.mark.benchmark
 
 
 def _load_module(name: str, relative: str):
@@ -66,58 +69,92 @@ class _FakeSandbox:
         return self.output
 
 
-def test_aio_provider_default_leaves_image_unset(monkeypatch, tmp_path):
-    captured_config: dict[str, Any] = {}
+def test_aio_provider_default_uses_image_defaults(monkeypatch, tmp_path):
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    captured = {}
 
-    def _factory(config: dict[str, Any]):
-        captured_config.update(config)
-        return _FakeProvider(), {"replicas": config["replicas"], "idle_timeout": config["idle_timeout"], "image": config.get("image")}
+    def factory(config):
+        captured.update(config)
+        return _FakeProvider(), config
 
-    monkeypatch.setitem(bench.PROVIDER_FACTORIES, "aio-docker", _factory)
+    monkeypatch.setitem(bench.PROVIDER_FACTORIES, "aio-docker", factory)
+    output = tmp_path / "out.jsonl"
+    assert bench.main(["--provider", "aio-docker", "--iterations", "1", "--warmup-iterations", "0", "--output", str(output)]) == 0
+    assert captured["image"] is None
+    assert captured["environment"] == {}
+    assert json.loads(output.read_text(encoding="utf-8"))["aio_service_profile"] == "image-defaults"
 
-    rc = bench.main(
-        [
-            "--provider",
-            "aio-docker",
-            "--iterations",
-            "0",
-            "--warmup-iterations",
-            "0",
-            "--output",
-            str(tmp_path / "out.jsonl"),
-        ]
+
+@pytest.mark.parametrize("env_file", [".env", "benchmark.env"])
+def test_aio_cli_reads_config_path_from_dotenv_on_startup(tmp_path, env_file):
+    (tmp_path / "profile.yaml").write_bytes(b'sandbox:\n  environment:\n    DISABLE_JUPYTER: "$BENCH_JUPYTER"\n')
+    (tmp_path / env_file).write_bytes(b"DEER_FLOW_CONFIG_PATH=profile.yaml\nBENCH_JUPYTER=true\n")
+    env = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT") if key in os.environ}
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    if env_file != ".env":
+        env["DEER_FLOW_ENV_FILE"] = env_file
+
+    # A fresh interpreter exercises the CLI's first config import. Stop at the Docker boundary.
+    script = """
+import json
+from scripts.benchmark.sandbox import bench_provider as bench
+
+def capture(config):
+    print(json.dumps(config["environment"]))
+    raise SystemExit(0)
+
+bench.PROVIDER_FACTORIES["aio-docker"] = capture
+bench.main(["--provider", "aio-docker"])
+"""
+    run = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, env=env, capture_output=True, encoding="utf-8", timeout=30)
+    assert run.returncode == 0, run.stderr
+    assert json.loads(run.stdout) == {"DISABLE_JUPYTER": "true"}
+
+
+def test_aio_cli_forwards_selected_service_flags_and_records_profile(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """\
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  environment:
+    DISABLE_JUPYTER: "$BENCH_JUPYTER"
+    DISABLE_CODE_SERVER: "false"
+    OTHER: private-fixture
+    UNUSED: "$BENCH_UNSET_UNUSED"
+""",
+        encoding="utf-8",
     )
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("BENCH_UNSET_UNUSED", raising=False)
+    monkeypatch.setenv("BENCH_JUPYTER", "true")
+    captured = {}
 
-    assert rc == 0
-    assert captured_config["image"] is None
+    def factory(config):
+        captured.update(config)
+        return _FakeProvider(), config
 
+    monkeypatch.setitem(bench.PROVIDER_FACTORIES, "aio-docker", factory)
+    output = tmp_path / "out.jsonl"
+    assert bench.main(["--provider", "aio-docker", "--image", "custom/aio:latest", "--iterations", "1", "--warmup-iterations", "0", "--output", str(output)]) == 0
+    assert captured["image"] == "custom/aio:latest"
+    assert captured["environment"] == {"DISABLE_CODE_SERVER": "false", "DISABLE_JUPYTER": "true"}
+    data = output.read_text(encoding="utf-8")
+    assert json.loads(data)["aio_service_profile"] == "DISABLE_CODE_SERVER=false,DISABLE_JUPYTER=true"
+    assert "private-fixture" not in data
 
-def test_explicit_aio_provider_image_is_forwarded(monkeypatch, tmp_path):
-    captured_config: dict[str, Any] = {}
+    captured.clear()
+    monkeypatch.delenv("BENCH_JUPYTER")
+    with pytest.raises(ValueError, match="BENCH_JUPYTER"):
+        bench.main(["--provider", "aio-docker", "--output", str(output)])
+    assert not captured
 
-    def _factory(config: dict[str, Any]):
-        captured_config.update(config)
-        return _FakeProvider(), {"replicas": config["replicas"], "idle_timeout": config["idle_timeout"], "image": config.get("image")}
-
-    monkeypatch.setitem(bench.PROVIDER_FACTORIES, "aio-docker", _factory)
-
-    rc = bench.main(
-        [
-            "--provider",
-            "aio-docker",
-            "--image",
-            "custom/aio:latest",
-            "--iterations",
-            "0",
-            "--warmup-iterations",
-            "0",
-            "--output",
-            str(tmp_path / "out.jsonl"),
-        ]
-    )
-
-    assert rc == 0
-    assert captured_config["image"] == "custom/aio:latest"
+    monkeypatch.setenv("BENCH_JUPYTER", "private-invalid-value")
+    with pytest.raises(ValueError, match="DISABLE_JUPYTER") as exc:
+        bench.main(["--provider", "aio-docker", "--output", str(output)])
+    assert "private-invalid-value" not in str(exc.value)
+    assert not captured
+    assert output.read_text(encoding="utf-8") == data
 
 
 def test_failed_turn_releases_acquired_sandbox() -> None:
@@ -504,6 +541,17 @@ def test_default_summary_does_not_merge_cold_baseline_with_warm_pool(tmp_path, c
     assert {r["no_warmpool"] for r in rows} == {True, False}
 
 
+def test_default_summary_separates_service_profiles_and_legacy_rows(tmp_path, capsys):
+    base = {"provider": "aio-docker", "success": True, "acquire_ms": 1, "total_ms": 2}
+    profiles = ["image-defaults", "DISABLE_JUPYTER=true", "DISABLE_JUPYTER=true"]
+    rows = [base, *({**base, "aio_service_profile": profile} for profile in profiles)]
+    path = tmp_path / "profiles.jsonl"
+    path.write_text("\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+    assert summarize.main([str(path), "--json"]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert {row["aio_service_profile"]: row["count"] for row in summary} == {"?": 1, "image-defaults": 1, "DISABLE_JUPYTER=true": 2}
+
+
 def test_summary_failed_data_exits_nonzero(tmp_path, capsys):
     path = tmp_path / "results.jsonl"
     path.write_text(json.dumps({"provider": "aio-docker", "success": False}))
@@ -625,7 +673,8 @@ def test_aio_factory_uses_current_config_contract_and_reports_effective_image(mo
             self._config = real_provider._load_config(self)
 
     monkeypatch.setattr(provider_module, "AioSandboxProvider", ConfigOnlyProvider)
-    provider, config = bench._make_aio_provider({"container_prefix": "deerflow-bench-test"})
+    provider, config = bench._make_aio_provider({"container_prefix": "deerflow-bench-test", "environment": {"DISABLE_JUPYTER": "true"}})
+    assert provider._config["environment"]["DISABLE_JUPYTER"] == "true"
     assert provider._config["network"]["mode"] == "open"
     assert config["image"] == provider._config["image"]
     assert config["image"]

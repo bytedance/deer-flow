@@ -81,7 +81,7 @@ def _render_chart(*settings: str) -> list[dict]:
 def _render_failure(*args: str) -> str:
     """Return helm's stderr for a render that must be refused."""
     result = _helm(*args)
-    assert result.returncode != 0, "the render must fail instead of producing a budget that protects nothing"
+    assert result.returncode != 0, "Helm accepted invalid chart values"
     return result.stderr
 
 
@@ -141,7 +141,8 @@ def test_deployment_template_takes_replicas_and_strategy_from_values() -> None:
     template = DEPLOYMENT_TEMPLATE.read_text(encoding="utf-8")
     assert "replicas: {{ .Values.provisioner.replicas }}" in template
     assert re.search(r"^\s*replicas:\s*\d+\s*$", template, flags=re.MULTILINE) is None, "a literal replica count ignores provisioner.replicas"
-    assert re.search(r"\{\{- with \.Values\.provisioner\.strategy \}\}\n\s+strategy:\n\s+\{\{- toYaml \. \| nindent 4 \}\}\n\s+\{\{- end \}\}", template), "the rollout strategy must come from values like the gateway's"
+    strategy_block = r'\{\{- with \.Values\.provisioner\.strategy \}\}\n\s+strategy:\n\s+\{\{- include "deer-flow\.strategy" \. \| nindent 4 \}\}\n\s+\{\{- end \}\}'
+    assert re.search(strategy_block, template), "the rollout strategy must come from values like the gateway's"
     assert SELECTOR_BLOCK.search(template), "the Deployment selector is what the budget has to match"
 
 
@@ -259,6 +260,30 @@ def test_rendered_default_matches_the_previous_single_replica_deployment() -> No
     assert deployment["spec"]["replicas"] == 1
     assert deployment["spec"]["strategy"] == {"type": "RollingUpdate", "rollingUpdate": {"maxSurge": 1, "maxUnavailable": 0}}
     assert not any(document.get("kind") == "PodDisruptionBudget" for document in documents)
+
+
+def test_rendered_provisioner_passes_sandbox_resources_as_strings() -> None:
+    documents = _render_chart("provisioner.sandboxResources.limits.cpu=2", "provisioner.sandboxResources.requests.ephemeral-storage=0")
+    deployment = _by_kind(documents, "Deployment", "-provisioner")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env = {item["name"]: item.get("value") for item in container["env"]}
+    assert {key: value for key, value in env.items() if key.endswith(("_REQUEST", "_LIMIT"))} == {
+        "SANDBOX_CPU_REQUEST": "100m",
+        "SANDBOX_MEMORY_REQUEST": "256Mi",
+        "SANDBOX_EPHEMERAL_STORAGE_REQUEST": "0",
+        "SANDBOX_CPU_LIMIT": "2",
+        "SANDBOX_MEMORY_LIMIT": "1Gi",
+        "SANDBOX_EPHEMERAL_STORAGE_LIMIT": "500Mi",
+    }
+    assert container["resources"] == _values()["provisioner"]["resources"]
+
+
+@pytest.mark.parametrize(("group", "resource"), [("limits", "memroy"), ("requests", "nvidia.com/gpu")])
+def test_render_rejects_unknown_sandbox_resource(group: str, resource: str, tmp_path: Path) -> None:
+    values_file = tmp_path / "values.yaml"
+    values_file.write_text(yaml.safe_dump({"provisioner": {"sandboxResources": {group: {resource: "1"}}}}), encoding="utf-8", newline="\n")
+    error = _render_failure("--values", str(values_file))
+    assert group in error and resource in error
 
 
 def test_gateway_and_provisioner_budgets_render_side_by_side() -> None:

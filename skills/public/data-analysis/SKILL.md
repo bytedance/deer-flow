@@ -17,7 +17,24 @@ Prepare the Python environment before running analyses. Install the required pac
 python -m pip install duckdb openpyxl
 ```
 
-If either package is missing, the script exits with a setup instruction; it does not invoke an installer or modify the environment. DuckDB's existing spatial-extension setup for loading files is unchanged.
+If either package is missing, the script exits with a setup instruction; it does not invoke an installer or modify the environment. DuckDB's spatial extension is initialized only for `.xlsx` input. CSV and legacy `.xls` analysis do not install or load it, so they can run offline with an empty extension cache.
+
+Legacy Excel 97–2003 (`.xls`) workbooks additionally require:
+
+```bash
+python -m pip install pandas xlrd
+```
+
+These optional packages are loaded only for `.xls` input. A missing package produces
+an explicit setup instruction. Legacy workbooks are read sheet by sheet with pandas'
+xlrd engine, preserving cell values (including literal `NA` strings and leading
+zeros in text identifiers) and treating empty cells as nulls. Columns with
+incompatible cell types, such as a date and a number, are stored as text with
+nulls preserved. Compatible numeric types still produce numeric columns.
+Completely empty sheets are skipped. The `.xlsx` reader
+continues to use openpyxl and DuckDB's spatial extension. A legacy workbook that
+cannot be opened is reported and skipped so remaining inputs can still be
+analyzed. The command fails if no input produces a table.
 
 ## Core Capabilities
 
@@ -260,10 +277,17 @@ After analysis:
 
 The script automatically caches loaded data to avoid re-parsing files on every call:
 
-- On first load, files are parsed and stored in a persistent DuckDB database under the system temporary directory (`.data-analysis-cache/`)
-- The cache key hashes the ordered input basenames and a separate SHA256 digest of each file. Renaming, reordering, or changing inputs creates a new cache; moving unchanged, identically named inputs to another directory preserves reuse. The updated key namespace ignores older cached table maps, which are rebuilt on first use
-- Subsequent calls with the same files will use the cached database directly (near-instant startup)
+- On first load, files are parsed into a private DuckDB generation under the system temporary directory (.data-analysis-cache/generations-v1/). Its writer closes before a complete generation and table map become visible together through an atomic manifest replacement
+- The cache key hashes the ordered input basenames and a separate SHA256 digest of each file. Renaming, reordering, or changing inputs creates a new cache; moving unchanged, identically named inputs to another directory preserves reuse. Older flat caches are ignored and rebuilt from source without deleting the old files
+- Subsequent calls open a complete generation read-only. Overlapping readers can reuse it while another analysis is still running; invalid manifests or damaged databases rebuild from source
 - Cache is transparent — no extra parameters needed
+
+Concurrent cold calls may build separate complete generations. Failed private
+builds are removed, while complete generations are retained so active readers
+remain valid. Stop analyses before manually clearing `.data-analysis-cache/`;
+automatic cache garbage collection is not implemented. These are rebuildable
+local caches, not snapshots of changing input files or a power-loss guarantee.
+Analysis connections are read-only; export query results with `--output-file`.
 
 This is especially useful when running multiple queries against the same data files (inspect → query → summary).
 

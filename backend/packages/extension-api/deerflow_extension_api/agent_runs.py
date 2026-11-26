@@ -76,6 +76,18 @@ class AgentRuns(Protocol):
         """
         ...
 
+    def capture_authority(self) -> Mapping[str, Any] | None:
+        """Persistable snapshot of this handle's existing authority, or None.
+
+        Returns the mint-time ceiling (token_version, source, permissions) of
+        the live session handle so a service can restore equivalent authority
+        later through the host's delegated-restore capability. Capture only
+        reflects authority the handle already holds; it is not a credential to
+        serialize across hosts, and None means this host or handle cannot be
+        restored. Hosts that predate this method lack it entirely.
+        """
+        ...
+
     async def send_input(self, *, thread_id: str, run_id: str, text: str, mode: str, request_id: str, context: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Queue a new turn or steer the active Run; never change its model."""
         ...

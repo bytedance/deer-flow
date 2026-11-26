@@ -17,6 +17,7 @@ import pytest
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
 from deerflow.config.paths import Paths
 from deerflow.sandbox.middleware import SandboxMiddleware
+from deerflow.skills import projection
 from deerflow.skills.projection import (
     ensure_public_skill_projection,
     ensure_skill_projections,
@@ -396,6 +397,71 @@ def test_unrestricted_run_reuses_existing_thread_mount_with_full_enabled_view(pr
     assert (projected.public / "alpha" / "SKILL.md").is_file()
     assert (projected.public / "beta" / "SKILL.md").is_file()
     assert {category: getattr(projected, category).stat().st_ino for category in ("public", "custom", "legacy", "integrations")} == category_inodes
+
+
+@pytest.mark.parametrize("available_skills", [{"request-only"}, None], ids=["allowlist", "unrestricted"])
+@pytest.mark.parametrize("user_scoped", [True, False], ids=["user-scoped", "local"])
+def test_lead_projects_injected_skills_into_the_sandbox(projection_env, monkeypatch, available_skills, user_scoped) -> None:
+    from deerflow.agents.lead_agent.agent import build_middlewares
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+    env = projection_env
+    _write_skill(env.skills_root / "public", "default-only")
+    app_config = AppConfig(sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider", allow_host_bash=False))
+    app_config.skills.path = str(env.skills_root)
+    request_root = env.root / "request-skills"
+    skill = _write_skill(request_root / "public", "request-only")
+    (skill.parent / "info.txt").write_text("request support file", encoding="utf-8")
+    _write_skill(request_root / "public", "another-skill")
+    _write_skill(request_root / "public", "disabled-skill")
+    env.extensions.skills["disabled-skill"] = SkillStateConfig(enabled=False)
+    kwargs = {"host_path": str(request_root), "app_config": app_config}
+    storage = UserScopedSkillStorage("alice", **kwargs) if user_scoped else LocalSkillStorage(**kwargs)
+
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: app_config)
+    monkeypatch.setattr("deerflow.sandbox.security.get_app_config", lambda: app_config)
+    provider = LocalSandboxProvider()
+    monkeypatch.setattr("deerflow.sandbox.middleware.get_sandbox_provider", lambda: provider)
+    middlewares = build_middlewares(
+        {"configurable": {}},
+        app_config=app_config,
+        model_name=None,
+        user_id="alice",
+        available_skills=available_skills,
+        skill_storage=storage,
+    )
+    sandbox_middleware = next(m for m in middlewares if isinstance(m, SandboxMiddleware))
+    thread_id = "thread-injected"
+    projection = sandbox_middleware._prepare_agent_skill_projection(thread_id, user_id="alice")
+    assert projection is not None
+
+    sandbox = provider.get(provider.acquire(thread_id, user_id="alice"))
+    assert sandbox is not None
+    assert sandbox.read_file("/mnt/skills/public/request-only/SKILL.md") == skill.read_text(encoding="utf-8")
+    assert sandbox.read_file("/mnt/skills/public/request-only/info.txt") == "request support file"
+    assert (projection.public / "another-skill").exists() == (available_skills is None)
+    assert not (projection.public / "default-only").exists()
+    assert not (projection.public / "disabled-skill").exists()
+
+    restored = SandboxMiddleware()._prepare_agent_skill_projection(thread_id, user_id="alice")
+    assert restored == projection
+    assert not (projection.public / "request-only").exists()
+    assert (projection.public / "default-only" / "SKILL.md").is_file()
+
+
+def test_lead_rejects_projection_from_another_users_storage(projection_env, monkeypatch) -> None:
+    env = projection_env
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: env.config)
+    monkeypatch.setattr("deerflow.sandbox.middleware.get_sandbox_provider", lambda: SimpleNamespace(supports_agent_skill_isolation=True))
+    middleware = SandboxMiddleware(skill_storage=env.storage)
+
+    with pytest.raises(ValueError, match="storage owner"):
+        middleware._prepare_agent_skill_projection("thread-wrong-owner", user_id="bob")
+
+    assert not env.paths.thread_skills_view_dir("thread-wrong-owner", user_id="alice").exists()
 
 
 def test_subagent_non_owner_preserves_restricted_lead_projection(
@@ -1080,3 +1146,138 @@ def test_thread_projection_upgrades_metadata_only_manifest(projection_env) -> No
     ensure_thread_skill_projection(env.storage, "thread-old-manifest", {"alpha"})
 
     assert target.read_bytes() == source.read_bytes()
+
+
+def test_undecodable_manifest_is_treated_as_missing(tmp_path: Path) -> None:
+    """A manifest we cannot decode must not stop the projection from being rebuilt."""
+    from deerflow.skills.projection import _read_manifest
+
+    (tmp_path / ".projection-manifest.json").write_bytes(b"\xff\xfe")
+
+    assert _read_manifest(tmp_path) is None
+
+
+def test_undecodable_skill_states_file_is_treated_as_empty(projection_env) -> None:
+    """An undecodable states file reads as 'no overrides', not as a crash."""
+    state_file = projection_env.paths.user_skills_dir("alice") / "_skill_states.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_bytes(b"\xff\xfe")
+
+    assert projection_env.storage._read_skill_states() == {}
+
+
+@pytest.fixture
+def projection_locks(monkeypatch):
+    locks = {}
+    monkeypatch.setattr(projection, "_process_locks", locks)
+    return locks
+
+
+def test_completed_thread_projections_reclaim_idle_locks(projection_env, projection_locks):
+    for index in range(4):
+        paths = ensure_thread_skill_projection(projection_env.storage, f"thread-{index}", set())
+        assert paths is not None and paths.public.is_dir()
+    assert not projection_locks
+
+
+def test_waiter_and_late_arrival_share_the_same_projection_lock(tmp_path, projection_locks):
+    root = tmp_path / "view"
+    waiting, retry_waiter, waiter_blocked_again = Event(), Event(), Event()
+    late_holding, release_late = Event(), Event()
+
+    def check_waiter():
+        if not waiting.is_set():
+            waiting.set()
+            assert retry_waiter.wait(5)
+        else:
+            waiter_blocked_again.set()
+
+    def waiter():
+        with projection._projection_lock(root, check=check_waiter):
+            assert not late_holding.is_set()
+
+    def late_arrival():
+        with projection._projection_lock(root):
+            late_holding.set()
+            try:
+                assert release_late.wait(5)
+            finally:
+                late_holding.clear()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        try:
+            with projection._projection_lock(root):
+                (entry,) = projection_locks.values()
+                queued = executor.submit(waiter)
+                assert waiting.wait(5)
+
+            late = executor.submit(late_arrival)
+            assert late_holding.wait(5)
+            (late_entry,) = projection_locks.values()
+            assert late_entry is entry
+            retry_waiter.set()
+            assert waiter_blocked_again.wait(5)
+        finally:
+            retry_waiter.set()
+            release_late.set()
+        queued.result(timeout=5)
+        late.result(timeout=5)
+    assert not projection_locks
+
+
+def test_nested_projection_lock_keeps_entry_until_outer_exit(tmp_path, projection_locks):
+    root = tmp_path / "view"
+    with projection._projection_lock(root):
+        (entry,) = projection_locks.values()
+        with projection._projection_lock(root, timeout=0):
+            (nested_entry,) = projection_locks.values()
+            assert nested_entry is entry
+        (remaining_entry,) = projection_locks.values()
+        assert remaining_entry is entry
+    assert not projection_locks
+
+
+@pytest.mark.parametrize("abort_wait", [False, True], ids=["timeout", "check-error"])
+def test_projection_lock_reclaims_entry_after_failed_wait(tmp_path, projection_locks, abort_wait):
+    root = tmp_path / "view"
+    checked = Event()
+
+    def check():
+        checked.set()
+        if abort_wait:
+            raise RuntimeError("stop waiting")
+
+    def waiter():
+        with projection._projection_lock(root, timeout=0, check=check):
+            pytest.fail("waiter entered while the lock was held")
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with projection._projection_lock(root):
+            future = executor.submit(waiter)
+            expected = RuntimeError if abort_wait else TimeoutError
+            with pytest.raises(expected, match="stop waiting" if abort_wait else "Skill projection lock timeout"):
+                future.result(timeout=5)
+            assert checked.is_set()
+    assert not projection_locks
+
+
+def test_projection_lock_reclaims_entry_when_body_raises(tmp_path, projection_locks):
+    with pytest.raises(RuntimeError, match="projection failed"):
+        with projection._projection_lock(tmp_path / "view"):
+            raise RuntimeError("projection failed")
+    assert not projection_locks
+
+
+def test_distinct_projection_paths_can_hold_locks_in_parallel(tmp_path, projection_locks):
+    both_holding = Barrier(2, timeout=5)
+
+    def acquire(root):
+        with projection._projection_lock(root):
+            both_holding.wait()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(acquire, tmp_path / "first")
+        second = executor.submit(acquire, tmp_path / "second")
+        first.result(timeout=10)
+        second.result(timeout=10)
+    assert not projection_locks

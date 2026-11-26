@@ -70,7 +70,11 @@ sandbox:
 
     loaded = provider._load_config()
 
-    assert loaded["environment"] == _RESOLVED
+    expected = dict(_RESOLVED)
+    if class_name == "AioSandboxProvider":
+        expected["AIO_BASH_MAX_SESSIONS"] = "50"
+    assert loaded["environment"] == expected
+    assert app_config.sandbox.environment == _RESOLVED
 
 
 @pytest.mark.usefixtures("secret_env")

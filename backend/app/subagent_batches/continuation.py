@@ -2,6 +2,7 @@
 
 import copy
 import json
+import logging
 
 from deerflow_extension_api.agent_runs import AgentRunError, ExecutionFence
 
@@ -10,6 +11,7 @@ from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.runtime.goal import goal_waits_for_external_result, read_thread_goal
 from deerflow.runtime.runs.schemas import GOAL_RUN_HARD_STOP_REASONS
 
+logger = logging.getLogger(__name__)
 _TRUSTED = object()
 
 
@@ -19,7 +21,11 @@ class BatchContinuations:
 
     async def prepare(self, request):
         from app.gateway.services import _CONTEXT_CONFIGURABLE_KEYS, _MODEL_SELECTION_CONTEXT_KEYS
+        from deerflow.persistence.coordination.workers import THREAD_PREFIX
 
+        workers = getattr(self.app.state, "coordination_workers", None)
+        if workers is not None and request.thread_id.startswith(THREAD_PREFIX) and await workers.repo.task_for_thread(request.thread_id):
+            raise AgentRunError(409, "A managed worker accepts follow-ups through its coordination task")
         host = self.app.state.agent_runs_host
         grant = host.capture_batch_authority(request.continuation_authority, user_id=request.user_id)
         source = await request.continuation_authority.get(thread_id=request.thread_id, run_id=request.run_id)
@@ -133,7 +139,10 @@ class BatchContinuations:
         if record.status == "success" and record.stop_reason not in GOAL_RUN_HARD_STOP_REASONS:
             return
         for batch in await self.app.state.subagent_batch_repo.list_continuation_batches_for_run(record.run_id):
-            await self.app.state.subagent_batch_service.cancel_batch(batch_id=batch["id"], user_id=batch["user_id"])
+            try:
+                await self.app.state.subagent_batch_service.cancel_batch(batch_id=batch["id"], user_id=batch["user_id"])
+            except Exception:
+                logger.warning("Batch %s cancellation failed for run %s (non-fatal)", batch["id"], record.run_id, exc_info=True)
         goal = await read_thread_goal(self.app.state.checkpointer, record.thread_id)
         if goal and goal.get("status") == "active" and goal.get("created_at"):
             await self.app.state.subagent_batch_repo.suppress_thread_continuations(record.thread_id, goal_created_at=goal["created_at"])

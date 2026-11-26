@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import socket
 import ssl
@@ -36,6 +37,56 @@ def test_address_is_public_rejects_host_private_link_local_and_metadata() -> Non
     assert network_proxy.address_is_public("8.8.8.8")
     assert not network_proxy.address_is_public("198.18.1.5")
     assert network_proxy.address_is_public("198.18.1.5", allow_synthetic_dns=True)
+
+
+def test_address_is_public_rejects_non_public_ipv4_inside_ipv6_spellings() -> None:
+    # NAT64 (64:ff9b::/96) and IPv4-compatible (::a.b.c.d) spellings report
+    # is_global even when the embedded IPv4 is loopback, private or metadata.
+    for address in (
+        "64:ff9b::a9fe:a9fe",  # 169.254.169.254
+        "64:ff9b::a9fe:a9fe%eth0",  # the same spelling with a zone id
+        "64:ff9b::7f00:1",  # 127.0.0.1
+        "64:ff9b::a00:1",  # 10.0.0.1
+        "64:ff9b::c0a8:102",  # 192.168.1.2
+        "64:ff9b::6464:64c8",  # 100.100.100.200, CGNAT cloud metadata
+        "::169.254.169.254",
+        "::127.0.0.1",
+        "::ffff:169.254.169.254",
+        "::ffff:0:a9fe:a9fe",  # IPv4-translated (SIIT) metadata spelling
+        "2002:a9fe:a9fe::1",
+        "::2",  # IPv4-compatible this-network block, not a unicast target
+        # RFC 8215 local-use translation prefix: rejected explicitly, without
+        # relying on the interpreter classification that changed in 3.12.4.
+        "64:ff9b:1::1",
+        "64:ff9b:1::a9fe:a9fe",
+        "64:ff9b:1:42::a9fe:a9fe",
+        "64:ff9b:1::808:808",  # even a public IPv4 spelling must not egress
+    ):
+        assert not network_proxy.address_is_public(address)
+    # 6to4 carrying a public IPv4 target follows the interpreter's outer
+    # classification: CPython marks 2002::/16 private from 3.12.4 (gh-113171),
+    # so it is rejected there and allowed on earlier 3.12 patch releases.
+    sixtofour_public = "2002:808:808::1"
+    assert network_proxy.address_is_public(sixtofour_public) == ipaddress.ip_address(sixtofour_public).is_global
+    # A NAT64 spelling of a public IPv4 target stays allowed; the prefix
+    # reports is_reserved, so a blanket reserved check would wrongly reject it.
+    assert network_proxy.address_is_public("64:ff9b::808:808")  # 8.8.8.8
+    assert network_proxy.address_is_public("64:ff9b::101:101")  # 1.1.1.1
+    assert network_proxy.address_is_public("::ffff:8.8.8.8")
+    assert network_proxy.address_is_public("::ffff:0:808:808")
+    assert network_proxy.address_is_public("2606:4700:4700::1111")
+    # The Docker Desktop synthetic-DNS exception passes through the embedded
+    # check: 64:ff9b::c612:105 carries 198.18.1.5.
+    assert not network_proxy.address_is_public("64:ff9b::c612:105")
+    assert network_proxy.address_is_public("64:ff9b::c612:105", allow_synthetic_dns=True)
+
+
+def test_local_use_nat64_prefix_rejected_independent_of_interpreter_flags(monkeypatch) -> None:
+    # Simulate a pre-3.12.4 interpreter (gh-113171) that reports the RFC 8215
+    # local-use range as global; the explicit rejection must still hold.
+    monkeypatch.setattr(ipaddress.IPv6Address, "is_global", property(lambda self: True))
+    for address in ("64:ff9b:1::1", "64:ff9b:1::a9fe:a9fe", "64:ff9b:1::808:808"):
+        assert not network_proxy.address_is_public(address)
 
 
 def test_policy_denial_and_temporary_or_sandbox_grants(tmp_path, monkeypatch) -> None:
@@ -135,6 +186,19 @@ async def test_resolve_public_fails_closed_when_dns_contains_private_answer(monk
         return [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 443)),
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 443)),
+        ]
+
+    monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo)
+    assert await network_proxy.resolve_public("example.com", 443) is None
+
+
+@pytest.mark.anyio
+async def test_resolve_public_fails_closed_on_nat64_metadata_answer(monkeypatch) -> None:
+    loop = asyncio.get_running_loop()
+
+    async def fake_getaddrinfo(*_args, **_kwargs):
+        return [
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("64:ff9b::a9fe:a9fe", 443, 0, 0)),
         ]
 
     monkeypatch.setattr(loop, "getaddrinfo", fake_getaddrinfo)

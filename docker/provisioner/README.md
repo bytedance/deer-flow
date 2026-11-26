@@ -175,6 +175,9 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts; ignored when `SANDBOX_SERVICE_TYPE=ClusterIP` |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
 
+For the sandbox CPU, memory and ephemeral storage environment variables and their
+defaults, see [Kubernetes sandbox Pod resources](../../docs/guide/sandbox.md#kubernetes-sandbox-pod-resources).
+
 For new sandbox requests, the Gateway also sends the effective AIO shell-session
 capacity derived from `subagent_runtime.max_running`. The provisioner writes it
 to the sandbox Pod as `MAX_SHELL_SESSIONS`; requests from older Gateways omit the
@@ -185,6 +188,32 @@ request for an existing Pod with insufficient capacity returns HTTP 409; the
 provisioner does not delete an existing Pod to upgrade its capacity, including
 after a transient Gateway discovery failure. If the old Pod has already gone
 but its Service remains, create can safely provision the missing Pod.
+
+The Gateway also forwards the operator's `sandbox.environment` map, and the
+provisioner writes those entries to the sandbox container so image-level knobs
+such as `DISABLE_JUPYTER=true` or `DISABLE_CODE_SERVER=true` reach Kubernetes
+sandboxes the same way they reach local Docker ones. A Gateway that provisions
+through this service leaves `AIO_BASH_MAX_SESSIONS`, `MAX_SHELL_SESSIONS` and
+`DEERFLOW_LARK_BROKER_URL` out of that map, because it already sends them
+through the dedicated fields above; the provisioner ignores those names in the
+map if another client sends them anyway, so one Pod keeps a single source per
+setting. All 32 entries a request may carry are therefore the operator's own,
+keys must match `[A-Za-z_][A-Za-z0-9_]*` within 64 characters, and a value is
+limited to 1024 characters. Values are written literally: a `$` is escaped so
+Kubernetes does not expand `$(NAME)` or collapse `$$` before the container reads
+the value.
+
+The Gateway applies those limits to the filtered map while it starts, so a map
+this service would refuse stops the Gateway with `sandbox.environment` named
+instead of failing the first sandbox create. Sandbox allocation itself stays
+lazy.
+
+Both directions of a version skew drop the profile silently, so upgrade the
+provisioner before you rely on it. A request from a Gateway older than this
+change carries no map and produces the same Pods as before; a new Gateway
+talking to a provisioner from before this change gets a successful create whose
+Pod ignores the map. Existing Pods also keep the environment they were created
+with until they are recreated.
 
 ### Custom sandbox image
 

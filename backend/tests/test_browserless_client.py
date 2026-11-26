@@ -2,8 +2,10 @@
 
 import ipaddress
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -17,6 +19,31 @@ class AsyncMock(MagicMock):
 
     async def __call__(self, *args, **kwargs):
         return super().__call__(*args, **kwargs)
+
+
+def test_web_fetch_tool_declares_content_and_artifact_return_contract():
+    assert tools.web_fetch_tool.response_format == "content_and_artifact"
+
+
+@pytest.mark.asyncio
+async def test_direct_web_fetch_call_returns_content_and_artifact(monkeypatch):
+    client = MagicMock()
+    client.fetch_html_with_status = AsyncMock(
+        return_value=BrowserlessFetchResult(
+            html="<html><body>page</body></html>",
+            target_status_code="200",
+            target_status="OK",
+        )
+    )
+    monkeypatch.setattr(tools, "_get_tool_config", lambda *_args: {"base_url": "https://browserless.invalid"})
+    monkeypatch.setattr(tools, "_get_browserless_client", lambda *_args: client)
+    monkeypatch.setattr(tools, "validate_public_http_url", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(tools, "_validate_backend_base_url", lambda *_args: None)
+    monkeypatch.setattr(tools._readability_extractor, "extract_article", lambda *_args, **_kwargs: SimpleNamespace(to_markdown=lambda: "page content"))
+
+    result = await tools.web_fetch_tool.coroutine(url="https://example.com")
+
+    assert result == ("page content", {"deerflow_http_response": {"status_code": 200}})
 
 
 @pytest.mark.asyncio
@@ -356,6 +383,196 @@ async def test_configured_token_passes_browserless_request_gate(call, server_tok
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("call", [_fetch, _capture], ids=["fetch", "capture"])
+async def test_http_error_redacts_raw_and_encoded_token_before_truncation(call) -> None:
+    """Non-200 bodies echoing the request URL or token must be redacted before slicing."""
+    token = "bl_tok+secret/42="
+    encoded = quote(token, safe="")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Echo both the encoded query parameter and raw token, then pad from
+        # len(prefix) so the final token straddles the 200-char cutoff
+        # (starts before index 200 and ends after it).
+        prefix = f"Upstream rejected {request.url} (raw={token}) "
+        padding = "x" * (200 - len(prefix) - 6)
+        body = f"{prefix}{padding}{token}"
+        final_start = len(prefix) + len(padding)
+        assert final_start < 200 < final_start + len(token)
+        return httpx.Response(502, text=body)
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+
+    def client_with_transport(**kwargs):
+        return real_client(transport=transport, **kwargs)
+
+    with patch("deerflow.community.browserless.browserless_client.httpx.AsyncClient", side_effect=client_with_transport):
+        result = await call(BrowserlessClient(base_url="http://browserless:3000", token=token))
+
+    assert isinstance(result, str)
+    assert result.startswith("Error: Browserless HTTP 502:")
+    assert token not in result
+    assert encoded not in result
+    assert "bl_tok" not in result
+    assert result.count("[REDACTED]") == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call", [_fetch, _capture], ids=["fetch", "capture"])
+async def test_response_status_headers_are_validated_and_redacted_for_logs_and_results(call, caplog) -> None:
+    """X-Response-Code is validated and X-Response-Status is redacted before logging or returning."""
+    token = "bl_tok+secret/42="
+    encoded = quote(token, safe="")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        headers = {
+            "X-Response-Code": " 403 ",
+            "X-Response-Status": f"Forbidden for {request.url} (raw={token})",
+        }
+        if request.url.path == "/screenshot":
+            return httpx.Response(
+                200,
+                content=b"\x89PNG\r\n\x1a\n",
+                headers={"Content-Type": "image/png", **headers},
+            )
+        return httpx.Response(200, text="<html><body>Blocked</body></html>", headers=headers)
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+
+    def client_with_transport(**kwargs):
+        return real_client(transport=transport, **kwargs)
+
+    with caplog.at_level(logging.DEBUG, logger="deerflow.community.browserless.browserless_client"):
+        with patch("deerflow.community.browserless.browserless_client.httpx.AsyncClient", side_effect=client_with_transport):
+            result = await call(BrowserlessClient(base_url="http://browserless:3000", token=token))
+
+    assert not isinstance(result, str)
+    assert result.target_status_code == "403"
+    assert token not in result.target_status
+    assert encoded not in result.target_status
+    assert "[REDACTED]" in result.target_status
+    warning = tools._target_status_warning(result)
+    assert "403" in warning
+    assert token not in warning
+    assert encoded not in warning
+    assert token not in caplog.text
+    assert encoded not in caplog.text
+    assert "[REDACTED]" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call", [_fetch, _capture], ids=["fetch", "capture"])
+@pytest.mark.parametrize("bad_code", ["500 bl_tok+secret/42=", "999", "not-a-code"])
+@pytest.mark.parametrize("http_status", [200, 502])
+async def test_invalid_response_code_header_is_dropped_before_logging_and_returning(call, bad_code, http_status, caplog) -> None:
+    """Non-HTTP-status X-Response-Code values never reach debug logs or returned results."""
+    token = "bl_tok+secret/42="
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        headers = {
+            "X-Response-Code": bad_code,
+            "X-Response-Status": f"Upstream failed ({token})",
+        }
+        if http_status != 200:
+            return httpx.Response(http_status, text="gateway failure", headers=headers)
+        if request.url.path == "/screenshot":
+            return httpx.Response(
+                200,
+                content=b"\x89PNG\r\n\x1a\n",
+                headers={"Content-Type": "image/png", **headers},
+            )
+        return httpx.Response(200, text="<html><body>OK</body></html>", headers=headers)
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+
+    def client_with_transport(**kwargs):
+        return real_client(transport=transport, **kwargs)
+
+    with caplog.at_level(logging.DEBUG, logger="deerflow.community.browserless.browserless_client"):
+        with patch("deerflow.community.browserless.browserless_client.httpx.AsyncClient", side_effect=client_with_transport):
+            result = await call(BrowserlessClient(base_url="http://browserless:3000", token=token))
+
+    assert token not in caplog.text
+    assert bad_code not in caplog.text
+    if http_status == 200:
+        assert not isinstance(result, str)
+        assert result.target_status_code == ""
+        assert token not in result.target_status
+        assert "[REDACTED]" in result.target_status
+    else:
+        assert isinstance(result, str)
+        assert token not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call", [_fetch, _capture], ids=["fetch", "capture"])
+@pytest.mark.parametrize("error_kind", ["request_error", "unexpected_error"])
+async def test_client_errors_redact_token_in_result_and_logs(call, error_kind, caplog) -> None:
+    """Transport and unexpected failures must scrub raw and encoded tokens from returns and logs."""
+    token = "bl_tok+secret/42="
+    encoded = quote(token, safe="")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if error_kind == "request_error":
+            raise httpx.ConnectError(f"Failed connecting to {request.url}", request=request)
+        raise RuntimeError(f"Proxy error for {request.url} ({token})")
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+
+    def client_with_transport(**kwargs):
+        return real_client(transport=transport, **kwargs)
+
+    with caplog.at_level(logging.ERROR, logger="deerflow.community.browserless.browserless_client"):
+        with patch("deerflow.community.browserless.browserless_client.httpx.AsyncClient", side_effect=client_with_transport):
+            result = await call(BrowserlessClient(base_url="http://browserless:3000", token=token))
+
+    assert isinstance(result, str)
+    assert token not in result
+    assert encoded not in result
+    assert "[REDACTED]" in result
+    assert token not in caplog.text
+    assert encoded not in caplog.text
+    assert "[REDACTED]" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_tools_redact_token_in_outer_error_handlers(caplog, tmp_path) -> None:
+    """Outer tool catch-alls scrub the configured Browserless token from logs and messages."""
+    token = "bl_tok+secret/42="
+    encoded = quote(token, safe="")
+    client = BrowserlessClient(base_url="https://production-sfo.browserless.io", token=token)
+
+    with (
+        patch("deerflow.community.browserless.tools._get_tool_config", return_value={"base_url": "https://production-sfo.browserless.io", "token": token}),
+        patch("deerflow.community.browserless.tools._resolve_host_addresses", return_value=[ipaddress.ip_address("93.184.216.34")]),
+        patch("deerflow.community.browserless.tools._validate_backend_base_url", return_value=None),
+        patch("deerflow.community.browserless.tools._get_browserless_client", return_value=client),
+        caplog.at_level(logging.ERROR, logger="deerflow.community.browserless.tools"),
+    ):
+        with patch.object(client, "fetch_html_with_status", side_effect=RuntimeError(f"boom {token} {encoded}")):
+            fetch_result, artifact = await tools.web_fetch_tool.coroutine(url="https://example.com")
+        assert artifact is None
+        assert token not in fetch_result
+        assert encoded not in fetch_result
+        assert "[REDACTED]" in fetch_result
+
+        runtime = SimpleNamespace(state={"thread_data": {"outputs_path": str(tmp_path)}})
+        with patch.object(client, "capture_screenshot", side_effect=RuntimeError(f"boom {token} {encoded}")):
+            capture_cmd = await tools.web_capture_tool.coroutine(runtime=runtime, url="https://example.com", tool_call_id="tc-1")
+        capture_text = capture_cmd.update["messages"][0].content
+        assert token not in capture_text
+        assert encoded not in capture_text
+        assert "[REDACTED]" in capture_text
+
+    assert token not in caplog.text
+    assert encoded not in caplog.text
+    assert "[REDACTED]" in caplog.text
+
+
+@pytest.mark.asyncio
 class TestBrowserlessTools:
     """Tests for the Browserless tool functions."""
 
@@ -416,6 +633,110 @@ class TestBrowserlessTools:
     async def test_boolean_timeout_falls_back_to_default(self):
         """YAML `timeout_s: off` parses as False; 0.0 would time out every request."""
         assert self._client_with_config({"timeout_s": False}).timeout_s == 30.0
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            0,
+            0.0,
+            -1,
+            -0.5,
+            float("inf"),
+            float("-inf"),
+            float("nan"),
+            "0",
+            "-1",
+            "inf",
+            "-inf",
+            "nan",
+            "1e400",
+            pytest.param(10**400, id="int-overflow"),
+        ],
+    )
+    async def test_unusable_timeout_falls_back_to_default(self, value):
+        """A value `httpx` cannot use as a deadline must never reach it.
+
+        Measured with httpx 0.28.1 against a backend that accepts the connection
+        and then never answers: `0` and the negatives fail every fetch with
+        `ConnectTimeout`, `nan` raises `ValueError: deadline must not be NaN`,
+        and `inf` leaves the request without a deadline so it never completes.
+        Either way a healthy Browserless backend looks broken.
+        """
+        assert self._client_with_config({"timeout_s": value}).timeout_s == 30.0
+
+    @pytest.mark.parametrize("value", [1, 0.001, 45, 12.5, "1", "45", "12.5", pytest.param(1e308, id="large-finite")])
+    async def test_usable_timeout_is_kept(self, value):
+        """Preserve positive finite timeout values without an upper limit."""
+        assert self._client_with_config({"timeout_s": value}).timeout_s == float(value)
+
+    async def test_unusable_timeout_warns(self, caplog):
+        """Swapping in the default silently would hide the operator's typo."""
+        with caplog.at_level("WARNING", logger="deerflow.community.browserless.tools"):
+            assert self._client_with_config({"timeout_s": 0}).timeout_s == 30.0
+        assert "invalid timeout 0" in caplog.text
+
+    async def test_env_token_is_stripped(self):
+        """A token read from a file keeps its trailing newline.
+
+        ``resolve_api_key`` is the shared credential rule for search and fetch
+        providers; without it the raw value becomes the auth query parameter and
+        every Browserless request fails authentication.
+        """
+        with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
+            mock_cfg.return_value = {"base_url": "https://production-sfo.browserless.io"}
+            with patch.dict("os.environ", {"BROWSERLESS_TOKEN": "  env-token\r\n"}, clear=True):
+                client = tools._get_browserless_client("web_capture")
+
+        assert client.token == "env-token"
+
+    async def test_config_token_is_stripped(self):
+        assert self._client_with_config({"token": " cfg-token\n"}).token == "cfg-token"
+
+    async def test_blank_config_token_does_not_fall_back_to_env(self):
+        """An explicit blank token opts the tool out of the environment token.
+
+        A self-hosted capture endpoint sets ``token: ""`` so it receives no
+        authentication; falling back to BROWSERLESS_TOKEN would send the cloud
+        credential to it.
+        """
+        with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
+            mock_cfg.return_value = {"token": ""}
+            with patch.dict("os.environ", {"BROWSERLESS_TOKEN": "env-token"}, clear=True):
+                client = tools._get_browserless_client("web_capture")
+
+        assert client.token == ""
+
+    async def test_null_config_token_does_not_fall_back_to_env(self):
+        with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
+            mock_cfg.return_value = {"token": None}
+            with patch.dict("os.environ", {"BROWSERLESS_TOKEN": "env-token"}, clear=True):
+                client = tools._get_browserless_client("web_capture")
+
+        assert client.token == ""
+
+    async def test_whitespace_only_token_sends_no_auth_parameter(self):
+        assert self._client_with_config({"token": "\r\n"}).token == ""
+
+    async def test_capture_query_omits_token_when_config_opts_out(self):
+        """The outgoing capture request must not carry the environment token."""
+        with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
+            mock_cfg.return_value = {"token": ""}
+            with patch.dict("os.environ", {"BROWSERLESS_TOKEN": "cloud-token"}, clear=True):
+                client = tools._get_browserless_client("web_capture")
+
+        with patch("deerflow.community.browserless.browserless_client.httpx.AsyncClient") as mock_cls:
+            mock_ctx = MagicMock()
+            mock_cls.return_value.__aenter__.return_value = mock_ctx
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.content = b"\x89PNG\r\n\x1a\nimage"
+            mock_resp.text = "<binary>"
+            mock_resp.headers = {"Content-Type": "image/png"}
+            mock_ctx.post = AsyncMock(return_value=mock_resp)
+
+            await client.capture_screenshot("https://example.com")
+
+        assert mock_ctx.post.call_args.kwargs["params"] is None
 
     @patch("deerflow.community.browserless.tools._get_browserless_client")
     async def test_web_fetch_tool_success(self, mock_get_client):

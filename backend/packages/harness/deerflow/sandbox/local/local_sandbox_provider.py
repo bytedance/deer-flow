@@ -63,11 +63,9 @@ class LocalSandboxProvider(SandboxProvider):
     sandbox (losing only its ``_agent_written_paths`` reverse-resolve hint,
     which gracefully degrades read_file output).
 
-    The managed ``/mnt/skills`` projection is a logical boundary, not a host
-    filesystem security boundary. When host bash is enabled, a subprocess can
-    address canonical host paths without going through ``PathMapping``. The
-    provider therefore advertises Agent skill isolation only while host bash
-    remains disabled.
+    Agents access the managed ``/mnt/skills`` projection through the virtual
+    file tools. The provider advertises the managed view only for local
+    workspace configurations.
     """
 
     uses_thread_data_mounts = True
@@ -490,9 +488,8 @@ class LocalSandboxProvider(SandboxProvider):
         #
         # A thread view exists only to enforce an Agent skill allowlist, and
         # SandboxMiddleware keeps it fresh only while this provider can enforce
-        # one. With host bash allowed it skips the view (restricted runs are
-        # rejected), so mounting a leftover view would pin the last restricted
-        # Agent's allowlist; use the shared projection instead.
+        # one. Use the shared projection if support cannot be established to
+        # avoid pinning a stale restricted view.
         skill_projection = self._ensure_skills_projection(
             effective_user_id,
             thread_id=thread_id if self.supports_agent_skill_isolation else None,

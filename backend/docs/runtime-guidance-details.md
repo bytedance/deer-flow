@@ -116,7 +116,7 @@ regular file created or modified under `/mnt/user-data/outputs`; internal
 process-feedback files are excluded (the scanner's `EXCLUDED_DIR_NAMES` plus
 the configured `tool_output.storage_subdir`), so a run that only externalized
 oversized tool outputs does not fail delivery. At least one candidate must be
-covered by a path attributed by the journal to `present_files`; presenting only
+covered by a path attributed by the journal to `present_files` or `present_shared_artifact`; presenting only
 an unrelated pre-existing path does not satisfy delivery. Receipts for such
 runs add `produced_paths`, `presented_paths`, `matched_paths`, `verification`,
 `stage`, and `satisfied` to the Slice 1 fact fields. Missing a matching
@@ -161,10 +161,21 @@ and after scans. Its budget is shared and consumed root by root (workspace
 before outputs), so a workspace at the limit starves outputs.
 `get_changed_output_paths()` inherits this uncertainty: newly observed outputs
 are suppressed when the before snapshot was truncated, while modifications
-observed in both snapshots remain eligible. The worker passes this list through
+observed in both snapshots remain eligible. Hidden paths are working state, not
+deliverables: any dot-prefixed segment below the outputs root (a cursor/state
+JSON, a `.work/` scratch tree) is excluded, so it never enters `produced_paths`.
+The worker passes this list through
 `_produced_output_paths()` to its delivery check; an empty list leaves
 `produced_paths` and `verification` absent from the delivery receipt, and
-`_delivery_error()` returns no error. When that empty list accompanies a truncated
+`_delivery_error()` returns no error. Delivery enforcement is required when the
+run took part in a goal: the continuation helper reports an active, expected
+goal through a participation callback before any evaluation write, a scheduled
+goal is installed, the evaluator verdict was persisted, or the goal state could
+not be read (unknown keeps delivery required). A failed verdict write therefore
+still requires delivery. An ordinary run records the same
+verdict with `enforcement: "advisory"` and stays successful, because working
+files and a local copy of a result written to an external system are not
+deliverables. When that empty list accompanies a truncated
 pre-run snapshot, the receipt includes
 `verification_skipped: "truncated_pre_run_snapshot"` on both normal completion and
 failure/cancellation cleanup. This marker explains the skipped check without
@@ -180,13 +191,18 @@ backend-owned `(change_seq, run_id)` key rather than timestamps or per-thread
 event sequence numbers. The singleton SQL clock allocates positions in the same
 transaction as each public record mutation; memory uses a process-local counter.
 The clock row serializes position-bearing SQL mutations globally until their
-transactions commit, so every mutator must acquire it before any run-row lock.
+transactions commit, so every position-bearing mutator must acquire it before
+any run-row lock.
 An atomic thread operation uses one position for its interrupted rows and new
-row, with `run_id` ordering ties. High-frequency progress snapshots and lease
-heartbeats do not advance this position: they are not lifecycle-discovery
-signals, progress evidence remains available from the event stream, and
-excluding them bounds clock contention. A later lifecycle change exposes the
-run row's latest `updated_at` and accumulated progress fields to internal readers.
+row, with `run_id` ordering ties. High-frequency progress snapshots, lease
+heartbeats and run-input appends do not advance this position: they are not
+lifecycle-discovery signals, progress evidence remains available from the event
+stream, and excluding them bounds clock contention. A run-input append writes
+only `run_inputs_json`, so no changed-run cursor could read back a position it
+took; because it reads the row before it writes it, on SQLite it takes the
+write lock up front with `BEGIN IMMEDIATE` instead. A later lifecycle change
+exposes the run row's latest `updated_at` and accumulated progress fields to
+internal readers.
 Rows from before the migration retain `change_seq=0` and page deterministically
 by run id. Because a later mutation only moves a row forward, concurrent paging
 may replay a run but cannot move an unseen run behind the committed cursor.
@@ -330,7 +346,7 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 
 **Never bypass `CheckpointStateAccessor` (`runtime/checkpoint_state.py`) for thread-state access.** It is the single choke point binding graph + checkpointer + mode: it injects the mode marker into configs, runs the compatibility check before every `get`/`update`/`history`, and returns materialized state (delta checkpoints lack `channel_values.messages` — raw `get_tuple` reads see a sentinel). An async unpinned delta read verifies that its resolved checkpoint still exists after materialization and retries once from the new head when retention removed that target mid-read; explicit historical selections never silently move. For metadata-only reads, use `get_metadata` / `aget_metadata` to retain the mode gate without materialization. Thread-owned reads must use `build_thread_checkpoint_state_accessor` so the recorded assistant schema materializes every channel. Sync checkpoint mutations must drain off-thread commits before cancellation propagates; sync `get_tuple` reads remain cancellable. `history(limit)` semantics: `0` means zero items (explicit empty), `None` means unlimited — do not pass `limit=0` through to `graph.get_state_history`. Assistant metadata lookup is fail-closed for mutation accessors so a store outage cannot silently select the default schema and discard extension channels. In `full` mode the read path degrades to a raw checkpointer read (`_RawCheckpointReadAccessor`) when the agent factory cannot build the graph (bad model config, MCP outage) — full checkpoints carry complete `channel_values`, so reads don't need the graph; degraded snapshots take `created_at` from the standard checkpoint `ts` field, falling back to metadata only for compatibility. The delta gate still applies on the degraded path; `next`/`tasks` degrade to empty and thread status falls back to the stored status because task presence is not derivable, while delta mode has no fallback (materialization needs the channel table).
 
-**Replay checkpoint lookup prefers lineage and degrades only for an explicitly missing legacy parent link.** Branch and regenerate paths first walk `parent_config`, which prevents a global chronological scan from selecting a sibling created by regeneration. `CheckpointParentMissingError` alone enables the bounded newest-first history fallback in `app/gateway/checkpoint_lineage.py`; cycles, dangling/non-addressable parents, target mismatches, and depth exhaustion raise `CheckpointLineageIntegrityError` and fail closed instead of selecting a sibling. The compatibility scans request 400 raw checkpoints so up to 200 duration-only entries do not consume the effective branch-history budget; the fallback scans oldest-to-newest internally, skips duration-only checkpoints, and accepts only checkpoints with an addressable id as the replay base. A source history with no discoverable pre-user checkpoint preserves the historical single-checkpoint branch behavior instead of rejecting the branch; regeneration remains unavailable for that inherited response. Existing single-checkpoint branches are not mutated by regenerate preparation, and no raw checkpoint tuple is copied across threads because delta state depends on ancestry and pending writes. Regenerate source-run lookup uses the current thread's exact event, then the server-stamped `run_id` on the copied human message, then verified RunManager content matching; it does not read parent-thread events. When an interrupted response was streamed but never checkpointed, regeneration accepts only the latest visible human message's server-stamped `run_id` after verifying that it belongs to the same thread and still has `interrupted` status. Storage or checkpoint-mode failures are not treated as a missing base and still fail closed.
+**Replay checkpoint lookup prefers lineage and degrades only for an explicitly missing legacy parent link.** Branch, regenerate, and edit replay first walk `parent_config` to stay on the selected lineage. The linked walk shares a lookup deadline. Expiry is logged and returns HTTP 504. `CheckpointParentMissingError` enables the bounded newest-first history fallback only when the selected checkpoint has no recorded parent link. A linked walk that ends before finding the replay base, encounters a cycle or invalid parent, or starts at a checkpoint without the target message raises `CheckpointLineageIntegrityError`. The compatibility scans request 400 raw checkpoints so up to 200 duration-only entries do not consume the effective branch-history budget; the fallback scans oldest-to-newest internally, skips duration-only checkpoints, and accepts only checkpoints with an addressable id as the replay base. A source history with no discoverable pre-user checkpoint preserves the historical single-checkpoint branch behavior instead of rejecting the branch; regeneration remains unavailable for that inherited response. Existing single-checkpoint branches are not mutated by regenerate preparation, and no raw checkpoint tuple is copied across threads because delta state depends on ancestry and pending writes. Regenerate source-run lookup uses the current thread's exact event, then the server-stamped `run_id` on the copied human message, then verified RunManager content matching; it does not read parent-thread events. When an interrupted response was streamed but never checkpointed, regeneration accepts only the latest visible human message's server-stamped `run_id` after verifying that it belongs to the same thread and still has `interrupted` status. Storage or checkpoint-mode failures are not treated as a missing base and still fail closed.
 
 **A delta-mode run cannot fork; `runtime/runs/worker.py` linearizes the resume instead.** An older-checkpoint resume creates siblings whose pending writes can replay into the fork, retaining a superseded answer. Write-to-child ownership belongs to the upstream delta contract, so DeerFlow does not reimplement the walk: `_linearize_delta_checkpoint_resume` materializes the requested checkpoint's complete state and writes every channel onto the **current head** (which has no siblings) through the state mutation graph, using `Overwrite` for reducer channels and resetting newer head-only channels to their schema default (or `None` when no constructible default exists); it then drops the `checkpoint_id` selector and lets the run proceed linearly, while the abandoned turn stays in history as the rewritten head's ancestry. The worker holds `_checkpoint_thread_lock` across `_capture_rollback_point` and the optional linear rewrite, making the rollback snapshot and rewrite atomic with graph streaming and the preceding run's duration-metadata checkpoint write. Capture preserves the complete real pre-run state; cancel-with-rollback then linearly replaces the current delta head with that captured state rather than forking the now-shared pre-run checkpoint, so the abandoned turn is restored without replaying the resume sibling's writes. The worker also recomputes the current-run message boundary from the rewritten state and fails closed (an unreadable resume checkpoint raises rather than falling back to the corrupt fork). `full` mode keeps forking — its checkpoints carry complete `channel_values` and need no replay — so LangGraph branching semantics are unchanged there. Root namespace only; subgraph namespaces are left alone.
 
@@ -343,7 +359,7 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 **Where things live**:
 - `runtime/checkpoint_mode.py` — mode + snapshot-frequency freeze, marker injection, delta detection, compatibility gate, both error types
 - `runtime/checkpoint_state.py` — `CheckpointStateAccessor`, `build_state_mutation_graph`, `RollbackPoint`
-- `checkpoint_patches.py` (package root) — the one remaining patch: `BinaryOperatorAggregate` unwrapping an `Overwrite` first write into an empty channel (#4380; probe-guarded). The `InMemorySaver` delta-history patch is gone: `langgraph-checkpoint` 4.2.0 fixed that write loss upstream (#8526) while keeping its override, so the dependency floor plus the full → delta migration contract test are the gate — never re-add a version-guarded saver patch.
+- `checkpoint_patches.py` (package root) — the one remaining patch: `BinaryOperatorAggregate` unwrapping an `Overwrite` first write into an empty channel (#4380; probe-guarded). The `InMemorySaver` delta-history patch is gone: `langgraph-checkpoint` 4.2.0 fixed that write loss upstream (#8526) while keeping its override. The 4.3.0 floor also keeps same-superstep replay in live task-path order; SQLite 3.1.2 and Postgres 3.1.3 carry the matching saver behavior, including paged Postgres ancestor walks. Dependency floors plus the migration, ordering and pagination contract tests are the gates — never re-add version-guarded saver patches or defect-triggered skips.
 - `agents/thread_state.py` — `ThreadState`/`DeltaThreadState`, `delta_messages_field` / `DELTA_MESSAGES_FIELD` (`DeltaChannel` at the configured `snapshot_frequency`, default 10), schema adaptation helpers
 - `runtime/context_compaction.py` — compaction via accessor + mutation graph (reference consumer). Runs stamp their effective agent into server-owned checkpoint metadata; manual compaction uses that binding—not request `agent_name`—for memory policy and bucket. Missing/invalid legacy bindings and unreadable agent configs fail closed by skipping the optional flush while compaction may continue with the default model; a missing pre-binding checkpoint emits a warning so the skipped write is observable.
 - `runtime/checkpoint_cache/` + `runtime/checkpointer/cached_saver.py` — delta-mode checkpoint history cache; checkpoint state reads MUST go through `CheckpointStateAccessor`, and the checkpointer may be a `CachedHistorySaver` wrapper — never rely on concrete saver types
@@ -365,7 +381,14 @@ while its replacement awaits a Store result. Preserve terminal-attribution and
 cancellation compensation below; changing lock granularity does not grant a new
 worker authority over a durable row.
 
-Assembly evidence persists a full row snapshot. Serialize that write with the
+With heartbeat enabled, assembly evidence is merged into the row's metadata
+through `RunStore.merge_owned_metadata()`, which requires this Worker's live
+lease on a `pending`/`running` row and writes no other field. A full snapshot
+would also rewrite status, owner, lease and error, reviving a row a peer already
+reclaimed. A rejection fences the run and fails assembly before execution; a
+locally fenced run is refused before any write, and a Store without the method
+fails closed instead of falling back to `put()`. Without heartbeat, evidence
+still persists a full row snapshot. Serialize either write with the
 same run's lease renewal and local acknowledgment, so it cannot restore an old
 lease after renewal. Lock order is thread gate, then snapshot gate, then the
 short registry lock. Renewal uses only the snapshot gate and must release it

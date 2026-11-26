@@ -33,6 +33,7 @@ from deerflow.agents.middlewares.tool_result_meta import (
     _command_messages,
     normalize_tool_result,
 )
+from deerflow.agents.middlewares.tool_transform_meta import append_tool_transform
 from deerflow.config.harness_guard_config import HarnessGuardConfig
 from deerflow.sandbox.tools import _match_line_endings, read_current_file_content
 
@@ -74,7 +75,9 @@ def classify_tool_error(content: str) -> ErrorSignature | None:
             category="MODULE_NOT_FOUND",
             entity=pkg,
             signature=f"MODULE_NOT_FOUND:{pkg}",
-            targeted_hint=(f"[HARNESS GUARD] Missing Python dependency or symbol '{pkg}'. Action: Execute 'pip install {pkg}' or check your package version/virtualenv."),
+            targeted_hint=(
+                f"[HARNESS GUARD] Missing Python dependency or symbol '{pkg}'. This output does not establish the cause or the correct distribution. Inspect the environment, source and dependency declarations before choosing a remedy."
+            ),
         )
 
     match = re.search(
@@ -87,7 +90,7 @@ def classify_tool_error(content: str) -> ErrorSignature | None:
             category="MODULE_NOT_FOUND",
             entity=pkg,
             signature=f"MODULE_NOT_FOUND:{pkg}",
-            targeted_hint=(f"[HARNESS GUARD] Missing Python dependency '{pkg}'. Action: Execute 'pip install {pkg}' or verify your virtual environment before re-running the script."),
+            targeted_hint=(f"[HARNESS GUARD] Missing Python dependency '{pkg}'. The import name does not establish a distribution name. Inspect the interpreter, project source and dependency declarations before choosing a remedy."),
         )
 
     # 2. Command not found
@@ -102,7 +105,7 @@ def classify_tool_error(content: str) -> ErrorSignature | None:
             category="COMMAND_NOT_FOUND",
             entity=cmd,
             signature=f"COMMAND_NOT_FOUND:{cmd}",
-            targeted_hint=(f"[HARNESS GUARD] Command '{cmd}' was not found in environment. Action: Check command spelling or install the required executable before retrying."),
+            targeted_hint=(f"[HARNESS GUARD] Command '{cmd}' was not found in environment. Inspect command resolution and the environment before choosing a remedy."),
         )
 
     # 3. FileNotFoundError / No such file
@@ -117,7 +120,7 @@ def classify_tool_error(content: str) -> ErrorSignature | None:
             category="FILE_NOT_FOUND",
             entity=path,
             signature=f"FILE_NOT_FOUND:{path}",
-            targeted_hint=(f"[HARNESS GUARD] File '{path}' does not exist. Action: Run 'ls' or check directory layout to confirm file paths before retrying."),
+            targeted_hint=(f"[HARNESS GUARD] File '{path}' does not exist. Inspect the requested path and working directory before choosing a remedy."),
         )
 
     # 4. SyntaxError in execution output
@@ -130,7 +133,7 @@ def classify_tool_error(content: str) -> ErrorSignature | None:
             category="SYNTAX_ERROR",
             entity=line,
             signature=f"SYNTAX_ERROR:line_{line}",
-            targeted_hint=(f"[HARNESS GUARD] Python SyntaxError detected at line {line}: '{msg}'. Action: Correct the script syntax before executing again."),
+            targeted_hint=(f"[HARNESS GUARD] Python SyntaxError detected at line {line}: '{msg}'. Inspect the actual source and parser diagnostic before choosing a remedy."),
         )
 
     # 5. PermissionError
@@ -145,7 +148,7 @@ def classify_tool_error(content: str) -> ErrorSignature | None:
             category="PERMISSION_DENIED",
             entity=path,
             signature=f"PERMISSION_DENIED:{path}",
-            targeted_hint=(f"[HARNESS GUARD] Permission denied on '{path}'. Action: Check file permissions (e.g. chmod +x) or user privileges."),
+            targeted_hint=(f"[HARNESS GUARD] Permission denied on '{path}'. Inspect the operation, ownership and access policy before choosing a remedy."),
         )
 
     # 6. Address / Port already in use
@@ -154,7 +157,7 @@ def classify_tool_error(content: str) -> ErrorSignature | None:
             category="PORT_IN_USE",
             entity="port",
             signature="PORT_IN_USE",
-            targeted_hint=("[HARNESS GUARD] Network port is already in use. Action: Specify an alternative port or stop the listening process."),
+            targeted_hint=("[HARNESS GUARD] Network port is already in use. Inspect the bind address and listener ownership before choosing a remedy."),
         )
 
     return None
@@ -359,11 +362,13 @@ class HarnessGuardMiddleware(AgentMiddleware):
                 if matching_streak + 1 >= self.config.max_repeated_error_signatures:
                     repetition_warning = f"[HARNESS GUARD: CRITICAL REPETITION] Error '{sig_str}' has occurred {matching_streak + 1} times consecutively. Do NOT repeat this action without addressing the root cause."
 
-            # Check alternating oscillation pattern (A -> B -> A -> B)
-            if self.config.detect_alternating_loops and len(history) >= 3:
+            # Check alternating oscillation pattern (A -> B -> A -> B). Only
+            # failures form the loop: a success ends it, its content must reach
+            # the model unchanged, and a window containing it is not a loop.
+            if self.config.detect_alternating_loops and is_error and len(history) >= 3:
                 h = list(history)
                 r0, r1, r2, r3 = h[-3], h[-2], h[-1], record
-                if r0.tool_name == r2.tool_name and r1.tool_name == r3.tool_name and r0.tool_name != r1.tool_name and sum(1 for r in (r0, r1, r2, r3) if r.is_error) >= 3:
+                if r0.tool_name == r2.tool_name and r1.tool_name == r3.tool_name and r0.tool_name != r1.tool_name and all(r.is_error for r in (r0, r1, r2)):
                     oscillation_warning = f"[HARNESS GUARD: OSCILLATION DETECTED] Alternating failing tool loop detected between '{r0.tool_name}' and '{r1.tool_name}'. Pause and re-evaluate your strategy."
 
             history.append(record)
@@ -390,6 +395,7 @@ class HarnessGuardMiddleware(AgentMiddleware):
             else:
                 result.content = f"{result.content}{hint_block_text}"
 
+            append_tool_transform(result.additional_kwargs, "diagnostic_observation", by="HarnessGuardMiddleware", version="2")
             if HARNESS_GUARD_KEY not in result.additional_kwargs:
                 result.additional_kwargs[HARNESS_GUARD_KEY] = {}
             result.additional_kwargs[HARNESS_GUARD_KEY].update(

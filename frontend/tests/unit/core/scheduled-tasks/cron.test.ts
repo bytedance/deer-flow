@@ -132,6 +132,21 @@ describe("parseCron", () => {
     expect(parseCron("garbage").preset).toBe("custom");
     expect(parseCron("garbage").parts.raw).toBe("garbage");
   });
+
+  test.each([
+    "60 * * * *",
+    "99 9 * * *",
+    "0 24 * * *",
+    "0 9 0 * *",
+    "0 9 32 * *",
+  ])("keeps the out-of-range cron %j as custom", (cron) => {
+    expect(parseCron(cron)).toEqual({ preset: "custom", parts: { raw: cron } });
+  });
+
+  test("accepts inclusive upper bounds for numeric fields", () => {
+    expect(parseCron("59 23 * * *").preset).toBe("daily");
+    expect(parseCron("0 9 31 * *").preset).toBe("monthly");
+  });
 });
 
 describe("describeSchedule", () => {
@@ -544,6 +559,35 @@ describe("zonedLocalToUtcIso DST transitions", () => {
 });
 
 describe("onceRunAtInstant", () => {
+  test.each([
+    ["2026-12-07T09:00.5", "Asia/Shanghai", "2026-12-07T01:00:00.5+00:00"],
+    ["2026-12-07T09:00,5", "Asia/Shanghai", "2026-12-07T01:00:00.5+00:00"],
+    [
+      "2026-12-07T09:00:45,123",
+      "Asia/Shanghai",
+      "2026-12-07T01:00:45.123+00:00",
+    ],
+    ["2026-11-01T01:30.5", "America/New_York", "2026-11-01T05:30:00.5+00:00"],
+    [
+      "2026-12-07T09:00:45.123456",
+      "Asia/Shanghai",
+      "2026-12-07T01:00:45.123456+00:00",
+    ],
+    ["2026-12-07 09:00:45", "Asia/Shanghai", "2026-12-07T01:00:45+00:00"],
+    [
+      "2026-11-01T01:30:45.123",
+      "America/New_York",
+      "2026-11-01T05:30:45.123+00:00",
+    ],
+    [
+      "2026-03-08T02:30:45.123",
+      "America/New_York",
+      "2026-03-08T07:30:45.123+00:00",
+    ],
+  ])("preserves sub-minute precision for %s in %s", (value, zone, expected) => {
+    expect(onceRunAtInstant(value, zone)).toBe(expected);
+  });
+
   test("a run_at without an offset is wall-clock time in the task's zone", () => {
     expect(onceRunAtInstant("2026-10-07T09:00:00", "Asia/Shanghai")).toBe(
       "2026-10-07T01:00:00+00:00",
@@ -601,6 +645,13 @@ describe("describeTaskSchedule", () => {
     ).toBe("工作日 08:30 (Asia/Shanghai)");
   });
 
+  test("max valid weekdays still read as weekdays", () => {
+    expect(describeTaskSchedule(cronTask("59 23 * * 1-5"), "en-US")).toEqual({
+      text: "Weekdays at 23:59 (Asia/Shanghai)",
+      raw: "59 23 * * 1-5",
+    });
+  });
+
   test("daily reuses the preset wording", () => {
     expect(describeTaskSchedule(cronTask("0 9 * * *"), "en-US").text).toBe(
       "Every day at 09:00 (Asia/Shanghai)",
@@ -609,6 +660,16 @@ describe("describeTaskSchedule", () => {
       "每天 09:00 (Asia/Shanghai)",
     );
   });
+
+  test.each(["60 9 * * 1-5", "0 24 * * 1-5"])(
+    "does not describe the out-of-range cron %j as a preset",
+    (cron) => {
+      expect(describeTaskSchedule(cronTask(cron), "en-US")).toEqual({
+        text: "Custom schedule (Asia/Shanghai)",
+        raw: cron,
+      });
+    },
+  );
 
   test("a custom cron never shows the expression in text", () => {
     const { text, raw } = describeTaskSchedule(

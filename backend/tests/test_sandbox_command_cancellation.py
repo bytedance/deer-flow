@@ -7,13 +7,14 @@ import signal
 import subprocess
 import sys
 import threading
+from functools import partial
 from pathlib import Path
 
 import pytest
 
 from deerflow.sandbox.command_scope import command_owner
-from deerflow.sandbox.lease import run_sync_lifecycle_operation
-from deerflow.sandbox.local.local_sandbox import LocalSandbox
+from deerflow.sandbox.lease import run_sync_lifecycle_operation, sandbox_lease_owner
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 
 
 def _alive(pid: int) -> bool:
@@ -224,7 +225,7 @@ async def test_cancelled_aio_waiter_never_starts_or_interrupts_another_scope(mon
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["interrupt", "failure", "loop_capped"])
-async def test_native_bash_to_worker_stops_owned_processes_before_release(monkeypatch, tmp_path, outcome):
+async def test_worker_stops_owned_provider_processes_before_release(tmp_path, outcome):
     from types import SimpleNamespace as N
     from unittest.mock import AsyncMock, MagicMock
 
@@ -232,15 +233,14 @@ async def test_native_bash_to_worker_stops_owned_processes_before_release(monkey
     from deerflow.runtime.runs.worker import RunContext, run_agent
     from deerflow.sandbox.lease import get_sandbox_lease_manager
     from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
-    from deerflow.sandbox.tools import bash_tool
+    from deerflow.sandbox.tools import _execute_bash_command, ensure_sandbox_initialized_async
 
-    sandbox = LocalSandbox("local:worker-cancel")
+    sandbox = LocalSandbox("local:worker-cancel", [PathMapping("/mnt/user-data/workspace", str(tmp_path))])
     provider = MagicMock()
     provider.get.return_value = sandbox
     provider.get_scoped.return_value = sandbox
     provider.acquire.return_value = sandbox.id
     provider.acquire_async = AsyncMock(return_value=sandbox.id)
-    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
     run_manager = RunManager()
     record = await run_manager.create("native-bash-cancellation")
     background = tmp_path / "background.pid"
@@ -255,18 +255,25 @@ async def test_native_bash_to_worker_stops_owned_processes_before_release(monkey
 
     provider.release.side_effect = release
 
+    async def execute_owned(runtime, command):
+        active = await ensure_sandbox_initialized_async(runtime)
+        owner = sandbox_lease_owner(runtime.context)
+        assert owner is not None
+        execute = partial(_execute_bash_command, active, command, runtime=runtime, env=None)
+        return await run_sync_lifecycle_operation(execute, _on_cancel=partial(active.request_command_cancel, owner))
+
     class Agent:
         async def astream(self, graph_input, config, **kwargs):
             context = config["configurable"]["__pregel_runtime"].context
             state = {"sandbox": {"sandbox_id": sandbox.id}, "thread_data": {key: str(tmp_path) for key in ("workspace_path", "outputs_path", "uploads_path")}}
             runtime = N(context=context, state=state, config=config)
             command = "nohup " + _command(background, background=True).replace(shlex.quote(sys.executable), "python3").replace(str(tmp_path), "/mnt/user-data/workspace")
-            result = await bash_tool.coroutine(runtime=runtime, command=command)
+            result = await execute_owned(runtime, command)
             assert not result.startswith("Error:"), result
             await _pid(background)
             if outcome == "interrupt":
                 command = _command(foreground, background=False).replace(shlex.quote(sys.executable), "python3").replace(str(tmp_path), "/mnt/user-data/workspace")
-                await bash_tool.coroutine(runtime=runtime, command=command)
+                await execute_owned(runtime, command)
             elif outcome == "failure":
                 raise RuntimeError("scripted model failure after starting a process")
             else:
@@ -364,6 +371,99 @@ def test_aio_cleanup_does_not_report_success_without_pidfd_support():
     assert result.returncode != 0
     assert "pidfd unavailable" in result.stderr
     assert '"remaining": 0' not in result.stdout
+
+
+def _marked_process(token: str) -> int:
+    needle = f"DEERFLOW_COMMAND_OWNER={token}".encode()
+    for _ in range(1000):
+        for name in os.listdir("/proc"):
+            try:
+                with open(f"/proc/{name}/environ", "rb") as stream:
+                    if needle in stream.read().split(b"\0"):
+                        return int(name)
+            except (OSError, ValueError):
+                continue
+        threading.Event().wait(0.01)
+    raise AssertionError("marked command did not start")
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux") or not hasattr(os, "pidfd_open"), reason="Linux /proc and pidfd")
+@pytest.mark.parametrize("job_control", ["-m", "+m"])
+def test_aio_cleanup_stops_the_rest_of_a_persistent_shell_command(tmp_path, job_control):
+    import json
+    import pty
+    import uuid
+
+    from deerflow.community.aio_sandbox.command_cleanup import cleanup_command
+
+    # The AIO persistent shell is an interactive bash on a PTY that exports the
+    # marker itself, so only its children carry it.
+    token = uuid.uuid4().hex
+    shell, terminal = pty.fork()
+    if shell == 0:
+        os.execve("/bin/bash", ["bash", "--norc", "--noprofile", "-i", job_control], {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "PS1": "$ ", "TERM": "dumb"})
+
+    def drain():
+        try:
+            while os.read(terminal, 4096):
+                pass
+        except OSError:
+            pass
+
+    threading.Thread(target=drain, daemon=True).start()
+    state = tmp_path / "state.txt"
+    try:
+        os.write(terminal, f"cd {shlex.quote(str(tmp_path))}\nexport DEERFLOW_COMMAND_OWNER={token}; sleep 30; echo tail > tail.txt\n".encode())
+        _marked_process(token)
+        command = shlex.split(cleanup_command(token))
+        receipt = subprocess.run([sys.executable, *command[1:]], capture_output=True, text=True, timeout=15, check=True)
+        assert json.loads(receipt.stdout)["remaining"] == 0
+
+        # The shell reads lines in order, so once it answers this probe the
+        # cancelled line has either run its tail or been abandoned.
+        for _ in range(10):
+            os.write(terminal, b'echo "$PWD|$DEERFLOW_COMMAND_OWNER" > state.txt\n')
+            for _ in range(100):
+                if state.exists() and state.read_text().strip():
+                    break
+                threading.Event().wait(0.01)
+            else:
+                continue
+            break
+        assert state.exists() and state.read_text().strip() == f"{tmp_path}|{token}", "the shell must survive with its state"
+        assert not (tmp_path / "tail.txt").exists(), "cancel must stop the rest of the command"
+    finally:
+        try:
+            os.kill(shell, signal.SIGKILL)
+            os.waitpid(shell, 0)
+        except (ProcessLookupError, ChildProcessError):
+            pass
+        os.close(terminal)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux") or not hasattr(os, "pidfd_open"), reason="Linux /proc and pidfd")
+def test_aio_cleanup_stops_the_rest_of_a_one_off_bash_command(tmp_path):
+    import json
+    import uuid
+
+    from deerflow.community.aio_sandbox.command_cleanup import cleanup_command
+
+    # AIO bash.exec runs each env-bearing command as its own `bash -c` session
+    # without a terminal; the script exports the marker after bash started.
+    token = uuid.uuid4().hex
+    script = f"exec < /dev/null\nexport DEERFLOW_COMMAND_OWNER={token}\nsleep 30; echo tail > tail.txt"
+    shell = subprocess.Popen(["/bin/bash", "-c", script], cwd=tmp_path, start_new_session=True)
+    try:
+        _marked_process(token)
+        command = shlex.split(cleanup_command(token))
+        receipt = subprocess.run([sys.executable, *command[1:]], capture_output=True, text=True, timeout=15, check=True)
+        assert json.loads(receipt.stdout)["remaining"] == 0
+        shell.wait(timeout=10)
+        assert not (tmp_path / "tail.txt").exists(), "cancel must stop the rest of the command"
+    finally:
+        if shell.poll() is None:
+            shell.kill()
+            shell.wait()
 
 
 @pytest.mark.parametrize("case", ["missing-command", "missing-stdout-cursor", "missing-stderr-cursor", "completed-without-cursors", "empty-poll"])

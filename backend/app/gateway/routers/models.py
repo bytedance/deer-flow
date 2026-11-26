@@ -197,7 +197,7 @@ async def list_models(
         owner = await _resolve_bound_owner_for_model_list(request)
         principal_user = owner if owner is not None else user
         try:
-            provider, principal = resolve_model_authorization(principal_user, is_internal=_is_internal_caller(request, user))
+            provider, principal = await asyncio.to_thread(resolve_model_authorization, principal_user, is_internal=_is_internal_caller(request, user))
         except _AuthorizationUnavailable as exc:
             if exc.fail_closed:
                 visible_models = []
@@ -263,6 +263,6 @@ async def get_model(
     # model exists but the role lacks permission to use it).
     user = await get_optional_user_from_request(request)
     if user is not None:
-        authorize_model_use(user, model_name, is_internal=_is_internal_caller(request, user), app_config=config)
+        await asyncio.to_thread(authorize_model_use, user, model_name, is_internal=_is_internal_caller(request, user), app_config=config)
 
     return _model_response(model)

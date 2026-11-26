@@ -122,7 +122,7 @@ def _build_middleware(**attrs: int) -> LLMErrorHandlingMiddleware:
     return middleware
 
 
-def test_async_model_call_retries_busy_provider_then_succeeds(
+def test_async_model_call_retries_structured_503_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=25, retry_cap_delay_ms=25)
@@ -145,7 +145,7 @@ def test_async_model_call_retries_busy_provider_then_succeeds(
         nonlocal attempts
         attempts += 1
         if attempts < 3:
-            raise FakeError("当前服务集群负载较高，请稍后重试，感谢您的耐心等待。 (2064)")
+            raise FakeError("当前服务集群负载较高，请稍后重试，感谢您的耐心等待。 (2064)", status_code=503)
         return AIMessage(content="ok")
 
     monkeypatch.setattr("asyncio.sleep", fake_sleep)
@@ -579,6 +579,7 @@ def test_empty_response_error_uses_one_retry_budget() -> None:
     assert middleware.release_policy_parameters() == {
         "empty_response_retry_limit": 1,
         "empty_response_retry_scope": "run",
+        "error_classification": "structured_evidence_v1",
     }
 
 
@@ -1212,12 +1213,12 @@ def test_circuit_breaker_does_not_trip_on_non_retriable_errors(monkeypatch: pyte
 # ---------- ReadError / RemoteProtocolError retriable classification ----------
 
 
-class _ReadError(Exception):
-    """Local stand-in for httpx.ReadError — same class name, no httpx dependency."""
+class _ReadError(httpx.ReadError):
+    """Transport failure with the real httpx exception contract."""
 
 
-class _RemoteProtocolError(Exception):
-    """Local stand-in for httpx.RemoteProtocolError — same class name, no httpx dependency."""
+class _RemoteProtocolError(httpx.RemoteProtocolError):
+    """Protocol failure with the real httpx exception contract."""
 
 
 _ReadError.__name__ = "ReadError"
@@ -1256,11 +1257,8 @@ def test_sync_read_error_triggers_retry_loop(monkeypatch: pytest.MonkeyPatch) ->
     result = middleware.wrap_model_call(SimpleNamespace(), handler)
 
     assert isinstance(result, AIMessage)
-    # ReadError is a generic connection drop, not a chunk-gap timeout, so
-    # it must fall back to the legacy transient copy rather than the
-    # specialized "split the work into smaller steps" guidance (#3195 CR).
-    assert "temporarily unavailable" in result.content
-    assert "streaming response was interrupted" not in result.content
+    assert "streaming response was interrupted" in result.content
+    assert "cause is unknown" in result.content
     assert attempts == 3  # exhausted all retries
     assert len(waits) == 2  # slept between attempts 1→2 and 2→3
 
@@ -1284,11 +1282,8 @@ async def test_async_read_error_triggers_retry_loop(monkeypatch: pytest.MonkeyPa
     result = await middleware.awrap_model_call(SimpleNamespace(), handler)
 
     assert isinstance(result, AIMessage)
-    # ReadError is a generic connection drop, not a chunk-gap timeout, so
-    # it must fall back to the legacy transient copy rather than the
-    # specialized "split the work into smaller steps" guidance (#3195 CR).
-    assert "temporarily unavailable" in result.content
-    assert "streaming response was interrupted" not in result.content
+    assert "streaming response was interrupted" in result.content
+    assert "cause is unknown" in result.content
     assert attempts == 3  # exhausted all retries
     assert len(waits) == 2  # slept between attempts 1→2 and 2→3
 
@@ -1356,17 +1351,14 @@ async def test_async_circuit_breaker_trips_and_recovers(monkeypatch: pytest.Monk
     assert middleware._check_circuit() is False
 
 
-class _StreamChunkTimeoutError(Exception):
-    """Local stand-in for langchain_openai's StreamChunkTimeoutError —
-    matched by class name, no langchain-openai import needed (mirrors
-    how this file already stubs httpx.ReadError / RemoteProtocolError).
-    """
+class _StreamChunkTimeoutError(TimeoutError):
+    """Timeout subtype matching the adapter watchdog, with a bounded retry budget."""
 
 
 _StreamChunkTimeoutError.__name__ = "StreamChunkTimeoutError"
 
 
-class _ReadTimeoutError(Exception):
+class _ReadTimeoutError(httpx.ReadTimeout):
     pass
 
 
@@ -1526,12 +1518,8 @@ def test_max_attempts_for_override_never_exceeds_user_cap() -> None:
     assert middleware._max_attempts_for(exc) == 1
 
 
-def test_user_message_for_stream_chunk_timeout_mentions_split_or_shorten() -> None:
-    """When the retry budget for StreamChunkTimeoutError is exhausted, the user
-    message must guide the user toward splitting / shortening the request
-    instead of suggesting a generic retry. This is the actionable advice
-    Reviewer B asked for in the follow-up CR (issue #3189).
-    """
+def test_user_message_for_stream_timeout_does_not_invent_payload_cause() -> None:
+    """A timeout reports interrupted streaming without guessing the cause."""
     middleware = _build_middleware()
     exc = _StreamChunkTimeoutError("No streaming chunk received for 120.0s")
     exc.__class__.__name__ = "StreamChunkTimeoutError"
@@ -1539,42 +1527,32 @@ def test_user_message_for_stream_chunk_timeout_mentions_split_or_shorten() -> No
     message = middleware._build_user_message(exc, reason="transient")
 
     assert "streaming response was interrupted" in message
-    assert "split" in message or "shorten" in message
-    # The old generic "streaming response was interrupted" wording must NOT appear here,
-    # otherwise the actionable guidance is buried.
+    assert "cause is unknown" in message
+    assert "split" not in message and "shorten" not in message
     assert "temporarily unavailable" not in message
 
 
 def test_user_message_for_remote_protocol_error_uses_generic_transient_copy() -> None:
-    """RemoteProtocolError is a generic connection drop that can fire on
-    transient network blips with perfectly normal payloads. The
-    "split the work into smaller steps" guidance only applies when the
-    upstream chunk-gap watchdog fires (StreamChunkTimeoutError), so
-    RemoteProtocolError must fall back to the legacy transient copy.
-    Regression guard for the #3195 CR feedback.
-    """
+    """Transport failures retain bounded retry and report uncertainty."""
     middleware = _build_middleware()
     exc = _RemoteProtocolError("Server closed connection unexpectedly")
     exc.__class__.__name__ = "RemoteProtocolError"
 
     message = middleware._build_user_message(exc, reason="transient")
 
-    assert "temporarily unavailable" in message
-    assert "streaming response was interrupted" not in message
+    assert "streaming response was interrupted" in message
+    assert "cause is unknown" in message
 
 
 def test_user_message_for_read_error_uses_generic_transient_copy() -> None:
-    """httpx.ReadError is symmetric to RemoteProtocolError: a generic
-    connection drop that must NOT receive the "split the work" guidance.
-    Regression guard for the #3195 CR feedback.
-    """
+    """Transport failures retain bounded retry and report uncertainty."""
     middleware = _build_middleware()
     exc = _ReadError("connection dropped mid-stream")
 
     message = middleware._build_user_message(exc, reason="transient")
 
-    assert "temporarily unavailable" in message
-    assert "streaming response was interrupted" not in message
+    assert "streaming response was interrupted" in message
+    assert "cause is unknown" in message
 
 
 def test_user_message_for_generic_transient_keeps_legacy_copy() -> None:
@@ -1605,30 +1583,14 @@ def test_user_message_for_quota_unchanged() -> None:
     assert "streaming response was interrupted" not in message
 
 
-def test_classify_error_index_error_is_retriable_transient() -> None:
-    """``langchain_core.language_models.chat_models.ainvoke`` crashes with
-    ``IndexError: list index out of range`` when the upstream provider
-    returns ``200 OK`` with ``generations == []`` (observed against the
-    Volces "coding" endpoint at ark.cn-beijing.volces.com). That's an
-    upstream-payload glitch we don't want killing the entire run, so it
-    must classify as retriable/transient and go through the normal
-    retry/backoff path.
-    """
-    middleware = _build_middleware()
-    exc = IndexError("list index out of range")
-    retriable, reason = middleware._classify_error(exc)
-    assert retriable is True
-    assert reason == "transient"
+def test_arbitrary_index_error_is_not_evidence_of_provider_failure() -> None:
+    assert _build_middleware()._classify_error(IndexError("list index out of range")) == (False, "generic")
 
 
-def test_async_index_error_retries_then_succeeds(
+def test_async_index_error_does_not_retry_without_provider_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Empty-``generations`` payloads from the upstream provider must not
-    abort the run on the first failure. Confirm that the retry loop kicks
-    in and the next attempt's successful AIMessage is returned to the
-    caller instead of an error fallback.
-    """
+    """Use structured evidence and preserve a bounded, marked fallback."""
     middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=10, retry_cap_delay_ms=10)
     attempts = 0
 
@@ -1647,19 +1609,14 @@ def test_async_index_error_retries_then_succeeds(
     result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
 
     assert isinstance(result, AIMessage)
-    assert result.content == "ok"
-    assert attempts == 2
+    assert result.additional_kwargs["error_reason"] == "generic"
+    assert attempts == 1
 
 
-def test_async_index_error_exhausted_returns_user_fallback(
+def test_async_index_error_returns_marked_generic_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If every retry hits the same empty-``generations`` IndexError, the
-    middleware must still produce a user-facing fallback AIMessage (with
-    ``deerflow_error_fallback=True``) instead of letting the IndexError
-    propagate out of the agent loop and ending the run in ``error``
-    status with no GitHub-side reply.
-    """
+    """Use structured evidence and preserve a bounded, marked fallback."""
     middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=10, retry_cap_delay_ms=10)
 
     async def fake_sleep(_delay: float) -> None:
@@ -1674,9 +1631,9 @@ def test_async_index_error_exhausted_returns_user_fallback(
 
     assert isinstance(result, AIMessage)
     assert result.additional_kwargs["deerflow_error_fallback"] is True
-    assert result.additional_kwargs["error_reason"] == "transient"
+    assert result.additional_kwargs["error_reason"] == "generic"
     assert result.additional_kwargs["error_type"] == "IndexError"
-    assert "temporarily unavailable" in str(result.content)
+    assert "LLM request failed" in str(result.content)
 
 
 def test_classify_error_empty_stream_value_error_is_retriable_transient() -> None:
@@ -2167,13 +2124,11 @@ def test_classify_error_limit_burst_rate_by_code() -> None:
     assert middleware._classify_error(exc) == (True, "burst_rate")
 
 
-def test_classify_error_limit_burst_rate_by_message() -> None:
-    """Burst-rate is also detectable from the message alone (no code field),
-    matching how Volcano Engine phrases the error.
-    """
+def test_429_prose_does_not_invent_burst_code() -> None:
+    """Use structured evidence and preserve a bounded, marked fallback."""
     middleware = _build_middleware()
     exc = FakeError("Request rate increased too quickly. To ensure system stability, please adjust your client logic.", status_code=429)
-    assert middleware._classify_error(exc) == (True, "burst_rate")
+    assert middleware._classify_error(exc) == (True, "transient")
 
 
 def test_classify_error_normal_429_stays_transient() -> None:
@@ -3140,8 +3095,8 @@ def test_omniroute_in_stream_504_is_transient(exc: openai.APIError) -> None:
         pytest.param("upstream answered HTTP 200, then failed with [503]", id="status-200-skipped-for-later-match"),
     ],
 )
-def test_in_stream_error_takes_its_status_from_the_message(message: str) -> None:
-    assert _build_middleware()._classify_error(_in_stream_error(message)) == (True, "transient")
+def test_prose_status_is_diagnostic_only(message: str) -> None:
+    assert _build_middleware()._classify_error(RuntimeError(message)) == (False, "generic")
 
 
 @pytest.mark.parametrize(
@@ -3171,7 +3126,9 @@ def test_in_stream_error_takes_its_status_from_structured_fields(error_fields: d
 
 def test_in_stream_non_error_status_does_not_hide_server_error_type() -> None:
     exc = _in_stream_error("stream aborted after HTTP 200", type="server_error")
-    assert _build_middleware()._classify_error(exc) == (True, "transient")
+    middleware = _build_middleware()
+    assert middleware._classify_error(exc) == (True, "transient")
+    assert middleware._max_attempts_for(exc, "transient") == 2
 
 
 @pytest.mark.parametrize(
@@ -3189,15 +3146,21 @@ def test_in_band_lookup_skips_non_error_statuses(exc: openai.APIError) -> None:
 @pytest.mark.parametrize(
     "exc",
     [
-        pytest.param(_in_stream_error("upstream rate-limit hit"), id="hyphenated-message"),
-        pytest.param(_in_stream_error("Upstream request failed.", code="rate_limit_exceeded"), id="snake-case-code"),
+        pytest.param(RuntimeError("upstream rate-limit hit"), id="hyphenated-message"),
         pytest.param(_in_stream_error("Request exceeded the local execution expiration.", code="RATE_LIMIT_EXECUTION_TIMEOUT"), id="upper-snake-case-code"),
         pytest.param(RuntimeError("Codex API response.failed (rate_limit_exceeded): slow down"), id="codex-response-failed"),
-        pytest.param(_in_stream_error("rate-limit header malformed"), id="separator-busy-without-a-status"),
+        pytest.param(RuntimeError("rate-limit header malformed"), id="separator-busy-without-a-status"),
     ],
 )
-def test_status_less_error_matches_busy_patterns_across_separators(exc: Exception) -> None:
-    assert _build_middleware()._classify_error(exc) == (True, "busy")
+def test_unrecognized_codes_and_busy_prose_stay_generic(exc: Exception) -> None:
+    assert _build_middleware()._classify_error(exc) == (False, "generic")
+
+
+@pytest.mark.parametrize("code", ["rate_limit_exceeded", "rate_limit_error"])
+def test_structured_openai_rate_limit_codes_are_retriable(code: str) -> None:
+    exc = _in_stream_error("Upstream request failed.", code=code)
+
+    assert _build_middleware()._classify_error(exc) == (True, "transient")
 
 
 @pytest.mark.parametrize(
@@ -3213,7 +3176,6 @@ def test_status_less_error_matches_busy_patterns_across_separators(exc: Exceptio
         ),
         pytest.param(_in_stream_error("Upstream request failed.", code=400), id="code-400"),
         pytest.param(_in_stream_error("Upstream request failed.", code=400, type="server_error"), id="code-400-beats-server-error-type"),
-        pytest.param(_in_stream_error("upstream returned HTTP 400", type="server_error"), id="message-400-beats-server-error-type"),
         pytest.param(_in_stream_error("upstream failed [999]"), id="out-of-range-status"),
         pytest.param(_in_stream_error("Upstream request failed.", code=True), id="bool-code"),
         pytest.param(_in_stream_error("upstream failed: [5040]"), id="bracketed-four-digits"),
@@ -3226,7 +3188,7 @@ def test_status_less_error_matches_busy_patterns_across_separators(exc: Exceptio
         pytest.param(_in_stream_error("upstream failed: status503"), id="status-without-separator"),
         pytest.param(_in_stream_error("upstream failed: statuscode503"), id="statuscode-without-separator"),
         pytest.param(_in_stream_error("upstream failed: status_code503"), id="status_code-without-separator"),
-        # Arabic-Indic and fullwidth digits for 503: int() accepts them, the status regex must not.
+        # Prose, including Unicode digits, cannot supply an error status.
         pytest.param(_in_stream_error("upstream answered HTTP \u0665\u0660\u0663"), id="http-arabic-indic-digits"),
         pytest.param(_in_stream_error("upstream answered HTTP \uff15\uff10\uff13"), id="http-fullwidth-digits"),
         pytest.param(_in_stream_error("upstream failed: [\u0665\u0660\u0663]"), id="bracketed-arabic-indic-digits"),
@@ -3238,10 +3200,20 @@ def test_status_less_error_matches_busy_patterns_across_separators(exc: Exceptio
         pytest.param(_in_stream_error("invalid tool call at tools[0][503].function"), id="nested-index"),
         pytest.param(_in_stream_error("rate-limit header malformed", code=400), id="code-400-beats-separator-busy"),
         pytest.param(_in_stream_error("HTTP 400: rate-limit header malformed"), id="message-400-beats-separator-busy"),
+        pytest.param(_in_stream_error("upstream failed", code="\u0665\u0660\u0663"), id="non-ascii-code"),
     ],
 )
-def test_in_stream_error_without_a_retriable_signal_stays_generic(exc: openai.APIError) -> None:
-    assert _build_middleware()._classify_error(exc) == (False, "generic")
+def test_in_stream_error_retry_requires_status_code_or_openai_apierror(exc: openai.APIError) -> None:
+    middleware = _build_middleware()
+    status = _extract_in_band_status(exc, include_type=False)
+    has_status = status is not None
+    has_error_code = isinstance(exc.code, str) and bool(exc.code.strip())
+
+    if has_status or has_error_code:
+        assert middleware._classify_error(exc) == (False, "generic")
+    else:
+        assert middleware._classify_error(exc) == (True, "transient")
+        assert middleware._max_attempts_for(exc, "transient") == 2
 
 
 @pytest.mark.parametrize(
@@ -3253,18 +3225,73 @@ def test_in_stream_error_without_a_retriable_signal_stays_generic(exc: openai.AP
         pytest.param(_in_stream_error("Upstream request failed.", error="upstream timeout"), id="string-error-field"),
         pytest.param(_in_stream_error("Upstream request failed.", code={"value": 503}), id="dict-code"),
         pytest.param(_in_stream_error("Upstream request failed.", status=["503"]), id="list-status"),
-        # Arabic-Indic digits for 503: int() accepts them, the status check must not.
-        pytest.param(_in_stream_error("Upstream request failed.", code="\u0665\u0660\u0663"), id="non-ascii-digit-code"),
     ],
 )
-def test_in_stream_error_with_a_malformed_body_stays_generic(exc: openai.APIError) -> None:
-    assert _build_middleware()._classify_error(exc) == (False, "generic")
+def test_in_stream_error_without_usable_status_or_code_gets_one_retry(exc: openai.APIError) -> None:
+    middleware = _build_middleware()
+
+    assert middleware._classify_error(exc) == (True, "transient")
+    assert middleware._max_attempts_for(exc, "transient") == 2
+
+
+@pytest.mark.parametrize("exc_type", [openai.APIConnectionError, openai.APITimeoutError])
+@pytest.mark.parametrize("max_attempts", [1, 3, 5])
+def test_sync_openai_network_errors_exhaust_the_configured_budget(monkeypatch: pytest.MonkeyPatch, exc_type: type[openai.APIConnectionError], max_attempts: int) -> None:
+    middleware = _build_middleware(retry_max_attempts=max_attempts)
+    attempts = 0
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        raise exc_type(request=_STREAM_REQUEST)
+
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert attempts == max_attempts
+    assert isinstance(result, AIMessage)
+    assert result.additional_kwargs["deerflow_error_fallback"] is True
+    assert result.additional_kwargs["error_type"] == exc_type.__name__
+    assert result.additional_kwargs["error_reason"] == "transient"
+
+
+@pytest.mark.parametrize("exc_type", [openai.APIConnectionError, openai.APITimeoutError])
+@pytest.mark.parametrize("max_attempts", [3, 5])
+def test_async_openai_network_errors_can_recover_on_the_last_configured_attempt(monkeypatch: pytest.MonkeyPatch, exc_type: type[openai.APIConnectionError], max_attempts: int) -> None:
+    middleware = _build_middleware(retry_max_attempts=max_attempts)
+    attempts = 0
+    events: list[dict] = []
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    async def fake_emit_custom_event(payload, *, writer):
+        writer(payload)
+
+    async def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        if attempts < max_attempts:
+            raise exc_type(request=_STREAM_REQUEST)
+        return AIMessage(content="recovered")
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: events.append)
+    monkeypatch.setattr("deerflow.agents.middlewares.llm_error_handling_middleware.aemit_custom_event", fake_emit_custom_event)
+
+    result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
+
+    assert isinstance(result, AIMessage)
+    assert result.content == "recovered"
+    assert attempts == max_attempts
+    assert [(event["type"], event["reason"], event["max_attempts"]) for event in events] == [("llm_retry", "transient", max_attempts)] * (max_attempts - 1)
 
 
 def test_in_stream_status_parsing_stays_fast_on_a_long_message() -> None:
     # Spaces before and after ``:``/``=`` must be separate runs in the status
     # regex; two adjacent ``[ \t]*`` would backtrack quadratically here.
-    exc = _in_stream_error("status" + " " * 50_000 + "x")
+    exc = RuntimeError("status" + " " * 50_000 + "x")
     started = time.perf_counter()
     assert _build_middleware()._classify_error(exc) == (False, "generic")
     assert time.perf_counter() - started < 1.0
@@ -3293,8 +3320,8 @@ def test_in_stream_quota_auth_and_burst_rate_keep_precedence(exc: openai.APIErro
         pytest.param(FakeError("rate limit exceeded", status_code=400), id="http-400"),
     ],
 )
-def test_in_band_4xx_keeps_the_plain_busy_match(exc: Exception) -> None:
-    assert _build_middleware()._classify_error(exc) == (True, "busy")
+def test_busy_prose_cannot_override_explicit_4xx(exc: Exception) -> None:
+    assert _build_middleware()._classify_error(exc) == (False, "generic")
 
 
 @pytest.mark.parametrize(
