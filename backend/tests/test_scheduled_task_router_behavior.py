@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,11 +12,12 @@ import httpx
 import pytest
 import pytest_asyncio
 from _router_auth_helpers import call_unwrapped, make_authed_test_app
-from _scheduled_rows import occurrence
+from _scheduled_rows import create_task, occurrence
 from fastapi import HTTPException
 
 from app.gateway.auth.models import User
-from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
+from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_PAT, AUTH_SOURCE_SESSION
 from app.gateway.routers import scheduled_tasks
 from app.scheduler.service import ScheduledTaskService
 from deerflow.config.database_config import DatabaseConfig
@@ -1482,11 +1484,12 @@ async def http(tmp_path, monkeypatch):
         launches.append(kwargs)
         return {"run_id": f"run-{len(launches)}", "thread_id": kwargs["thread_id"]}
 
-    app = make_authed_test_app(user_factory=lambda: _OWNER, bind_current_user=True)
+    caller = SimpleNamespace(user=_OWNER, source=AUTH_SOURCE_SESSION)
+    app = make_authed_test_app(user_factory=lambda: caller.user, bind_current_user=True)
 
     @app.middleware("http")
     async def mark_session_source(request, call_next):
-        request.state.auth_source = AUTH_SOURCE_SESSION
+        request.state.auth_source = caller.source
         return await call_next(request)
 
     app.state.scheduled_task_repo = repo
@@ -1496,7 +1499,7 @@ async def http(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduled_tasks, "get_config", lambda: _Config())
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False), base_url="http://lifecycle.test") as client:
-            yield SimpleNamespace(client=client, app=app, repo=repo, runs=run_repo, sf=sf, launches=launches)
+            yield SimpleNamespace(client=client, app=app, repo=repo, runs=run_repo, sf=sf, launches=launches, caller=caller)
     finally:
         await close_engine()
 
@@ -1531,6 +1534,129 @@ def _when(body):
 
 
 _CREATE = {"title": "Checklist", "prompt": "Check release-checklist.md.\nList the unchecked items.", "schedule_type": "interval", "schedule_spec": {"every_seconds": 3600}, "timezone": "UTC"}
+
+
+@pytest_asyncio.fixture
+async def admin_http(http, monkeypatch):
+    users = SQLiteUserRepository(http.sf)
+    await users.create_user(_OWNER)
+    admin = await users.create_user(User(email="operator@example.com", system_role="admin"))
+    http.caller.user = admin
+    monkeypatch.setattr(scheduled_tasks, "get_user_repository", lambda: users)
+    return http
+
+
+@pytest.mark.asyncio
+async def test_admin_can_inspect_and_pause_only_the_selected_owners_task(admin_http, caplog):
+    env = admin_http
+    admin_id = str(env.caller.user.id)
+    await create_task(env.repo, "operators-task", user_id=admin_id)
+    await _seed(env.repo, "owners-task")
+    async with env.sf() as session:
+        session.add(occurrence("waiting", "owners-task", seq=1, status="queued", accounted=False))
+        await session.commit()
+
+    url = "/api/scheduled-tasks"
+    params = {"owner_user_id": OWNER}
+    caplog.set_level(logging.INFO, logger=scheduled_tasks.__name__)
+    personal = await env.client.get(url)
+    assert [row["id"] for row in personal.json()] == ["operators-task"]
+    assert "prompt" in personal.json()[0]
+    listed = await env.client.get(url, params=params)
+    detail = await env.client.get(f"{url}/owners-task", params=params)
+    assert listed.status_code == detail.status_code == 200
+    assert listed.json() == [detail.json()]
+    assert set(detail.json()) == {"id", "title", "status", "next_run_at", "active_run_status"}
+    assert detail.json()["id"] == "owners-task" and detail.json()["active_run_status"] == "queued"
+
+    wrong_owner = await env.client.post(f"{url}/operators-task/pause", params=params)
+    coded(wrong_owner, 404, "task_not_found")
+    paused = await env.client.post(f"{url}/owners-task/pause", params=params)
+    assert paused.status_code == 200
+    assert set(paused.json()) == set(detail.json())
+    assert paused.json()["status"] == "paused" and paused.json()["active_run_status"] is None
+    assert (await env.runs.list_by_task("owners-task"))[0]["status"] == "interrupted"
+    assert (await env.repo.get("operators-task", user_id=admin_id))["status"] == "enabled"
+    assert not env.launches
+    assert f"actor={admin_id} owner={OWNER}" in caplog.text
+    assert "status=200 pause_committed=True" in caplog.text
+    assert "status=404 pause_committed=False" in caplog.text
+    assert "Check release-checklist.md" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("role", "source"), [("user", AUTH_SOURCE_SESSION), ("guest", AUTH_SOURCE_SESSION), ("admin", AUTH_SOURCE_PAT), ("admin", AUTH_SOURCE_INTERNAL), ("admin", AUTH_SOURCE_AUTH_DISABLED)])
+async def test_owner_selection_requires_an_interactive_system_admin(http, role, source, monkeypatch):
+    http.caller.user = User(email="caller@example.com", system_role=role)
+    http.caller.source = source
+    lookup = AsyncMock()
+    monkeypatch.setattr(scheduled_tasks, "get_user_repository", lambda: SimpleNamespace(get_user_by_id=lookup))
+    await _seed(http.repo)
+    for method, suffix in [("GET", ""), ("GET", "/task-l"), ("POST", "/task-l/pause")]:
+        response = await http.client.request(method, "/api/scheduled-tasks" + suffix, params={"owner_user_id": OWNER})
+        assert response.status_code == 403
+    lookup.assert_not_awaited()
+    assert (await http.repo.get("task-l", user_id=OWNER))["status"] == "enabled"
+
+
+@pytest.mark.asyncio
+async def test_admin_scope_still_requires_route_permission(admin_http, monkeypatch):
+    monkeypatch.setattr("_router_auth_helpers._STUB_PERMISSIONS", ["threads:read"])
+    await _seed(admin_http.repo)
+    response = await admin_http.client.post("/api/scheduled-tasks/task-l/pause", params={"owner_user_id": OWNER})
+    assert response.status_code == 403
+    assert (await admin_http.repo.get("task-l", user_id=OWNER))["status"] == "enabled"
+
+
+@pytest.mark.asyncio
+async def test_owner_selector_validation_and_account_existence(admin_http):
+    client = admin_http.client
+    url = "/api/scheduled-tasks"
+    for value in ["", "unknown", "default"]:
+        coded(await client.get(url, params={"owner_user_id": value}), 422, "invalid_request")
+    coded(await client.get(url, params=[("owner_user_id", OWNER), ("owner_user_id", OWNER)]), 422, "invalid_request")
+    coded(await client.get(url, params={"owner_user_id": "00000000-0000-0000-0000-000000000001"}), 404, "task_not_found")
+    empty = await client.get(url, params={"owner_user_id": OWNER})
+    assert empty.status_code == 200 and empty.json() == []
+
+
+@pytest.mark.asyncio
+async def test_admin_can_inspect_disabled_owner_but_cannot_pause_launching_run(admin_http):
+    await SQLiteUserRepository(admin_http.sf).set_disabled(OWNER, True)
+    await _seed(admin_http.repo)
+    async with admin_http.sf() as session:
+        session.add(occurrence("starting", "task-l", seq=1, status="launching", accounted=False))
+        await session.commit()
+
+    url = "/api/scheduled-tasks/task-l"
+    params = {"owner_user_id": OWNER}
+    detail = await admin_http.client.get(url, params=params)
+    assert detail.status_code == 200 and detail.json()["active_run_status"] == "launching"
+    coded(await admin_http.client.post(f"{url}/pause", params=params), 409, "task_running")
+    assert (await admin_http.repo.get("task-l", user_id=OWNER))["status"] == "enabled"
+    assert (await admin_http.runs.list_by_task("task-l"))[0]["status"] == "launching"
+
+
+@pytest.mark.asyncio
+async def test_owner_lookup_failure_prevents_pause(admin_http, monkeypatch):
+    await _seed(admin_http.repo)
+    lookup = AsyncMock(side_effect=RuntimeError("unavailable"))
+    monkeypatch.setattr(scheduled_tasks, "get_user_repository", lambda: SimpleNamespace(get_user_by_id=lookup))
+    response = await admin_http.client.post("/api/scheduled-tasks/task-l/pause", params={"owner_user_id": OWNER})
+    coded(response, 503, "scheduler_unavailable")
+    assert (await admin_http.repo.get("task-l", user_id=OWNER))["status"] == "enabled"
+
+
+@pytest.mark.asyncio
+async def test_unsupported_owner_selector_cannot_update_delete_or_trigger_even_the_callers_own_task(admin_http):
+    admin_id = str(admin_http.caller.user.id)
+    await create_task(admin_http.repo, "personal", user_id=admin_id)
+    url = "/api/scheduled-tasks/personal"
+    for method, path, body in [("PATCH", url, {"title": "Changed"}), ("DELETE", url, None), ("POST", f"{url}/trigger", None), ("POST", f"{url}/resume", None)]:
+        response = await admin_http.client.request(method, path, params={"owner_user_id": OWNER}, json=body)
+        coded(response, 422, "invalid_request")
+    assert (await admin_http.repo.get("personal", user_id=admin_id))["title"] == "personal"
+    assert not admin_http.launches
 
 
 @pytest.mark.asyncio

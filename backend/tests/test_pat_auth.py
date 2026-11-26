@@ -472,6 +472,50 @@ def test_pat_never_carries_admin_capability_even_for_admin_owner(client):
     assert control.json() == {"is_admin": True}
 
 
+def test_admin_pat_can_only_manage_personal_scheduled_tasks(client, pat_env):
+    from app.gateway.routers.scheduled_tasks import router
+    from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+
+    app, _, engine = pat_env
+    app.include_router(router)
+    repo = ScheduledTaskRepository(async_sessionmaker(engine, expire_on_commit=False))
+    app.state.scheduled_task_repo = repo
+    other_owner = "7fed2bc0-aba8-4dff-8c78-98971975e383"
+    for task_id, owner in (("personal", "admin-1"), ("other", other_owner)):
+        asyncio.run(
+            repo.create(
+                task_id=task_id,
+                user_id=owner,
+                thread_id=None,
+                context_mode="fresh_thread_per_run",
+                assistant_id="lead_agent",
+                title=task_id,
+                prompt="summarize",
+                schedule_type="interval",
+                schedule_spec={"every_seconds": 3600},
+                timezone="UTC",
+                next_run_at=datetime(2030, 1, 1, tzinfo=UTC),
+            )
+        )
+    token = _create_pat(client, user_id="admin-1", scopes=["schedules:read", "schedules:write", "threads:read", "threads:write"])
+    client.cookies.clear()
+    headers = {"Authorization": f"Bearer {token['token']}"}
+    base = "/api/scheduled-tasks"
+
+    response = client.get(base, headers=headers)
+    assert response.status_code == 200, response.text
+    assert [task["id"] for task in response.json()] == ["personal"]
+    assert client.get(f"{base}/personal", headers=headers).status_code == 200
+    paused = client.post(f"{base}/personal/pause", headers=headers)
+    assert paused.status_code == 200, paused.text
+    assert paused.json()["status"] == "paused"
+
+    for method, path in (("GET", base), ("GET", f"{base}/other"), ("POST", f"{base}/other/pause")):
+        denied = client.request(method, path, headers=headers, params={"owner_user_id": other_owner})
+        assert denied.status_code == 403, denied.text
+    assert asyncio.run(repo.get("other", user_id=other_owner))["status"] == "enabled"
+
+
 def test_pat_default_denied_on_route_outside_pat_policy(client):
     """P1 regression (#5041 review): a PAT holding every scope must not reach
     destructive routes that have no PAT policy — scope intersection only

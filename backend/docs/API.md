@@ -1840,6 +1840,25 @@ GET    /api/threads/{thread_id}/scheduled-task-events?limit=50
 POST   /api/scheduled-tasks/preview-cron
 ```
 
+A signed-in system administrator can pass a single `owner_user_id` query parameter to the
+list, detail and pause endpoints. Use the local account UUID from `GET /api/v1/admin/users`.
+For example, `GET /api/scheduled-tasks?owner_user_id=<uuid>` lists that account's tasks.
+The administrator also needs the endpoint's usual route permission. Each explicit selection,
+including one naming the caller, returns only `id`, `title`, `status`, `next_run_at` and
+`active_run_status` per task. Omit the parameter for the usual personal response.
+Operators can inspect and pause a disabled user's tasks. Pausing uses the same queue
+cancellation and active-run conflict checks as a personal request.
+
+This permission spans accounts within one deployment. Personal access tokens, internal
+credentials, auth-disabled identities and ordinary users cannot select an owner.
+For personal tasks, a token needs both `schedules:read` and `threads:read` to list or
+inspect tasks, and both `schedules:write` and `threads:write` to pause one.
+An invalid or repeated selector returns 422. An unknown account or a task outside the
+selected account returns 404. An existing account with no tasks returns an empty list.
+Other operations in this router reject an explicit selector with 422. When an explicit
+selection reaches the router, it logs the actor, operation, task ID, outcome, trace ID
+and the target UUID once validated. For a pause it also logs whether the mutation committed. The task keeps its original execution owner.
+
 **Task fields.** Create and PATCH accept `title`, `prompt`, `schedule_type`
 (`once` | `cron` | `interval`), `schedule_spec`, `timezone`, `context_mode`,
 `thread_id`, `assistant_id`, plus:
