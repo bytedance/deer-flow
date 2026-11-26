@@ -179,6 +179,13 @@ Saving a model switch waits until the selected model is available; unrelated
 edits remain saveable without the catalog. Incompatible saved reasoning values
 are shown explicitly so they can be replaced with Inherit or a supported value.
 
+In web chats, an Agent's thinking and effort settings take precedence over the
+mode preset. A dispatch-only Agent can turn thinking off and still delegate in
+Ultra. A separately selected effort takes precedence in the browser thread
+where you picked it. Choosing a mode or model resets that choice.
+Explicit API request values keep their usual precedence. The selected model's
+reasoning capabilities still apply.
+
 Custom Agents migrated to `agent_storage.backend: db` remain editable through
 Agent settings and `update_agent` while the importer retains their old files
 for rollback. See [Agent Storage](../../backend/docs/CONFIGURATION.md#agent-storage)

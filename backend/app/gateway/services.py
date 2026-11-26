@@ -1200,6 +1200,7 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
         "model_name",
         "tool_approval_mode",
         "mode",
+        "mode_default_fields",
         "thinking_enabled",
         "reasoning_effort",
         "is_plan_mode",
@@ -1354,6 +1355,12 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
             existing_runtime_context["locale"] = locale
     for section in (existing_configurable, existing_runtime_context):
         if isinstance(section, dict):
+            # A previous turn's mode preset only applies when this request sends it again.
+            previous_defaults = section.pop("mode_default_fields", None)
+            if isinstance(previous_defaults, list):
+                for field in ("thinking_enabled", "reasoning_effort"):
+                    if field in previous_defaults:
+                        section.pop(field, None)
             for key in _MODEL_SELECTION_CONTEXT_KEYS:
                 section.pop(key, None)
     if isinstance(existing_runtime_context, dict) and "client" in existing_runtime_context:
@@ -1368,6 +1375,14 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
 
     configurable = config.setdefault("configurable", {})
     runtime_context = config.setdefault("context", {})
+    if isinstance(mode_fields := context.get("mode_default_fields"), list):
+        context = dict(context)
+        defaults = [key for key in ("thinking_enabled", "reasoning_effort") if key in mode_fields and key in context]
+        for key in defaults:
+            # A preset cannot replace an explicit value supplied in body.config.
+            if any(isinstance(section, dict) and key in section for section in (configurable, runtime_context)):
+                context.pop(key)
+        context["mode_default_fields"] = [key for key in defaults if key in context]
     # UI language is public request data, never a checkpoint default. An
     # explicit invalid/null value clears a legacy config.context preference.
     if "locale" in context and isinstance(runtime_context, dict):

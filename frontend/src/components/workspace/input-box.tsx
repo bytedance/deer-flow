@@ -28,6 +28,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ChangeEvent,
   type ComponentProps,
   type ClipboardEvent,
@@ -69,6 +70,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
+import type { Agent } from "@/core/agents/types";
 import { fetch } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { getBackendBaseURL } from "@/core/config";
@@ -103,6 +105,7 @@ import {
   retireProjectAttachments,
   useStagedProjectAttachments,
 } from "@/core/projects/composer-attach";
+import { getThreadEffortOverride, subscribe } from "@/core/settings/store";
 import {
   buildReferenceMessageMetadata,
   type SidecarContext,
@@ -329,6 +332,7 @@ export function InputBox({
   projectId,
   draftAgentName,
   defaultModelName,
+  agentReasoning,
   knowledgeScopeControl,
   initialValue,
   onContextChange,
@@ -379,6 +383,7 @@ export function InputBox({
    * (issue #4336). ``null`` / undefined = no agent default → use models[0].
    */
   defaultModelName?: string | null;
+  agentReasoning?: Pick<Agent, "thinking_enabled" | "reasoning_effort"> | null;
   /** Optional knowledge-scope control rendered directly after mode. */
   knowledgeScopeControl?: React.ReactNode;
   initialValue?: string;
@@ -804,15 +809,32 @@ export function InputBox({
   );
 
   const supportReasoningEffort = reasoningEffortOptions.length > 0;
+  const threadEffort = useSyncExternalStore(
+    subscribe,
+    () => getThreadEffortOverride(threadId, context.reasoning_effort),
+    () => undefined,
+  );
+  const thinkingForRun =
+    thinkingRequired ||
+    (supportThinking &&
+      (agentReasoning?.thinking_enabled ?? context.mode !== "flash"));
 
   const effectiveReasoningEffort = useMemo(
     () =>
       resolveReasoningEffort(
         selectedModel,
-        context.reasoning_effort ??
+        threadEffort ??
+          agentReasoning?.reasoning_effort ??
+          context.reasoning_effort ??
           reasoningEffortForMode(context.mode ?? "pro", selectedModel),
       ),
-    [context.mode, context.reasoning_effort, selectedModel],
+    [
+      threadEffort,
+      agentReasoning?.reasoning_effort,
+      context.mode,
+      context.reasoning_effort,
+      selectedModel,
+    ],
   );
 
   const reasoningEffortLabel = useCallback(
@@ -3409,7 +3431,7 @@ export function InputBox({
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
             {knowledgeScopeControl}
-            {supportReasoningEffort && context.mode !== "flash" && (
+            {supportReasoningEffort && thinkingForRun && (
               <PromptInputActionMenu>
                 <PromptInputActionMenuTrigger
                   className="hidden gap-1! px-2! sm:inline-flex"
