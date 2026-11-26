@@ -39,6 +39,7 @@ from deerflow.models.reasoning import resolve_reasoning_contract
 from deerflow.models.vllm_provider import VllmChatModel, count_tokens_with_replayed_reasoning
 from deerflow.runtime.events.catalog import MIDDLEWARE_SUMMARIZE_TAG
 from deerflow.utils.assembly_io import run_assembly
+from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
@@ -132,6 +133,9 @@ class SummarizationEvent:
     thread_id: str | None
     agent_name: str | None
     runtime: Runtime
+    # The thread's ``imported_history`` state channel: the summarized messages
+    # may no longer carry their own import marks.
+    imported_history: str | None = None
 
 
 @dataclass(frozen=True)
@@ -793,7 +797,22 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         body = self._build_summary_input_text(source[cursor:end], previous)
         if body is None:
             return None
-        return self.summary_prompt.format(messages=body).rstrip(), end
+        prompt = self._render_summary_prompt(body)
+        if prompt is None:
+            return None
+        return prompt, end
+
+    def _render_summary_prompt(self, body: str) -> str | None:
+        """Keep template-authoring failures inside the compaction failure boundary."""
+        try:
+            return self.summary_prompt.format(messages=body).rstrip()
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
+            logger.warning(
+                "Summarization template failed to render; keeping history. Use {messages} for history and double literal braces ({{ }}). summary_prompt_hash=%s error_type=%s",
+                canonical_hash(self.summary_prompt),
+                type(exc).__name__,
+            )
+            return None
 
     def _build_summary_input_text(self, formatted_messages: str, previous_summary: str | None = None) -> str | None:
         """Wrap complete raw sections; never trim material selected for removal.
@@ -816,7 +835,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         source = self._summary_source_text(messages_to_summarize)
         previous = redact_text(previous_summary, getattr(self._app_config, "pii_redaction", None)) if previous_summary else None
         body = self._build_summary_input_text(source, previous)
-        return self.summary_prompt.format(messages=body).rstrip() if body else None
+        return self._render_summary_prompt(body) if body else None
 
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
         return self._maybe_summarize(state, runtime)
@@ -989,7 +1008,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # messages into durable memory for a summary that never materializes would
         # duplicate that work on the next attempt. Messages are still removed after
         # this returns (in _maybe_summarize), so hooks run before they are gone.
-        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        self._fire_hooks(messages_to_summarize, preserved_messages, runtime, imported_history=_imported_history(state))
         self._record_compaction(
             source_content_hashes,
             summary=summary,
@@ -1039,7 +1058,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         summary = str(summary)
         self._record_summary_telemetry(runtime, previous_summary, summary, len(messages_to_summarize), llm_call_skipped=llm_call_skipped)
         # Fire hooks only once a replacement summary exists (see compact_state).
-        await self._afire_hooks(messages_to_summarize, preserved_messages, runtime)
+        await self._afire_hooks(messages_to_summarize, preserved_messages, runtime, imported_history=_imported_history(state))
         self._record_compaction(
             source_content_hashes,
             summary=summary,
@@ -1126,6 +1145,8 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         messages_to_summarize: list[AnyMessage],
         preserved_messages: list[AnyMessage],
         runtime: Runtime,
+        *,
+        imported_history: str | None = None,
     ) -> None:
         if not self._before_summarization_hooks:
             return
@@ -1136,6 +1157,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             thread_id=_resolve_thread_id(runtime),
             agent_name=_resolve_agent_name(runtime),
             runtime=runtime,
+            imported_history=imported_history,
         )
 
         for hook in self._before_summarization_hooks:
@@ -1150,6 +1172,8 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         messages_to_summarize: list[AnyMessage],
         preserved_messages: list[AnyMessage],
         runtime: Runtime,
+        *,
+        imported_history: str | None = None,
     ) -> None:
         """Async counterpart of :meth:`_fire_hooks`, run in a worker thread.
 
@@ -1161,7 +1185,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         """
         if not self._before_summarization_hooks:
             return
-        await asyncio.to_thread(self._fire_hooks, messages_to_summarize, preserved_messages, runtime)
+        await asyncio.to_thread(partial(self._fire_hooks, imported_history=imported_history), messages_to_summarize, preserved_messages, runtime)
+
+
+def _imported_history(state: object) -> str | None:
+    # Persisted state is untrusted: only a string value names a source.
+    value = state.get(IMPORTED_HISTORY_CHANNEL) if isinstance(state, Mapping) else None
+    return value if isinstance(value, str) and value else None
 
 
 def _summary_model_thinking_enabled(name: str | None, app_config: Any) -> bool:

@@ -28,7 +28,11 @@ rewriting the *request view* at the model boundary:
   placeholder — local images are meant to reach the model through the
   ``view_image`` tool, not as unresolvable URLs.
 
-Placeholder text comes from ``resource_placeholder_text`` in
+Configured text-only models also receive text placeholders for standard, legacy,
+and native OpenAI Responses image blocks. Original messages retain their image
+payloads so a later vision-capable turn can still consume them.
+
+Resource-link placeholder text comes from ``resource_placeholder_text`` in
 ``deerflow.tools.resource_placeholder`` — the same formatter the conversion
 layer uses — so a thread healed at read time shows the model the exact
 placeholder shape a fresh conversion would have produced. The location segment
@@ -84,6 +88,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AnyMessage
 
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
+from deerflow.agents.middlewares.tool_call_args import without_response_chain_id
 from deerflow.tools.resource_placeholder import model_visible_location, resource_placeholder_text
 
 logger = logging.getLogger(__name__)
@@ -132,7 +137,7 @@ def _accepts_http_file_urls(model: Any) -> bool:
     return isinstance(model, ChatAnthropic)
 
 
-def _sanitize_block(block: Any, model: Any) -> Any:
+def _sanitize_block(block: Any, model: Any, supports_vision: bool) -> Any:
     """Return *block* unchanged, or its text-placeholder replacement.
 
     Identity is the unchanged signal for the caller: the same object comes back
@@ -141,6 +146,8 @@ def _sanitize_block(block: Any, model: Any) -> Any:
     if not isinstance(block, dict):
         return block
     block_type = block.get("type")
+    if block_type in ("image", "image_url", "input_image") and not supports_vision:
+        return {"type": "text", "text": "[Image omitted: the selected model does not support image inputs]"}
     if block_type == "file":
         # URL-sourced file blocks are rejected by Chat Completions whenever a
         # ``url`` KEY is present — langchain-core raises even for an empty
@@ -175,7 +182,7 @@ def _sanitize_block(block: Any, model: Any) -> Any:
     return block
 
 
-def _sanitize_message(message: AnyMessage, model: Any) -> AnyMessage:
+def _sanitize_message(message: AnyMessage, model: Any, supports_vision: bool) -> AnyMessage:
     """Return *message* unchanged, or a copy with incompatible blocks replaced.
 
     Role-agnostic on purpose: any message with list-form content can carry a
@@ -184,18 +191,18 @@ def _sanitize_message(message: AnyMessage, model: Any) -> AnyMessage:
     content = message.content
     if not isinstance(content, list):
         return message
-    patched = [_sanitize_block(block, model) for block in content]
+    patched = [_sanitize_block(block, model, supports_vision) for block in content]
     if all(new is old for new, old in zip(patched, content, strict=True)):
         return message
     return message.model_copy(update={"content": patched})
 
 
-def _sanitize_messages(messages: list[AnyMessage], model: Any) -> list[AnyMessage] | None:
+def _sanitize_messages(messages: list[AnyMessage], model: Any, supports_vision: bool) -> list[AnyMessage] | None:
     """Rewrite *messages* for the model request, or ``None`` when nothing changed."""
     updated: list[AnyMessage] = []
     changed = False
     for message in messages:
-        patched = _sanitize_message(message, model)
+        patched = _sanitize_message(message, model, supports_vision)
         changed = changed or patched is not message
         updated.append(patched)
     return updated if changed else None
@@ -205,10 +212,17 @@ class ModelContentCompatibilityMiddleware(AgentMiddleware[AgentState]):
     """Downgrades persisted URL-sourced content blocks the model cannot accept.
 
     Request-view-only rewrite at the model boundary; see the module docstring
-    for the failure mode and the contract. Stateless and config-free aside
-    from the selected model's serializer capabilities, which gate only the
-    http(s) file-URL preserve; the downgrade itself is unconditional.
+    for the failure mode and the contract. Configured text-only models also
+    receive text placeholders for image blocks. When model capabilities are
+    unknown, image inputs retain the existing serializer-based behavior.
     """
+
+    def __init__(self, *, supports_vision: bool = True) -> None:
+        super().__init__()
+        self._supports_vision = supports_vision
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        return {"supports_vision": self._supports_vision}
 
     @override
     def wrap_model_call(
@@ -227,9 +241,10 @@ class ModelContentCompatibilityMiddleware(AgentMiddleware[AgentState]):
         # Pure in-memory rewrite: no sandbox or file I/O, so it stays on the loop.
         return await handler(self._sanitize_request(request))
 
-    @staticmethod
-    def _sanitize_request(request: ModelRequest) -> ModelRequest:
-        patched = _sanitize_messages(request.messages, request.model)
+    def _sanitize_request(self, request: ModelRequest) -> ModelRequest:
+        patched = _sanitize_messages(request.messages, request.model, self._supports_vision)
         if patched is None:
             return request
-        return request.override(messages=patched)
+        # An OpenAI response ID references the provider's original history.
+        # Drop every chain ID so the adapter sends the projected history.
+        return request.override(messages=[without_response_chain_id(message) for message in patched])

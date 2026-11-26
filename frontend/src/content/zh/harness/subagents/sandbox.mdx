@@ -43,9 +43,9 @@ AIO 镜像默认最多 10 个 shell 会话（`MAX_SHELL_SESSIONS`），超出时
 | -------------------------- | --------------------------------------------- |
 | 没有 `sandbox` 段          | 不可用                                        |
 | 容器或远端 provider        | 可用                                          |
-| `LocalSandboxProvider`     | 取决于 `sandbox.allow_host_bash`，默认 `false` |
+| `LocalSandboxProvider`     | 仅提供文件工具                                         |
 
-在本地沙箱下委派 `bash` 会得到一条明确的失败结果，说明该子 Agent 被禁用、只应在完全可信的本地环境里开启 `allow_host_bash`。
+委派 `bash` 任务需要使用隔离沙箱。
 
 ## 身份传播到命令
 

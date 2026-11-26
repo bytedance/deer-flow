@@ -3,7 +3,7 @@
 import asyncio
 import hashlib
 import json
-import sqlite3
+import logging
 import uuid
 from collections import deque
 from collections.abc import Mapping
@@ -16,10 +16,26 @@ from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 
 from . import artifacts, history, shared_state
 from .artifacts import Artifacts
-from .store import TERMINAL, Store
+from .store import TERMINAL, Store, StoreUnavailable
 
 NAMESPACE = "community.agent-teams"
 LIMIT = 100
+logger = logging.getLogger(__name__)
+
+
+def report_shutdown_failure(task):
+    if not task.cancelled() and task.exception() is not None:
+        # Stop waiters may have timed out already. Observe the failure without
+        # logging exception details that could contain connection credentials.
+        logger.error("Agent teams shutdown failed; storage ownership may not have been released")
+
+
+async def drain_task(task):
+    """Finish pending work even if shutdown repeatedly cancels its waiter."""
+    while not task.done():
+        with suppress(asyncio.CancelledError, Exception):
+            await asyncio.shield(task)
+    return task.result()
 
 
 def text(payload, key, limit=4000):
@@ -79,8 +95,8 @@ def pending_clarification(messages):
 
 
 class Teams(Artifacts):
-    def __init__(self, path):
-        self.store = Store(path)
+    def __init__(self, path=None, *, store=None):
+        self.store = store if store is not None else Store(path)
         self.handles = {}
         self.locks = WeakValueDictionary()
         self.scheduling_lock = asyncio.Lock()
@@ -88,36 +104,71 @@ class Teams(Artifacts):
         self.in_flight = set()
         self.owner_rotation = deque()
         self.task = None
+        self.shutdown_task = None
         self.process_lock = None
         self.available = False
 
     async def db(self, method, *args):
-        return await asyncio.to_thread(getattr(self.store, method), *args)
+        operation = asyncio.create_task(asyncio.to_thread(getattr(self.store, method), *args))
+        try:
+            return await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            # A worker retains its team lock until the synchronous transaction
+            # finishes. Shutdown must drain it before releasing store ownership.
+            with suppress(Exception):
+                await drain_task(operation)
+            raise
+        except StoreUnavailable:
+            self.available = False
+            self.handles.clear()
+            # The loop owns worker draining. A failing worker must not wait for
+            # a shutdown operation that is itself waiting for that worker.
+            if self.task and self.task is not asyncio.current_task():
+                self.task.cancel()
+            raise
+
+    async def ensure_available(self):
+        if not self.available:
+            raise StoreUnavailable("Team service unavailable; restart Gateway and reconnect")
+        await self.db("check_service_lock")
+        if not self.available:
+            raise StoreUnavailable("Team service unavailable; restart Gateway and reconnect")
 
     async def start(self, deps):
-        # One service per database. A separate SQLite connection holds a process
-        # lock for the service lifetime, released by the OS after a crash.
-        def acquire():
-            db = sqlite3.connect(str(self.store.path) + ".service-lock", timeout=0, check_same_thread=False)
-            try:
-                db.execute("BEGIN EXCLUSIVE")
-            except BaseException:
-                db.close()
-                raise
-            return db
-
-        self.process_lock = await asyncio.to_thread(acquire)
+        acquisition = asyncio.create_task(asyncio.to_thread(self.store.acquire_service_lock))
         try:
+            self.process_lock = await asyncio.shield(acquisition)
             await self.db("scheduling_snapshots")
         except BaseException:
-            await asyncio.to_thread(self.process_lock.close)
-            self.process_lock = None
+            # Cancelling to_thread cannot stop lock acquisition. Wait for its
+            # result and release it, including when shutdown cancels us again.
+            async def cleanup():
+                lock = await acquisition
+                try:
+                    await asyncio.to_thread(lock.close)
+                finally:
+                    if self.process_lock is lock:
+                        self.process_lock = None
+
+            cleanup_task = asyncio.create_task(cleanup())
+            with suppress(Exception):
+                await drain_task(cleanup_task)
             raise
         self.available = True
+        self.shutdown_task = None
         self.task = asyncio.create_task(self.loop())
 
     async def stop(self):
         self.available = False
+        if self.shutdown_task is None:
+            self.shutdown_task = asyncio.create_task(self.shutdown())
+            self.shutdown_task.add_done_callback(report_shutdown_failure)
+        # All callers share one drain, but a cancelled waiter must return so
+        # the Gateway's shutdown timeout can advance to the next service.
+        # Shield keeps worker draining and lock release owned by this task.
+        await asyncio.shield(self.shutdown_task)
+
+    async def shutdown(self):
         if self.task:
             self.task.cancel()
             with suppress(asyncio.CancelledError, Exception):
@@ -131,11 +182,14 @@ class Teams(Artifacts):
     async def loop(self):
         try:
             while True:
+                await self.ensure_available()
                 await self.tick(wait=False)
                 await asyncio.sleep(1)
+        except StoreUnavailable:
+            pass  # Ownership loss is terminal for this service instance.
         finally:
             self.available = False
-            await self.cancel_workers()
+            await drain_task(asyncio.create_task(self.cancel_workers()))
             self.handles.clear()
 
     def team_lock(self, owner, team_id):
@@ -180,6 +234,7 @@ class Teams(Artifacts):
                 self.handles.pop((owner, team_id), None)
                 raise
             for member in team["members"]:
+                await self.ensure_available()
                 await context.agent_runs.create_thread(assistant_id=member["agent"], thread_id=member["thread_id"], metadata={"title": f"{team['name']} · {member['name']}"})
             await self.db("change", owner, team_id, lambda t: t.update(ready=True))
         return await self.get({"team_id": team_id}, context)
@@ -247,6 +302,7 @@ class Teams(Artifacts):
             if context.agent_runs is None:
                 raise ValueError("Agent control unavailable")
             for member in team["members"]:
+                await self.ensure_available()
                 await context.agent_runs.create_thread(assistant_id=member["agent"], thread_id=member["thread_id"], metadata={})
             self.bind(context, team["id"])
             await self.db("change", context.principal.user_id, team["id"], lambda t: t.update(ready=True))
@@ -365,6 +421,7 @@ class Teams(Artifacts):
                 # Structured references and labels are untrusted. The host capability
                 # must authorize BOTH conversations before the plugin uses the owner.
                 await runs.get_state(thread_id=source)
+                await self.ensure_available()
                 await runs.create_thread(assistant_id=member["agent"], thread_id=member["thread_id"], metadata={})
                 content = text({"text": message.content}, "text")
                 self.handles[(owner, team_id)] = runs
@@ -457,7 +514,7 @@ class Teams(Artifacts):
         return job["input"] is not None
 
     async def plan(self, attempted, eligible):
-        # Only SQLite snapshots and slot bookkeeping live under this lock.
+        # Only storage snapshots and slot bookkeeping live under this lock.
         # Host calls run in independent workers, serialized by team.
         async with self.scheduling_lock:
             teams = await self.db("scheduling_snapshots")
@@ -616,6 +673,7 @@ class Teams(Artifacts):
                 return
             options = {"artifact_imports": job["artifact_imports"]} if job.get("artifact_imports") else {}
             try:
+                await self.ensure_available()
                 run = await runs.start(thread_id=thread, input=job["input"], idempotency_key=job["id"], **options)
             except AgentRunError as exc:
                 if exc.status_code != 422 or not options:
@@ -643,15 +701,18 @@ class Teams(Artifacts):
                 if not admitted and (not pending or pending["request_id"] != job["clarification"]["request_id"] or state.get("next") or state.get("interrupts")):
                     await self.finish(owner, team, job, "failed", "Conversation advanced before the clarification response; inspect it before continuing")
                     return
+                await self.ensure_available()
                 run = await runs.start(thread_id=thread, input=continuation, idempotency_key=job["resume"]["key"])
                 job.update(result_message_id=message_id, result_run_id=run.run_id)
             else:
+                await self.ensure_available()
                 run = await runs.resume(thread_id=thread, resume=job["resume"]["response"], idempotency_key=job["resume"]["key"])
             job.update(run_id=run.run_id, execution_key=job["resume"]["key"], status="cancelling" if job["status"] == "cancelling" else "running", resume=None, clarification=None)
             await self.save_job(owner, team["id"], job)
         run = await runs.get(thread_id=thread, run_id=job["run_id"])
         if job["status"] == "cancelling":
             if run.status in ("pending", "running"):
+                await self.ensure_available()
                 await runs.cancel(thread_id=thread, run_id=job["run_id"])
             else:
                 await self.finish(owner, team, job, "cancelled", "Request cancelled; checkpoint retained")

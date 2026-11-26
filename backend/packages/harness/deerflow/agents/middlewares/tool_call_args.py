@@ -99,7 +99,7 @@ def rewrite_messages_tool_call_args(messages: list[Any], replacement_for: Replac
         updated.append(patched)
     if not changed:
         return None
-    return [_without_response_chain_id(message) for message in updated]
+    return [without_response_chain_id(message) for message in updated]
 
 
 def _duplicated_call_ids(tool_calls: Sequence[Any]) -> set[str]:
@@ -174,7 +174,7 @@ def pair_tool_call_results(messages: Sequence[Any]) -> list[ToolCallOccurrence]:
     return occurrences
 
 
-def _without_response_chain_id(message: Any) -> Any:
+def without_response_chain_id(message: Any) -> Any:
     """Drop an OpenAI ``resp_`` response id so the adapter replays history instead of chaining to it."""
     if not isinstance(message, AIMessage):
         return message

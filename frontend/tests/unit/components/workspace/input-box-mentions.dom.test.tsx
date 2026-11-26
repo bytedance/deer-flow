@@ -1078,7 +1078,7 @@ it("keeps cancellation available while approvals lock new input", async () => {
   });
   expect(screen.getByRole<HTMLTextAreaElement>("textbox").disabled).toBe(true);
   const submit = screen.getByRole<HTMLButtonElement>("button", {
-    name: "Submit",
+    name: "Stop current task",
   });
   expect(submit.disabled).toBe(false);
   fireEvent.click(submit);

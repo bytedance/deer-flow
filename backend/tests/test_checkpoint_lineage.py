@@ -14,6 +14,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.gateway.checkpoint_lineage import (
+    CheckpointLineageIntegrityError,
     CheckpointParentMissingError,
     find_checkpoint_before_message,
     find_checkpoint_before_message_chronologically,
@@ -133,16 +134,25 @@ def test_chronological_scan_prefers_the_previous_turn_boundary():
     assert base.config["configurable"]["checkpoint_id"] == "ckpt-turn1-tail"
 
 
-def test_lineage_walk_reports_missing_parent_when_no_settled_ancestor_exists():
-    """Fail closed rather than fork a mid-run checkpoint."""
+@pytest.mark.parametrize(
+    ("parent_config", "expected_error"),
+    [
+        (None, CheckpointParentMissingError),
+        ({"configurable": {"thread_id": THREAD_ID, "checkpoint_id": "ckpt-mid"}}, CheckpointLineageIntegrityError),
+        ({"configurable": None}, CheckpointLineageIntegrityError),
+    ],
+    ids=["unlinked-head", "linked-exhaustion", "malformed-link"],
+)
+def test_lineage_walk_only_reports_missing_parent_for_unlinked_head(parent_config, expected_error):
     human = HumanMessage(id="h1__user", content="question")
     history = [
-        _snapshot("ckpt-head", [human, AIMessage(id="ai-1", content="answer")], parent_id="ckpt-mid"),
+        _snapshot("ckpt-head", [human, AIMessage(id="ai-1", content="answer")]),
         _snapshot("ckpt-mid", [HumanMessage(id="h1", content="question")], next_tasks=("DynamicContextMiddleware.before_agent",)),
     ]
+    history[0].parent_config = parent_config
     accessor = _Accessor(history)
 
-    with pytest.raises(CheckpointParentMissingError):
+    with pytest.raises(expected_error):
         asyncio.run(find_checkpoint_before_message(accessor, history[0], "h1__user", max_depth=10))
 
 

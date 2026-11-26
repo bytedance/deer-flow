@@ -285,6 +285,11 @@ class ResolvedPath(NamedTuple):
 _POWERSHELL_QUOTE_TRANSLATION = str.maketrans("\u2018\u2019\u201c\u201d", "''\"\"")
 
 
+def escape_powershell_single_quoted(value: str) -> str:
+    """Escape text inside a PowerShell single-quoted string."""
+    return re.sub(r"['\u2018\u2019]", lambda char: char.group() * 2, value)
+
+
 def escape_powershell_path(match: re.Match[str], path: str) -> str:
     """Keep mapped paths literal in the caller's quote context, preserving wildcards."""
     quote = None
@@ -330,7 +335,7 @@ def escape_powershell_path(match: re.Match[str], path: str) -> str:
     if closing_quote:
         path = path[:-1]
     if quote == "'":
-        return re.sub(r"['\u2018\u2019]", lambda char: char.group() * 2, path) + closing_quote
+        return escape_powershell_single_quoted(path) + closing_quote
     characters = r'[`$"\u201c\u201d]' if quote is not None else r"[ \t`$'\";&,()@{}#\u2018\u2019\u201c\u201d]"
     return re.sub(characters, lambda char: "`" + char.group(), path) + closing_quote
 
@@ -872,6 +877,8 @@ class LocalSandbox(Sandbox):
         command: str,
         env: dict[str, str] | None = None,
         timeout: float | None = None,
+        *,
+        cwd: str | None = None,
     ) -> CommandOutput:
         # Validate ``env`` keys against the POSIX env-var rule. Defense in
         # depth: ``subprocess.run(env=...)`` does not go through a shell so a
@@ -883,6 +890,8 @@ class LocalSandbox(Sandbox):
         _validate_extra_env(env)
         # Resolve container paths in command before execution
         shell = self._get_shell()
+        if cwd is not None and (os.name != "nt" or not self._is_cmd_shell(shell)):
+            raise ValueError("A process working directory is only supported for the cmd.exe fallback")
         resolved_command = self._resolve_paths_in_command(command, shell=shell)
         if timeout is None:
             timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
@@ -904,6 +913,12 @@ class LocalSandbox(Sandbox):
                 args = [shell, "-NoProfile", "-Command", utf8_preamble + resolved_command]
             elif self._is_cmd_shell(shell):
                 args = [shell, "/c", resolved_command]
+                if cwd is not None:
+                    if ntpath.splitdrive(cwd)[0].startswith(("\\\\", "//")):
+                        raise ValueError("cmd.exe requires a workspace on a local or mapped drive")
+                    # /d disables AutoRun (which could change cwd). /s strips
+                    # the outer quotes and preserves the command's own quotes.
+                    args = f'{subprocess.list2cmdline([shell])} /d /s /c "{resolved_command}"'
             else:
                 args = [shell, "-c", resolved_command]
                 if self._is_msys_shell(shell):
@@ -965,6 +980,7 @@ class LocalSandbox(Sandbox):
                     timeout,
                     sandbox_env,
                     encoding=self._get_cmd_output_encoding(),
+                    cwd=cwd,
                 )
             else:
                 stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)
@@ -991,12 +1007,13 @@ class LocalSandbox(Sandbox):
 
     @staticmethod
     def _run_windows_command(
-        args: list[str],
+        args: list[str] | str,
         timeout: float,
         env: dict[str, str] | None = None,
         *,
         encoding: str | None = None,
         fallback_encoding: str | None = None,
+        cwd: str | None = None,
     ) -> tuple[str, str, int, bool]:
         """Run with bounded capture, a process-tree timeout, and locale decoding unless overridden."""
         timed_out = False
@@ -1012,6 +1029,7 @@ class LocalSandbox(Sandbox):
                 stderr=stderr_write_fd,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
                 env=env,
+                cwd=cwd,
             )
         except BaseException:
             # Include interruptions during and after Popen; the read ends have
@@ -1470,6 +1488,21 @@ class LocalSandbox(Sandbox):
             raise type(e)(e.errno, e.strerror, filename, getattr(e, "winerror", None), filename2) from None
         return [self._reverse_resolve_path(match) for match in matches], truncated
 
+    def _grep_line_with_virtual_paths(self, line: str) -> str:
+        """Show the mount roots in a matched line as virtual paths, spelled as stored.
+
+        write_file stores host paths in code files. Matched lines show virtual
+        paths for every file, as bash output does: the record of agent-written
+        files that read_file consults does not survive a restart. The output
+        scanner stops at punctuation such as ``:`` that can belong to one
+        filename (``cache:old.txt``), so the tail is kept verbatim instead of
+        canonicalized: following an unrelated symlink at the cut-off prefix
+        (``cache -> data``) would name a different file (``data:old.txt``).
+        """
+        for mapping in self._mappings_by_local_specificity:
+            line = replace_output_path_matches(line, self._resolved_local_paths[mapping], mapping.container_path, separator_agnostic=True)
+        return line
+
     def grep(
         self,
         path: str,
@@ -1495,6 +1528,7 @@ class LocalSandbox(Sandbox):
                         max_results=max_results - len(results) + 1,
                         relative_prefix=child,
                         user_data=user_data,
+                        display_line=self._grep_line_with_virtual_paths,
                     )
                     results.extend(GrepMatch(path=f"{path.rstrip('/')}/{child}/{Path(match.path).relative_to(root).as_posix()}", line_number=match.line_number, line=match.line) for match in matches)
                     if len(results) > max_results:
@@ -1509,6 +1543,7 @@ class LocalSandbox(Sandbox):
                 case_sensitive=case_sensitive,
                 max_results=max_results,
                 user_data=user_data,
+                display_line=self._grep_line_with_virtual_paths,
             )
         except OSError as e:
             if e.filename is None:

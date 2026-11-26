@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from langgraph.channels import DeltaChannel
+from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import StateGraph
@@ -99,7 +100,7 @@ def test_make_history_key_is_stable_and_scoped():
     assert k1 != make_history_key("ckpt-hist:v1:db0", "t1", "", "c2", "messages")
     assert k1 != make_history_key("ckpt-hist:v1:db0", "t1", "", "c1", "todos")
     assert k1 != make_history_key("ckpt-hist:v1:db9", "t1", "", "c1", "messages")
-    assert CACHE_FORMAT_VERSION == 1
+    assert CACHE_FORMAT_VERSION == 2
 
 
 def test_get_many_miss_then_hit():
@@ -719,7 +720,7 @@ async def test_zero_ttl_disables_expiry_explicitly(monkeypatch: pytest.MonkeyPat
 async def test_adelete_thread_purges_matching_keys_only(monkeypatch: pytest.MonkeyPatch):
     fake = _FakeRedis()
     cache = _make_cache(monkeypatch, fake)
-    prefix = "ckpt-hist:v1:db0"
+    prefix = f"ckpt-hist:v{CACHE_FORMAT_VERSION}:db0"
     await cache.aset_many(
         {
             f"{prefix}:t1:aaa": _redis_entry(1),
@@ -742,6 +743,42 @@ async def test_adelete_thread_outage_degrades_without_raising(monkeypatch: pytes
     with caplog.at_level("WARNING"):
         await cache.adelete_thread("p", "t1")  # must not raise
     assert "thread purge failed" in caplog.text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("key_prefix", ["", "tenant-history"])
+async def test_thread_delete_after_redis_cache_upgrade(monkeypatch: pytest.MonkeyPatch, key_prefix: str) -> None:
+    config = _redis_app_config(
+        {
+            "backend": "sqlite",
+            "checkpoint_channel_mode": "delta",
+            "checkpoint_cache": {"type": "redis", "ttl_seconds": 0, "key_prefix": key_prefix},
+        }
+    )
+    fake = _FakeRedis()
+    cache = _make_cache(monkeypatch, fake, ttl_seconds=0)
+
+    async with make_checkpointer(config) as saver:
+        thread = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+        checkpoint = empty_checkpoint()
+        saved = await saver.aput(thread, checkpoint, {}, {})
+        assert await saver.aget_tuple(saved) is not None
+
+        legacy_prefix = f"ckpt-hist:v1:{checkpoint_cache_db_hash(config.database)}"
+        active_key = make_history_key(checkpoint_cache_key_prefix(config), "t1", "", checkpoint["id"], "messages")
+        legacy_key = make_history_key(legacy_prefix, "t1", "", checkpoint["id"], "messages")
+        sibling_key = make_history_key(legacy_prefix, "t10", "", checkpoint["id"], "messages")
+        other_db_key = make_history_key("ckpt-hist:v1:other-db", "t1", "", checkpoint["id"], "messages")
+        await cache.aset_many({key: _redis_entry(1) for key in (active_key, legacy_key, sibling_key, other_db_key)})
+        assert fake.ttls[legacy_key] is None
+
+        await saver.adelete_thread("t1")
+
+        assert await saver.aget_tuple(saved) is None
+        expected = {sibling_key, other_db_key}
+        if key_prefix:
+            expected.add(legacy_key)
+        assert set(fake.store) == expected
 
 
 @pytest.mark.anyio
@@ -798,10 +835,19 @@ def test_key_prefix_override_wins():
     app_config = _redis_app_config({"backend": "sqlite", "checkpoint_cache": {"key_prefix": "custom:"}})
     assert checkpoint_cache_key_prefix(app_config) == "custom:"
     default = checkpoint_cache_key_prefix(_redis_app_config({"backend": "sqlite"}))
-    assert default.startswith("ckpt-hist:v1:")
+    assert default.startswith(f"ckpt-hist:v{CACHE_FORMAT_VERSION}:")
 
 
 # --- test_checkpoint_cache_redis_literal_purge ---
+
+
+@pytest.fixture
+def redis_cache(monkeypatch: pytest.MonkeyPatch) -> tuple[RedisCheckpointHistoryCache, AsyncMock]:
+    client = AsyncMock()
+    client.connection_pool = Mock()
+    client.connection_pool.get_encoder.return_value.encode.side_effect = lambda value: value.encode("utf-8")
+    monkeypatch.setattr("deerflow.runtime.checkpoint_cache.redis._create_client", lambda *args, **kwargs: client)
+    return RedisCheckpointHistoryCache("redis://unused", serde=None, ttl_seconds=60), client
 
 
 @pytest.mark.anyio
@@ -816,15 +862,11 @@ def test_key_prefix_override_wins():
         ("plain", "t1*", "t10", r"plain:t1\*:*"),
     ],
 )
-async def test_purge_escapes_namespace_and_filters_results(prefix, thread_id, sibling_thread_id, pattern):
+async def test_purge_escapes_namespace_and_filters_results(redis_cache, prefix, thread_id, sibling_thread_id, pattern):
     # Exercise the actual purge method without needing a running Redis server.
     # The expected SCAN pattern is a wire-level Redis glob contract; returned
     # keys also include a foreign namespace to pin the final deletion fence.
-    cache = RedisCheckpointHistoryCache.__new__(RedisCheckpointHistoryCache)
-    client = AsyncMock()
-    cache._client = client
-    client.connection_pool = Mock()
-    client.connection_pool.get_encoder.return_value.encode.side_effect = lambda value: value.encode("utf-8")
+    cache, client = redis_cache
     owned = make_history_key(prefix, thread_id, "", "c1", "messages").encode()
     foreign = make_history_key("tenant-other", thread_id, "", "c1", "messages").encode()
     sibling = make_history_key(prefix, sibling_thread_id, "", "c1", "messages").encode()
@@ -846,23 +888,17 @@ async def test_purge_escapes_namespace_and_filters_results(prefix, thread_id, si
 
 
 @pytest.mark.anyio
-async def test_purge_does_not_unlink_empty_filtered_page():
-    cache = RedisCheckpointHistoryCache.__new__(RedisCheckpointHistoryCache)
-    cache._client = AsyncMock()
-    cache._client.connection_pool = Mock()
-    cache._client.connection_pool.get_encoder.return_value.encode.side_effect = lambda value: value.encode("utf-8")
-    cache._client.scan.return_value = (0, [b"other:t1:history"])
+async def test_purge_does_not_unlink_empty_filtered_page(redis_cache):
+    cache, client = redis_cache
+    client.scan.return_value = (0, [b"other:t1:history"])
     await cache.adelete_thread("owned", "t1")
-    cache._client.unlink.assert_not_awaited()
+    client.unlink.assert_not_awaited()
 
 
 @pytest.mark.anyio
-async def test_purge_uses_client_encoding_for_byte_key_fence():
+async def test_purge_uses_client_encoding_for_byte_key_fence(redis_cache):
     """A non-UTF-8 Redis client must still unlink its own non-ASCII keys."""
-    cache = RedisCheckpointHistoryCache.__new__(RedisCheckpointHistoryCache)
-    client = AsyncMock()
-    cache._client = client
-    client.connection_pool = Mock()
+    cache, client = redis_cache
     client.connection_pool.get_encoder.return_value.encode.side_effect = lambda value: value.encode("latin-1")
     owned = make_history_key("café", "t1", "", "c1", "messages").encode("latin-1")
     sibling = make_history_key("café", "t10", "", "c1", "messages").encode("latin-1")

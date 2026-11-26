@@ -221,17 +221,13 @@ openssl rand -base64 32
 
 ## 部署后验证
 
-启动后验证部署：
+在宿主机上，通过访问工作区时使用的 nginx 地址检查 Gateway 是否就绪。下例使用默认地址 `localhost:2026`。如果更改了 Compose 的端口，请使用 `docker port deer-flow-nginx 2026/tcp` 显示的宿主机端口。
 
 ```bash
-# 检查 Gateway 健康状态
-curl http://localhost:8001/health
-
-# 通过 nginx 列出配置的模型（验证完整代理链）
-curl http://localhost:2026/api/models
+curl -i http://localhost:2026/health/ready
 ```
 
-正常工作的部署会从每个端点返回 `200` 响应。`/api/models` 调用会返回你 `config.yaml` 中的模型列表。
+Gateway 就绪时返回 HTTP 200 和 `"status": "ready"`。HTTP 503 和 `"status": "degraded"` 表示必要依赖的检查失败。就绪检查可匿名访问。开启认证后，通过 `/api/models` 查看模型需要凭据。
 
 <Cards num={2}>
   <Cards.Card title="配置" href="/docs/application/configuration" />

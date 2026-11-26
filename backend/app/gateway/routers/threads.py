@@ -29,12 +29,14 @@ from sqlalchemy.exc import IntegrityError
 from app.gateway.authz import _is_internal_caller, authorize_model_use, require_permission
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
+    CheckpointLineageTimeoutError,
     CheckpointParentMissingError,
-    find_checkpoint_before_message,
     find_checkpoint_before_message_chronologically,
+    find_replay_checkpoint_before_message,
     history_parent_index,
     is_duration_only_checkpoint,
     parent_from_history_index,
+    replay_lineage_timeout_http_error,
     resolve_history_versions,
     resolve_stamp_candidate_versions,
 )
@@ -49,6 +51,7 @@ from app.gateway.history_seed import reserve_history_seed, write_history_seed
 from app.gateway.hitl_approval import find_pending_interrupts
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.services import (
+    _THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
     abuild_checkpoint_state_accessor,
     build_checkpoint_state_mutation_accessor,
     build_thread_checkpoint_state_accessor,
@@ -57,7 +60,7 @@ from app.gateway.services import (
     reserve_checkpoint_write,
     strip_server_owned_state_metadata,
 )
-from app.gateway.share_fork import SHARE_IMPORT_COMPLETE_KEY, SHARE_IMPORT_HISTORY_MARKED_KEY
+from app.gateway.share_fork import SHARE_IMPORT_COMPLETE_KEY, SHARE_IMPORT_HISTORY_MARKED_KEY, branch_share_provenance, mark_imported, prepare_share_copy_compaction
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.human_input import extract_unanswered_human_input_request
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
@@ -102,6 +105,7 @@ from deerflow.runtime.serialization import serialize_lc_object
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.uploads.companions import register_companion, resolve_companion
 from deerflow.utils.file_io import await_drained, run_file_io
+from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
 from deerflow.utils.thread_id import ThreadId, resolve_thread_id, validate_thread_id
 from deerflow.utils.time import coerce_iso, now_iso
 
@@ -303,22 +307,18 @@ async def _find_branch_replay_base(
 ) -> Any | None:
     """Resolve a replay base while preserving unlinked legacy histories."""
 
+    thread_id = config.get("configurable", {}).get("thread_id", "")
     try:
-        return await find_checkpoint_before_message(
-            accessor,
-            snapshot,
-            target_human_id,
-            max_depth=_BRANCH_HISTORY_RAW_SCAN_LIMIT,
-        )
+        return await find_replay_checkpoint_before_message(accessor, snapshot, target_human_id)
+    except CheckpointLineageTimeoutError as exc:
+        raise replay_lineage_timeout_http_error(thread_id, exc) from exc
     except CheckpointParentMissingError:
-        thread_id = config.get("configurable", {}).get("thread_id", "")
         logger.debug(
             "Could not resolve parent lineage for branch thread %s; falling back to history scan",
             sanitize_log_param(thread_id),
             exc_info=True,
         )
     except CheckpointLineageError as exc:
-        thread_id = config.get("configurable", {}).get("thread_id", "")
         logger.warning(
             "Rejected unsafe checkpoint lineage for branch thread %s",
             sanitize_log_param(thread_id),
@@ -329,10 +329,8 @@ async def _find_branch_replay_base(
     try:
         history = await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT)
     except _CHECKPOINT_MODE_ERRORS as exc:
-        thread_id = config.get("configurable", {}).get("thread_id", "")
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
     except Exception as exc:
-        thread_id = config.get("configurable", {}).get("thread_id", "")
         logger.exception("Failed to scan replay checkpoint history for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
 
@@ -341,7 +339,7 @@ async def _find_branch_replay_base(
         logger.warning(
             "Could not locate branch user message %s in chronological history for thread %s",
             sanitize_log_param(target_human_id),
-            sanitize_log_param(config.get("configurable", {}).get("thread_id", "")),
+            sanitize_log_param(thread_id),
         )
     return replay_base
 
@@ -1179,6 +1177,9 @@ async def _branch_thread_with_reservation(
         snapshot,
         target_human_id,
     )
+    # A copy imported before share provenance moved into state has nothing for
+    # the branch to inherit, so the branch gets it from the source's import.
+    branch_provenance = await branch_share_provenance(request, source_metadata, snapshot.values, source_accessor, source_config)
 
     # Workspace files are not checkpointed, so they only reflect the *current* thread
     # state. Cloning them onto a branch from an older turn would leak files created
@@ -1243,10 +1244,14 @@ async def _branch_thread_with_reservation(
         for key, value in source_values.items():
             if key in _BRANCH_EXCLUDED_CHANNELS:
                 continue
+            if key == "messages" and isinstance(value, list) and branch_provenance is not None:
+                value = mark_imported(value, branch_provenance[1])
             if key in branch_reducer_fields:
                 values[key] = Overwrite(list(value) if key == "messages" and isinstance(value, list) else value)
             else:
                 values[key] = value
+        if branch_provenance is not None:
+            values[IMPORTED_HISTORY_CHANNEL] = branch_provenance[0]
         if replaces is not None:
             # The head write lands on the replay base, so goal state the head
             # lacks (write_thread_goal pops goal and goal_outcome) would keep
@@ -1800,6 +1805,9 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
     keep = body.keep.to_tuple() if body.keep is not None else None
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
+            # Migrate an older share copy under this reservation before its
+            # copied turns can reach the memory flush.
+            memory_flush = await prepare_share_copy_compaction(request, thread_id, accessor, read_config, as_node="manual_compaction", metadata_timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS)
             result = await compact_thread_context(
                 accessor,
                 thread_id,
@@ -1808,6 +1816,7 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
                 user_id=get_effective_user_id(),
                 agent_name=body.agent_name,
                 model_name=body.model_name,
+                memory_flush=memory_flush,
             )
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Compact after the run finishes.") from None
