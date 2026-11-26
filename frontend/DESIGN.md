@@ -13,7 +13,7 @@ The app has three surfaces that share one token set:
 | ------------------ | ---------------------------------- | ---------------------------------------------------------------------------------- |
 | Workspace (app UI) | `/workspace/*`, `/login`, `/setup` | Dense, calm, task-focused. Most UI work happens here.                              |
 | Docs               | `/[lang]/docs/*` (Nextra 4)        | Reading-first. Nextra theme with the landing `Header` in place of Nextra's navbar. |
-| Landing and blog   | `/`, `/blog/*`                     | Brand-forward. The only place decorative effects are allowed.                      |
+| Landing and blog   | `/`, `/blog/*`                     | Editorial, light-default with full dark-mode support via `--df-*` warm tokens.     |
 
 ## Color
 
@@ -54,9 +54,10 @@ Rules:
 
 - **Sans** (`--font-sans`): the platform UI stack (`ui-sans-serif, system-ui`).
   Used for all UI and body text.
-- **Serif** (Tailwind `font-serif`): reserved for the **DeerFlow wordmark** and
-  a few brand moments (header, footer quote, auth pages, workspace header).
-  Don't use it for UI labels or body text.
+- **Serif** (Tailwind `font-serif`): reserved for the **DeerFlow wordmark**,
+  landing hero display headline, and a few brand moments (header, footer quote,
+  auth pages, workspace header). Don't use it for section headings, UI labels,
+  or body text.
 - **Mono** (`font-mono`): code, paths, IDs, token counts.
 - Dark mode sets `font-weight: 300` on `.dark` to offset light-on-dark bloom.
   Don't fight it with per-component weights.
@@ -144,12 +145,15 @@ format, so color is supplementary. These tints apply only to file identity tiles
 surrounding controls use semantic tokens. Rendered document colors belong to the
 file content and preserve the author's styling.
 
-Landing-only decoration that does not follow the rules above. Don't copy these
-into app or docs UI:
+Landing-scoped tokens and legacy decorative primitives. Don't copy legacy
+decorative effects into app or docs UI:
 
-- `Section` headings use a white-to-gray gradient text (`bg-clip-text`), and
-  `.golden-text` is a gold gradient.
-- `.ambilight` is a rainbow glow, and the header's Star on GitHub button has a
-  pink-to-violet blur behind it (`#ff80b5` to `#9089fc`).
-- `galaxy`, `aurora-text`, `flickering-grid`, `magic-bento`, `spotlight-card`
-  and `shine-border` in `components/ui/` are landing effects.
+- The landing page (`/`) uses `--df-*` editorial tokens defined on `:root` and
+  `.dark` in `globals.css` (warm light paper default plus dark mode via
+  `next-themes`, no forced dark mode) with alternating section canvases
+  (`--df-bg`, `--df-bg-soft`), hairline borders (`--df-border`), flat panels
+  (`--df-panel`), and a single teal accent (`--df-accent` / `--df-cta`).
+- Legacy decorative utilities (`.golden-text`, `.ambilight`) and primitives
+  (`aurora-text`, `flickering-grid`, `shine-border` in `components/ui/`) remain
+  only where still referenced by workspace or auth screens and are not used on
+  the landing page.

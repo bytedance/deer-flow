@@ -1,101 +1,198 @@
+import { ArrowUpRight } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
 
-import { Card } from "@/components/ui/card";
+import { DEFAULT_LOCALE, type Locale } from "@/core/i18n/locale";
 import { pathOfPublicDemoThread } from "@/core/threads/static-demo";
-import { cn } from "@/lib/utils";
 
 import { Section } from "../section";
 
-export function CaseStudySection({ className }: { className?: string }) {
-  const caseStudies = [
-    {
-      threadId: "7cfa5f8f-a2f8-47ad-acbd-da7137baf990",
-      title: "Forecast 2026 Agent Trends and Opportunities",
-      description:
-        "Create a webpage with a Deep Research report forecasting the agent technology trends and opportunities in 2026.",
-    },
-    {
-      threadId: "4f3e55ee-f853-43db-bfb3-7d1a411f03cb",
-      title: 'Generate a Video Based On the Novel "Pride and Prejudice"',
-      description:
-        'Search the specific scene from the novel "Pride and Prejudice", then generate a video as well as a reference image based on the scenes.',
-    },
-    {
-      threadId: "21cfea46-34bd-4aa6-9e1f-3009452fbeb9",
-      title: "Doraemon Explains the MOE Architecture",
-      description:
-        "Generate a Doraemon comic strip explaining the MOE architecture to the teenagers who are interested in AI.",
-    },
-    {
-      threadId: "ad76c455-5bf9-4335-8517-fc03834ab828",
-      title: "An Exploratory Data Analysis of the Titanic Dataset",
-      description:
-        "Explore the Titanic dataset and identify the key factors that influenced survival rates with visualizations and insights.",
-    },
-    {
-      threadId: "d3e5adaf-084c-4dd5-9d29-94f1d6bccd98",
-      title: "Watch Y Combinator's Video then Conduct a Deep Research",
-      description:
-        "Watch the given Y Combinator's YouTube video and conduct a deep research on the YC's tips for technical startup founders.",
-    },
-    {
-      threadId: "3823e443-4e2b-4679-b496-a9506eae462b",
-      title: "Collect and Summarize Dr. Fei Fei Li's Podcasts",
-      description:
-        "Collect all the podcast appearances of Dr. Fei Fei Li in the last 6 months, then summarize them into a comprehensive report.",
-    },
-  ];
+type CaseStudyItem = {
+  threadId: string;
+  category: string;
+  title: string;
+  description: string;
+};
+
+type CaseStudyCopy = {
+  eyebrow: string;
+  title: string;
+  subtitle: string;
+  openShowcase: string;
+  items: CaseStudyItem[];
+};
+
+const CASE_STUDY_COPY: Record<Locale, CaseStudyCopy> = {
+  "en-US": {
+    eyebrow: "Showcase · Live Threads",
+    title: "Case Studies",
+    subtitle:
+      "See how DeerFlow researches, plans, writes code, and produces complete deliverables in real threads.",
+    openShowcase: "Open showcase",
+    items: [
+      {
+        threadId: "7cfa5f8f-a2f8-47ad-acbd-da7137baf990",
+        category: "Deep Research",
+        title: "Forecast 2026 Agent Trends and Opportunities",
+        description:
+          "Create a webpage with a Deep Research report forecasting the agent technology trends and opportunities in 2026.",
+      },
+      {
+        threadId: "4f3e55ee-f853-43db-bfb3-7d1a411f03cb",
+        category: "Multimodal",
+        title: 'Generate a Video Based On the Novel "Pride and Prejudice"',
+        description:
+          'Search the specific scene from the novel "Pride and Prejudice", then generate a video as well as a reference image based on the scenes.',
+      },
+      {
+        threadId: "21cfea46-34bd-4aa6-9e1f-3009452fbeb9",
+        category: "Visual Story",
+        title: "Doraemon Explains the MOE Architecture",
+        description:
+          "Generate a Doraemon comic strip explaining the MOE architecture to the teenagers who are interested in AI.",
+      },
+      {
+        threadId: "ad76c455-5bf9-4335-8517-fc03834ab828",
+        category: "Data Analysis",
+        title: "An Exploratory Data Analysis of the Titanic Dataset",
+        description:
+          "Explore the Titanic dataset and identify the key factors that influenced survival rates with visualizations and insights.",
+      },
+      {
+        threadId: "d3e5adaf-084c-4dd5-9d29-94f1d6bccd98",
+        category: "Video Research",
+        title: "Watch Y Combinator's Video then Conduct a Deep Research",
+        description:
+          "Watch the given Y Combinator's YouTube video and conduct a deep research on the YC's tips for technical startup founders.",
+      },
+      {
+        threadId: "3823e443-4e2b-4679-b496-a9506eae462b",
+        category: "Podcast Digest",
+        title: "Collect and Summarize Dr. Fei Fei Li's Podcasts",
+        description:
+          "Collect all the podcast appearances of Dr. Fei Fei Li in the last 6 months, then summarize them into a comprehensive report.",
+      },
+    ],
+  },
+  "zh-CN": {
+    eyebrow: "案例展示 · 真实会话",
+    title: "实战案例",
+    subtitle:
+      "查看 DeerFlow 如何在真实任务中完成深度研究、代码执行与多模态交付。",
+    openShowcase: "查看演示",
+    items: [
+      {
+        threadId: "7cfa5f8f-a2f8-47ad-acbd-da7137baf990",
+        category: "深度研究",
+        title: "预测 2026 年 Agent 技术趋势与机会",
+        description:
+          "撰写一份关于 2026 年智能体技术趋势与机会的深度研究报告，并生成可交互网页。",
+      },
+      {
+        threadId: "4f3e55ee-f853-43db-bfb3-7d1a411f03cb",
+        category: "多模态创作",
+        title: "基于《傲慢与偏见》原著片段生成视频",
+        description:
+          "检索小说《傲慢与偏见》的经典场景，并据此生成参考图与完整视频片段。",
+      },
+      {
+        threadId: "21cfea46-34bd-4aa6-9e1f-3009452fbeb9",
+        category: "视觉科普",
+        title: "用哆啦A梦漫画讲解 MoE 架构",
+        description:
+          "面向对人工智能感兴趣的青少年，生成一组生动易懂的 MoE 架构科普漫画。",
+      },
+      {
+        threadId: "ad76c455-5bf9-4335-8517-fc03834ab828",
+        category: "数据分析",
+        title: "泰坦尼克号数据集探索性分析",
+        description:
+          "分析泰坦尼克号数据集，通过可视化图表与统计结论揭示影响生还率的关键因素。",
+      },
+      {
+        threadId: "d3e5adaf-084c-4dd5-9d29-94f1d6bccd98",
+        category: "视频研究",
+        title: "观看 YC 视频并展开技术创业深度研究",
+        description:
+          "解析 Y Combinator 的 YouTube 视频内容，系统梳理面向技术创始人的创业建议。",
+      },
+      {
+        threadId: "3823e443-4e2b-4679-b496-a9506eae462b",
+        category: "播客汇总",
+        title: "整理并总结李飞飞博士近半年播客访谈",
+        description:
+          "搜集李飞飞博士近 6 个月参与的全部播客节目，提炼核心观点并生成综合报告。",
+      },
+    ],
+  },
+};
+
+export function CaseStudySection({
+  className,
+  locale = DEFAULT_LOCALE,
+}: {
+  className?: string;
+  locale?: Locale;
+}) {
+  const copy = CASE_STUDY_COPY[locale] ?? CASE_STUDY_COPY["en-US"];
+
   return (
     <Section
+      id="case-studies"
+      variant="soft"
       className={className}
-      title="Case Studies"
-      subtitle="See how DeerFlow is used in the wild"
+      eyebrow={copy.eyebrow}
+      title={copy.title}
+      subtitle={copy.subtitle}
     >
-      <div className="container-md mt-8 grid grid-cols-1 gap-4 md:grid-cols-2 md:px-20 lg:grid-cols-3">
-        {caseStudies.map((caseStudy) => (
+      <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
+        {copy.items.map((caseStudy) => (
           <Link
-            key={caseStudy.title}
+            key={caseStudy.threadId}
             href={pathOfPublicDemoThread(caseStudy.threadId)}
             target="_blank"
             rel="noopener noreferrer"
+            className="group focus-visible:ring-ring/50 block h-full min-w-0 rounded-md focus-visible:ring-2 focus-visible:outline-none"
           >
-            <Card className="group/card relative h-64 overflow-hidden">
-              <Image
-                src={`/images/${caseStudy.threadId}.jpg`}
-                alt={`${caseStudy.title} preview`}
-                width={640}
-                height={360}
-                loading="lazy"
-                decoding="async"
-                sizes="(min-width: 1024px) 320px, (min-width: 768px) 50vw, 100vw"
-                className="absolute inset-0 z-0 h-full w-full object-cover transition-all duration-300 group-hover/card:scale-110 group-hover/card:brightness-90"
-              />
-              <div
-                className={cn(
-                  "relative z-10 flex h-full w-full translate-y-[calc(100%-60px)] flex-col items-center",
-                  "transition-all duration-300",
-                  "group-hover/card:translate-y-[calc(100%-128px)]",
-                )}
-              >
-                <div
-                  className="flex w-full flex-col p-4"
-                  style={{
-                    background:
-                      "linear-gradient(to bottom, rgba(0, 0, 0, 0) 0%, rgba(0, 0, 0, 1) 100%)",
-                  }}
-                >
-                  <div className="flex flex-col gap-2">
-                    <h3 className="flex h-14 items-center text-xl font-bold text-shadow-black">
-                      {caseStudy.title}
-                    </h3>
-                    <p className="box-shadow-black overflow-hidden text-sm text-white/85 text-shadow-black">
-                      {caseStudy.description}
-                    </p>
-                  </div>
-                </div>
+            <article className="flex h-full min-w-0 flex-col overflow-hidden rounded-md border border-[var(--df-border,#d8d0c2)] bg-[var(--df-panel,#fffaf1)] transition-colors duration-150 group-hover:border-[var(--df-accent,#0a7c93)]/60">
+              <div className="relative aspect-[16/9] w-full overflow-hidden border-b border-[var(--df-border,#d8d0c2)] bg-[var(--df-muted,#f4edde)]">
+                <Image
+                  src={`/images/${caseStudy.threadId}.jpg`}
+                  alt={`${caseStudy.title} preview`}
+                  width={640}
+                  height={360}
+                  loading="lazy"
+                  decoding="async"
+                  sizes="(min-width: 1024px) 380px, (min-width: 768px) 50vw, 100vw"
+                  className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03] motion-reduce:transform-none"
+                />
               </div>
-            </Card>
+
+              <div className="flex flex-1 flex-col p-5 sm:p-6">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="inline-flex items-center rounded border border-[var(--df-border,#d8d0c2)] bg-[var(--df-surface,#fbf6ec)] px-2 py-0.5 font-mono text-[11px] font-medium tracking-[0.12em] text-[var(--df-muted-fg,#625b50)] uppercase">
+                    {caseStudy.category}
+                  </span>
+                  <ArrowUpRight
+                    className="size-4 shrink-0 text-[var(--df-muted-fg,#625b50)] transition-colors duration-150 group-hover:text-[var(--df-accent,#0a7c93)]"
+                    aria-hidden="true"
+                  />
+                </div>
+
+                <h3 className="mt-3 text-base leading-snug font-semibold text-[var(--df-ink,#171511)] transition-colors duration-150 group-hover:text-[var(--df-accent,#0a7c93)] sm:text-lg">
+                  {caseStudy.title}
+                </h3>
+
+                <p className="mt-2 line-clamp-3 text-sm leading-6 text-[var(--df-muted-fg,#625b50)]">
+                  {caseStudy.description}
+                </p>
+
+                <span className="mt-auto inline-flex items-center gap-1 pt-4 font-mono text-xs font-medium text-[var(--df-accent,#0a7c93)]">
+                  {copy.openShowcase}
+                  <ArrowUpRight className="size-3.5" aria-hidden="true" />
+                </span>
+              </div>
+            </article>
           </Link>
         ))}
       </div>
