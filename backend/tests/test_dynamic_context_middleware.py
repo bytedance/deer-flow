@@ -18,6 +18,8 @@ from deerflow.agents.middlewares.dynamic_context_middleware import (
     DynamicContextMiddleware,
 )
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.runtime.journal import RunJournal
 
 _SYSTEM_REMINDER_TAG = "<system-reminder>"
 
@@ -332,6 +334,64 @@ def test_checkpointed_memory_is_recorded_for_a_later_run_or_branch_without_reloa
         project_shelf_revision=None,
         memory_injection={"status": "unknown", "eligible": None, "selected": None, "injected": None, "withheld": None},
     )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("current_date", ["2026-05-08, Friday", "2026-05-09, Saturday"])
+async def test_legacy_date_only_checkpoint_records_unknown_without_reloading(current_date):
+    date = _date_reminder_msg("2026-05-08, Friday", "first")
+    # Older checkpoint format: the marked SystemMessage carries the date only in its content.
+    del date.additional_kwargs["reminder_date"]
+    messages = [date, HumanMessage(content="First", id="first__user"), HumanMessage(content="Continue", id="next")]
+    store = MemoryRunEventStore()
+    journal = RunJournal("run", "thread", store)
+    runtime = _fake_runtime(journal, pre_existing_message_ids={date.id, "first__user"})
+    middleware = _make_middleware()
+
+    with (
+        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context") as load_memory,
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware._format_current_date", return_value=current_date),
+    ):
+        update = middleware.before_agent({"messages": messages}, runtime)
+    load_memory.assert_not_called()
+    if update:
+        messages = add_messages(messages, update["messages"])
+    assert not any(isinstance(message, HumanMessage) and (message.id or "").endswith("__memory") for message in messages)
+
+    _drive_first_model_call(middleware, messages, runtime)
+    await journal.flush()
+    events = await store.list_events("thread", "run", event_types=["context:memory"])
+    assert len(events) == 1
+    assert events[0]["content"]["content_sha256"] is None
+    assert events[0]["content"]["memory_injection"] == {"status": "unknown", "eligible": None, "selected": None, "injected": 0, "withheld": None}
+
+
+@pytest.mark.anyio
+async def test_fresh_empty_snapshot_records_counts_when_date_reminder_inherits_memory_suffix():
+    messages = [HumanMessage(content="Hi", id="first__memory")]
+    store = MemoryRunEventStore()
+    journal = RunJournal("run", "thread", store)
+    runtime = _fake_runtime(journal)
+    middleware = _make_middleware()
+
+    def load_context(*_args, **kwargs):
+        kwargs["injection_stats"].update(schema_version=1, status="known", eligible_fact_count=5, selected_fact_count=0)
+        return ""
+
+    with (
+        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", side_effect=load_context),
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware._format_current_date", return_value="2026-05-08, Friday"),
+    ):
+        update = middleware.before_agent({"messages": messages}, runtime)
+    assert isinstance(update["messages"][0], SystemMessage)
+    assert update["messages"][0].id == messages[0].id
+
+    _drive_first_model_call(middleware, add_messages(messages, update["messages"]), runtime)
+    await journal.flush()
+    events = await store.list_events("thread", "run", event_types=["context:memory"])
+    assert len(events) == 1
+    assert events[0]["content"]["content_sha256"] is None
+    assert events[0]["content"]["memory_injection"] == {"status": "empty", "eligible": 5, "selected": 0, "injected": 0, "withheld": 5}
 
 
 def test_state_memory_without_checkpoint_proof_cannot_forge_context_event():

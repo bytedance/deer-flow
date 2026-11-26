@@ -743,18 +743,18 @@ class DynamicContextMiddleware(AgentMiddleware):
         has_memory_content = memory_message is not None and bool(memory_message.content.strip())
         carrier = memory_message
         if carrier is None:
-            carrier = next(
-                (
-                    message
-                    for message in messages
-                    if isinstance(message, (SystemMessage, HumanMessage))
-                    and not str(message.id or "").endswith("__memory")
-                    and is_dynamic_context_reminder(message)
-                    and MEMORY_INJECTION_STATS_KEY in message.additional_kwargs
-                    and self._is_trusted_context_message(message, runtime)
-                ),
-                None,
-            )
+            for message in messages:
+                if not isinstance(message, (SystemMessage, HumanMessage)) or not is_dynamic_context_reminder(message) or not self._is_trusted_context_message(message, runtime):
+                    continue
+                # Date SystemMessages inherit the user's ID; only HumanMessages use this suffix to identify memory.
+                if isinstance(message, HumanMessage) and (message.id or "").endswith("__memory"):
+                    continue
+                if MEMORY_INJECTION_STATS_KEY in message.additional_kwargs:
+                    carrier = message
+                    break
+                # A legacy date-only checkpoint has unknown counts. Prefer a stats-bearing snapshot over a date refresh.
+                if carrier is None and _last_injected_date([message]) is not None:
+                    carrier = message
         if carrier is None:
             return None
         stats = carrier.additional_kwargs.get(MEMORY_INJECTION_STATS_KEY)
@@ -865,7 +865,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         delivered). All are audit fingerprints: never compared, never stored
         in additional_kwargs, and unable to reconstruct the underlying text.
         The frozen selection counts are included when available; an explicit
-        empty or disabled observation also emits an event without a hash.
+        empty, disabled, or legacy date-only observation also emits an event without a hash.
         Runs supplying neither context nor an observation keep no-event behavior.
         """
         context = getattr(runtime, "context", None)
