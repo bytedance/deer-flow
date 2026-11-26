@@ -7,8 +7,9 @@ description: >-
   products, hotels and reviews. Also use it for bulk structured extraction
   from one specific website. It needs the apify_actor_start and
   apify_actor_await tools; when they are not available, do not load it and
-  use web_search and web_fetch instead. Do not use it for a single web search
-  or for reading one page; use the web_search and web_fetch tools for those.
+  use your other tools, such as web_search and web_fetch, instead. Do not use
+  it for a single web search or for reading one page; use the web_search and
+  web_fetch tools for those.
 ---
 
 # Apify Ultimate Scraper Skill
@@ -17,7 +18,7 @@ description: >-
 
 This skill needs the `apify_actor_start` and `apify_actor_await` tools. Check your tool list first. If they are not in it:
 
-- Do the task with `web_search` and `web_fetch`, and ignore the rest of this skill. Do not read its reference files, do not call any `apify_actor_*` tool, and do not try to run Actors another way, for example with `bash` or `curl`.
+- Do the task with the other tools you have, such as `web_search`, `web_fetch` or an MCP tool, and ignore the rest of this skill. Do not read its reference files, do not call any `apify_actor_*` tool, and do not call the Apify API yourself, for example with `bash` or `curl`.
 - If the user asked to use Apify or an Apify Actor, end your answer by telling them that the Apify Actor tools are not enabled, and that they can enable them in `config.yaml` (see the Apify blocks in `config.example.yaml`) and set `APIFY_API_TOKEN`.
 
 For tasks in the routing table below, use the listed Actor ID and do not call `apify_actor_discover`.

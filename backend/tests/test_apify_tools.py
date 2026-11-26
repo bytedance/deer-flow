@@ -6,9 +6,11 @@ validation and the normalization are all under test. The provider's own ``httpx`
 reference is replaced; the shared ``httpx.AsyncClient`` stays untouched.
 """
 
+import asyncio
 import json
 import logging
 import re
+import time
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -252,7 +254,7 @@ class TestStart:
     # Apify reads a limit of 0 as no limit, so 0 must not reach it either.
     @pytest.mark.parametrize(
         ("key", "value"),
-        [("max_total_charge_usd", value) for value in (0, "0", -1, "lots", "", True, "inf", "nan")] + [("max_paid_items", value) for value in (0, "0", -5, 2.5, "many", True)],
+        [("max_total_charge_usd", value) for value in (0, "0", -1, "lots", "", None, True, "inf", "nan")] + [("max_paid_items", value) for value in (0, "0", -5, 2.5, "many", None, True)],
     )
     async def test_an_invalid_cost_limit_refuses_to_start_the_run(self, config, apify, key, value):
         config(**{key: value})
@@ -391,6 +393,20 @@ class TestAwait:
         assert payload["status"] == status
         assert apify.only("POST", "/v2/actor-runs/run-1/abort") == []
 
+    async def test_a_slow_status_check_cannot_outlast_the_wait(self, config, apify, events):
+        # httpx bounds each read, not the whole response; a server that keeps the
+        # check open must still not hold the wait past its timeout.
+        async def stall(request: httpx.Request) -> httpx.Response:
+            await asyncio.sleep(30)
+            return httpx.Response(200, json={"data": {"status": "RUNNING"}})
+
+        config(timeout_secs="0.3")
+        apify.on("GET", "/v2/actor-runs/run-1", stall)
+        started = time.monotonic()
+        payload = json.loads(await apify_tools.apify_actor_await_tool.ainvoke({"run_id": "run-1", "dataset_id": "d"}))
+        assert payload["status"] == "TIMED_OUT"
+        assert time.monotonic() - started < 5
+
     async def test_invalid_config_numbers_fall_back_to_defaults(self, config, apify, events):
         # `$VAR` references resolve to strings; a bad one must not raise outside the error boundary.
         config(poll_interval_secs="soon", timeout_secs=False, max_items=2.5)
@@ -451,10 +467,10 @@ class TestInstallWithoutApify:
 
         # The model reads the description in its skill list before it opens the skill.
         assert "apify_actor_start" in skill.description
-        assert "use web_search and web_fetch instead" in skill.description
+        assert "use your other tools, such as web_search and web_fetch, instead" in skill.description
         text = skill_file.read_text(encoding="utf-8-sig")
         rule = text[text.index("## Core Rule") : text.index("## Actor Routing Table")]
         assert "Check your tool list first" in rule
-        assert "Do the task with `web_search` and `web_fetch`" in rule
+        assert "Do the task with the other tools you have, such as `web_search`, `web_fetch`" in rule
         # The rule that stopped requests on installs without Apify must not return.
         assert "then stop" not in rule and "do not try other tools" not in rule

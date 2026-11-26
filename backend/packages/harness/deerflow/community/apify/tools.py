@@ -378,11 +378,12 @@ async def apify_actor_start_tool(actor_id: str, run_input: str, description: str
     # Cost limits: max_total_charge_usd caps a run's charges and platform usage, and
     # max_paid_items caps the results a pay-per-result Actor charges for. A limit that
     # cannot be read must not start the run without it. Apify reads 0 as no limit,
-    # so 0 is refused like any other invalid value.
+    # so 0 is refused like any other invalid value, and so is a key left without a
+    # value, which YAML reads as null.
     for key, param, integer, unit in (("max_total_charge_usd", "maxTotalChargeUsd", False, "number of US dollars"), ("max_paid_items", "maxItems", True, "whole number")):
-        configured = extra.get(key)
-        if configured is None:
+        if key not in extra:
             continue
+        configured = extra[key]
         limit = _positive_number(configured, integer=integer)
         if limit is None:
             logger.error("Invalid Apify %s=%r; refusing to start the run without that limit", key, configured)
@@ -495,8 +496,11 @@ async def apify_actor_await_tool(run_id: str, dataset_id: str, description: str 
                 if check_timeout <= 0:
                     break
                 try:
-                    run = await _api_data(client, api_key, "GET", f"/actor-runs/{quote(run_id, safe='')}", action="Reading the run", timeout=check_timeout)
-                except TimeoutException:
+                    # httpx bounds each connect or read step, not the whole request,
+                    # so the overall bound comes from asyncio.timeout.
+                    async with asyncio.timeout(check_timeout):
+                        run = await _api_data(client, api_key, "GET", f"/actor-runs/{quote(run_id, safe='')}", action="Reading the run", timeout=check_timeout)
+                except (TimeoutException, TimeoutError):
                     # The wait ran out during the check, not Apify: the run goes on.
                     if check_timeout < _API_TIMEOUT_SECS:
                         break

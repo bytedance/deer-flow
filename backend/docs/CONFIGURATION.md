@@ -1439,9 +1439,9 @@ Store or returns an Actor's input schema, `apify_actor_start` starts a run and
 returns at once, and `apify_actor_await` waits for the run and returns up to
 `max_items` dataset items. The agent starts several runs, then awaits each, to
 scrape in parallel. The `apify-scraper` skill routes common platforms to known
-Actors. When the Actor tools are not enabled, the skill sends the agent to
-`web_search` and `web_fetch` instead, and when the user asked for Apify, the
-answer also says how to enable the Actor tools.
+Actors. When the Actor tools are not enabled, the skill sends the agent to its
+other tools, such as `web_search`, `web_fetch` or MCP tools, and when the user
+asked for Apify, the answer also says how to enable the Actor tools.
 The tools read `APIFY_API_TOKEN` or the tool's `api_key`; `config.example.yaml`
 lists their options.
 
@@ -1459,10 +1459,12 @@ and `memory_mbytes` set the run's limits on Apify.
 When `apify_actor_await` reaches its own `timeout_secs`, the run keeps going on
 Apify and the agent can call await again. That result reports the run's status
 message and item count rather than an error, so loop detection lets the agent
-keep waiting on a run that makes progress and still stops it on a stalled one.
-Results of `apify_actor_await` and `apify_actor_discover`, and the errors of
-`apify_actor_start`, hold third-party content, so the tool-result sanitization
-and PII redaction middlewares treat them like `web_fetch` output. Offline tests
+keep waiting on a run that makes progress. When several waits in a row show the
+same status message and item count, loop detection stops the agent as for any
+repeated call, even if the Actor is still working and saves its results only at
+the end. Results of all three tools can hold third-party content (scraped data,
+Store text, and Apify's error text when a run cannot start), so the tool-result
+sanitization and PII redaction middlewares treat them like `web_fetch` output. Offline tests
 use HTTPX mock transports and need no token.
 
 **Built-in Tools**:
