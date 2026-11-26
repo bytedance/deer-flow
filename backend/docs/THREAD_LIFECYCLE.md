@@ -3,6 +3,12 @@
 Read this guide before changing thread branching, regeneration, edit replay, or
 archive/search metadata behavior. It supplements the Gateway module guide.
 
+A successful `POST /api/threads` makes the thread state readable. If the
+metadata row was saved but its first checkpoint write failed, retrying with
+the same thread ID seeds the missing checkpoint from the stored metadata.
+An existing head is preserved. If another writer owns the thread while a
+seed is still needed, the endpoint returns 409 and the caller can retry.
+
 **Branch/regenerate checkpoint invariant**: `app/gateway/checkpoint_lineage.py`
 walks `parent_config` rather than globally ordered checkpoint history so replay
 anchors stay on the selected lineage after regenerations create sibling branches.

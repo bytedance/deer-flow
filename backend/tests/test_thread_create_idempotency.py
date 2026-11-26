@@ -14,9 +14,12 @@ from langgraph.store.memory import InMemoryStore
 
 from app.gateway.auth.models import User
 from app.gateway.routers import threads
+from deerflow.config.app_config import AppConfig
 from deerflow.persistence.thread_meta import ThreadMetaRepository
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
-from deerflow.runtime import goal
+from deerflow.runtime import RunManager, ThreadOperationKind, goal
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 USER = User(id=UUID("00000000-0000-0000-0000-000000000001"), email="create@example.com", password_hash="x", system_role="admin")
 
@@ -41,6 +44,8 @@ def app_for(store, checkpointer):
     app = make_authed_test_app(user_factory=lambda: USER, bind_current_user=True)
     app.state.thread_store = store
     app.state.checkpointer = checkpointer
+    app.state.run_manager = RunManager()
+    app.state.run_event_store = MemoryRunEventStore()
     app.include_router(threads.router)
     return app
 
@@ -219,7 +224,8 @@ async def test_cancelled_holder_allows_create_retry(thread_store, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_checkpoint_failure_releases_creation_lock(thread_store, monkeypatch):
+async def test_retry_repairs_failed_initial_checkpoint(thread_store, monkeypatch):
+    monkeypatch.setattr("app.gateway.deps.get_config", lambda: AppConfig.model_validate({"sandbox": {"use": "test"}}))
     saver = InMemorySaver()
     original_put = saver.aput
 
@@ -231,11 +237,63 @@ async def test_checkpoint_failure_releases_creation_lock(thread_store, monkeypat
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         failed = await client.post("/api/threads", json={"thread_id": "failed-seed", "metadata": {"keep": True}})
         assert failed.status_code == 500
+        assert await saver.aget_tuple({"configurable": {"thread_id": "failed-seed"}}) is None
         assert not goal._goal_locks._entries_by_loop
         monkeypatch.setattr(saver, "aput", original_put)
-        # Preserve existing retry semantics for a metadata row whose initial
-        # seed failed; this fix does not add transactional seed recovery.
-        retry = await asyncio.wait_for(client.post("/api/threads", json={"thread_id": "failed-seed"}), 5)
+        retry = await asyncio.wait_for(client.post("/api/threads", json={"thread_id": "failed-seed", "metadata": {"keep": False}}), 5)
         assert retry.status_code == 200
         assert retry.json()["metadata"] == {"keep": True}
+        state = await client.get("/api/threads/failed-seed/state")
+        assert state.status_code == 200, state.text
+        assert state.json()["checkpoint_id"]
+        checkpoint = await saver.aget_tuple({"configurable": {"thread_id": "failed-seed", "checkpoint_ns": ""}})
+        assert checkpoint.metadata["keep"] is True
+        assert checkpoint.metadata["created_at"] == retry.json()["created_at"]
     assert not goal._goal_locks._entries_by_loop
+
+
+@pytest.mark.anyio
+async def test_seed_repair_respects_other_workers(thread_store):
+    thread_id = "busy-seed"
+    owner = str(USER.id)
+    await thread_store.create(thread_id, user_id=owner)
+    store = MemoryRunStore()
+    writer = RunManager(store=store, worker_id="writer")
+    saver = InMemorySaver()
+    app = app_for(thread_store, saver)
+    app.state.run_manager = RunManager(store=store, worker_id="retry")
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with writer.reserve_thread_operation(thread_id, kind=ThreadOperationKind.checkpoint_write, user_id=owner):
+            busy = await client.post("/api/threads", json={"thread_id": thread_id})
+            assert busy.status_code == 409
+            assert await saver.aget_tuple(config) is None
+            head = await saver.aput(config, empty_checkpoint(), {"source": "update", "step": 7}, {})
+            complete = await client.post("/api/threads", json={"thread_id": thread_id})
+            assert complete.status_code == 200
+        assert (await saver.aget_tuple(config)).config == head
+
+
+@pytest.mark.anyio
+async def test_retry_preserves_checkpoint_published_before_reservation(thread_store, monkeypatch):
+    thread_id = "concurrent-seed"
+    await thread_store.create(thread_id, user_id=str(USER.id))
+    saver = InMemorySaver()
+    app = app_for(thread_store, saver)
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    progress = empty_checkpoint()
+    reserve = app.state.run_manager.reserve_thread_operation
+
+    @asynccontextmanager
+    async def publish_then_reserve(*args, **kwargs):
+        # Another worker publishes its checkpoint after the optimistic read
+        # sees no head, but before this worker acquires the writer reservation.
+        await saver.aput(config, progress, {"source": "update", "step": 7}, {})
+        async with reserve(*args, **kwargs) as reservation:
+            yield reservation
+
+    monkeypatch.setattr(app.state.run_manager, "reserve_thread_operation", publish_then_reserve)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/threads", json={"thread_id": thread_id})
+    assert response.status_code == 200
+    assert [row.checkpoint["id"] async for row in saver.alist(config)] == [progress["id"]]

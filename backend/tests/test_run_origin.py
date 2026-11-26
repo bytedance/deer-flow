@@ -29,7 +29,7 @@ from app.gateway.run_models import RunCreateRequest
 from app.gateway.run_origin import resolve_request_origin
 from deerflow.persistence.base import Base
 from deerflow.persistence.run import RunRepository
-from deerflow.persistence.run.model import RunChangeClockRow, RunRow
+from deerflow.persistence.run.model import CompletedRunSnapshotRow, RunChangeClockRow, RunRow
 from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, ORIGIN_KINDS, admit_origin, make_origin, origin_kind_of
 
 CONTRACT = json.loads((Path(__file__).resolve().parents[2] / "contracts" / "thread_origin_contract.json").read_text())
@@ -145,7 +145,7 @@ async def gateway(monkeypatch, tmp_path):
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runs.db'}")
     async with engine.begin() as conn:
-        await conn.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[RunRow.__table__, RunChangeClockRow.__table__]))
+        await conn.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[RunRow.__table__, RunChangeClockRow.__table__, CompletedRunSnapshotRow.__table__]))
     sf = async_sessionmaker(engine, expire_on_commit=False)
 
     app = FastAPI()

@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.exc import IntegrityError
@@ -67,7 +66,7 @@ from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
-from deerflow.persistence.thread_meta import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, ThreadOwnershipConflictError
+from deerflow.persistence.thread_meta import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, ThreadMetaStore, ThreadOwnershipConflictError
 from deerflow.runtime import ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels, validate_state_mutation_node
 from deerflow.runtime.context_compaction import (
@@ -1032,9 +1031,49 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
 
     checkpointer = get_checkpointer(request)
     thread_store = get_thread_store(request)
-    now = now_iso()
     thread_owner_user_id = get_trusted_internal_owner_user_id(request)
     thread_owner_kwargs = {"user_id": thread_owner_user_id} if thread_owner_user_id else {}
+    record = await _get_or_create_thread_record(body, request, thread_store, thread_id, thread_owner_kwargs)
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    try:
+        # A retry of a complete thread is read-only, even during a run.
+        if await checkpointer.aget_tuple(config) is not None:
+            return _existing_thread_response(thread_id, record)
+
+        # The caller holds the process-local lifecycle lock. Reserve the writer
+        # across workers too, then recheck both stores under the reservation.
+        async with get_run_manager(request).reserve_thread_operation(
+            thread_id,
+            kind=ThreadOperationKind.checkpoint_write,
+            user_id=thread_owner_user_id or get_effective_user_id(),
+        ):
+            current = await thread_store.get(thread_id, **thread_owner_kwargs)
+            if current is None or current.get("incarnation") != record.get("incarnation"):
+                raise HTTPException(status_code=409, detail="Thread changed during creation. Retry the request.")
+            # The SQL store projects the project ID into row metadata. Only
+            # the admitted origin and ordinary client keys belong in a seed.
+            excluded = _CHECKPOINT_OWNED_METADATA_KEYS | (_SERVER_RESERVED_METADATA_KEYS - {DEERFLOW_ORIGIN_KEY})
+            initial_metadata = {key: value for key, value in (current.get("metadata") or {}).items() if key not in excluded}
+            await await_drained(ensure_thread_checkpoint(checkpointer, thread_id, initial_metadata=initial_metadata, created_at=coerce_iso(current.get("created_at"))))
+            logger.info("Thread checkpoint ready: %s", sanitize_log_param(thread_id))
+            return _existing_thread_response(thread_id, current)
+    except ConflictError as exc:
+        raise HTTPException(status_code=409, detail="Thread has work in flight. Retry creation after it finishes.") from exc
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to initialize checkpoint for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to create thread") from None
+
+
+async def _get_or_create_thread_record(
+    body: ThreadCreateRequest,
+    request: Request,
+    thread_store: ThreadMetaStore,
+    thread_id: str,
+    thread_owner_kwargs: dict[str, str],
+) -> dict:
+    thread_owner_user_id = thread_owner_kwargs.get("user_id")
     # ``body.metadata`` is already stripped of server-reserved keys by
     # ``ThreadCreateRequest._strip_reserved`` — see the model definition.
     # A server-side caller (an extension handle) marks the thread it creates;
@@ -1043,16 +1082,15 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
     if (origin := admit_origin(getattr(request.state, "run_origin", None))) is not None:
         metadata[DEERFLOW_ORIGIN_KEY] = origin
 
-    # Idempotency: return existing record when already present
     existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
     if existing_record is not None:
-        return _existing_thread_response(thread_id, existing_record)
+        return existing_record
 
     # Write thread_meta so the thread appears in /threads/search immediately
     from deerflow.persistence.projects import ProjectNotAssignableError
 
     try:
-        created_record = await thread_store.create(
+        return await thread_store.create(
             thread_id,
             assistant_id=getattr(body, "assistant_id", None),
             **thread_owner_kwargs,
@@ -1077,7 +1115,7 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
         # historical overwrite behavior for direct callers.
         existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
         if existing_record is not None:
-            return _existing_thread_response(thread_id, existing_record)
+            return existing_record
         # The same-owner reconciliation above found nothing, yet the insert hit
         # a duplicate primary key — so the surviving row belongs to *another*
         # user. That is the ownership-conflict case, which the route already
@@ -1093,31 +1131,6 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
         # Any non-race failure must surface, not be silently swallowed as a 200.
         logger.exception("Failed to write thread_meta for %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to create thread")
-
-    # Write an empty checkpoint so state endpoints work immediately
-    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-    try:
-        # Client metadata cannot supply checkpoint-owned keys; see
-        # ``_CHECKPOINT_OWNED_METADATA_KEYS``.
-        ckpt_metadata = {
-            **{key: value for key, value in metadata.items() if key not in _CHECKPOINT_OWNED_METADATA_KEYS},
-            "step": -1,
-            "source": "input",
-            "writes": None,
-            "parents": {},
-            "created_at": now,
-        }
-        await checkpointer.aput(config, empty_checkpoint(), ckpt_metadata, {})
-    except Exception:
-        logger.exception("Failed to create checkpoint for thread %s", sanitize_log_param(thread_id))
-        raise HTTPException(status_code=500, detail="Failed to create thread")
-
-    logger.info("Thread created: %s", sanitize_log_param(thread_id))
-    # Respond from the persisted record — the store stamps
-    # ``metadata.deerflow_project_id`` from the assigned project_id column, so
-    # echoing ``body.metadata`` here would omit the membership the retry path
-    # (``_existing_thread_response``) reports.
-    return _existing_thread_response(thread_id, created_record)
 
 
 @router.post("/{thread_id}/branches", response_model=ThreadBranchResponse)

@@ -137,11 +137,10 @@ def test_compact_rejects_run_owned_by_another_worker(monkeypatch) -> None:
         active = await owner.create_or_reject("thread-compact-race")
         await owner.set_status(active.run_id, RunStatus.running)
 
-    asyncio.run(_seed_active_run())
-
     with TestClient(app) as client:
         created = client.post("/api/threads", json={"thread_id": "thread-compact-race"})
         assert created.status_code == 200, created.text
+        client.portal.call(_seed_active_run)
         response = client.post("/api/threads/thread-compact-race/compact", json={"force": True})
 
     assert response.status_code == 409
@@ -234,11 +233,10 @@ def test_update_state_rejects_run_owned_by_another_worker(monkeypatch) -> None:
         active = await owner.create_or_reject("thread-state-race")
         await owner.set_status(active.run_id, RunStatus.running)
 
-    asyncio.run(_seed_active_run())
-
     with TestClient(app) as client:
         created = client.post("/api/threads", json={"thread_id": "thread-state-race"})
         assert created.status_code == 200, created.text
+        client.portal.call(_seed_active_run)
         response = client.post(
             "/api/threads/thread-state-race/state",
             json={"values": {"title": "must not write"}},
@@ -1220,7 +1218,7 @@ def test_insert_race_recovery_claims_unscoped_row_for_trusted_owner() -> None:
             user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
             auth_source=AUTH_SOURCE_INTERNAL,
         ),
-        app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+        app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store, run_manager=_ThreadTestRunManager())),
     )
 
     async def _scenario():
@@ -1334,7 +1332,7 @@ def test_insert_race_concurrent_trusted_claims_have_one_winner(monkeypatch) -> N
         return SimpleNamespace(
             headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: owner},
             state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source=AUTH_SOURCE_INTERNAL),
-            app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+            app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store, run_manager=_ThreadTestRunManager())),
         )
 
     async def _scenario():
@@ -1591,7 +1589,7 @@ def test_internal_owner_header_assigns_thread_to_owner() -> None:
             user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
             auth_source=AUTH_SOURCE_INTERNAL,
         ),
-        app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
+        app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store, run_manager=_ThreadTestRunManager())),
     )
 
     async def _scenario():
