@@ -13,16 +13,16 @@ This section accumulates work toward the **2.3.0** milestone
 ### Added
 - **crawl4ai:** `web_fetch` accepts an optional `max_chars` output cap (default
   4096). A page cut at the cap ends with a note giving the kept and total
-  length. ([#8553](https://github.com/bytedance/deer-flow/pull/8553))
+  length. ([#8553])
 
 - **summarization:** The built-in compaction prompt guides the summarizer to
   preserve active user requirements, literal approval phrases, action conditions,
   and explicit revisions. Explicit `summarization.summary_prompt` configurations
-  continue to take precedence. ([#8114](https://github.com/bytedance/deer-flow/pull/8114))
+  continue to take precedence. ([#8114])
 
 - **sandbox:** Short ranged `read_file` calls on uploaded and workspace files
   display source line numbers when the result contains 1–40 lines and the
-  labeled view fits the output budget. ([#8109](https://github.com/bytedance/deer-flow/pull/8109))
+  labeled view fits the output budget. ([#8109])
 
 - **projects:** Owner-scoped project memory with automatic-extraction, delete and
   move-to-instructions controls. Project facts share DeerMem's extraction call
@@ -42,16 +42,16 @@ This section accumulates work toward the **2.3.0** milestone
 - **knowledge:** The WeKnora retrieval extension offers opt-in shared read-only
   access for authenticated users, without maintaining a per-user allowlist.
   Exact-user allowlists remain the default; shared access requires matching
-  host-verified identity and grants no management permissions. ([#7944](https://github.com/bytedance/deer-flow/pull/7944))
+  host-verified identity and grants no management permissions. ([#7944])
 
 - **community:** New SpecStream `web_search` and `web_fetch` provider. Search returns
   ranked results with a direct answer when the sources agree on one, and fetch
-  returns a page or document as markdown. ([#7968](https://github.com/bytedance/deer-flow/pull/7968))
+  returns a page or document as markdown. ([#7968])
 
 - **subagents:** Durable batch items can wait for explicitly named prerequisites.
   An optional, once-only lead-Agent follow-up completes a previously requested
   summary or delivery after the batch ends, with persisted admission, cancellation
-  and authorization checks. Active Goals retain continuation ownership. ([#7839](https://github.com/bytedance/deer-flow/pull/7839))
+  and authorization checks. Active Goals retain continuation ownership. ([#7839])
 
 - **chat:** Running Web chats offer Queue and Steer in the composer. Queue
   waits for the next turn; Steer lets the main Agent handle updates while
@@ -60,7 +60,7 @@ This section accumulates work toward the **2.3.0** milestone
 
 - **models:** Administrators can select StepFun in **Settings → Models** and
   connect an ordinary StepFun API account with an API key and model ID.
-  ([#7988](https://github.com/bytedance/deer-flow/pull/7988))
+  ([#7988])
 
 ### Changed
 
@@ -85,7 +85,7 @@ This section accumulates work toward the **2.3.0** milestone
   hidden caller message that only wraps text in
   reminder tags is never treated as a pre-stamp reminder,
   and todo items render as data after the framework block rather than
-  inside it. ([#8168](https://github.com/bytedance/deer-flow/issues/8168))
+  inside it. ([#8168])
 
 - **scheduler:** Scheduled-task IM notices no longer forward a credential that
   carries no secret-like key. A URL's user info
@@ -123,7 +123,7 @@ This section accumulates work toward the **2.3.0** milestone
   fails transiently, the later duplicate becomes served again, so the
   implementation behind a bound name can alternate across cache generations
   with server health.
-  ([#8135](https://github.com/bytedance/deer-flow/pull/8135))
+  ([#8135])
   
 - **channels:** WeCom no longer drops images between 2 MB and 10 MB. The
   adapter capped image uploads at 2 MB — the voice limit in the same protocol —
@@ -135,7 +135,7 @@ This section accumulates work toward the **2.3.0** milestone
   `Failed to delete local thread data.` when the workspace holds a file whose
   path exceeds `MAX_PATH`. The thread directory is now resolved through the
   Windows extended-length namespace before removal.
-  ([#8144](https://github.com/bytedance/deer-flow/pull/8144))
+  ([#8144])
 
 - **channels:** A WeCom group command that follows the bot mention now runs as a
   command. WeCom keeps the mention inside the message text (`@RobotA /new`), and
@@ -150,7 +150,7 @@ This section accumulates work toward the **2.3.0** milestone
   explicitly, and invalid declarations report middleware-specific configuration
   guidance. Final graph assembly checks both explicit and middleware tools;
   framework-generated discovery helpers retain their filtered catalogs.
-  ([#8136](https://github.com/bytedance/deer-flow/pull/8136))
+  ([#8136])
 
 - **frontend:** **Share** in a sidebar chat's menu now copies a link to the
   deployment you are using. On `localhost` and `127.0.0.1`, the default
@@ -174,7 +174,7 @@ This section accumulates work toward the **2.3.0** milestone
   file storage now preserve the winning definition and return HTTP 409 to the
   losing request instead of reporting two successes and overwriting one definition.
   Gateway startup also probes hard-link support and warns if the storage volume
-  cannot support managed subagent creation. ([#8132](https://github.com/bytedance/deer-flow/pull/8132))
+  cannot support managed subagent creation. ([#8132])
 
 - **agents:** A high-risk tool call without a usable id no longer wedges the
   thread when `hitl_approval` is enabled. A provider that omits a tool-call id
@@ -194,11 +194,11 @@ This section accumulates work toward the **2.3.0** milestone
 - **runtime:** A HITL rejection, including the all-reject escape after approval is
   disabled or the gated tools change during a pause, now reaches the thread's
   message history under the resume run instead of existing only in checkpoint
-  state. ([#8073](https://github.com/bytedance/deer-flow/pull/8073))
+  state. ([#8073])
   
 - **summarization:** vLLM compaction counts reasoning tokens replayed to the
   model when checking the trigger and estimating how much history to keep.
-  ([#8077](https://github.com/bytedance/deer-flow/pull/8077))
+  ([#8077])
 
 - **gateway:** Posting feedback twice for the same run now returns a 409
   instead of a 500. `POST /api/threads/{id}/runs/{run_id}/feedback` allows one
@@ -208,7 +208,7 @@ This section accumulates work toward the **2.3.0** milestone
   updates the existing feedback. ([#8064])
   
 - **frontend:** Reopening a conversation restores successfully handed-off shared
-  artifacts in the Artifacts sidebar. ([#8080](https://github.com/bytedance/deer-flow/pull/8080))
+  artifacts in the Artifacts sidebar. ([#8080])
 
 - **sandbox:** AIO commands from independent subagents now run concurrently when
   they carry per-call environment variables, including Lark CLI commands.
@@ -222,7 +222,7 @@ This section accumulates work toward the **2.3.0** milestone
   suffix no longer inserts the dedupe counter inside the suffix. A second
   `report.tar.gz` is now named `report_1.tar.gz` (matching `report_1.tar` and
   `report_1.txt`), instead of `report.tar_1.gz`, so the extension stays intact
-  for file-type detection. ([#8042](https://github.com/bytedance/deer-flow/pull/8042))
+  for file-type detection. ([#8042])
 
 - **gateway:** Deleting a thread no longer reports success while its
   conversation stays readable. When the checkpoint store failed during
@@ -243,7 +243,7 @@ This section accumulates work toward the **2.3.0** milestone
 - **models:** Cancelling a Codex-backed run now closes its upstream HTTP/SSE
   connection, including while waiting for response headers, and retry waits
   are cancellable. Local resources are released; the remote service may still
-  continue generation. ([#8053](https://github.com/bytedance/deer-flow/pull/8053))
+  continue generation. ([#8053])
 
 - **middleware:** With PII redaction enabled, a long run of text without
   spaces (such as a pasted hex dump) no longer stalls the Gateway. The email
@@ -255,7 +255,7 @@ This section accumulates work toward the **2.3.0** milestone
 - **agents:** Token budgets count separate accepted model calls even when a
   provider reuses message IDs, so repeated IDs no longer bypass the configured
   cap. Hard stops preserve already-completed structured-output tool results.
-  ([#8050](https://github.com/bytedance/deer-flow/pull/8050))
+  ([#8050])
   
 - **subagents:** Managed subagent creation now rejects Windows reserved device
   names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) at the shared
@@ -299,7 +299,7 @@ This section accumulates work toward the **2.3.0** milestone
   which langchain-anthropic adds a beta left them out and Anthropic rejected
   the token. The OAuth betas now lead any request `betas` and any
   `anthropic-beta` in `extra_headers`.
-  ([#8061](https://github.com/bytedance/deer-flow/pull/8061))
+  ([#8061])
 
 - **community:** A search or fetch API key that ends in a newline no longer
   leaks into the conversation. GroundRoute (`GROUNDROUTE_API_KEY`), InfoQuest,
@@ -347,7 +347,7 @@ This section accumulates work toward the **2.3.0** milestone
   database failure leaves a completed operation's reservation in place. The
   next request for the thread on the same Gateway worker retries the release,
   including in single-worker deployments with lease heartbeats disabled.
-  ([#8068](https://github.com/bytedance/deer-flow/pull/8068))
+  ([#8068])
 
 - **channels:** Long Feishu/Lark answers are no longer lost. Card text was
   unbounded and ASCII-escaped, so an answer of about 4,400 CJK characters made
@@ -2185,7 +2185,7 @@ This release closes that milestone with **1068 merged pull requests**.
 - **tool output:** Superseded `write_file` payload elision is now opt-in. The
   optimization remains available, but the default keeps model-bound history
   append-only so later file actions do not invalidate provider prompt-cache
-  prefixes. ([#7319](https://github.com/bytedance/deer-flow/issues/7319))
+  prefixes. ([#7319])
 
 - **skills:** Treat `allowed-tools` as non-enforced compatibility metadata.
   Activating a skill no longer hides or blocks tools that Agent configuration
@@ -16289,6 +16289,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7311]: https://github.com/bytedance/deer-flow/pull/7311
 [#7312]: https://github.com/bytedance/deer-flow/pull/7312
 [#7313]: https://github.com/bytedance/deer-flow/pull/7313
+[#7319]: https://github.com/bytedance/deer-flow/issues/7319
 [#7325]: https://github.com/bytedance/deer-flow/pull/7325
 [#7326]: https://github.com/bytedance/deer-flow/pull/7326
 [#7328]: https://github.com/bytedance/deer-flow/pull/7328
@@ -16422,10 +16423,10 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7622]: https://github.com/bytedance/deer-flow/pull/7622
 [#7628]: https://github.com/bytedance/deer-flow/pull/7628
 [#7631]: https://github.com/bytedance/deer-flow/pull/7631
+[#7638]: https://github.com/bytedance/deer-flow/pull/7638
 [#7643]: https://github.com/bytedance/deer-flow/pull/7643
 [#7651]: https://github.com/bytedance/deer-flow/pull/7651
 [#7659]: https://github.com/bytedance/deer-flow/pull/7659
-[#7638]: https://github.com/bytedance/deer-flow/pull/7638
 [#7665]: https://github.com/bytedance/deer-flow/pull/7665
 [#7723]: https://github.com/bytedance/deer-flow/pull/7723
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727
@@ -16440,33 +16441,53 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7794]: https://github.com/bytedance/deer-flow/pull/7794
 [#7798]: https://github.com/bytedance/deer-flow/pull/7798
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
+[#7839]: https://github.com/bytedance/deer-flow/pull/7839
 [#7892]: https://github.com/bytedance/deer-flow/pull/7892
 [#7907]: https://github.com/bytedance/deer-flow/pull/7907
 [#7941]: https://github.com/bytedance/deer-flow/pull/7941
+[#7944]: https://github.com/bytedance/deer-flow/pull/7944
 [#7945]: https://github.com/bytedance/deer-flow/issues/7945
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953
 [#7958]: https://github.com/bytedance/deer-flow/pull/7958
+[#7968]: https://github.com/bytedance/deer-flow/pull/7968
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
+[#7988]: https://github.com/bytedance/deer-flow/pull/7988
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#7998]: https://github.com/bytedance/deer-flow/issues/7998
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
 [#8019]: https://github.com/bytedance/deer-flow/pull/8019
 [#8020]: https://github.com/bytedance/deer-flow/pull/8020
+[#8042]: https://github.com/bytedance/deer-flow/pull/8042
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8046]: https://github.com/bytedance/deer-flow/pull/8046
+[#8050]: https://github.com/bytedance/deer-flow/pull/8050
+[#8053]: https://github.com/bytedance/deer-flow/pull/8053
 [#8057]: https://github.com/bytedance/deer-flow/pull/8057
+[#8061]: https://github.com/bytedance/deer-flow/pull/8061
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8068]: https://github.com/bytedance/deer-flow/pull/8068
 [#8069]: https://github.com/bytedance/deer-flow/issues/8069
 [#8071]: https://github.com/bytedance/deer-flow/issues/8071
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
+[#8073]: https://github.com/bytedance/deer-flow/pull/8073
+[#8077]: https://github.com/bytedance/deer-flow/pull/8077
 [#8079]: https://github.com/bytedance/deer-flow/pull/8079
+[#8080]: https://github.com/bytedance/deer-flow/pull/8080
 [#8087]: https://github.com/bytedance/deer-flow/pull/8087
+[#8109]: https://github.com/bytedance/deer-flow/pull/8109
+[#8114]: https://github.com/bytedance/deer-flow/pull/8114
 [#8117]: https://github.com/bytedance/deer-flow/pull/8117
 [#8118]: https://github.com/bytedance/deer-flow/pull/8118
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
 [#8131]: https://github.com/bytedance/deer-flow/pull/8131
+[#8132]: https://github.com/bytedance/deer-flow/pull/8132
+[#8135]: https://github.com/bytedance/deer-flow/pull/8135
+[#8136]: https://github.com/bytedance/deer-flow/pull/8136
 [#8139]: https://github.com/bytedance/deer-flow/pull/8139
+[#8144]: https://github.com/bytedance/deer-flow/pull/8144
 [#8151]: https://github.com/bytedance/deer-flow/pull/8151
+[#8168]: https://github.com/bytedance/deer-flow/issues/8168
 [#8174]: https://github.com/bytedance/deer-flow/pull/8174
 [#8250]: https://github.com/bytedance/deer-flow/pull/8250
+[#8553]: https://github.com/bytedance/deer-flow/pull/8553

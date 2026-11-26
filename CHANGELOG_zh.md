@@ -15,13 +15,13 @@
 ### 新增
 
 - **crawl4ai：** `web_fetch` 支持可选的 `max_chars` 输出上限（默认 4096）。页面在达到上限被截断时，
-  结尾会附上一条说明，给出已保留长度与总长度。([#8553](https://github.com/bytedance/deer-flow/pull/8553))
+  结尾会附上一条说明，给出已保留长度与总长度。([#8553])
 
 - **摘要：** 内置压缩提示现在会引导摘要器保留仍在生效的用户需求、原样的批准用语、行动条件以及
-  明确的修改要求。显式配置的 `summarization.summary_prompt` 仍然优先生效。([#8114](https://github.com/bytedance/deer-flow/pull/8114))
+  明确的修改要求。显式配置的 `summarization.summary_prompt` 仍然优先生效。([#8114])
 
 - **沙箱：** 对上传文件与工作区文件的短区间 `read_file` 调用，在结果包含 1–40 行且带行号视图
-  未超出输出预算时，会显示源码行号。([#8109](https://github.com/bytedance/deer-flow/pull/8109))
+  未超出输出预算时，会显示源码行号。([#8109])
 
 - **项目：** 新增面向所有者的项目记忆，支持自动提取、删除与移入指令等控制。项目事实与用户事实
   共用 DeerMem 的提取调用，但彼此隔离。新进入文档架的文档默认会尽力生成摘要。([#8117])
@@ -35,20 +35,20 @@
 
 - **知识库：** WeKnora 检索扩展提供可选的共享只读访问，已认证用户即可使用，无需维护逐用户的
   允许列表。精确到用户的允许列表仍是默认行为；共享访问要求匹配经宿主验证的身份，且不授予任何
-  管理权限。([#7944](https://github.com/bytedance/deer-flow/pull/7944))
+  管理权限。([#7944])
 
 - **社区工具：** 新增 SpecStream `web_search` 与 `web_fetch` provider。搜索返回排序后的结果，
-  当各来源给出一致答案时附带直接答案；抓取以 Markdown 形式返回页面或文档。([#7968](https://github.com/bytedance/deer-flow/pull/7968))
+  当各来源给出一致答案时附带直接答案；抓取以 Markdown 形式返回页面或文档。([#7968])
 
 - **子智能体：** 后台批次可声明条目前置关系，并可登记一次主 Agent 接续，在批次结束后完成
-  用户已要求的汇总或交付。接续保留持久化启动记录、取消和授权检查；启用 Goal 时仍由 Goal 负责续跑。([#7839](https://github.com/bytedance/deer-flow/pull/7839))
+  用户已要求的汇总或交付。接续保留持久化启动记录、取消和授权检查；启用 Goal 时仍由 Goal 负责续跑。([#7839])
 
 - **对话：** 网页端在任务运行时，可在输入框选择 Queue（排队执行）或 Steer（调整当前任务）。
   Queue 等当前任务结束后再执行下一条消息；Steer 让主 Agent 先处理新要求，原生子 Agent 可暂停后恢复。
   Gateway 重启后，尚未确认生效的消息可以手动重试。([#7729])
 
 - **模型：** 管理员可在 **设置 → 模型** 中选择 StepFun（阶跃星辰），
-  填写 API Key 和模型 ID 即可接入普通 API。([#7988](https://github.com/bytedance/deer-flow/pull/7988))
+  填写 API Key 和模型 ID 即可接入普通 API。([#7988])
 
 ### 变更
 
@@ -65,7 +65,7 @@
   被中和，从而无法伪造框架标签。在来源标记出现之前持久化的提醒会被迁移或取代，而不是与新提醒
   并存；显式清空列表时，带标记的清空状态提示只在被取代的非空写入仍然可见时保留；只在 reminder
   标签中包裹文本的隐藏调用方消息不会被当作带标记之前的提醒；todo 条目作为数据渲染在框架块
-  之后，而不是块内。([#8168](https://github.com/bytedance/deer-flow/issues/8168))
+  之后，而不是块内。([#8168])
 
 - **调度器：** 定时任务发往 IM 的通知不再把不带密钥词形态的凭证原样发出。URL 中的账号信息
   （`postgres://admin:hunter2@host`）以及 `Authorization`、`Cookie` 请求头的值
@@ -90,14 +90,14 @@
   重复的绑定名会被丢弃并给出警告，按启用服务器的声明顺序指明保留的服务器。注意，只有当胜出
   服务器的发现持续成功时，保留结果才是稳定的：如果胜出者的发现暂时失败，靠后的重复项会重新
   生效，因此同一绑定名背后的实现在不同缓存代际间可能随服务器健康状况而交替。
-  ([#8135](https://github.com/bytedance/deer-flow/pull/8135))
+  ([#8135])
   
 - **通道：** 企业微信不再丢弃 2–10 MB 的图片。此前适配器把图片上限定为 2 MB（同一协议中语音的限制），
   超出即在上传前被跳过，消息到达时缺少图片。现在图片上限与平台的 10 MB 对齐；普通文件 20 MB 的限制不变。([#8174])
 
 - **线程：** 在 Windows 上删除对话时，若工作区中存在路径超过 `MAX_PATH` 的文件，不再失败并报
   `Failed to delete local thread data.`。现在会在删除前通过 Windows 扩展长度命名空间解析线程目录。
-  ([#8144](https://github.com/bytedance/deer-flow/pull/8144))
+  ([#8144])
 
 - **通道：** WeCom 群聊中 `@机器人 /new` 这类带提及的命令现在按命令执行。WeCom 会把提及保留在
   正文里，而命令识别要求裸的前导 `/`，于是群里的 `/new`、`/status` 被当成聊天轮次。现在仅在命令
@@ -106,7 +106,7 @@
 - **子智能体：** 即使全局授权处于关闭状态，工具允许/拒绝列表也会作用于中间件声明的工具，
   包括对 `task` 的默认拒绝。受限子智能体会显式拒绝非 Sequence 声明，无效声明会给出中间件
   专属的配置指引。最终图组装会同时检查显式工具与中间件工具；框架生成的发现辅助工具保留其
-  过滤后的目录。([#8136](https://github.com/bytedance/deer-flow/pull/8136))
+  过滤后的目录。([#8136])
   
 - **前端：** 侧边栏对话菜单中的 **分享** 现在复制指向当前部署的链接。此前在 `localhost` 和
   `127.0.0.1`（`make dev` 与 Docker 的默认地址）上，复制的是托管演示站
@@ -122,7 +122,7 @@
 
 - **子智能体：** 在共享文件存储中并发创建同名受管子智能体时，现在会保留胜出的定义并向落败的
   请求返回 HTTP 409，而不是报告两次成功并覆盖其中一个定义。Gateway 启动时还会探测硬链接支持，
-  并在存储卷无法支持受管子智能体创建时给出警告。([#8132](https://github.com/bytedance/deer-flow/pull/8132))
+  并在存储卷无法支持受管子智能体创建时给出警告。([#8132])
 
 - **智能体：** 启用 `hitl_approval` 时，缺少可用 id 的高风险工具调用不再卡死对话。此前提供方
   省略工具调用 id（`None`）或在同一响应内重复同一 id 时，中间件会带着 Gateway 永远无法校验的
@@ -134,16 +134,16 @@
   ([#8069])
 
 - **运行时：** HITL 拒绝现在会随恢复运行写入对话的消息历史，而不是只存在于检查点状态中——
-  包括审批被关闭后的“全部拒绝”逃生路径，以及暂停期间受控工具发生变化时的同一路径。([#8073](https://github.com/bytedance/deer-flow/pull/8073))
+  包括审批被关闭后的“全部拒绝”逃生路径，以及暂停期间受控工具发生变化时的同一路径。([#8073])
 
-- **摘要：** vLLM 压缩在检查触发条件与估算应保留的历史量时，会把回放给模型的推理 token 计入。([#8077](https://github.com/bytedance/deer-flow/pull/8077))
+- **摘要：** vLLM 压缩在检查触发条件与估算应保留的历史量时，会把回放给模型的推理 token 计入。([#8077])
   
 - **网关：** 同一用户对同一次运行重复提交反馈时，现在返回 409 而不是 500。
   `POST /api/threads/{id}/runs/{run_id}/feedback` 每个用户每次运行只允许一条反馈；此前重试，
   或对同一次运行的另一条消息提交反馈，会触发该唯一约束，Gateway 因未处理的数据库错误而失败。
   409 会提示调用方改用同一路由的 `PUT` 更新已有反馈。([#8064])
 
-- **前端：** 重新打开对话时，会在 Artifact 侧边栏恢复已成功交接的共享产物。([#8080](https://github.com/bytedance/deer-flow/pull/8080))
+- **前端：** 重新打开对话时，会在 Artifact 侧边栏恢复已成功交接的共享产物。([#8080])
 
 - **沙箱：** 来自相互独立的子智能体的 AIO 命令在携带按调用配置的环境变量时，现在会并发执行，
   包括 Lark CLI 命令。同一子智能体内的命令仍保持先后顺序，客户端清理时会将其排空。
@@ -153,7 +153,7 @@
 
 - **上传：** 重新上传文件名与复合归档后缀冲突的文件时，去重计数器不再插入后缀内部。
   第二个 `report.tar.gz` 现在命名为 `report_1.tar.gz`（与 `report_1.tar`、`report_1.txt` 一致），
-  而不是 `report.tar_1.gz`，文件类型检测所需的扩展名得以保持完整。([#8042](https://github.com/bytedance/deer-flow/pull/8042))
+  而不是 `report.tar_1.gz`，文件类型检测所需的扩展名得以保持完整。([#8042])
 
 - **网关：** 删除线程时不再在对话仍可读取的情况下返回成功。此前
   `DELETE /api/threads/{id}` 在检查点存储失败时只记录 DEBUG 日志，仍删除线程元数据行并
@@ -166,7 +166,7 @@
   所有者的情形与 `ThreadOwnershipConflictError` 的处理一致；没有现存行的重复键仍以 500 报告。([#8057])
 
 - **模型：** 取消使用 Codex 的任务时，会关闭上游 HTTP/SSE 连接，包括等待响应头期间；
-  重试等待也可取消。本地资源会释放，远端服务仍可能继续生成。([#8053](https://github.com/bytedance/deer-flow/pull/8053))
+  重试等待也可取消。本地资源会释放，远端服务仍可能继续生成。([#8053])
 
 - **中间件：** 启用 PII 脱敏时，不含空格的长文本（例如粘贴的十六进制转储）不再让 Gateway
   卡住。此前邮箱检测器的耗时与这类文本长度呈平方关系，而脱敏会在每次模型调用时重新扫描全部
@@ -198,7 +198,7 @@
   `betas`（即使是 `[]`）、调用时传入 `betas`，或使用了 langchain-anthropic 会为其追加 beta
   的服务端工具，OAuth beta 就会丢失，Anthropic 随即拒绝该 token。现在 OAuth beta 会排在
   请求 `betas` 以及 `extra_headers` 中 `anthropic-beta` 的最前面。
-  ([#8061](https://github.com/bytedance/deer-flow/pull/8061))
+  ([#8061])
 
 - **社区工具：** 以换行结尾的搜索或抓取 API 密钥不再泄露到对话中。GroundRoute
   （`GROUNDROUTE_API_KEY`）、InfoQuest、Tavily、Exa、Jina、Firecrawl、fastCRW 和
@@ -233,7 +233,7 @@
 
 - **运行时：** 瞬时数据库故障在已完成操作上遗留的占用，不再阻止对话接受新的运行与修改。
   同一 Gateway worker 上针对该对话的下一个请求会重试释放，在禁用租约心跳的单 worker 部署中
-  同样生效。([#8068](https://github.com/bytedance/deer-flow/pull/8068))
+  同样生效。([#8068])
 
 - **渠道：** 飞书/Lark 的长回答不再丢失。此前卡片文本没有长度上限，并以 ASCII 转义
   序列化，约 4,400 个中日韩字符就会让卡片请求超过飞书 30 KB 的限制（`230025`）：
@@ -292,7 +292,7 @@
 
 - **智能体：** 即使模型提供方复用消息 ID，Token 预算也会分别统计已接受的模型调用，
   避免重复 ID 绕过配置的上限；触发硬停止时保留已完成的结构化输出工具结果。
-  ([#8050](https://github.com/bytedance/deer-flow/pull/8050))
+  ([#8050])
 
 - **渠道：** 钉钉 AI 卡片模式（`card_template_id`）下，卡片请求失败（例如缺少卡片权限或钉钉服务异常）时
   不再丢失回复。dingtalk-stream 会记录失败的卡片请求后按成功返回，因此文本形式的运行中提示和最终答案的
@@ -352,7 +352,7 @@
   工具返回的通用异常文本。两个校验器现在都会在协议检查与内网地址逃生通道之前拒绝任何畸形
   authority，包括 userinfo 中的裸方括号——RFC 3986 禁止它，而各 Python 版本对此行为不一。
   这是一次 fail-closed 的契约修复外加版本差异加固：通过格式合法的 URL 可达的任何主机都不会
-  因此被拦截。([#8079](https://github.com/bytedance/deer-flow/pull/8079))
+  因此被拦截。([#8079])
 
 ## [2.2.0] — 2026-10-29
 
@@ -1670,7 +1670,7 @@
 
 - **工具输出：** 被后续操作取代的 `write_file` 载荷省略现在改为显式启用。该优化仍可
   使用，但默认会保持发送给模型的历史只追加，避免后续文件操作使 provider 的提示词缓存
-  前缀失效。([#7319](https://github.com/bytedance/deer-flow/issues/7319))
+  前缀失效。([#7319])
 
 - **技能：** 将 `allowed-tools` 作为不强制执行的兼容性元数据。激活技能不再隐藏或
   阻止智能体配置与宿主授权已经允许的工具，即使该声明为空也是如此。保留解析、校验、
@@ -12898,6 +12898,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7311]: https://github.com/bytedance/deer-flow/pull/7311
 [#7312]: https://github.com/bytedance/deer-flow/pull/7312
 [#7313]: https://github.com/bytedance/deer-flow/pull/7313
+[#7319]: https://github.com/bytedance/deer-flow/issues/7319
 [#7325]: https://github.com/bytedance/deer-flow/pull/7325
 [#7326]: https://github.com/bytedance/deer-flow/pull/7326
 [#7328]: https://github.com/bytedance/deer-flow/pull/7328
@@ -13031,10 +13032,10 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7622]: https://github.com/bytedance/deer-flow/pull/7622
 [#7628]: https://github.com/bytedance/deer-flow/pull/7628
 [#7631]: https://github.com/bytedance/deer-flow/pull/7631
+[#7638]: https://github.com/bytedance/deer-flow/pull/7638
 [#7643]: https://github.com/bytedance/deer-flow/pull/7643
 [#7651]: https://github.com/bytedance/deer-flow/pull/7651
 [#7659]: https://github.com/bytedance/deer-flow/pull/7659
-[#7638]: https://github.com/bytedance/deer-flow/pull/7638
 [#7665]: https://github.com/bytedance/deer-flow/pull/7665
 [#7723]: https://github.com/bytedance/deer-flow/pull/7723
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727
@@ -13044,26 +13045,58 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7762]: https://github.com/bytedance/deer-flow/pull/7762
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
+[#7782]: https://github.com/bytedance/deer-flow/pull/7782
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
 [#7794]: https://github.com/bytedance/deer-flow/pull/7794
 [#7798]: https://github.com/bytedance/deer-flow/pull/7798
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
-[#7782]: https://github.com/bytedance/deer-flow/pull/7782
+[#7839]: https://github.com/bytedance/deer-flow/pull/7839
+[#7892]: https://github.com/bytedance/deer-flow/pull/7892
+[#7907]: https://github.com/bytedance/deer-flow/pull/7907
+[#7941]: https://github.com/bytedance/deer-flow/pull/7941
+[#7944]: https://github.com/bytedance/deer-flow/pull/7944
+[#7945]: https://github.com/bytedance/deer-flow/issues/7945
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953
 [#7958]: https://github.com/bytedance/deer-flow/pull/7958
+[#7968]: https://github.com/bytedance/deer-flow/pull/7968
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
+[#7988]: https://github.com/bytedance/deer-flow/pull/7988
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#7998]: https://github.com/bytedance/deer-flow/issues/7998
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
 [#8019]: https://github.com/bytedance/deer-flow/pull/8019
 [#8020]: https://github.com/bytedance/deer-flow/pull/8020
+[#8042]: https://github.com/bytedance/deer-flow/pull/8042
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8046]: https://github.com/bytedance/deer-flow/pull/8046
+[#8050]: https://github.com/bytedance/deer-flow/pull/8050
+[#8053]: https://github.com/bytedance/deer-flow/pull/8053
+[#8057]: https://github.com/bytedance/deer-flow/pull/8057
+[#8061]: https://github.com/bytedance/deer-flow/pull/8061
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8068]: https://github.com/bytedance/deer-flow/pull/8068
+[#8069]: https://github.com/bytedance/deer-flow/issues/8069
+[#8071]: https://github.com/bytedance/deer-flow/issues/8071
+[#8072]: https://github.com/bytedance/deer-flow/pull/8072
+[#8073]: https://github.com/bytedance/deer-flow/pull/8073
+[#8077]: https://github.com/bytedance/deer-flow/pull/8077
+[#8079]: https://github.com/bytedance/deer-flow/pull/8079
+[#8080]: https://github.com/bytedance/deer-flow/pull/8080
 [#8087]: https://github.com/bytedance/deer-flow/pull/8087
+[#8109]: https://github.com/bytedance/deer-flow/pull/8109
+[#8114]: https://github.com/bytedance/deer-flow/pull/8114
+[#8117]: https://github.com/bytedance/deer-flow/pull/8117
 [#8118]: https://github.com/bytedance/deer-flow/pull/8118
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
+[#8131]: https://github.com/bytedance/deer-flow/pull/8131
+[#8132]: https://github.com/bytedance/deer-flow/pull/8132
+[#8135]: https://github.com/bytedance/deer-flow/pull/8135
+[#8136]: https://github.com/bytedance/deer-flow/pull/8136
 [#8139]: https://github.com/bytedance/deer-flow/pull/8139
+[#8144]: https://github.com/bytedance/deer-flow/pull/8144
+[#8151]: https://github.com/bytedance/deer-flow/pull/8151
+[#8168]: https://github.com/bytedance/deer-flow/issues/8168
 [#8174]: https://github.com/bytedance/deer-flow/pull/8174
 [#8250]: https://github.com/bytedance/deer-flow/pull/8250
+[#8553]: https://github.com/bytedance/deer-flow/pull/8553
