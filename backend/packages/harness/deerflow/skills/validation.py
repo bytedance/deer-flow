@@ -23,6 +23,10 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
     skill_md = skill_dir / SKILL_MD_FILE
     if not skill_md.exists():
         return False, f"{SKILL_MD_FILE} not found", None
+    # An archive can carry a SKILL.md directory; reading it would raise an
+    # OSError that the install route reports as a 500 with the temp path.
+    if not skill_md.is_file():
+        return False, f"{SKILL_MD_FILE} must be a file", None
 
     content = skill_md.read_text(encoding="utf-8")
     return validate_skill_frontmatter_text(content)

@@ -159,6 +159,9 @@ Gemini image data is base64-decoded before the output directory or
 file is created. If decoding fails, an existing output image is preserved and no
 empty output file is left behind.
 
+The OpenAI-compatible path rejects an empty download or an empty data URL before
+the output directory or file is created, so an existing image is preserved too.
+
 The legacy MiniMax `/v1/image_generation` writer opens the destination before
 decoding. If decoding fails, it can leave an empty file or erase an existing
 image. Use a fresh `--output-file` path when you need to keep the previous image.
@@ -199,6 +202,7 @@ This skill auto-selects the provider by environment variables (no CLI change):
 - Otherwise, `IMAGE_GENERATION_API_KEY` set → use an OpenAI-compatible Images API.
 - Force one explicitly with `IMAGE_GENERATION_PROVIDER=gemini|minimax|openai`.
   `openai-compatible` is also accepted as an alias for `openai`.
+  If the selected provider's key is missing, the CLI names it on stderr and exits with status 1.
 
 OpenAI-compatible settings:
 
@@ -236,8 +240,9 @@ the same structured JSON regardless of which provider is active. MiniMax `image-
 consumes a single text string, so the MiniMax path itself sends only the JSON `prompt`
 field (the other fields such as `style` / `composition` / `negative_prompt` apply to the
 Gemini path) and enables `prompt_optimizer` so MiniMax expands it server-side. MiniMax
-caps that prompt at 1500 characters; if the `prompt` field is longer, the script returns
-an error instead of calling the API. The Gemini path receives the full structured JSON.
+accepts prompts up to 1500 characters. For longer prompts, the CLI reports the length
+limit on stderr and exits with status 1 before contacting MiniMax or writing the image.
+The Gemini path receives the full structured JSON.
 
 ## Notes
 

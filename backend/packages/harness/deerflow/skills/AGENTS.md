@@ -56,6 +56,9 @@ their credentials and enabled state stay per user.
 - **A skill name is a directory name on every host.** Creation and archive install
   reject Windows reserved device names on all platforms. Reads and deletes stay
   permissive, so that skills stored by an older release can still be removed.
+- **Archive install rejects a bad package with `ValueError`.** The route maps it
+  to `400`. Any other exception becomes a `500` that echoes its message, which can
+  name the extraction temp path, so check the extracted tree before reading it.
 - **History is JSONL split on LF only.** Unicode line separators inside a saved
   field are data. Every history writer appends a whole record and its LF under
   `locked_history_file`: callers do not share a mutation lock, and a split or

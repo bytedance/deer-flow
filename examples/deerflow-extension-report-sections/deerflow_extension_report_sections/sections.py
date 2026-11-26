@@ -25,9 +25,16 @@ _DDL = """CREATE TABLE IF NOT EXISTS report_sections (
 )"""
 
 
-def _norm_heading(text: str) -> str:
-    """Whitespace- and marker-insensitive form for heading comparison."""
-    return re.sub(r"[\s#]+", "", text)
+def _normalized_atx_heading(line: str) -> str | None:
+    """Extract an ATX heading's text, then ignore whitespace for comparison."""
+    match = re.fullmatch(r" {0,3}#{1,6}(?=[ \t]|$)([^\r\n]*)", line.removesuffix("\r"))
+    if match is None:
+        return None
+    text = match[1].rstrip(" \t")
+    before_trailing_hashes = text.rstrip("#")
+    if before_trailing_hashes.endswith((" ", "\t")):
+        text = before_trailing_hashes
+    return "".join(text.split())
 
 
 def strip_duplicate_title_heading(content: str, title: str) -> str:
@@ -39,8 +46,8 @@ def strip_duplicate_title_heading(content: str, title: str) -> str:
     """
     stripped = content.lstrip()
     first_line, _, rest = stripped.partition("\n")
-    match = re.match(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", first_line)
-    if match and _norm_heading(match.group(1)) == _norm_heading(title):
+    opening_title = _normalized_atx_heading(first_line)
+    if opening_title is not None and opening_title == _normalized_atx_heading(f"## {title.strip()}"):
         return rest.lstrip("\n")
     return stripped
 
