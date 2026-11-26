@@ -398,24 +398,46 @@ class TestWebSearchTool:
         assert "secret-skipped-web" not in caplog.text
         assert "secret-skipped-web" not in raw
 
-    async def test_non_json_200_response_returns_format_error_without_leaking_body(self, mock_config_with_key, caplog):
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.side_effect = json.JSONDecodeError("Expecting value", "<html>secret-proxy-body</html>", 0)
-        patcher, _ = _patch_get(mock_resp)
-        try:
+    @pytest.mark.parametrize(
+        ("body_bytes", "content_type"),
+        [
+            (b"<html>secret-proxy-body</html>", "text/html; charset=utf-8"),
+            ("<html>café secret-proxy-body</html>".encode("iso-8859-1"), "text/html; charset=iso-8859-1"),
+        ],
+        ids=["utf-8-html", "iso-8859-1-html"],
+    )
+    async def test_non_json_200_response_returns_format_error_without_leaking_body(
+        self,
+        body_bytes,
+        content_type,
+        mock_config_with_key,
+        caplog,
+    ):
+        real_async_client = httpx.AsyncClient
+        transport = httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                content=body_bytes,
+                headers={"content-type": content_type},
+            )
+        )
+        with patch(
+            "deerflow.community.youcom.tools.httpx.AsyncClient",
+            side_effect=lambda **kwargs: real_async_client(transport=transport, **kwargs),
+        ):
             from deerflow.community.youcom.tools import web_search_tool
 
             with caplog.at_level(logging.ERROR, logger="deerflow.community.youcom.tools"):
                 raw = await web_search_tool.ainvoke({"query": "test"})
-        finally:
-            patcher.stop()
 
         parsed = json.loads(raw)
         assert parsed == {"error": "You.com returned an unexpected response format", "query": "test"}
+        assert any(record.levelno >= logging.ERROR for record in caplog.records)
         assert "secret-proxy-body" not in caplog.text
         assert "secret-proxy-body" not in raw
         assert "Expecting value" not in raw
+        assert "codec" not in raw
+        assert "codec" not in caplog.text
 
     async def test_partial_fields_default_to_empty_string(self, mock_config_with_key):
         patcher, _ = _patch_get(_make_response({"results": {"web": [{}]}}))

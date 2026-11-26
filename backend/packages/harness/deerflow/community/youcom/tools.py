@@ -234,7 +234,7 @@ async def web_search_tool(query: str, max_results: int | None = None) -> str:
         if hint:
             message = f"{message} ({hint})"
         return json.dumps({"error": message, "query": query}, ensure_ascii=False)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         logger.error("You.com returned a non-JSON response")
         return _unexpected_format_error(query)
     except Exception as e:
