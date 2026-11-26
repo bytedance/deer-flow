@@ -17,7 +17,7 @@ from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
+from deerflow.sandbox.search import GrepMatch, is_user_data_path, path_matches, should_ignore_path_under_root, truncate_line
 
 if TYPE_CHECKING:
     from deerflow.community.e2b_sandbox.e2b_sandbox_provider import MountUploadResult
@@ -341,13 +341,15 @@ class E2BSandbox(Sandbox):
             raise OSError(f"Failed to download file '{path}' from sandbox: {e}") from e
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
+        # Label before the rewrite: home_dir can also hold non-user-data trees.
+        user_data = is_user_data_path(path)
         resolved = self._resolve_path(path)
         with self._lock:
             client = self._client
             if client is None:
                 raise RuntimeError("sandbox client has been closed")
             try:
-                result = client.commands.run(remote_list_dir_command(resolved, max_depth))
+                result = client.commands.run(remote_list_dir_command(resolved, max_depth, user_data=user_data))
             except CommandExitException as exc:
                 # The listing script exits nonzero on reachable outcomes (missing
                 # root: 1; head truncating a large listing: SIGPIPE 141). The SDK
@@ -361,6 +363,7 @@ class E2BSandbox(Sandbox):
                 getattr(result, "stdout", "") or "",
                 resolved,
                 pipeline_exit_code=getattr(result, "exit_code", None),
+                user_data=user_data,
             )
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
@@ -414,6 +417,8 @@ class E2BSandbox(Sandbox):
         include_dirs: bool = False,
         max_results: int = 200,
     ) -> tuple[list[str], bool]:
+        # Label before the rewrite: home_dir can also hold non-user-data trees.
+        user_data = is_user_data_path(path)
         resolved = self._resolve_path(path)
         types = "f,d" if include_dirs else "f"
         hard_limit = max(max_results * 4, max_results + 50)
@@ -441,7 +446,7 @@ class E2BSandbox(Sandbox):
                 continue
             if entry != root and not entry.startswith(root_prefix):
                 continue
-            if should_ignore_path_under_root(entry, root):
+            if should_ignore_path_under_root(entry, root, glob=pattern, user_data=user_data):
                 continue
             rel_path = entry[len(root) :].lstrip("/")
             if not rel_path:
@@ -475,6 +480,8 @@ class E2BSandbox(Sandbox):
         if not literal:
             re.compile(pattern, 0 if case_sensitive else re.IGNORECASE)
 
+        # Label before the rewrite: home_dir can also hold non-user-data trees.
+        user_data = is_user_data_path(path)
         resolved = self._resolve_path(path)
         # Build a portable ``grep`` invocation:
         # -r recursive, -n line numbers, -H always print filename, -I skip
@@ -532,7 +539,7 @@ class E2BSandbox(Sandbox):
                 line_number = int(line_no_str)
             except ValueError:
                 continue
-            if should_ignore_path_under_root(file_path, root):
+            if should_ignore_path_under_root(file_path, root, glob=glob, user_data=user_data):
                 continue
             if glob is not None:
                 # Restrict to the caller's real directory scope -- the

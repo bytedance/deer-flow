@@ -31,7 +31,7 @@ from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
+from deerflow.sandbox.search import GrepMatch, is_user_data_path, path_matches, should_ignore_path_under_root, truncate_line
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -305,8 +305,9 @@ class BoxliteBox(Sandbox):
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         resolved = self._resolve_path(path)
-        r = self._sh(remote_list_dir_command(resolved, max_depth))
-        return parse_remote_list_dir_output(r.stdout, resolved, pipeline_exit_code=r.exit_code)
+        user_data = is_user_data_path(resolved)
+        r = self._sh(remote_list_dir_command(resolved, max_depth, user_data=user_data))
+        return parse_remote_list_dir_output(r.stdout, resolved, pipeline_exit_code=r.exit_code, user_data=user_data)
 
     def glob(
         self,
@@ -329,12 +330,13 @@ class BoxliteBox(Sandbox):
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
+        user_data = is_user_data_path(root)
         # Records are LF-delimited; other splitlines() boundaries can be path characters.
         for entry in output.text.split("\n"):
             # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)):
                 continue
-            if should_ignore_path_under_root(entry, root):
+            if should_ignore_path_under_root(entry, root, glob=pattern, user_data=user_data):
                 continue
             rel_path = entry[len(root) :].lstrip("/")
             if not rel_path:
@@ -382,6 +384,7 @@ class BoxliteBox(Sandbox):
 
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
+        user_data = is_user_data_path(root)
         matches: list[GrepMatch] = []
         truncated = output.truncated
         # Keep non-LF separators inside filenames and matched text intact.
@@ -394,7 +397,7 @@ class BoxliteBox(Sandbox):
                 line_number = int(line_no_str)
             except ValueError:
                 continue
-            if should_ignore_path_under_root(file_path, root):
+            if should_ignore_path_under_root(file_path, root, glob=glob, user_data=user_data):
                 continue
             if glob is not None:
                 # Match the caller's real directory scope: a pattern like

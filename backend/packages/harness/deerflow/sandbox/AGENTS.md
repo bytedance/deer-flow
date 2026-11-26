@@ -88,9 +88,15 @@ Windows. The portable string assertions do not replace it.
   own files; a glob the caller spelled out wins over those defaults. The local
   provider labels a root from its mount table, so a host path the tools resolved
   from `/mnt/user-data/...` still counts as user data, and a skills mount or any
-  other root keeps the repository filter. In-flight `.upload-*.part` files stay
-  hidden in both root types. A file named as the search root is read at any size;
-  the 1 MB bound only skips files a directory walk discovers.
+  other root keeps the repository filter. Remote providers label the root with
+  `search.is_user_data_path()` before any path rewrite: e2b and Tenki map the
+  virtual prefix under a home directory, so the original path decides, not the
+  resolved one. A search rooted at the virtual prefix itself therefore treats
+  the whole backing home as user data, including a skills root an operator
+  configured inside it; a search addressed at the home path directly keeps the
+  repository filter. In-flight `.upload-*.part`
+  files stay hidden in both root types. A file named as the search root is read
+  at any size; the 1 MB bound only skips files a directory walk discovers.
 - Same-path write serialization is scoped to `(sandbox.id, path)`. Two isolated
   sandboxes use the same virtual paths and must not contend.
 

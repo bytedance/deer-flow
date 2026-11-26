@@ -20,7 +20,7 @@ from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.read_file_contract import slice_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
+from deerflow.sandbox.search import GrepMatch, is_user_data_path, path_matches, should_ignore_path_under_root, truncate_line
 
 from .backend import sandbox_http_trust_env
 from .command_cleanup import cleanup_command
@@ -1315,6 +1315,7 @@ class AioSandbox(Sandbox):
             The contents of the directory.
         """
         resolved = path
+        user_data = is_user_data_path(resolved)
         timeout = self._LIST_DIR_TIMEOUT_SECONDS
         with self._lock:
             client = self._client
@@ -1323,7 +1324,7 @@ class AioSandbox(Sandbox):
                 session_id = self._ensure_default_shell_session_id(client)
 
                 kwargs = {
-                    "command": remote_list_dir_command(resolved, max_depth),
+                    "command": remote_list_dir_command(resolved, max_depth, user_data=user_data),
                     "no_change_timeout": self._effective_no_change_timeout(timeout),
                     "hard_timeout": timeout,
                     "request_options": self._command_request_options(timeout),
@@ -1391,6 +1392,7 @@ class AioSandbox(Sandbox):
                 data.output or "",
                 resolved,
                 pipeline_exit_code=getattr(data, "exit_code", None),
+                user_data=user_data,
             )
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
@@ -1413,10 +1415,12 @@ class AioSandbox(Sandbox):
 
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
         root_path = path.rstrip("/") or "/"
+        # AIO keeps DeerFlow's virtual paths, so the root itself carries the label.
+        user_data = is_user_data_path(root_path)
         if not include_dirs:
             result = self._client.file.find_files(path=path, glob=pattern)
             files = result.data.files if result.data and result.data.files else []
-            filtered = [file_path for file_path in files if not should_ignore_path_under_root(file_path, root_path)]
+            filtered = [file_path for file_path in files if not should_ignore_path_under_root(file_path, root_path, glob=pattern, user_data=user_data)]
             truncated = len(filtered) > max_results
             return filtered[:max_results], truncated
 
@@ -1427,7 +1431,7 @@ class AioSandbox(Sandbox):
         for entry in entries:
             if entry.path != root_path and not entry.path.startswith(root_prefix):
                 continue
-            if should_ignore_path_under_root(entry.path, root_path):
+            if should_ignore_path_under_root(entry.path, root_path, glob=pattern, user_data=user_data):
                 continue
             rel_path = entry.path[len(root_path) :].lstrip("/")
             if path_matches(pattern, rel_path):
@@ -1474,12 +1478,13 @@ class AioSandbox(Sandbox):
         provider_matches = data.matches if data and data.matches else []
         root = path.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
+        user_data = is_user_data_path(root)
 
         matches: list[GrepMatch] = []
         truncated = bool(data and data.truncated)
         for match in provider_matches:
             file_path = match.file
-            if should_ignore_path_under_root(file_path, root):
+            if should_ignore_path_under_root(file_path, root, glob=glob, user_data=user_data):
                 continue
             if file_path == root:
                 rel_path = file_path.rsplit("/", 1)[-1]

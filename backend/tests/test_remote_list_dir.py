@@ -391,3 +391,60 @@ def test_pruning_uses_the_parsers_case_policy(tmp_path, monkeypatch) -> None:
     assert "BUILD" not in proc.stdout
     entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
     assert entries == [str(root), str(root / "report.txt")]
+
+
+def test_command_prunes_data_names_only_outside_user_data() -> None:
+    default = remote_list_dir_command("/mnt/user-data/uploads", 2)
+    assert "-name '*.log'" in default or "-iname '*.log'" in default
+    user_data = remote_list_dir_command("/mnt/user-data/uploads", 2, user_data=True)
+    assert "*.log" not in user_data
+    # shlex.quote leaves bare words unquoted, so check the prune term itself.
+    assert "-name logs" not in user_data and "-iname logs" not in user_data
+    # Repository machinery and in-flight uploads stay pruned in both root types.
+    for command in (default, user_data):
+        assert "node_modules" in command
+        assert ".upload-*.part" in command
+
+
+def test_parse_user_data_keeps_logs_and_hides_machinery() -> None:
+    stdout = (
+        "/mnt/user-data/uploads\n/mnt/user-data/uploads/app.log\n/mnt/user-data/uploads/logs\n"
+        "/mnt/user-data/uploads/logs/worker.log\n/mnt/user-data/uploads/notes.txt\n"
+        "/mnt/user-data/uploads/node_modules/dep.log\n/mnt/user-data/uploads/.upload-active.part\n\n__DF_FIND_STATUS__:0\n"
+    )
+    assert parse_remote_list_dir_output(stdout, "/mnt/user-data/uploads", pipeline_exit_code=0, user_data=True) == [
+        "/mnt/user-data/uploads",
+        "/mnt/user-data/uploads/app.log",
+        "/mnt/user-data/uploads/logs",
+        "/mnt/user-data/uploads/logs/worker.log",
+        "/mnt/user-data/uploads/notes.txt",
+    ]
+    # Without the label the same listing keeps the repository filter.
+    assert parse_remote_list_dir_output(stdout, "/mnt/user-data/uploads", pipeline_exit_code=0) == [
+        "/mnt/user-data/uploads",
+        "/mnt/user-data/uploads/notes.txt",
+    ]
+
+
+@_POSIX_SH
+@pytest.mark.skipif(shutil.which("find") is None, reason="system find required")
+def test_list_dir_command_user_data_keeps_uploaded_logs(tmp_path) -> None:
+    root = tmp_path / "uploads"
+    (root / "logs").mkdir(parents=True)
+    (root / "app.log").write_text("FATAL app\n", encoding="utf-8")
+    (root / "logs" / "worker.log").write_text("FATAL worker\n", encoding="utf-8")
+    (root / "notes.txt").write_text("FATAL notes\n", encoding="utf-8")
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / "dep.log").write_text("FATAL dep\n", encoding="utf-8")
+    (root / ".upload-active.part").write_text("partial", encoding="utf-8")
+
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), 3, user_data=True))
+    entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode, user_data=True)
+    assert str(root / "app.log") in entries
+    assert str(root / "logs" / "worker.log") in entries
+    assert not any("node_modules" in entry or ".upload-active.part" in entry for entry in entries)
+
+    # The default prune still hides the data-looking names in the same tree.
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), 3))
+    entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
+    assert entries == [str(root), str(root / "notes.txt")]

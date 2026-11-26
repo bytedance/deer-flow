@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import shlex
 
-from deerflow.sandbox.search import IGNORE_PATTERNS, should_ignore_path
+from deerflow.sandbox.search import IGNORE_PATTERNS, USER_DATA_IGNORE_PATTERNS, should_ignore_path, user_data_ignore_rules
 
 _STATUS_PREFIX = "__DF_FIND_STATUS__:"
 _MISSING_ROOT = "missing"
@@ -27,16 +27,23 @@ _LIST_LIMIT = 500
 _FIND_OK = (0, 141)
 
 
-def remote_list_dir_command(path: str, max_depth: int, *, limit: int = _LIST_LIMIT) -> str:
-    """Return a POSIX ``sh -lc`` script that lists ``path`` and records find status."""
+def remote_list_dir_command(path: str, max_depth: int, *, limit: int = _LIST_LIMIT, user_data: bool = False) -> str:
+    """Return a POSIX ``sh -lc`` script that lists ``path`` and records find status.
+
+    ``user_data`` marks a root the provider maps to the user's own files; the
+    prune list then keeps only repository machinery and in-flight uploads, so
+    ``*.log`` uploads survive the server-side walk. Pass the same value to
+    :func:`parse_remote_list_dir_output`.
+    """
     quoted = shlex.quote(path)
     depth = int(max_depth)
     n = int(limit)
     # Match the parser's host-platform case policy. Prune ignored descendants
     # before head so they cannot consume the visible listing's output budget.
     name_test = "-iname" if os.path.normcase("A") == "a" else "-name"
-    # IGNORE_PATTERNS must contain basename patterns (no '/'); -name/-iname do not match paths.
-    ignored = " -o ".join(f"{name_test} {shlex.quote(pattern)}" for pattern in IGNORE_PATTERNS)
+    # Ignore patterns must contain basename patterns (no '/'); -name/-iname do not match paths.
+    patterns = USER_DATA_IGNORE_PATTERNS if user_data else IGNORE_PATTERNS
+    ignored = " -o ".join(f"{name_test} {shlex.quote(pattern)}" for pattern in patterns)
     prune = f"\\( {ignored} \\) -prune -o " if ignored else ""
     # Status file is written by the find side of the pipe, then printed AFTER
     # head so a 500-line listing cannot truncate the marker. ``set +e`` undoes
@@ -69,6 +76,7 @@ def parse_remote_list_dir_output(
     resolved: str,
     *,
     pipeline_exit_code: int | None = None,
+    user_data: bool = False,
 ) -> list[str]:
     """Parse listing stdout, preferring the find-status marker over pipeline status.
 
@@ -79,7 +87,9 @@ def parse_remote_list_dir_output(
     listing ``build`` — or a path below an ignored ancestor — still returns its
     contents, as the local walk does. Filtering happens after the empty-output
     check, so a directory whose entries are all ignored returns an empty list
-    rather than a missing-path error.
+    rather than a missing-path error. ``user_data`` mirrors the command's prune
+    list: the user's own ``*.log`` files are content, while repository machinery
+    and in-flight ``.upload-*.part`` files stay hidden.
 
     Raises:
         OSError: Command/client failure or an incomplete traversal.
@@ -122,6 +132,8 @@ def parse_remote_list_dir_output(
         raise FileNotFoundError(resolved)
     root = resolved.rstrip("/") or "/"
     prefix = "/" if root == "/" else f"{root}/"
+    # Same rule split as the command's prune list and search.ignore_rules_for.
+    rules = user_data_ignore_rules(user_data=user_data)
     kept: list[str] = []
     for entry in entries:
         if entry.rstrip("/") == root:
@@ -129,7 +141,7 @@ def parse_remote_list_dir_output(
             # its own name matches an ignore pattern.
             kept.append(entry)
         elif entry.startswith(prefix):
-            if not should_ignore_path(entry[len(prefix) :]):
+            if not should_ignore_path(entry[len(prefix) :], rules=rules):
                 kept.append(entry)
         else:
             # Defensive fallback for unexpected entries outside the requested
