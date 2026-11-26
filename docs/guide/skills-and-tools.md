@@ -20,6 +20,10 @@ unanswerable approval cannot block the chat.
 See [HITL Tool Approval](../../backend/docs/CONFIGURATION.md#hitl-tool-approval) for
 configuration and safety semantics.
 
+When a sandbox provider rejects a tool call because capacity is unavailable,
+the tool tells the agent how long to wait before retrying. If capacity remains
+unavailable, the result asks the agent to tell the user to try again later.
+
 Agents can call the read-only `inspect_run_status` tool to inspect visible run
 token usage, message and tool-call counts, an approximate context-window fill,
 and whether a summary or unfinished to-dos exist. It returns counts only, not
@@ -184,9 +188,12 @@ validated or converted, and provider-specific format restrictions still apply.
 
 The [image-generation skill](../../skills/public/image-generation/SKILL.md#output-handling)
 decodes Gemini base64 image data before opening the output file,
-preserving an existing image when decoding fails. With the legacy MiniMax
-`/v1/image_generation` endpoint, a decode failure can still erase an existing
-output image. Use a fresh `--output-file` path to keep the previous image.
+preserving an existing image when decoding fails. For OpenAI-compatible providers,
+the CLI rejects an empty download or empty data URL before creating the output
+directory or opening the file. If a MiniMax prompt exceeds 1500 characters, the CLI
+reports the limit on stderr and exits with status 1 before contacting the provider.
+With the legacy MiniMax `/v1/image_generation` endpoint, a decode failure can still
+erase an existing output image. Use a fresh `--output-file` path to keep the previous image.
 
 The [music-generation skill](../../skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
 
@@ -197,7 +204,8 @@ Skills are loaded progressively — only when the task needs them, not all at on
 
 The bundled video-generation command reports failures on stderr and exits with
 status 1, including when the selected provider has no API key. Callers can check
-the exit status before presenting an output file.
+the exit status before presenting an output file. A zero-byte video download
+fails before the command opens the output file, preserving any previous video.
 
 The bundled podcast-generation command returns a nonzero exit status and writes
 diagnostics to stderr when generation fails. Callers can check the status before
@@ -216,7 +224,7 @@ Discovery follows operator-managed directory symlinks, but skips links back to a
 
 Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and review utilities read and write text explicitly as UTF-8 so localized skills behave consistently across operating systems.
 
-For standalone skill creation, `scripts/init_skill.py <skill-name> --path <directory>` creates a new direct child of the chosen directory. Names can be up to 40 characters long and consist of lowercase ASCII letters and digits, optionally grouped with single hyphens (for example, `data-analyzer`). The creator and packager write progress to stdout and report errors on stderr.
+For standalone skill creation, `scripts/init_skill.py <skill-name> --path <directory>` creates a new direct child of the chosen directory. Names can be up to 40 characters long and consist of lowercase ASCII letters and digits, optionally grouped with single hyphens (for example, `data-analyzer`). The initializer rejects Windows reserved device names, such as `nul` and `com1`, on every platform before creating files. The creator and packager write progress to stdout and report errors on stderr.
 
 For standalone skill exports, the bundled skill creator's `scripts/package_skill.py` can be run by file path from any directory, or as `python -m scripts.package_skill` from the skill-creator directory. Both entry points validate the skill before writing a `.skill` archive. The packager requires a regular `SKILL.md` file and skips symbolic links to files and directories in the skill. Copy any linked resources the skill needs into its directory before packaging.
 
@@ -234,7 +242,7 @@ and other runs.
 
 `SKILL.md` YAML frontmatter must open and close with `---` on its own line (trailing spaces or tabs are allowed). A line such as `---suffix` is not a closing delimiter.
 
-Custom skill history preserves Unicode line separators inside saved content and metadata, keeping those revisions readable for history inspection and rollback. Malformed JSON history records are still rejected.
+Custom skill history preserves Unicode line separators inside saved content and metadata, keeping those revisions readable for history inspection and rollback. Malformed JSON history records are still rejected. Each record is appended whole under the history file's lock, so concurrent edits from the agent, the skill API or several Gateway workers cannot join two records on one line. History reads take the same lock, so they never see a record that is still being written.
 
 The bundled `github-deep-research` API client also works without `requests`, using
 Python's standard-library HTTP client. Its fallback preserves spaces, Unicode, and
@@ -300,7 +308,9 @@ The built-in `image-generation` skill supports Gemini, MiniMax, and
 OpenAI-compatible Images APIs. Select the latter with
 `IMAGE_GENERATION_PROVIDER=openai`, then configure
 `IMAGE_GENERATION_API_KEY`, `IMAGE_GENERATION_BASE_URL`, and
-`IMAGE_GENERATION_MODEL`. Run the skill's script in an isolated sandbox such as
+`IMAGE_GENERATION_MODEL`. If the explicitly selected provider's API key is missing,
+the CLI reports the missing key on stderr and exits with status 1.
+Run the skill's script in an isolated sandbox such as
 Docker/AIO, the Kubernetes provisioner, or E2B, and pass the variables through
 `sandbox.environment`. Sandbox commands do not inherit API keys from the Gateway
 process.
@@ -505,6 +515,12 @@ repeatedly starting a missing toolchain. A non-zero extraction exit falls back
 only for that document, because malformed or oversized input can fail while
 the toolchain remains healthy. The fallback keeps resolved article links in
 the returned Markdown.
+When extraction returns a whole document, the fallback parses the source HTML
+and uses its body with or without a source URL. Calls without a source URL
+retain relative link destinations and do not repeat the document title.
+Only explicit document-level wrappers trigger that fallback. An inline SVG
+chart's title or a document-tag example in a comment or script leaves the
+successfully extracted article intact.
 Chat tool-step titles accept leading blank lines and up to three spaces before
 a page's first H1 heading. Indented code, including mixed spaces and tabs, is
 not used as a title; the tool step falls back to the URL.
