@@ -81,6 +81,10 @@ def _accumulate_token_usage(stored: dict[str, Any] | None, attempt: dict[str, An
     return total
 
 
+def _usage_count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
 class SubagentBatchRepository:
     """Durable batch/item state with lease-based multi-worker claiming."""
 
@@ -274,6 +278,54 @@ class SubagentBatchRepository:
                     value["prompt"] = row.prompt
                 values.append(value)
             return values
+
+    async def list_item_token_usage(
+        self,
+        *,
+        user_id: str | None,
+        thread_id: str | None = None,
+        updated_since: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Token usage stored on batch items, for the usage views.
+
+        Batch items are not runs, so the run-based usage views miss them. Each
+        entry is one item with stored usage (all its attempts so far): its
+        model, the time its usage was last written (``completed_at``, else
+        ``updated_at``) and its input/output/total tokens. ``user_id=None``
+        means no owner filter (the caller decides who may see all users).
+        """
+        stmt = (
+            select(
+                SubagentBatchItemRow.model_name,
+                SubagentBatchItemRow.token_usage,
+                SubagentBatchItemRow.completed_at,
+                SubagentBatchItemRow.updated_at,
+            )
+            .join(SubagentBatchRow, SubagentBatchRow.id == SubagentBatchItemRow.batch_id)
+            .where(SubagentBatchItemRow.token_usage.is_not(None))
+        )
+        if user_id is not None:
+            stmt = stmt.where(SubagentBatchRow.user_id == user_id)
+        if thread_id is not None:
+            stmt = stmt.where(SubagentBatchRow.thread_id == thread_id)
+        if updated_since is not None:
+            stmt = stmt.where(SubagentBatchItemRow.updated_at >= updated_since)
+        async with self._sf() as session:
+            rows = (await session.execute(stmt)).all()
+        usage = []
+        for model_name, token_usage, completed_at, updated_at in rows:
+            if not isinstance(token_usage, dict):
+                continue
+            usage.append(
+                {
+                    "model_name": model_name,
+                    "at": completed_at or updated_at,
+                    "input_tokens": _usage_count(token_usage.get("input_tokens")),
+                    "output_tokens": _usage_count(token_usage.get("output_tokens")),
+                    "total_tokens": _usage_count(token_usage.get("total_tokens")),
+                }
+            )
+        return usage
 
     @staticmethod
     def _dependencies_ready():

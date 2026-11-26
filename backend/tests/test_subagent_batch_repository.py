@@ -309,6 +309,24 @@ async def test_manual_retry_adds_to_the_failed_attempts_token_usage(tmp_path) ->
 
 
 @pytest.mark.asyncio
+async def test_item_token_usage_lists_items_with_usage_by_owner_thread_and_time(tmp_path) -> None:
+    repo = await _repo(tmp_path)
+    await _create(repo, count=2, max_live=2, max_running=2)
+    now = datetime.now(UTC)
+    claimed = await repo.claim_items(now=now, lease_owner="worker-1", lease_seconds=60, limit=2)
+    # Only the first item has finished; the second is still leased and has no usage.
+    await _finalize(repo, claimed[0]["id"], "worker-1", succeeded=True, token_usage={"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}, at=now)
+
+    usage = await repo.list_item_token_usage(user_id="user-1", thread_id="thread-1")
+    assert [{key: entry[key] for key in ("input_tokens", "output_tokens", "total_tokens")} for entry in usage] == [{"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}]
+    assert usage[0]["at"] is not None
+    assert await repo.list_item_token_usage(user_id=None) == usage
+    assert await repo.list_item_token_usage(user_id="user-2") == []
+    assert await repo.list_item_token_usage(user_id="user-1", thread_id="thread-2") == []
+    assert await repo.list_item_token_usage(user_id="user-1", updated_since=datetime.now(UTC) + timedelta(hours=1)) == []
+
+
+@pytest.mark.asyncio
 async def test_pause_resume_cancel_and_owner_scope(tmp_path) -> None:
     repo = await _repo(tmp_path)
     await _create(repo, count=2, max_live=2, max_running=1)

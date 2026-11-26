@@ -26,6 +26,7 @@ from sqlalchemy.pool import NullPool
 from app.gateway.routers import console
 from deerflow.persistence.base import Base
 from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow, SubagentBatchRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
 # Pinned to noon UTC so hour-level seed offsets (NOW - 1h, NOW - 2h) never cross
@@ -608,3 +609,87 @@ def _insert_usage_row(session_factory, run_id: str, usage_map: dict) -> None:
             await session.commit()
 
     asyncio.run(insert())
+
+
+def _insert_batch_items(session_factory) -> None:
+    """One batch per user; items with usage now, 40 days ago and none yet."""
+
+    async def insert():
+        async with session_factory() as session:
+            for batch_id, user_id in (("b-a", "user-a"), ("b-b", "user-b")):
+                session.add(
+                    SubagentBatchRow(
+                        id=batch_id,
+                        user_id=user_id,
+                        thread_id="t1",
+                        submission_key=batch_id,
+                        title="batch",
+                        subagent_type="general-purpose",
+                        status="running",
+                        total_items=3,
+                        max_live_items=2,
+                        max_running_items=2,
+                        max_attempts=2,
+                        execution_spec={},
+                    )
+                )
+            items = [
+                ("b-a", "a-now", {"input_tokens": 400, "output_tokens": 100, "total_tokens": 500}, NOW - timedelta(minutes=10)),
+                ("b-a", "a-old", {"input_tokens": 7, "output_tokens": 0, "total_tokens": 7}, NOW - timedelta(days=40)),
+                ("b-a", "a-pending", None, NOW - timedelta(minutes=5)),
+                ("b-b", "b-now", {"input_tokens": 20, "output_tokens": 10, "total_tokens": 30}, NOW - timedelta(minutes=10)),
+            ]
+            for position, (batch_id, item_id, usage, at) in enumerate(items):
+                session.add(
+                    SubagentBatchItemRow(
+                        id=item_id,
+                        batch_id=batch_id,
+                        item_key=item_id,
+                        position=position,
+                        prompt="p",
+                        status="succeeded" if usage else "pending",
+                        model_name="minimax-m2",
+                        token_usage=usage,
+                        completed_at=at if usage else None,
+                        created_at=at,
+                        updated_at=at,
+                    )
+                )
+            await session.commit()
+
+    asyncio.run(insert())
+
+
+class TestConsoleBatchItems:
+    def test_usage_counts_batch_items_in_the_window(self, client, session_factory):
+        _insert_batch_items(session_factory)
+        data = client.get("/api/console/usage", params={"days": 14}).json()
+        assert data["total_runs"] == 4
+        assert data["total_batch_items"] == 2  # a-now and b-now; a-old is outside, a-pending has no usage
+        assert data["total_tokens"] == 1200 + 300 + 50 + 70 + 500 + 30
+        assert sum(d["total_tokens"] for d in data["days"]) == data["total_tokens"]
+        today = {d["date"]: d for d in data["days"]}[NOW.date().isoformat()]
+        assert today["batch_items"] == 2
+        assert today["runs"] == 3
+        assert data["by_model"]["minimax-m2"]["tokens"] == 1500 + 500 + 30
+        assert data["by_model"]["minimax-m2"]["runs"] == 2
+
+    def test_stats_and_usage_scope_batch_items_to_the_user(self, client, session_factory, monkeypatch):
+        _insert_batch_items(session_factory)
+        monkeypatch.setattr(console, "get_current_user", AsyncMock(return_value="user-a"))
+        usage = client.get("/api/console/usage", params={"days": 14}).json()
+        assert usage["total_batch_items"] == 1
+        assert usage["total_tokens"] == 1200 + 300 + 50 + 500
+        stats = client.get("/api/console/stats").json()
+        assert stats["total_tokens"] == 1200 + 300 + 50 + 999 + 500 + 7
+
+    def test_priced_batch_items_add_to_the_cost(self, client, session_factory, monkeypatch):
+        _insert_batch_items(session_factory)
+        # user-b: run r5 is on an unpriced model, its batch item on a priced one.
+        monkeypatch.setattr(console, "get_current_user", AsyncMock(return_value="user-b"))
+        monkeypatch.setattr(console, "get_app_config", lambda: _priced_config())
+        item_cost = 20 * 8e-6 + 10 * 32e-6
+        usage = client.get("/api/console/usage", params={"days": 14}).json()
+        assert usage["total_cost"] == pytest.approx(item_cost)
+        assert usage["by_model"]["minimax-m2"]["cost"] == pytest.approx(item_cost)
+        assert client.get("/api/console/stats").json()["total_cost"] == pytest.approx(item_cost)
