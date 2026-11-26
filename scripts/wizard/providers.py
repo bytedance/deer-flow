@@ -752,6 +752,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         extra_config={"max_results": 5},
     ),
     SearchProvider(
+        name="nestdaddy",
+        display_name="NestDaddy",
+        description="Own search index with fresh news blended in, API key required",
+        use="deerflow.community.nestdaddy.tools:web_search_tool",
+        env_var="NESTDADDY_API_KEY",
+        extra_config={"max_results": 5},
+    ),
+    SearchProvider(
         name="specstream",
         display_name="SpecStream",
         description="Answers from the live web with a source for each result, API key required",

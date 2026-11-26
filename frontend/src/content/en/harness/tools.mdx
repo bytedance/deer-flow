@@ -127,7 +127,7 @@ Community tools connect the agent to external services. Each `tools:` entry in `
 
 ### Web search
 
-<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
+<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "NestDaddy", "Sofya", "SpecStream", "You.com"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -237,6 +237,16 @@ tools:
     api_key: $SOFYA_API_KEY
 ```
 Results include the content of each page, not only a snippet. Requires a [Sofya](https://sofya.co) API key. `max_results` is capped at 20, and each result's content is capped at `contents_max_characters` (default 2000, set 0 for no cap). Also supports `web_fetch`.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.nestdaddy.tools:web_search_tool
+    api_key: $NESTDADDY_API_KEY
+```
+Results come from NestDaddy's own search index, with fresh news blended in for current topics. Each result carries a snippet, a source URL and a publish date when known. Requires a [NestDaddy](https://nestdaddy.com/serp-api) API key. `max_results` is capped at 50.
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
