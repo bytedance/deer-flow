@@ -2741,17 +2741,128 @@ class TestNoChangeTimeout:
 
 
 class TestReadFile:
-    def test_read_file_forwards_requested_line_range(self, sandbox):
-        sandbox._client.file.read_file = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(content="line 1\nline 2")))
+    """``/v1/file/read`` turns every line ending into "\\n" and its ranges also
+    end lines at a bare "\\r", \\f and Unicode separators. ``read_file`` takes the
+    stored bytes from the download route instead and slices ranges like
+    ``LocalSandbox``, so a full read returns the endings as stored and a ranged
+    read numbers the lines that ``count_file_lines`` counts."""
 
-        result = sandbox.read_file("/mnt/user-data/workspace/huge.log", start_line=1, end_line=10)
+    def test_read_file_returns_line_endings_as_stored(self, sandbox):
+        sandbox._client.file.download_file = MagicMock(return_value=iter([b"a\r\nb", b"\rc\n"]))
 
-        assert result == "line 1\nline 2"
-        sandbox._client.file.read_file.assert_called_once_with(
-            file="/mnt/user-data/workspace/huge.log",
-            start_line=0,
-            end_line=10,
-        )
+        assert sandbox.read_file("/mnt/user-data/workspace/run.bat") == "a\r\nb\rc\n"
+        sandbox._client.file.download_file.assert_called_once_with(path="/mnt/user-data/workspace/run.bat")
+        sandbox._client.file.read_file.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("stored", "start_line", "end_line", "expected"),
+        [
+            pytest.param(b"one\r\ntwo\r\nthree\r\n", 2, 3, "two\nthree", id="crlf"),
+            pytest.param(b"one\rtwo\nthree\n", 2, 2, "three", id="bare-cr-is-not-a-line-end"),
+            pytest.param("one\u2028two\fx\nthree\n".encode(), 1, 1, "one\u2028two\fx", id="unicode-separators"),
+            pytest.param(b"one\ntwo\n", 3, None, "", id="past-the-end"),
+            pytest.param(b"one\ntwo\n", None, 1, "one", id="end-only"),
+        ],
+    )
+    def test_ranged_read_file_ends_lines_only_at_lf(self, sandbox, stored, start_line, end_line, expected):
+        sandbox._client.file.download_file = MagicMock(return_value=iter([stored]))
+
+        assert sandbox.read_file("/mnt/user-data/workspace/f.txt", start_line=start_line, end_line=end_line) == expected
+        sandbox._client.file.read_file.assert_not_called()
+
+    def test_read_file_reads_paths_outside_user_data(self, sandbox):
+        # download_file() refuses paths outside /mnt/user-data; read_file must
+        # keep reading skills and custom mounts.
+        sandbox._client.file.download_file = MagicMock(return_value=iter([b"---\r\nname: x\r\n"]))
+
+        assert sandbox.read_file("/mnt/skills/custom/x/SKILL.md") == "---\r\nname: x\r\n"
+
+    def test_read_file_does_not_wait_for_a_running_command(self, sandbox):
+        sandbox._client.file.download_file = MagicMock(return_value=iter([b"ok"]))
+
+        with sandbox._lock:
+            assert sandbox.read_file("/mnt/user-data/workspace/f.txt") == "ok"
+
+    def test_an_oversized_file_raises_and_str_replace_leaves_it_unchanged(self, sandbox, monkeypatch):
+        # An "Error: ..." string would let str_replace replace text inside it
+        # ("read" occurs in the message) and write the message over the file.
+        import deerflow.community.aio_sandbox.aio_sandbox as aio_module
+        from deerflow.sandbox.tools import str_replace_tool
+
+        monkeypatch.setattr(aio_module, "_MAX_DOWNLOAD_SIZE", 4 * 1024 * 1024)
+        chunks = iter([b"x" * (3 * 1024 * 1024), b"x" * (3 * 1024 * 1024), b"never read"])
+        sandbox._client.file.download_file = MagicMock(return_value=chunks)
+        with pytest.raises(OSError, match="larger than 4 MB; read part of it with bash"):
+            sandbox.read_file("/mnt/user-data/workspace/huge.log", start_line=1, end_line=10)
+        assert next(chunks) == b"never read"
+
+        sandbox._client.file.download_file = MagicMock(return_value=iter([b"x" * (5 * 1024 * 1024)]))
+        sandbox._client.file.write_file = MagicMock()
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+        monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+        result = str_replace_tool.func(runtime=MagicMock(), description="d", path="/mnt/user-data/workspace/huge.log", old_str="read", new_str="x")
+
+        assert result.startswith("Error: ")
+        sandbox._client.file.write_file.assert_not_called()
+
+    def test_read_file_reports_a_binary_file_as_unreadable(self, sandbox):
+        sandbox._client.file.download_file = MagicMock(return_value=iter([b"\xafI~m\xd3"]))
+
+        assert sandbox.read_file("/mnt/user-data/uploads/a.bin") == "Error: file not found or unreadable: /mnt/user-data/uploads/a.bin"
+
+    def test_read_file_reports_a_file_the_server_cannot_open_as_unreadable(self, sandbox):
+        # The server sends headers before it opens the file, so a root-owned
+        # file ends the response body early.
+        error = httpx.RemoteProtocolError("peer closed connection without sending complete message body (received 0 bytes, expected 7)")
+        sandbox._client.file.download_file = MagicMock(side_effect=error)
+
+        assert sandbox.read_file("/mnt/user-data/workspace/root600.txt") == "Error: file not found or unreadable: /mnt/user-data/workspace/root600.txt"
+
+
+class _AioFileServer:
+    """In-memory stand-in for the AIO file routes, with their real line-ending behavior."""
+
+    def __init__(self) -> None:
+        self.files: dict[str, bytes] = {}
+
+    def read_file(self, *, file, **kwargs):
+        # The text route normalizes line endings (verified on AIO 1.11.0).
+        text = self.files[file].decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        return SimpleNamespace(data=SimpleNamespace(content=text, file=file))
+
+    def download_file(self, *, path, **kwargs):
+        yield self.files[path]
+
+    def write_file(self, *, file, content, **kwargs):
+        # The text write route stores "\r" as given (verified on AIO 1.11.0).
+        self.files[file] = content.encode("utf-8")
+
+
+@pytest.mark.parametrize(
+    ("stored", "old_str", "new_str", "expected"),
+    [
+        pytest.param(b"@echo off\r\nset NAME=old\r\necho %NAME%\r\n", "old", "new", b"@echo off\r\nset NAME=new\r\necho %NAME%\r\n", id="crlf"),
+        pytest.param(b"one\rtwo old\rthree\r", "old", "new", b"one\rtwo new\rthree\r", id="cr-only"),
+        pytest.param(b"one\r\ntwo old\nthree\rfour", "old", "new", b"one\r\ntwo new\nthree\rfour", id="mixed"),
+        pytest.param(b"one\ntwo old\nthree\n", "old", "new", b"one\ntwo new\nthree\n", id="lf"),
+        pytest.param(b"first\r\nsecond\r\n", "first\nsecond", "1\n2", b"1\r\n2\r\n", id="crlf-multiline-lf-old-str"),
+    ],
+)
+def test_str_replace_on_aio_keeps_the_file_line_endings(sandbox, monkeypatch, stored, old_str, new_str, expected):
+    from deerflow.sandbox.tools import str_replace_tool
+
+    server = _AioFileServer()
+    server.files["/mnt/user-data/workspace/f.txt"] = stored
+    sandbox._client.file = server
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: False)
+
+    result = str_replace_tool.func(runtime=MagicMock(), description="d", path="/mnt/user-data/workspace/f.txt", old_str=old_str, new_str=new_str)
+
+    assert result == "OK"
+    assert server.files["/mnt/user-data/workspace/f.txt"] == expected
 
 
 class TestWriteFile:
@@ -3085,45 +3196,32 @@ def test_list_dir_preserves_trailing_space_in_filename(sandbox):
     assert sandbox.list_dir("/test") == ["/test/notes.txt ", "/test/sub"]
 
 
-def _sdk_file_read_validation_error() -> Exception:
-    """The exact exception the SDK raises for a server failure envelope.
+def _missing_file_error() -> Exception:
+    """The ApiError the download route raises for a missing file (AIO 1.11.0)."""
+    from agent_sandbox.core.api_error import ApiError
 
-    The AIO server reports read failures (e.g. ENOENT) as
-    ``{"success": false, "message": ..., "data": {}}``; the empty ``data``
-    cannot satisfy the required fields of the SDK's ``FileReadResult`` model,
-    so parsing raises a ``ValidationError`` with two "Field required" errors.
-    Building it from the real SDK models keeps the test faithful to what
-    production raises.
-    """
-    from agent_sandbox.file.client import ResponseFileReadResult
-    from pydantic import ValidationError
-
-    try:
-        ResponseFileReadResult.model_validate({"success": False, "message": "file not found", "data": {}})
-    except ValidationError as e:
-        return e
-    raise AssertionError("model_validate should fail on data: {}")
+    return ApiError(status_code=404, headers={}, body={"success": False, "message": "File does not exist: /workspace/new_file.py", "data": None})
 
 
 def test_read_file_missing_file_returns_actionable_error(sandbox, caplog):
-    """A server failure envelope must not leak the SDK's pydantic
-    validation-error text to the model. The result must state the file is
-    missing/unreadable so the agent can act on it (create it, pick another
-    path) instead of retrying the same read or "fixing" a nonexistent file."""
-    sandbox._client.file.read_file.side_effect = _sdk_file_read_validation_error()
+    """A missing file must not leak the SDK's error text (headers included)
+    to the model. The result must state the file is missing/unreadable so the
+    agent can act on it (create it, pick another path) instead of retrying
+    the same read or "fixing" a nonexistent file."""
+    sandbox._client.file.download_file.side_effect = _missing_file_error()
 
     with caplog.at_level(logging.DEBUG, logger="deerflow.community.aio_sandbox.aio_sandbox"):
         result = sandbox.read_file("/workspace/new_file.py")
 
     assert result == "Error: file not found or unreadable: /workspace/new_file.py"
-    assert "validation errors" not in result
+    assert "headers" not in result
 
 
 def test_read_file_missing_file_does_not_log_error_noise(sandbox, caplog):
     """Missing files are an expected outcome — ReadBeforeWriteMiddleware
-    probes every new-file write — so the validation failure must stay out of
-    the error-level gateway log."""
-    sandbox._client.file.read_file.side_effect = _sdk_file_read_validation_error()
+    probes every new-file write — so the 404 must stay out of the
+    error-level gateway log."""
+    sandbox._client.file.download_file.side_effect = _missing_file_error()
 
     with caplog.at_level(logging.DEBUG, logger="deerflow.community.aio_sandbox.aio_sandbox"):
         sandbox.read_file("/workspace/new_file.py")
@@ -3132,15 +3230,15 @@ def test_read_file_missing_file_does_not_log_error_noise(sandbox, caplog):
 
 
 def test_read_file_success_returns_content(sandbox):
-    sandbox._client.file.read_file.return_value = SimpleNamespace(data=SimpleNamespace(content="hello\n", file="/workspace/a.txt"))
+    sandbox._client.file.download_file.return_value = iter([b"hello\n"])
     assert sandbox.read_file("/workspace/a.txt") == "hello\n"
-    sandbox._client.file.read_file.assert_called_once_with(file="/workspace/a.txt")
+    sandbox._client.file.download_file.assert_called_once_with(path="/workspace/a.txt")
 
 
 def test_read_file_unexpected_error_still_logged(sandbox, caplog):
-    """Non-validation failures keep the error log and the generic error
-    string; only the server failure envelope is downgraded to debug."""
-    sandbox._client.file.read_file.side_effect = RuntimeError("connection reset")
+    """Other failures keep the error log and the generic error string; only
+    a missing file is downgraded to debug."""
+    sandbox._client.file.download_file.side_effect = RuntimeError("connection reset")
 
     with caplog.at_level(logging.ERROR, logger="deerflow.community.aio_sandbox.aio_sandbox"):
         result = sandbox.read_file("/workspace/a.txt")
