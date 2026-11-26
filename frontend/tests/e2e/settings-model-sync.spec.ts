@@ -1,6 +1,10 @@
 import { expect, test } from "@playwright/test";
 
-import { mockLangGraphAPI, MOCK_THREAD_ID } from "./utils/mock-api";
+import {
+  handleRunStream,
+  mockLangGraphAPI,
+  MOCK_THREAD_ID,
+} from "./utils/mock-api";
 
 for (const agent of [false, true]) {
   for (const field of ["effort", "mode"] as const) {
@@ -8,7 +12,13 @@ for (const agent of [false, true]) {
       page,
     }) => {
       mockLangGraphAPI(page, {
-        agents: [{ name: "researcher", description: "Research agent" }],
+        agents: [
+          {
+            name: "researcher",
+            description: "Research agent",
+            reasoning_effort: "low",
+          },
+        ],
         threads: [
           {
             thread_id: MOCK_THREAD_ID,
@@ -95,14 +105,14 @@ for (const agent of [false, true]) {
       ).toBeVisible();
       await expect(
         page.getByRole("button", {
-          name: "Reasoning Effort: Medium",
+          name: agent ? "Reasoning Effort: Low" : "Reasoning Effort: Medium",
           exact: true,
         }),
       ).toBeVisible();
       if (field === "effort") {
         await page
           .getByRole("button", {
-            name: "Reasoning Effort: Medium",
+            name: agent ? "Reasoning Effort: Low" : "Reasoning Effort: Medium",
             exact: true,
           })
           .click();
@@ -126,6 +136,54 @@ for (const agent of [false, true]) {
       await expect(
         page.getByRole("button", { name: "Thread Model", exact: true }),
       ).toBeVisible();
+      if (agent) {
+        if (field === "mode") {
+          // The account saved high for Ultra, but the agent's own default is low.
+          const effort = page.getByRole("button", {
+            name: "Reasoning Effort: Low",
+          });
+          await effort.click();
+          await page.getByRole("menuitem").filter({ hasText: /^High/ }).click();
+          await page.keyboard.press("Escape");
+          // A separate choice of high matters even when it equals Ultra's preset.
+        }
+        await expect(
+          page.getByRole("button", { name: "Reasoning Effort: High" }),
+        ).toBeVisible();
+        await page.route("**/api/langgraph/threads/*/runs/stream", (route) =>
+          handleRunStream(route),
+        );
+        const submitted = page.waitForRequest(
+          (req) =>
+            req.method() === "POST" && req.url().endsWith("/runs/stream"),
+        );
+        await page
+          .getByPlaceholder(/how can i assist you/i)
+          .fill("Check this task");
+        await page.getByRole("button", { name: "Send", exact: true }).click();
+        expect((await submitted).postDataJSON().context).toMatchObject({
+          reasoning_effort: "high",
+          mode_default_fields: ["thinking_enabled"],
+          subagent_enabled: field === "mode",
+        });
+        if (field === "mode") {
+          const beforeReload = reads;
+          await page.reload();
+          // This auth-disabled fixture activates its mocked account on opening settings.
+          await page
+            .locator("[data-sidebar='sidebar']")
+            .getByRole("button", { name: /Settings and more/ })
+            .click();
+          await page.keyboard.press("Escape");
+          await page.evaluate(() =>
+            document.dispatchEvent(new Event("visibilitychange")),
+          );
+          await expect.poll(() => reads).toBeGreaterThan(beforeReload);
+          await expect(
+            page.getByRole("button", { name: "Reasoning Effort: High" }),
+          ).toBeVisible();
+        }
+      }
     });
   }
 }

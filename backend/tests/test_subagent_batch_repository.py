@@ -257,6 +257,57 @@ async def test_finalize_retries_then_terminalizes_and_completes_batch(tmp_path) 
     assert batch["counts"]["succeeded"] == 1
 
 
+async def _finalize(repo: SubagentBatchRepository, item_id: str, owner: str, *, succeeded: bool, token_usage, at: datetime) -> None:
+    assert await repo.finalize_item(
+        item_id,
+        lease_owner=owner,
+        succeeded=succeeded,
+        result="done" if succeeded else None,
+        result_preview="done" if succeeded else None,
+        result_truncated=False,
+        error=None if succeeded else "temporary",
+        stop_reason=None,
+        token_usage=token_usage,
+        model_name="model-a",
+        completed_at=at,
+    )
+
+
+@pytest.mark.asyncio
+async def test_finalize_accumulates_token_usage_over_retried_attempts(tmp_path) -> None:
+    repo = await _repo(tmp_path)
+    await _create(repo, count=1, max_live=1, max_running=1, max_attempts=3)
+    now = datetime.now(UTC)
+
+    first = (await repo.claim_items(now=now, lease_owner="worker-1", lease_seconds=60, limit=1))[0]
+    await _finalize(repo, first["id"], "worker-1", succeeded=False, token_usage={"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}, at=now)
+    # An attempt without usage (the service's exception path) keeps what is stored.
+    second = (await repo.claim_items(now=now + timedelta(seconds=1), lease_owner="worker-2", lease_seconds=60, limit=1))[0]
+    await _finalize(repo, second["id"], "worker-2", succeeded=False, token_usage=None, at=now + timedelta(seconds=2))
+    third = (await repo.claim_items(now=now + timedelta(seconds=3), lease_owner="worker-3", lease_seconds=60, limit=1))[0]
+    await _finalize(repo, third["id"], "worker-3", succeeded=True, token_usage={"input_tokens": 40, "output_tokens": 5, "total_tokens": 45}, at=now + timedelta(seconds=4))
+
+    item = (await repo.list_items("batch-1", user_id="user-1"))[0]
+    assert item["status"] == "succeeded"
+    assert item["token_usage"] == {"input_tokens": 140, "output_tokens": 25, "total_tokens": 165}
+
+
+@pytest.mark.asyncio
+async def test_manual_retry_adds_to_the_failed_attempts_token_usage(tmp_path) -> None:
+    repo = await _repo(tmp_path)
+    await _create(repo, count=1, max_live=1, max_running=1, max_attempts=1)
+    now = datetime.now(UTC)
+    failed = (await repo.claim_items(now=now, lease_owner="worker-1", lease_seconds=60, limit=1))[0]
+    await _finalize(repo, failed["id"], "worker-1", succeeded=False, token_usage={"total_tokens": 70}, at=now)
+    assert (await repo.list_items("batch-1", user_id="user-1"))[0]["status"] == "failed"
+
+    assert await repo.retry_item("batch-1", failed["id"], user_id="user-1") is not None
+    again = (await repo.claim_items(now=now + timedelta(seconds=1), lease_owner="worker-2", lease_seconds=60, limit=1))[0]
+    await _finalize(repo, again["id"], "worker-2", succeeded=True, token_usage={"total_tokens": 30}, at=now + timedelta(seconds=2))
+
+    assert (await repo.list_items("batch-1", user_id="user-1"))[0]["token_usage"] == {"total_tokens": 100}
+
+
 @pytest.mark.asyncio
 async def test_pause_resume_cancel_and_owner_scope(tmp_path) -> None:
     repo = await _repo(tmp_path)

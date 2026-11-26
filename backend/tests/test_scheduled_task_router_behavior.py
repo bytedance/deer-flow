@@ -23,6 +23,7 @@ from deerflow.persistence.engine import close_engine, get_session_factory, init_
 from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
 from deerflow.persistence.scheduled_task_runs.finalization import AGENT_STOP_LAST_ERROR_PREFIX
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 
 
 @pytest.fixture(autouse=True)
@@ -1533,6 +1534,76 @@ def _when(body):
 _CREATE = {"title": "Checklist", "prompt": "Check release-checklist.md.\nList the unchecked items.", "schedule_type": "interval", "schedule_spec": {"every_seconds": 3600}, "timezone": "UTC"}
 
 
+@pytest.fixture
+def fixed_schedule_clock(monkeypatch):
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 22, tzinfo=UTC)
+
+    monkeypatch.setattr(scheduled_tasks, "datetime", FixedDatetime)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("clock", "utc_clock"),
+    [
+        ("09:30:00+08", "01:30:00"),
+        ("09:30:00,5+08", "01:30:00.500000"),
+        ("09:30.5+08", "01:30:00.500000"),
+        ("09:30:30+08:00:30", "01:30:00"),
+    ],
+)
+async def test_once_api_stores_explicit_instants_in_utc(http, fixed_schedule_clock, clock, utc_clock):
+    expected = f"2026-12-12T{utc_clock}+00:00"
+    fields = {"schedule_type": "once", "schedule_spec": {"run_at": f"2026-12-12T{clock}"}, "timezone": "Asia/Shanghai"}
+    response = await http.client.post("/api/scheduled-tasks", json={**_CREATE, **fields})
+    assert response.status_code == 200, response.text
+    task = response.json()
+    assert task["schedule_spec"]["run_at"] == task["next_run_at"] == expected
+    async with http.sf() as session:
+        assert (await session.get(ScheduledTaskRow, task["id"])).schedule_spec["run_at"] == expected
+    moved = await http.client.patch(f"/api/scheduled-tasks/{task['id']}", json={"timezone": "UTC"})
+    assert moved.json()["next_run_at"] == expected
+
+
+@pytest.mark.asyncio
+async def test_rescheduled_wall_time_follows_the_task_zone(http, fixed_schedule_clock):
+    task = await _seed(http.repo)
+    url = f"/api/scheduled-tasks/{task['id']}"
+    local = "2026-12-12T09:30:00.123456"
+    response = await http.client.patch(url, json={"schedule_type": "once", "schedule_spec": {"run_at": "2026-12-12T09:30,123456"}, "timezone": "Asia/Shanghai"})
+    assert response.status_code == 200, response.text
+    assert response.json()["schedule_spec"]["run_at"] == local
+    assert response.json()["next_run_at"] == "2026-12-12T01:30:00.123456+00:00"
+    async with http.sf() as session:
+        assert (await session.get(ScheduledTaskRow, task["id"])).schedule_spec["run_at"] == local
+    moved = await http.client.patch(url, json={"timezone": "UTC"})
+    assert moved.json()["next_run_at"] == local + "+00:00"
+
+
+@pytest.mark.asyncio
+async def test_legacy_once_reads_work_without_a_next_run_or_a_backfill(http):
+    raw = "20261212T093000+08"
+    expected = "2026-12-12T01:30:00+00:00"
+    for task_id, value in [("old", raw), ("invalid", "unparseable")]:
+        await _seed(http.repo, task_id=task_id)
+        async with http.sf.begin() as session:
+            row = await session.get(ScheduledTaskRow, task_id)
+            row.schedule_type = "once"
+            row.schedule_spec = {"run_at": value}
+            row.status = "completed"
+            row.next_run_at = None
+    url = "/api/scheduled-tasks/old"
+    listed = (await http.client.get("/api/scheduled-tasks")).json()
+    assert {task["id"]: task["schedule_spec"]["run_at"] for task in listed} == {"old": expected, "invalid": "unparseable"}
+    for response in [await http.client.get(url), await http.client.patch(url, json={"title": "Renamed"})]:
+        assert response.json()["schedule_spec"]["run_at"] == expected
+        assert response.json()["next_run_at"] is None
+    async with http.sf() as session:
+        assert (await session.get(ScheduledTaskRow, "old")).schedule_spec["run_at"] == raw
+
+
 @pytest.mark.asyncio
 async def test_resume_recomputes_a_past_interval_run_from_now(http):
     await _seed(http.repo, next_run_at=datetime.now(UTC) - timedelta(hours=5))
@@ -1742,13 +1813,7 @@ async def test_naive_end_at_is_wall_clock_time_in_the_task_timezone(http):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("operation", "field"), [("create", "run_at"), ("update", "run_at"), ("create", "end_at"), ("update", "end_at"), ("resume", "end_at")])
-async def test_http_rejects_nonexistent_local_time_without_writing(http, monkeypatch, operation, field):
-    class FixedDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return cls(2026, 10, 22, tzinfo=UTC)
-
-    monkeypatch.setattr(scheduled_tasks, "datetime", FixedDatetime)
+async def test_http_rejects_nonexistent_local_time_without_writing(http, fixed_schedule_clock, operation, field):
     wall_time = "2027-03-14T02:30:00"
     fields = {"schedule_type": "once", "schedule_spec": {"run_at": wall_time}} if field == "run_at" else {"end_at": wall_time}
     if operation == "create":
