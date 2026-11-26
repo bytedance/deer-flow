@@ -454,7 +454,7 @@ async def _raise_lease_valid_elsewhere(
     the owner renewed between our read and the conditional UPDATE). Re-read
     from the store to get the fresh value so ``Retry-After`` is accurate.
     """
-    fresh = await run_mgr.get(run_id)
+    fresh = await run_mgr.get(run_id, user_id=record.user_id)
     if fresh is not None:
         record = fresh
     retry_after = _compute_retry_after(record.lease_expires_at, run_mgr.grace_seconds)
@@ -1296,25 +1296,32 @@ async def _require_run_visible_to_scope(run_id: str, thread_id: str, request: Re
 
     These routes query or mutate by ``(thread_id, run_id)``; events and
     messages add only the ``_run_scope_user_id`` data filter, which matches
-    row stamps rather than gating the run itself. For trusted internal
-    callers on threads without established ownership, a missing gate let an
-    internal caller acting for owner A read or cancel owner B's run by id
-    (#5448 review P1 follow-up).
+    row stamps rather than gating the run itself (and the in-memory event
+    store ignores ``user_id`` altogether). On threads without established
+    ownership (missing or NULL-owner meta rows), a missing gate lets a caller
+    read or cancel another owner's run by id (#5448 review P1 follow-up).
     The run's own stamp must therefore match the acting owner's raw value (or
-    the legacy ``"default"`` stamp); every other caller and every
-    established-ownership thread keeps its existing semantics.
+    the legacy ``"default"`` stamp for ownerless internal callers) for
+    internal callers, or the authenticated ``user_id`` for non-internal
+    callers; established-ownership threads keep their existing semantics.
     """
     state = getattr(request, "state", None)
     user = getattr(state, "user", None)
-    if getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE:
-        return
-    if await _thread_ownership_established(request, thread_id):
-        return
-    scope = get_trusted_internal_owner_user_id(request) or "default"
+    is_internal = getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE
+    if is_internal:
+        if await _thread_ownership_established(request, thread_id):
+            return
+        scope = get_trusted_internal_owner_user_id(request) or "default"
+    else:
+        scope = await get_current_user(request)
+        if scope is None:
+            return
+        if await _thread_ownership_established(request, thread_id):
+            return
     record = await get_run_manager(request).get(run_id)
     if record is None:
         return
-    record_owner = getattr(record, "user_id", None) or "default"
+    record_owner = (getattr(record, "user_id", None) or "default") if is_internal else getattr(record, "user_id", None)
     if record.thread_id != thread_id or record_owner != scope:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
@@ -1405,7 +1412,8 @@ async def cancel_run(
     """
     await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id)
+    user_id = await _run_scope_user_id(request, thread_id)
+    record = await run_mgr.get(run_id, user_id=user_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
@@ -1450,7 +1458,8 @@ async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> Stream
     """Join an existing run's SSE stream."""
     await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id)
+    user_id = await _run_scope_user_id(request, thread_id)
+    record = await run_mgr.get(run_id, user_id=user_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     bridge = get_stream_bridge(request)
@@ -1499,7 +1508,8 @@ async def _stream_existing_run(
 
     await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id)
+    user_id = await _run_scope_user_id(request, thread_id)
+    record = await run_mgr.get(run_id, user_id=user_id)
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     bridge = get_stream_bridge(request)
@@ -1781,7 +1791,7 @@ async def list_run_messages(
 
     if data:
         run_mgr = get_run_manager(request)
-        record = await run_mgr.get(run_id)
+        record = await run_mgr.get(run_id, user_id=user_id)
         if record:
             durations = compute_run_durations([record])
             if durations:

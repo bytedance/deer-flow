@@ -1184,13 +1184,16 @@ class RunManager:
 
         Args:
             run_id: The run ID to look up.
-            user_id: Optional user ID for permission filtering when hydrating from store.
+            user_id: Optional user ID for permission filtering across in-memory
+                and store records.
             raise_on_store_error: Propagate store hydration/mapping failures so
                 lifecycle callers can distinguish them from a missing run.
         """
         async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
         if record is not None and not record.evicted:
+            if user_id is not None and record.user_id != user_id:
+                return None
             return record
         # A hidden record is authoritative for "this run is deleted", so never
         # resurrect it from a stale store read. Settle that before any store call
@@ -1211,6 +1214,8 @@ class RunManager:
         async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
         if record is not None and not record.evicted:
+            if user_id is not None and record.user_id != user_id:
+                return None
             return record
         if record is not None or row is None:
             return None
@@ -1258,7 +1263,8 @@ class RunManager:
 
         Args:
             thread_id: The thread ID to filter by.
-            user_id: Optional user ID for permission filtering when hydrating from store.
+            user_id: Optional user ID for permission filtering across in-memory
+                and store records.
             limit: Maximum number of runs to return.
             before_created_at: ISO timestamp of the last run on the previous page.
             before_run_id: Run id of the last run on the previous page.
@@ -1283,6 +1289,7 @@ class RunManager:
                 for record in self._thread_records_locked(thread_id)
                 if record.operation_kind == ThreadOperationKind.run
                 and not record.evicted
+                and (user_id is None or record.user_id == user_id)
                 and run_is_before_cursor(
                     record.created_at,
                     record.run_id,
@@ -1315,8 +1322,10 @@ class RunManager:
             known = self._runs.get(run_id)
             # A hidden record means this thread was deleted while the record
             # still had a live finalize tail; the durable row is already gone,
-            # so a store row here can only be a stale or partial read.
-            if known is not None and known.evicted:
+            # so a store row here can only be a stale or partial read. An
+            # authoritative live record owned by another user must likewise
+            # block a stale store row from surfacing.
+            if known is not None and (known.evicted or (user_id is not None and known.user_id != user_id)):
                 continue
             if run_id not in records_by_id:
                 try:

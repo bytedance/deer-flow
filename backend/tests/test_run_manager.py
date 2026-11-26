@@ -1716,6 +1716,75 @@ async def test_list_by_thread_falls_back_to_store_with_user_filter():
     assert [r.run_id for r in runs] == ["run-1"]
 
 
+@pytest.mark.anyio
+async def test_get_filters_in_memory_records_by_user_id():
+    """get/aget must enforce user_id on live in-memory records as well as store rows."""
+    # Store-less manager
+    mem_mgr = RunManager()
+    mem_a = await mem_mgr.create("thread-1", user_id="user-1")
+    mem_b = await mem_mgr.create("thread-1", user_id="user-2")
+
+    assert await mem_mgr.get(mem_a.run_id, user_id="user-1") is mem_a
+    assert await mem_mgr.get(mem_a.run_id, user_id="user-2") is None
+    assert await mem_mgr.aget(mem_a.run_id, user_id="user-2") is None
+    assert await mem_mgr.get(mem_b.run_id, user_id="user-1") is None
+    assert await mem_mgr.get(mem_a.run_id) is mem_a
+
+    # Store-backed manager: mismatched in-memory owner must not fall through to store.
+    store = MemoryRunStore()
+    mgr = RunManager(store=store)
+    owned = await mgr.create("thread-1", user_id="user-1")
+    # Even if a stale store snapshot claims another owner, the live in-memory record wins.
+    store._runs[owned.run_id]["user_id"] = "user-2"
+
+    assert await mgr.get(owned.run_id, user_id="user-2") is None
+    assert await mgr.get(owned.run_id, user_id="user-1") is owned
+
+    # Post-store-await re-check: a concurrent in-memory create for user-1 must not
+    # be returned to a concurrent get(..., user_id="user-2") call.
+    raced_store = MemoryRunStore()
+    raced_mgr = RunManager(store=raced_store)
+    target_run_id = "run-raced"
+    original_get = raced_store.get
+
+    async def insert_during_get(run_id: str, *, user_id: str | None = None):
+        if run_id == target_run_id and target_run_id not in raced_mgr._runs:
+            await raced_mgr.create_or_reject("thread-1", run_id=target_run_id, user_id="user-1")
+        return await original_get(run_id, user_id=user_id)
+
+    raced_store.get = insert_during_get  # type: ignore[method-assign]
+
+    assert await raced_mgr.get(target_run_id, user_id="user-2") is None
+    assert (await raced_mgr.get(target_run_id, user_id="user-1")).run_id == target_run_id
+
+
+@pytest.mark.anyio
+async def test_list_by_thread_filters_in_memory_records_by_user_id():
+    """list_by_thread must filter both in-memory records and store rows by user_id."""
+    # Store-less manager
+    mem_mgr = RunManager()
+    mem_a = await mem_mgr.create("thread-1", user_id="user-1")
+    mem_b = await mem_mgr.create("thread-1", user_id="user-2")
+
+    assert [r.run_id for r in await mem_mgr.list_by_thread("thread-1", user_id="user-1")] == [mem_a.run_id]
+    assert [r.run_id for r in await mem_mgr.list_by_thread("thread-1", user_id="user-2")] == [mem_b.run_id]
+    assert {r.run_id for r in await mem_mgr.list_by_thread("thread-1")} == {mem_a.run_id, mem_b.run_id}
+
+    # Store-backed manager with mixed in-memory and store-only records
+    store = MemoryRunStore()
+    await store.put("store-u1", thread_id="thread-1", user_id="user-1", status="success")
+    await store.put("store-u2", thread_id="thread-1", user_id="user-2", status="success")
+    mgr = RunManager(store=store)
+    live_u1 = await mgr.create("thread-1", user_id="user-1")
+    live_u2 = await mgr.create("thread-1", user_id="user-2")
+    # Stale store owner on live_u1 must not surface it to user-2 via the store merge loop.
+    store._runs[live_u1.run_id]["user_id"] = "user-2"
+
+    assert {r.run_id for r in await mgr.list_by_thread("thread-1", user_id="user-1")} == {live_u1.run_id, "store-u1"}
+    assert {r.run_id for r in await mgr.list_by_thread("thread-1", user_id="user-2")} == {live_u2.run_id, "store-u2"}
+    assert {r.run_id for r in await mgr.list_by_thread("thread-1")} == {live_u1.run_id, live_u2.run_id, "store-u1", "store-u2"}
+
+
 # ---------------------------------------------------------------------------
 # Per-thread index (thread_id -> run_ids): keeps per-thread queries
 # O(runs-in-thread) instead of scanning every in-memory run, and stays
