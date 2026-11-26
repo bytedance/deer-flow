@@ -3,13 +3,27 @@ import { afterEach, expect, it, rs } from "@rstest/core";
 import { safeLocalStorage } from "@/core/settings/local";
 import {
   getBaseSettingsSnapshot,
+  getThreadEffortOverride,
   getThreadModelSnapshot,
   selectThreadModel,
   updateLocalSettings,
+  updateThreadSettings,
 } from "@/core/settings/store";
 
 afterEach(() => {
   rs.restoreAllMocks();
+});
+
+it("marks a separate effort choice only for that chat and its current value", () => {
+  updateThreadSettings("agent-thread", "context", { reasoning_effort: "high" });
+  expect(getThreadEffortOverride("agent-thread", "high")).toBe("high");
+  expect(getThreadEffortOverride("agent-thread", "low")).toBeUndefined();
+  expect(getThreadEffortOverride("another-thread", "high")).toBeUndefined();
+  updateThreadSettings("agent-thread", "context", {
+    mode: "ultra",
+    reasoning_effort: "high",
+  });
+  expect(getThreadEffortOverride("agent-thread", "high")).toBeUndefined();
 });
 
 it("does not claim to save a default when browser storage rejects the write", () => {

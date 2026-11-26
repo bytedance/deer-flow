@@ -20,6 +20,8 @@ export type LocalSettingsSetter = <K extends keyof LocalSettings>(
 
 const listeners = new Set<Listener>();
 const threadModelNames = new Map<string, string | undefined>();
+const THREAD_EFFORT_KEY_PREFIX = "deerflow.thread-reasoning-effort.";
+const threadEfforts = new Map<string, string | undefined>();
 
 let baseSettings: LocalSettings = DEFAULT_LOCAL_SETTINGS;
 let baseSettingsLoaded = false;
@@ -157,6 +159,7 @@ function handleStorage(event: StorageEvent) {
   if (event.key === null) {
     baseSettings = readSharedSettings();
     threadModelNames.clear();
+    threadEfforts.clear();
     emitChange();
     return;
   }
@@ -167,6 +170,11 @@ function handleStorage(event: StorageEvent) {
     return;
   }
 
+  if (event.key.startsWith(THREAD_EFFORT_KEY_PREFIX)) {
+    threadEfforts.delete(event.key.slice(THREAD_EFFORT_KEY_PREFIX.length));
+    emitChange();
+    return;
+  }
   if (!event.key.startsWith(THREAD_MODEL_KEY_PREFIX)) {
     return;
   }
@@ -201,6 +209,31 @@ export function getThreadModelSnapshot(threadId: string): string | undefined {
   return threadModelNames.get(threadId);
 }
 
+/** Remember which chat explicitly picked the current effort. The account still owns the value. */
+export function getThreadEffortOverride(
+  threadId?: string | null,
+  currentEffort?: string,
+): string | undefined {
+  if (!threadId || !currentEffort) return undefined;
+  const selected = threadEfforts.has(threadId)
+    ? threadEfforts.get(threadId)
+    : safeLocalStorage.getItem(THREAD_EFFORT_KEY_PREFIX + threadId);
+  return selected === currentEffort ? currentEffort : undefined;
+}
+
+function rememberThreadEffortChoice(
+  threadId: string,
+  effort: string | undefined,
+) {
+  const key = THREAD_EFFORT_KEY_PREFIX + threadId;
+  const saved =
+    effort === undefined
+      ? safeLocalStorage.removeItem(key)
+      : safeLocalStorage.setItem(key, effort);
+  if (saved) threadEfforts.delete(threadId);
+  else threadEfforts.set(threadId, effort);
+}
+
 export const updateLocalSettings: LocalSettingsSetter = (key, value) => {
   ensureBaseSettingsLoaded();
   ensureStorageListenerRegistered();
@@ -224,6 +257,7 @@ export function selectThreadModel(threadId: string, modelName: string) {
   ) {
     throw new Error("Unable to save the conversation model in this browser.");
   }
+  rememberThreadEffortChoice(threadId, undefined);
   threadModelNames.set(threadId, modelName);
   emitChange();
 }
@@ -232,11 +266,20 @@ export function updateThreadSettings<K extends keyof LocalSettings>(
   threadId: string,
   key: K,
   value: Partial<LocalSettings[K]>,
+  automatic = false,
 ) {
   ensureBaseSettingsLoaded();
   ensureStorageListenerRegistered();
 
   const previous = baseSettings;
+  if (key === "context" && !automatic) {
+    const edit = value as Partial<LocalSettings["context"]>;
+    if ("mode" in edit || "model_name" in edit) {
+      rememberThreadEffortChoice(threadId, undefined);
+    } else if ("reasoning_effort" in edit) {
+      rememberThreadEffortChoice(threadId, edit.reasoning_effort);
+    }
+  }
   const nextBaseSettings = mergeSettingsSection(baseSettings, key, value);
   baseSettings = nextBaseSettings;
   persistLocalOnlySettings();
@@ -261,7 +304,7 @@ export function resolveThreadContext(
   context: Partial<LocalSettings["context"]>,
 ) {
   if (!preferenceEdit) {
-    updateThreadSettings(threadId, "context", context);
+    updateThreadSettings(threadId, "context", context, true);
     return;
   }
   baseSettings = mergeSettingsSection(baseSettings, "context", context);
