@@ -1,5 +1,5 @@
 import asyncio
-import bisect
+import io
 import json
 import logging
 import ntpath
@@ -3599,67 +3599,113 @@ async def _write_file_tool_async(
 write_file_tool.coroutine = _write_file_tool_async
 
 
-def _to_crlf(text: str) -> str:
-    return text.replace("\r\n", "\n").replace("\n", "\r\n")
-
-
-def _match_line_endings(content: str, old_str: str, new_str: str) -> tuple[str, str]:
-    """Spell ``old_str`` and ``new_str`` with the CRLF line endings ``content`` uses.
-
-    Full reads return line endings as stored, but the model tends to write
-    ``\\n`` (and ranged reads join lines with ``\\n``), so a multi-line
-    ``old_str`` would never match a CRLF file and inserted lines would be LF.
-    A CRLF-only file takes both strings in CRLF; a mixed file does so only
-    when the LF spelling is absent and the CRLF one is present.
-    """
-    if "\r\n" not in content:
-        return old_str, new_str
-    crlf_old = _to_crlf(old_str)
-    if content.count("\r\n") == content.count("\n") or (old_str not in content and crlf_old in content):
-        return crlf_old, _to_crlf(new_str)
-    return old_str, new_str
-
-
-def _replace_across_line_endings(content: str, old_str: str, new_str: str, replace_all: bool) -> str | None:
-    """Replace a multi-line ``old_str`` whose span mixes CRLF and LF lines.
-
-    A ranged read of a mixed file joins lines with ``\\n``, so the snippet
-    matches neither its literal nor its all-CRLF spelling. Match it against the
-    file with CRLF read as LF and replace only the original span, so line
-    endings outside it stay as stored. ``new_str`` takes the ending of the
-    span's first line break.
-    """
-    flat_old = old_str.replace("\r\n", "\n")
-    if "\r\n" not in content or "\n" not in flat_old:
-        return None
-    flat = content.replace("\r\n", "\n")
-    index = flat.find(flat_old)
-    if index < 0:
-        return None
-    # Where each CRLF's "\n" sits in flat: flat offset i starts in content at
-    # i plus the number of CRLFs before it.
-    flat_crlf = [m.start() - k for k, m in enumerate(re.finditer("\r\n", content))]
-    pieces: list[str] = []
-    copied = 0
-    while index >= 0:
-        flat_end = index + len(flat_old)
-        start = index + bisect.bisect_left(flat_crlf, index)
-        end = flat_end + bisect.bisect_left(flat_crlf, flat_end)
-        span = content[start:end]
-        crlf = "\r\n" in span[: span.index("\n") + 1]
-        pieces += [content[copied:start], _to_crlf(new_str) if crlf else new_str.replace("\r\n", "\n")]
-        copied = end
-        index = flat.find(flat_old, flat_end) if replace_all else -1
-    pieces.append(content[copied:])
-    return "".join(pieces)
-
-
 def _replace_keeping_line_endings(content: str, old_str: str, new_str: str, replace_all: bool) -> str | None:
-    """Return ``content`` with ``old_str`` replaced, or None when it is absent."""
-    old_str, new_str = _match_line_endings(content, old_str, new_str)
-    if old_str in content:
-        return content.replace(old_str, new_str) if replace_all else content.replace(old_str, new_str, 1)
-    return _replace_across_line_endings(content, old_str, new_str, replace_all)
+    """Return ``content`` with ``old_str`` replaced, or None when it is absent.
+
+    A file without CRLF is matched and written literally. In a file with CRLF,
+    a CRLF is one line break. A ``\\r\\n`` in ``old_str`` matches only a CRLF,
+    a ``\\n`` matches an LF or a CRLF, and every other character, ``\\r``
+    included, matches itself; so a snippet from a full read matches as stored,
+    and one from a ranged read (lines joined with ``\\n``) or typed with
+    ``\\n`` matches whatever its lines end in. A match never starts or ends
+    between a ``\\r`` and its ``\\n``. Matches are taken in file order without
+    overlapping, as ``str.replace`` takes them: the first one, or every one
+    with ``replace_all``. The n-th line break of ``new_str`` is written in the
+    ending of the n-th line break inside the match, and later ones in the
+    ending of the last; a match without a line break lends the ending of the
+    line it is on (on a last line without one, the line before). Everything
+    outside the matches keeps its bytes.
+    """
+    if not old_str:
+        # str_replace treats an empty old_str as a no-op edit.
+        return content
+    count = -1 if replace_all else 1
+    if "\r\n" not in content or not ("\r" in old_str or "\n" in old_str or "\n" in new_str):
+        # Without CRLF in the file, or without a line break or CR on either
+        # side, the rule above matches and writes exactly as str.replace.
+        return content.replace(old_str, new_str, count) if old_str in content else None
+    flat_old = old_str.replace("\r\n", "\n")
+    lf_new = new_str.replace("\r\n", "\n")
+    if content.count("\r\n") == content.count("\n") and not flat_old.endswith("\r"):
+        # Every line break is a CRLF, so the CRLF spelling of old_str finds the
+        # same matches in place. Only a trailing bare "\r" could differ, by
+        # matching the "\r" of a CRLF, and that case takes the general path.
+        crlf_old = flat_old.replace("\n", "\r\n")
+        return content.replace(crlf_old, lf_new.replace("\n", "\r\n"), count) if crlf_old in content else None
+    return _replace_in_mixed_endings(content, old_str, flat_old, lf_new, count)
+
+
+def _replace_in_mixed_endings(content: str, old_str: str, flat_old: str, lf_new: str, count: int) -> str | None:
+    """The general case of ``_replace_keeping_line_endings``: search ``content`` with CRLF read as LF."""
+    flat = content.replace("\r\n", "\n")
+    # Where old_str spells a CRLF, the match must sit on a CRLF too. In
+    # ``kinds`` a CRLF is "\r" and an LF stays "\n", at the offsets of flat.
+    must_be_crlf: list[int] = []
+    offset = 0
+    for piece in old_str.split("\r\n")[:-1]:
+        offset += len(piece)
+        must_be_crlf.append(offset)
+        offset += 1
+    kinds = content.replace("\r\n", "\r") if must_be_crlf else ""
+    new_lines = lf_new.split("\n")
+    out = io.StringIO()
+    # content[:pos] reads as flat[:flat_pos]. Matches arrive in file order, so
+    # each step counts only the CRLFs since the previous one: linear time and
+    # no per-line bookkeeping.
+    pos = flat_pos = copied = 0
+    line_end = -1
+    line_crlf = False
+    index = flat.find(flat_old)
+    found = False
+    while index >= 0:
+        if any(kinds[index + i] != "\r" for i in must_be_crlf):
+            index = flat.find(flat_old, index + 1)
+            continue
+        found = True
+        bounds = []
+        for target in (index, index + len(flat_old)):
+            while True:
+                end = pos + target - flat_pos
+                crlfs = content.count("\r\n", pos, end)
+                if end > pos and content[end - 1] == "\r" and content.startswith("\n", end):
+                    # A CRLF is one flat character: never stop between its \r and \n.
+                    crlfs += 1
+                    end += 1
+                flat_pos += end - pos - crlfs
+                pos = end
+                if not crlfs:
+                    break
+            bounds.append(pos)
+        start, stop = bounds
+        endings: list[str] = []
+        at = start
+        while len(endings) < len(new_lines) - 1:
+            at = content.find("\n", at, stop) + 1
+            if not at:
+                break
+            endings.append("\r\n" if content[at - 2 : at] == "\r\n" else "\n")
+        if not endings and len(new_lines) > 1:
+            if start > line_end:
+                line_end = content.find("\n", start)
+                if line_end < 0:
+                    line_end = len(content)
+                    line_break = content.rfind("\n", 0, start)
+                else:
+                    line_break = line_end
+                line_crlf = line_break > 0 and content[line_break - 1] == "\r"
+            endings.append("\r\n" if line_crlf else "\n")
+        out.write(content[copied:start])
+        out.write(new_lines[0])
+        for n, line in enumerate(new_lines[1:]):
+            out.write(endings[min(n, len(endings) - 1)])
+            out.write(line)
+        copied = stop
+        count -= 1
+        index = flat.find(flat_old, index + len(flat_old)) if count else -1
+    if not found:
+        return None
+    out.write(content[copied:])
+    return out.getvalue()
 
 
 @tool("str_replace", parse_docstring=True)
