@@ -391,8 +391,8 @@ async def _drift_engine(tmp_path: Path, backend: str):
 @asyncio_test
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
 async def test_scheduled_task_delegation_upgrade_retry_and_downgrade(tmp_path, backend):
-    previous = "0061_coordination_coordinator"
-    revision = "0062_scheduled_task_subagents"
+    previous = "0062_mcp_agent_grants"
+    revision = "0063_scheduled_task_subagents"
     engine, schema = await _drift_engine(tmp_path, backend)
     try:
         cfg = _get_alembic_config(engine, postgres_schema=schema or None)
@@ -424,6 +424,11 @@ async def test_scheduled_task_delegation_upgrade_retry_and_downgrade(tmp_path, b
             assert "subagent_enabled" not in {column["name"] for column in columns}
             row = (await conn.execute(sa.text("SELECT title, run_count FROM scheduled_tasks WHERE id = 'existing'"))).one()
             assert row == ("Report", 4)
+
+        await asyncio.to_thread(command.upgrade, cfg, revision)
+        task = await repo.get("existing", user_id="owner")
+        assert task["subagent_enabled"] is False
+        assert task["run_count"] == 4
     finally:
         try:
             if schema:

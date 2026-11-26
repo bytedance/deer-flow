@@ -295,7 +295,17 @@ def test_gateway_scheduled_subagent_contract(tmp_path, monkeypatch, trigger, del
     from app.gateway.app import create_app
     from deerflow.agents.lead_agent import agent as lead_agent
     from deerflow.config import paths
+    from deerflow.sandbox.local.local_sandbox import LocalSandbox
 
+    execute_command = LocalSandbox.execute_command
+
+    def execute_without_remote_probe(self, command, *args, **kwargs):
+        # A local file check must work without GNU filesystem utilities.
+        if (kwargs.get("env") or {}).get("_DEERFLOW_SIZE_PROBE"):
+            raise OSError("Remote file probe is unavailable on this local host")
+        return execute_command(self, command, *args, **kwargs)
+
+    monkeypatch.setattr(LocalSandbox, "execute_command", execute_without_remote_probe)
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "0")
     monkeypatch.setenv("AUTH_JWT_SECRET", "local-scheduled-report-test-secret")
