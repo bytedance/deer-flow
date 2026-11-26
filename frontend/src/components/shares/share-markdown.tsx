@@ -3,8 +3,8 @@
 import { useMemo } from "react";
 import { visit } from "unist-util-visit";
 
-import { shareArtifactURL, type SharedArtifact } from "@/core/shares/api";
-import { resolveShareArtifact, sharedLink } from "@/core/shares/links";
+import { type SharedArtifact } from "@/core/shares/api";
+import { sharedArtifactLink, sharedLink } from "@/core/shares/links";
 import {
   SafeMessageResponse,
   streamdownPluginsWithoutRawHtml,
@@ -62,14 +62,14 @@ export function ShareMarkdown({
           );
         },
         img: ({ src, alt }) => {
-          const artifact =
+          const target =
             typeof src === "string"
-              ? resolveShareArtifact(src, artifacts, basePath)
+              ? sharedArtifactLink(src, token, artifacts, basePath)
               : undefined;
           // Do not load third-party tracking images or live private file endpoints.
-          return artifact ? (
+          return target ? (
             <img
-              src={shareArtifactURL(token, artifact.path)}
+              src={target}
               alt={alt ?? ""}
               referrerPolicy="no-referrer"
               className="max-w-full"

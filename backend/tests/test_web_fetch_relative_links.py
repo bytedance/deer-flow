@@ -73,6 +73,17 @@ def test_extract_article_without_url_preserves_legacy_relative_links(monkeypatch
     assert "[Next](../next)" in article.to_markdown()
 
 
+@pytest.mark.parametrize("url", [None, PAGE_URL])
+@pytest.mark.parametrize("head", ['<script>const example = "<body>Sample body";</script>', "<!-- <body>Sample body -->"])
+def test_python_fallback_uses_document_body_and_ignores_head_examples(monkeypatch, url, head):
+    monkeypatch.setattr("deerflow.utils.readability._readability_js_available", lambda: False)
+    article = ReadabilityExtractor().extract_article(_article('<a href="../next">Next</a>', head=head), url=url)
+    markdown = article.to_markdown()
+    assert "Sample body" not in markdown
+    assert markdown.count("Guide") == 1
+    assert f"[Next]({urljoin(url or '', '../next')})" in markdown
+
+
 @pytest.mark.parametrize(
     ("base", "expected"),
     [
