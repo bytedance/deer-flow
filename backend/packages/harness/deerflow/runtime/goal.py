@@ -812,8 +812,12 @@ async def ensure_thread_checkpoint(checkpointer: Any, thread_id: str, *, initial
     """Create an empty root checkpoint for *thread_id* when none exists."""
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     checkpoint_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", config)
-    if checkpoint_tuple is not None:
-        return
+    if checkpoint_tuple is None:
+        await write_initial_thread_checkpoint(checkpointer, config, initial_metadata=initial_metadata, created_at=created_at)
+
+
+async def write_initial_thread_checkpoint(checkpointer: Any, config: dict[str, Any], *, initial_metadata: dict[str, Any] | None = None, created_at: str | None = None) -> None:
+    """Write the seed after the caller has confirmed the root checkpoint is missing."""
     metadata = {
         **(initial_metadata or {}),
         "step": -1,

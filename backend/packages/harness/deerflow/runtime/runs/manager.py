@@ -3049,7 +3049,7 @@ class RunManager:
         return self._store if getattr(self._store, "supports_run_inputs", False) is True else None
 
     async def owns_active_admission(self, record: RunRecord) -> bool:
-        """Confirm the existing run slot without holding a SQL writer transaction."""
+        """Confirm a run or thread operation still owns its slot without holding a SQL writer transaction."""
         async with self._run_registry_lock(record.run_id):
             if self._runs.get(record.run_id) is not record or record.ownership_lost:
                 return False
@@ -3061,7 +3061,7 @@ class RunManager:
         if self.heartbeat_enabled:
             deadline = self._parse_lease_deadline(row.get("lease_expires_at"))
             if deadline is None or deadline <= datetime.now(UTC):
-                await self._mark_ownership_lost(record, reason="Scheduled goal cleanup lost its active run lease.", require_active=False)
+                await self._mark_ownership_lost(record, reason="Active admission lease expired or missing.", require_active=False)
                 return False
         return not record.ownership_lost
 

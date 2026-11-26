@@ -32,7 +32,7 @@ from deerflow.persistence.thread_meta import (
     ThreadOwnershipConflictError,
 )
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
-from deerflow.runtime import ConflictError, ThreadOperationKind
+from deerflow.runtime import ConflictError, RunManager, ThreadOperationKind
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY
@@ -76,6 +76,7 @@ class _PermissiveThreadMetaStore(MemoryThreadMetaStore):
 class _ThreadTestRunManager:
     def __init__(self):
         self.reservations: list[tuple[str, dict]] = []
+        self._manager = RunManager()
 
     async def list_by_thread(self, _thread_id: str, *, user_id=None, limit: int = 100) -> list:
         return []
@@ -83,7 +84,11 @@ class _ThreadTestRunManager:
     @asynccontextmanager
     async def reserve_thread_operation(self, _thread_id: str, **_kwargs):
         self.reservations.append((_thread_id, _kwargs))
-        yield
+        async with self._manager.reserve_thread_operation(_thread_id, **_kwargs) as reservation:
+            yield reservation
+
+    async def owns_active_admission(self, reservation):
+        return await self._manager.owns_active_admission(reservation)
 
 
 def _build_thread_app() -> tuple[FastAPI, InMemoryStore, InMemorySaver]:

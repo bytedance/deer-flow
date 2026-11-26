@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from uuid import UUID
 
 import httpx
@@ -10,11 +11,16 @@ from _router_auth_helpers import make_authed_test_app
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.store.memory import InMemoryStore
 
 from app.gateway.auth.models import User
 from app.gateway.routers import threads
 from deerflow.config.app_config import AppConfig
+from deerflow.config.run_ownership_config import RunOwnershipConfig
+from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+from deerflow.persistence.run import RunRepository
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta import ThreadMetaRepository
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.runtime import RunManager, ThreadOperationKind, goal
@@ -29,8 +35,6 @@ async def thread_store(request, tmp_path):
     if request.param == "memory":
         yield MemoryThreadMetaStore(InMemoryStore())
         return
-    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
-
     try:
         await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'threads.db'}", sqlite_dir=str(tmp_path))
         yield ThreadMetaRepository(get_session_factory())
@@ -297,3 +301,84 @@ async def test_retry_preserves_checkpoint_published_before_reservation(thread_st
         response = await client.post("/api/threads", json={"thread_id": thread_id})
     assert response.status_code == 200
     assert [row.checkpoint["id"] async for row in saver.alist(config)] == [progress["id"]]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("thread_store", ["sqlite"], indirect=True)
+@pytest.mark.parametrize("heartbeat", [True, False], ids=["heartbeat-cancels-read", "before-next-heartbeat"])
+async def test_create_losing_lease_preserves_peer_checkpoint(thread_store, heartbeat, monkeypatch, tmp_path):
+    thread_id = "expired-seed"
+    sessions = get_session_factory()
+    runs = RunRepository(sessions)
+    ownership = RunOwnershipConfig(heartbeat_enabled=True)
+    owner = RunManager(store=runs, worker_id="creator", run_ownership_config=ownership)
+    peer = RunManager(store=runs, worker_id="peer", run_ownership_config=ownership)
+    reading, resume, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "checkpoints.db")) as saver:
+        get_tuple = saver.aget_tuple
+
+        async def pause_reserved_read(config):
+            head = await get_tuple(config)
+            if await runs.list_inflight():
+                reading.set()
+                try:
+                    await resume.wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+            return head
+
+        monkeypatch.setattr(saver, "aget_tuple", pause_reserved_read)
+        app = app_for(thread_store, saver)
+        app.state.run_manager = owner
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            post = asyncio.create_task(client.post("/api/threads", json={"thread_id": thread_id}))
+            try:
+                await asyncio.wait_for(reading.wait(), 5)
+                [operation] = await runs.list_inflight()
+                async with sessions.begin() as session:
+                    row = await session.get(RunRow, operation["run_id"])
+                    row.lease_expires_at = datetime(2000, 1, 1, tzinfo=UTC)
+                await peer.reconcile_orphaned_inflight_runs(error="expired")
+                async with peer.reserve_thread_operation(thread_id, kind=ThreadOperationKind.checkpoint_write, user_id=str(USER.id)):
+                    progress = empty_checkpoint()
+                    progress["channel_values"] = {"messages": [HumanMessage(content="Saved by the new writer")]}
+                    progress["channel_versions"] = {"messages": 1}
+                    await saver.aput(config, progress, {"source": "update", "step": 7}, progress["channel_versions"])
+                    if heartbeat:
+                        await owner._renew_leases()
+                    resume.set()
+                    response = await asyncio.wait_for(post, 5)
+                assert [row.checkpoint["id"] async for row in saver.alist(config)] == [progress["id"]]
+                assert response.status_code == 409
+                assert cancelled.is_set() == heartbeat
+            finally:
+                resume.set()
+                post.cancel()
+                await asyncio.gather(post, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_create_drains_seed_already_in_progress_on_lease_loss(thread_store, monkeypatch):
+    runs = MemoryRunStore()
+    manager = RunManager(store=runs)
+    saver = InMemorySaver()
+    put = saver.aput
+
+    async def lose_lease_during_put(*args):
+        [row] = await runs.list_inflight()
+        reservation = await manager.get(row["run_id"])
+        # Fence from a separate task, as a heartbeat would while the saver is writing.
+        await asyncio.create_task(manager._mark_ownership_lost(reservation, reason="test lease loss"))
+        assert await runs.list_inflight()
+        return await put(*args)
+
+    monkeypatch.setattr(saver, "aput", lose_lease_during_put)
+    app = app_for(thread_store, saver)
+    app.state.run_manager = manager
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/threads", json={"thread_id": "started-seed"})
+    assert response.status_code == 409
+    assert await saver.aget_tuple({"configurable": {"thread_id": "started-seed"}}) is not None
+    assert await runs.list_inflight() == []

@@ -87,6 +87,7 @@ from deerflow.runtime.goal import (
     goal_thread_lock,
     is_active_goal,
     read_thread_goal,
+    write_initial_thread_checkpoint,
     write_thread_goal,
 )
 from deerflow.runtime.goal_synthesis import (
@@ -1042,19 +1043,25 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
 
         # The caller holds the process-local lifecycle lock. Reserve the writer
         # across workers too, then recheck both stores under the reservation.
-        async with get_run_manager(request).reserve_thread_operation(
+        run_manager = get_run_manager(request)
+        async with run_manager.reserve_thread_operation(
             thread_id,
             kind=ThreadOperationKind.checkpoint_write,
             user_id=thread_owner_user_id or get_effective_user_id(),
-        ):
+        ) as reservation:
             current = await thread_store.get(thread_id, **thread_owner_kwargs)
             if current is None or current.get("incarnation") != record.get("incarnation"):
                 raise HTTPException(status_code=409, detail="Thread changed during creation. Retry the request.")
+            if await checkpointer.aget_tuple(config) is not None:
+                return _existing_thread_response(thread_id, current)
             # The SQL store projects the project ID into row metadata. Only
             # the admitted origin and ordinary client keys belong in a seed.
             excluded = _CHECKPOINT_OWNED_METADATA_KEYS | (_SERVER_RESERVED_METADATA_KEYS - {DEERFLOW_ORIGIN_KEY})
             initial_metadata = {key: value for key, value in (current.get("metadata") or {}).items() if key not in excluded}
-            await await_drained(ensure_thread_checkpoint(checkpointer, thread_id, initial_metadata=initial_metadata, created_at=coerce_iso(current.get("created_at"))))
+            # A peer can recover an expired lease before the next local heartbeat.
+            if not await run_manager.owns_active_admission(reservation):
+                raise ConflictError(f"Thread {thread_id} reservation lease was lost")
+            await await_drained(write_initial_thread_checkpoint(checkpointer, config, initial_metadata=initial_metadata, created_at=coerce_iso(current.get("created_at"))))
             logger.info("Thread checkpoint ready: %s", sanitize_log_param(thread_id))
             return _existing_thread_response(thread_id, current)
     except ConflictError as exc:
