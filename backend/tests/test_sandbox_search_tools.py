@@ -560,6 +560,126 @@ def test_aio_sandbox_glob_falls_back_to_list_path_when_glob_files_is_missing(mon
     assert truncated is False
 
 
+def test_aio_sandbox_glob_fallback_pushes_a_literal_extension_to_the_server(monkeypatch) -> None:
+    """A pattern that names an extension narrows the listing server-side, so a
+    search for one file does not transfer the whole tree from an image without
+    /v1/file/glob."""
+    from agent_sandbox.core.api_error import ApiError
+
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+
+    def missing_glob_files(**kwargs):
+        raise ApiError(status_code=404, headers={}, body={"detail": "Not Found"})
+
+    seen: dict = {}
+
+    def list_path(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(
+            data=SimpleNamespace(
+                files=[
+                    SimpleNamespace(path="/mnt/user-data/uploads/logs", is_directory=True),
+                    SimpleNamespace(path="/mnt/user-data/uploads/logs/worker.log", is_directory=False),
+                ]
+            )
+        )
+
+    monkeypatch.setattr(sandbox._client.file, "glob_files", missing_glob_files)
+    monkeypatch.setattr(sandbox._client.file, "list_path", list_path)
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", "**/*.log")
+
+    assert seen["file_types"] == [".log"]
+    assert matches == ["/mnt/user-data/uploads/logs/worker.log"]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_fallback_omits_file_types_without_a_literal_extension(monkeypatch) -> None:
+    """A wildcard extension cannot be expressed as ``file_types``; the full
+    listing stays correct and the client keeps filtering."""
+    from agent_sandbox.core.api_error import ApiError
+
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+
+    def missing_glob_files(**kwargs):
+        raise ApiError(status_code=404, headers={}, body={"detail": "Not Found"})
+
+    seen: dict = {}
+
+    def list_path(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(
+            data=SimpleNamespace(
+                files=[
+                    SimpleNamespace(path="/mnt/user-data/uploads/logs", is_directory=True),
+                    SimpleNamespace(path="/mnt/user-data/uploads/logs/worker.log", is_directory=False),
+                ]
+            )
+        )
+
+    monkeypatch.setattr(sandbox._client.file, "glob_files", missing_glob_files)
+    monkeypatch.setattr(sandbox._client.file, "list_path", list_path)
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", "**/*")
+
+    assert "file_types" not in seen
+    assert matches == ["/mnt/user-data/uploads/logs/worker.log"]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_include_dirs_pushes_a_literal_extension_to_the_server(monkeypatch) -> None:
+    """The include-dirs listing benefits from the same extension filter; the
+    server still returns directories, so they remain matchable."""
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    seen: dict = {}
+
+    def list_path(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(
+            data=SimpleNamespace(
+                files=[
+                    SimpleNamespace(path="/mnt/user-data/uploads/.cache", is_directory=True),
+                    SimpleNamespace(path="/mnt/user-data/uploads/.cache/trace.txt", is_directory=False),
+                ]
+            )
+        )
+
+    monkeypatch.setattr(sandbox._client.file, "list_path", list_path)
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", ".cache/*.txt", include_dirs=True)
+
+    assert seen["file_types"] == [".txt"]
+    assert matches == ["/mnt/user-data/uploads/.cache/trace.txt"]
+    assert truncated is False
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        ("**/*.log", [".log"]),
+        ("*.txt", [".txt"]),
+        ("notes.txt", [".txt"]),
+        ("logs/app.log", [".log"]),
+        ("*.tar.gz", [".gz"]),
+        ("*", None),
+        ("**/*", None),
+        ("*.*", None),
+        ("*.[jt]s", None),
+        ("*.{log,txt}", None),
+        (".log", None),
+        ("notes.", None),
+        ("notes", None),
+    ],
+)
+def test_aio_pattern_file_types(pattern, expected) -> None:
+    from deerflow.community.aio_sandbox.aio_sandbox import _pattern_file_types
+
+    assert _pattern_file_types(pattern) == expected
+
+
 def test_aio_sandbox_glob_include_dirs_keeps_hidden_directory_contents(monkeypatch) -> None:
     """A hidden directory named by the pattern must not hide its children:
     the listing endpoint has to include hidden entries so the pattern can

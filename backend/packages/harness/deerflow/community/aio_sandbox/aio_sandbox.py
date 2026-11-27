@@ -49,6 +49,31 @@ _BASH_EXEC_UNSUPPORTED_ERROR = (
     "e.g. pin the tag `1.11.0`) and recreate the sandbox container, then try again."
 )
 
+_GLOB_METACHARACTERS = frozenset("*?[]{}")
+
+
+def _pattern_file_types(pattern: str) -> list[str] | None:
+    """Return a server-side extension filter for a glob pattern, if it has one.
+
+    The listing endpoint takes no pattern, so the 404 fallback for images
+    without ``/v1/file/glob`` walks the whole search root. When the pattern
+    ends in a literal ``.<extension>``, every match has that extension, so
+    ``file_types`` can be pushed to the server and files with other extensions
+    stay in the sandbox. Files that share the extension, and every directory
+    entry, still transfer: the endpoint has no result limit. Wildcard
+    extensions (``*.*``, ``*.[jt]s``) are not derivable and return ``None``;
+    the caller then falls back to the full listing. A name that is only
+    ``.<ext>`` (a dotfile such as ``.gitignore``) has no server-side extension
+    and is filtered out, which is the price of the push-down.
+    """
+    segment = pattern.rstrip("/").rsplit("/", 1)[-1]
+    before, dot, extension = segment.rpartition(".")
+    if not before or not dot or not extension:
+        return None
+    if any(character in _GLOB_METACHARACTERS for character in extension):
+        return None
+    return [f".{extension}"]
+
 
 @dataclass
 class _ScopedShellSession:
@@ -1430,7 +1455,7 @@ class AioSandbox(Sandbox):
         hard_limit = max(max_results * 4, max_results + 50)
         if include_dirs:
             return self._glob_matches(
-                self._list_path_entries(path),
+                self._list_path_entries(path, pattern=pattern),
                 root_path=root_path,
                 pattern=pattern,
                 user_data=user_data,
@@ -1454,9 +1479,10 @@ class AioSandbox(Sandbox):
             # endpoint, so the same client-side filter can decide file types.
             # That listing walks the whole tree, costlier than a server-side
             # glob; the default frozen image pays it because it has no glob
-            # endpoint.
+            # endpoint. A literal extension in the pattern is pushed down as
+            # ``file_types`` so unrelated files stay inside the sandbox.
             return self._glob_matches(
-                self._list_path_entries(path),
+                self._list_path_entries(path, pattern=pattern),
                 root_path=root_path,
                 pattern=pattern,
                 user_data=user_data,
@@ -1477,11 +1503,20 @@ class AioSandbox(Sandbox):
         # is conservative evidence of an incomplete result on its own.
         return matches, truncated or bool(result.data and result.data.truncated)
 
-    def _list_path_entries(self, path: str) -> list:
+    def _list_path_entries(self, path: str, *, pattern: str | None = None) -> list:
         # show_hidden stays on: hidden names are ordinary user files unless an
         # ignore rule rejects them, and the ignore filter runs here, not in the
         # file API. A hidden directory (``.cache``) must not hide its children.
-        result = self._client.file.list_path(path=path, recursive=True, show_hidden=True)
+        kwargs = {"path": path, "recursive": True, "show_hidden": True}
+        file_types = _pattern_file_types(pattern) if pattern else None
+        if file_types:
+            # The listing endpoint has no pattern parameter, so a whole-tree
+            # walk is the only fallback for images without /v1/file/glob. A
+            # literal extension the pattern already requires is the one filter
+            # it does accept, and it keeps files with other extensions inside
+            # the sandbox; directories are still returned and filtered here.
+            kwargs["file_types"] = file_types
+        result = self._client.file.list_path(**kwargs)
         return result.data.files if result.data and result.data.files else []
 
     def _glob_matches(

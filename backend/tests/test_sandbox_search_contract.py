@@ -129,11 +129,15 @@ class _Transport:
             )
         )
 
-    def list_path(self, *, path: str, recursive: bool, show_hidden: bool):
+    def list_path(self, *, path: str, recursive: bool, show_hidden: bool, file_types=None):
         self.check(path)
         assert recursive and show_hidden
+        # ``file_types`` filters files by extension server-side; directories
+        # are returned regardless, as the real endpoint does.
+        suffixes = tuple(file_types) if file_types else None
         host = Path(self._to_host(path))
-        return SimpleNamespace(data=SimpleNamespace(files=[SimpleNamespace(path=self._to_virtual(str(p)), is_directory=p.is_dir()) for p in sorted(host.rglob("*"))]))
+        entries = [p for p in sorted(host.rglob("*")) if p.is_dir() or suffixes is None or p.suffix in suffixes]
+        return SimpleNamespace(data=SimpleNamespace(files=[SimpleNamespace(path=self._to_virtual(str(p)), is_directory=p.is_dir()) for p in entries]))
 
     def grep_files(self, *, path: str, pattern: str, case_insensitive: bool, fixed_strings: bool, max_results: int, max_file_size: str, recursive: bool, include=None):
         self.check(path)
