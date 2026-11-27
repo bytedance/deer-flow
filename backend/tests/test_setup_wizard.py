@@ -45,6 +45,7 @@ class TestProviders:
             "minimax",
             "minimax_cn",
             "openrouter",
+            "nvidia",
             "vllm",
             "mindie",
             "codex",
@@ -57,6 +58,16 @@ class TestProviders:
         assert providers["mimo"].use == "deerflow.models.patched_mimo:PatchedChatMiMo"
         assert providers["deepseek"].use == "deerflow.models.patched_deepseek:PatchedChatDeepSeek"
         assert providers["volcengine"].extra_config["api_base"] == "https://ark.cn-beijing.volces.com/api/v3"
+
+    def test_nvidia_nim_defaults_and_self_hosted_base_url(self):
+        provider = next(p for p in LLM_PROVIDERS if p.name == "nvidia")
+
+        assert provider.use == "langchain_openai:ChatOpenAI"
+        assert provider.env_var == "NVIDIA_API_KEY"
+        assert provider.default_model == "nvidia/nemotron-3.5-super-vl-120b-a12b"
+        assert provider.extra_config["base_url"] == "https://integrate.api.nvidia.com/v1"
+        assert provider.extra_config["supports_vision"] is True
+        assert provider.base_url_prompt == "NVIDIA NIM base URL"
 
     def test_zai_glm_flash_declares_the_reasoning_contract(self):
         """GLM-5.3-Flash cannot disable thinking and only accepts low/high/max (issue #5073).
