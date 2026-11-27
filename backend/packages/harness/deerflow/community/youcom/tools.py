@@ -157,24 +157,29 @@ def _unexpected_format_error(query: str) -> str:
     return json.dumps({"error": _FORMAT_ERROR, "query": query}, ensure_ascii=False)
 
 
+def _error_envelope_key(data: dict) -> str | None:
+    return next((key for key in _ERROR_ENVELOPE_KEYS if data.get(key)), None)
+
+
 def _response_results(data: object) -> list[dict] | None:
     """Return merged web and news result objects, or None when the payload is malformed.
 
-    Missing or null ``results``, ``web``, or ``news`` containers represent an
-    empty search, unless the top-level object carries an explicit error
-    envelope field (such as ``detail`` or ``error``). A wrong-typed container,
-    an error envelope, or a non-empty section holding no object entries is
-    malformed so a 200-wrapped error payload is surfaced as a format error
-    rather than "No results found" — matching the containment rule the sibling
-    bundled providers follow. Non-object entries in an otherwise valid section
-    list are skipped in order and logged by position only.
+    Missing, null, or empty ``results``, ``web``, or ``news`` containers
+    represent an empty search, unless the top-level object carries an explicit
+    error envelope field (such as ``detail`` or ``error``). A wrong-typed
+    container, an error envelope without usable results, or a non-empty
+    section holding no object entries is malformed so a 200-wrapped error
+    payload is surfaced as a format error rather than "No results found" —
+    matching the containment rule the sibling bundled providers follow.
+    Non-object entries in an otherwise valid section list are skipped in order
+    and logged by position only.
     """
     if not isinstance(data, dict):
         logger.error("You.com returned an unexpected payload type: %s", type(data).__name__)
         return None
     sections = data.get("results")
     if sections is None:
-        error_key = next((key for key in _ERROR_ENVELOPE_KEYS if data.get(key)), None)
+        error_key = _error_envelope_key(data)
         if error_key is not None:
             logger.error("You.com returned an error envelope (%s)", error_key)
             return None
@@ -203,6 +208,11 @@ def _response_results(data: object) -> list[dict] | None:
             logger.error("You.com returned 'results.%s' with no usable result objects", section)
             return None
         merged.extend(usable)
+    if not merged:
+        error_key = _error_envelope_key(data)
+        if error_key is not None:
+            logger.error("You.com returned an error envelope (%s)", error_key)
+            return None
     return merged
 
 

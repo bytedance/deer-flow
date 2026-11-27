@@ -324,6 +324,10 @@ class TestWebSearchTool:
             ({"error_code": "secret-bad-gateway"}, "secret-bad-gateway"),
             ({"message": "secret-service-err"}, "secret-service-err"),
             ({"detail": "secret-null-results-err", "results": None}, "secret-null-results-err"),
+            ({"detail": "secret-empty-dict-err", "results": {}}, "secret-empty-dict-err"),
+            ({"detail": "secret-empty-web-err", "results": {"web": []}}, "secret-empty-web-err"),
+            ({"error": "secret-empty-both-err", "results": {"web": [], "news": []}}, "secret-empty-both-err"),
+            ({"message": "secret-null-sections-err", "results": {"web": None, "news": None}}, "secret-null-sections-err"),
         ],
         ids=[
             "results-str",
@@ -344,6 +348,10 @@ class TestWebSearchTool:
             "error-envelope-error-code",
             "error-envelope-message",
             "error-envelope-detail-with-null-results",
+            "error-envelope-detail-with-empty-results-dict",
+            "error-envelope-detail-with-empty-web",
+            "error-envelope-error-with-empty-sections",
+            "error-envelope-message-with-null-sections",
         ],
     )
     async def test_malformed_containers_return_format_error_without_leaking_payload(
@@ -375,10 +383,20 @@ class TestWebSearchTool:
             {"metadata": {"latency": 0.1}},
             {"results": None},
             {"error": None, "results": None},
+            {"detail": "", "results": {"web": []}},
+            {"error": None, "results": {}},
             {"results": {}},
             {"results": {"web": None, "news": None}},
         ],
-        ids=["metadata-only", "results-null", "falsy-error-and-results-null", "results-empty-dict", "sections-null"],
+        ids=[
+            "metadata-only",
+            "results-null",
+            "falsy-error-and-results-null",
+            "falsy-detail-and-empty-web",
+            "falsy-error-and-empty-results-dict",
+            "results-empty-dict",
+            "sections-null",
+        ],
     )
     async def test_null_or_empty_containers_remain_empty_search(self, payload, mock_config_with_key):
         patcher, _ = _patch_get(_make_response(payload))
@@ -390,6 +408,18 @@ class TestWebSearchTool:
             patcher.stop()
 
         assert parsed == {"error": "No results found", "query": "test"}
+
+    async def test_valid_results_with_top_level_message_still_return_results(self, mock_config_with_key):
+        payload = {"message": "ok", "results": {"web": [_web(url="https://ex.com/w1", title="W1")]}}
+        patcher, _ = _patch_get(_make_response(payload))
+        try:
+            from deerflow.community.youcom.tools import web_search_tool
+
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
+        finally:
+            patcher.stop()
+
+        assert [r["title"] for r in parsed] == ["W1"]
 
     async def test_mixed_section_entries_preserve_valid_objects_and_warn(self, mock_config_with_key, caplog):
         payload = {
