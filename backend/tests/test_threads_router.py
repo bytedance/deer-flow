@@ -32,7 +32,7 @@ from deerflow.persistence.thread_meta import (
     ThreadOwnershipConflictError,
 )
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
-from deerflow.runtime import ConflictError, ThreadOperationKind
+from deerflow.runtime import ConflictError, RunManager, ThreadOperationKind
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY
@@ -73,8 +73,9 @@ class _PermissiveThreadMetaStore(MemoryThreadMetaStore):
         return await super().search(metadata=metadata, status=status, limit=limit, offset=offset, user_id=None, archived=archived, project_id=project_id)
 
 
-class _ThreadTestRunManager:
+class _ThreadTestRunManager(RunManager):
     def __init__(self):
+        super().__init__()
         self.reservations: list[tuple[str, dict]] = []
 
     async def list_by_thread(self, _thread_id: str, *, user_id=None, limit: int = 100) -> list:
@@ -83,7 +84,8 @@ class _ThreadTestRunManager:
     @asynccontextmanager
     async def reserve_thread_operation(self, _thread_id: str, **_kwargs):
         self.reservations.append((_thread_id, _kwargs))
-        yield
+        async with super().reserve_thread_operation(_thread_id, **_kwargs) as reservation:
+            yield reservation
 
 
 def _build_thread_app() -> tuple[FastAPI, InMemoryStore, InMemorySaver]:
@@ -5737,6 +5739,80 @@ def test_branch_write_failure_keeps_checkpoints_owned(tmp_path, monkeypatch, fai
             retry = client.post(f"/api/threads/{source}/branches", json={"message_id": "ai-1"})
             assert retry.status_code == 200, retry.text
             assert retry.json()["thread_id"] != child
+
+
+@pytest.mark.parametrize(
+    ("takeover_at", "expected_writes", "remaining_checkpoints"),
+    [
+        ("owner", ["owner"], 0),
+        ("replay_base", ["owner", "replay_base"], 1),
+        ("head", ["owner", "replay_base", "head"], 1),
+        ("checkpoint_cleanup", ["owner", "replay_base", "head", "checkpoint_cleanup"], 0),
+    ],
+)
+def test_branch_stops_writing_after_child_takeover(tmp_path, monkeypatch, takeover_at, expected_writes, remaining_checkpoints):
+    from datetime import UTC, datetime
+
+    from sqlalchemy import update
+
+    from deerflow.config.run_ownership_config import RunOwnershipConfig
+    from deerflow.persistence.run.model import RunRow
+    from deerflow.persistence.run.sql import RunRepository
+
+    app = _build_project_threads_app(tmp_path)
+    sessions = get_session_factory()
+    runs = RunRepository(sessions)
+    owner = RunManager(store=runs, worker_id="branch-worker", run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True))
+    peer = RunManager(store=runs, worker_id="peer")
+    app.state.run_manager = owner
+    store, saver = app.state.thread_store, app.state.checkpointer
+    create, put, delete_checkpoints = store.create, saver.aput, saver.adelete_thread
+    writes = []
+    takeovers = []
+
+    async def at_write(stage, thread_id):
+        writes.append(stage)
+        if stage == takeover_at:
+            async with sessions.begin() as session:
+                await session.execute(update(RunRow).where(RunRow.thread_id == thread_id).values(lease_expires_at=datetime(2000, 1, 1, tzinfo=UTC)))
+            successor = await peer.create_or_reject(thread_id, multitask_strategy="interrupt", user_id="user-a")
+            if stage in ("owner", "head"):
+                # Deliver cancellation inside the write. In the other cases the
+                # next write must notice the takeover before the next heartbeat.
+                await owner._renew_leases()
+            takeovers.append(successor)
+
+    async def create_row(thread_id, **kwargs):
+        record = await create(thread_id, **kwargs)
+        await at_write("owner", thread_id)
+        return record
+
+    async def put_checkpoint(config, *args, **kwargs):
+        stage = "head" if "replay_base" in writes else "replay_base"
+        await at_write(stage, config["configurable"]["thread_id"])
+        if stage == "head" and takeover_at in ("head", "checkpoint_cleanup"):
+            raise RuntimeError("branch head write failed")
+        return await put(config, *args, **kwargs)
+
+    async def remove_checkpoints(thread_id):
+        await delete_checkpoints(thread_id)
+        await at_write("checkpoint_cleanup", thread_id)
+
+    with TestClient(app) as client:
+        assert client.post("/api/threads", json={"thread_id": "source"}).status_code == 200
+        _seed_branchable_thread(app, "source")
+        monkeypatch.setattr(threads, "build_checkpoint_state_mutation_accessor", gateway_services.build_checkpoint_state_mutation_accessor)
+        monkeypatch.setattr(store, "create", create_row)
+        monkeypatch.setattr(saver, "aput", put_checkpoint)
+        monkeypatch.setattr(saver, "adelete_thread", remove_checkpoints)
+        response = client.post("/api/threads/source/branches", json={"message_id": "ai-1"})
+
+    (successor,) = takeovers
+    assert writes == expected_writes
+    assert asyncio.run(store.get(successor.thread_id, user_id="user-a")) is not None
+    assert len(list(saver.list({"configurable": {"thread_id": successor.thread_id}}))) == remaining_checkpoints
+    assert asyncio.run(runs.get(successor.run_id, user_id="user-a"))["status"] == "pending"
+    assert response.status_code == 409, response.text
 
 
 def test_branch_inherits_source_project_membership(tmp_path):
