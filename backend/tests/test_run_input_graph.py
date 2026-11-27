@@ -518,9 +518,9 @@ async def test_graph_applies_input_before_long_tool_finishes_and_confirms_durabl
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("execution", ["continuous", "resumed", "edit-todos", "resave-todos", "edit-title"])
+@pytest.mark.parametrize("execution, new_message", [("continuous", False), ("resumed", False), ("resumed", True), ("edit-todos", False), ("edit-todos", True), ("resave-todos", False), ("edit-title", False)])
 @pytest.mark.parametrize("calls", [("replace",), ("replace", "write"), ("write", "replace"), ("replace", "invalid_write")], ids=["replace-only", "replace-then-write", "write-then-replace", "failed-write"])
-async def test_replacing_work_discards_only_the_abandoned_todos(calls, execution):
+async def test_replacing_work_discards_only_the_abandoned_todos(calls, execution, new_message):
     from unittest.mock import AsyncMock
 
     from _agent_e2e_helpers import FakeToolCallingModel
@@ -543,12 +543,17 @@ async def test_replacing_work_discards_only_the_abandoned_todos(calls, execution
     try:
         old_state = {"messages": [HumanMessage(content="Original task")], "todos": [{"content": "Old task", "status": "in_progress"}]}
         expected = new_plan if "write" in calls else []
-        result = await graph.ainvoke(old_state, config, context={INPUT_CONTEXT_KEY: control}, interrupt_after=["tools"] if execution != "continuous" else None)
+        updates = [frame async for frame in graph.astream(old_state, config, context={INPUT_CONTEXT_KEY: control}, stream_mode="updates", interrupt_after=["tools"] if execution != "continuous" else None)]
         assert control.abandoned
-        if execution != "continuous":
-            paused = await graph.aget_state(config)
-            assert paused.next
-            assert any(isinstance(m, ToolMessage) and m.tool_call_id == "replace" and m.status == "success" for m in paused.values["messages"])
+        snapshot = await graph.aget_state(config)
+        if execution == "continuous":
+            result = snapshot.values
+            visible_plans = [node["todos"] for frame in updates for node in frame.values() if isinstance(node, dict) and isinstance(node.get("todos"), list)]
+            assert visible_plans[-1] == expected
+        else:
+            assert snapshot.next
+            assert any(isinstance(m, ToolMessage) and m.tool_call_id == "replace" and m.status == "success" for m in snapshot.values["messages"])
+            assert snapshot.values["todos"] == expected
             await control.close()
             if execution in {"edit-todos", "resave-todos"}:
                 expected = old_state["todos"] if execution == "resave-todos" else [{"content": "New approved task", "status": "pending"}]
@@ -557,7 +562,8 @@ async def test_replacing_work_discards_only_the_abandoned_todos(calls, execution
             elif execution == "edit-title":
                 await graph.aupdate_state(config, {"title": "Renamed thread"})
             control = RunInputControl(inputs, agent_runs=control.agent_runs, thread_id="thread", checkpointer=saver)
-            result = await graph.ainvoke(None, config, context={INPUT_CONTEXT_KEY: control})
+            resume_input = {"messages": [HumanMessage(content="Please acknowledge.")]} if new_message else None
+            result = await graph.ainvoke(resume_input, config, context={INPUT_CONTEXT_KEY: control})
         assert (await graph.aget_state(config)).values["todos"] == expected
         if execution not in {"edit-todos", "resave-todos"}:
             assert [m.content for m in result["messages"] if isinstance(m, AIMessage) and not m.tool_calls] == ["OK"]

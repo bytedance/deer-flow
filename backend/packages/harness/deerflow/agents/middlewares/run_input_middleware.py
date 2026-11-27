@@ -1,16 +1,27 @@
 """Apply direct user inputs through the currently owned Agent graph."""
 
+from dataclasses import replace
 from typing import Literal
 
 from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain.tools import ToolRuntime, tool
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
-from langgraph.config import get_config
-from langgraph.runtime import Runtime
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command, Overwrite
 
-from deerflow.runtime.runs.input_control import RunInputControl, run_input_control
+from deerflow.runtime.runs.input_control import run_input_control
 from deerflow.runtime.runs.schemas import GOAL_RUN_HARD_STOP_REASONS
+
+
+def _replaces_and_writes_todos(state) -> bool:
+    calls = next((message.tool_calls for message in reversed(state.get("messages") or []) if isinstance(message, AIMessage)), [])
+    replacing = writing = False
+    for call in calls or ():
+        match call:
+            case {"name": "manage_current_work", "args": {"action": "replace"}}:
+                replacing = True
+            case {"name": "write_todos"}:
+                writing = True
+    return replacing and writing
 
 
 @tool
@@ -28,7 +39,6 @@ async def manage_current_work(action: Literal["continue", "replace", "stop"], ru
     if control is None or control.current_input is None:
         raise ValueError("There is no direct user input to apply")
     update = {}
-    receipt = ToolMessage(content=f"Current work control applied: {action}", tool_call_id=runtime.tool_call_id, name="manage_current_work")
     if action == "stop":
         await control.agent_runs.cancel(thread_id=control.thread_id, run_id=control.inputs.run_id)
     elif action == "replace":
@@ -40,12 +50,10 @@ async def manage_current_work(action: Literal["continue", "replace", "stop"], ru
         await cancel_sandbox_execution_lease_async(runtime.context, reset=True)
         await control.agent_runs.authorize_control(thread_id=control.thread_id, run_id=control.inputs.run_id, clear_goal=clear_goal)
         control.abandoned = True
-        if runtime.state.get("todos"):
-            # Bind the tool result to the server-owned steer that authorized the replace.
-            receipt.additional_kwargs["run_input_id"] = control.current_input
-            receipt.artifact = {"checkpoint_id": runtime.execution_info.checkpoint_id, "step": runtime.config["metadata"]["langgraph_step"]}
         if clear_goal:
             update = {"goal": Overwrite(None), "goal_outcome": None}
+        if runtime.state.get("todos"):
+            update["todos"] = []
     else:
         if len(instructions.encode("utf-8")) > 16 * 1024:
             raise ValueError("Subagent instructions exceed 16 KiB")
@@ -53,45 +61,17 @@ async def manage_current_work(action: Literal["continue", "replace", "stop"], ru
         if instructions and not accepted:
             update["messages"] = [ToolMessage(content="The subagents have already finished; apply the new requirement in the main Agent using their results.", tool_call_id=runtime.tool_call_id, name="manage_current_work")]
             return Command(update=update)
-    update["messages"] = [receipt]
+    update["messages"] = [ToolMessage(content=f"Current work control applied: {action}", tool_call_id=runtime.tool_call_id, name="manage_current_work")]
     return Command(update=update)
-
-
-async def _should_clear_todos(messages: list[BaseMessage], runtime: Runtime, control: RunInputControl | None) -> bool:
-    abandoned = None
-    for message in reversed(messages):
-        if not isinstance(message, ToolMessage):
-            break
-        if message.status != "success":
-            continue
-        if message.name == "write_todos":
-            return False
-        if message.name == "manage_current_work" and message.additional_kwargs.get("run_input_id"):
-            abandoned = message.artifact
-    if not isinstance(abandoned, dict) or type(abandoned.get("step")) is not int or not isinstance(abandoned.get("checkpoint_id"), str):
-        return False
-    # On the step immediately following tools, the completed batch accounts for all writes.
-    if get_config()["metadata"]["langgraph_step"] == abandoned["step"] + 1:
-        return True
-    if control is None or control.checkpointer is None:
-        return False
-
-    # A state edit creates a checkpoint even when it saves an identical list.
-    # Compare the todos channel on this branch so edits to other fields still allow cleanup.
-    async def todos_version(checkpoint_id: str):
-        saved = await control.checkpointer.aget_tuple({"configurable": {"thread_id": control.thread_id, "checkpoint_ns": "", "checkpoint_id": checkpoint_id}})
-        return saved.checkpoint["channel_versions"].get("todos") if saved else None
-
-    previous = await todos_version(abandoned["checkpoint_id"])
-    return previous is not None and previous == await todos_version(runtime.execution_info.checkpoint_id)
 
 
 class RunInputAdmissionMiddleware(AgentMiddleware):
     async def abefore_model(self, state, runtime):
         control = run_input_control(runtime.context)
         update = await control.deliver(state) if control is not None else None
-        if state.get("todos") and await _should_clear_todos(state.get("messages", []), runtime, control):
-            return {**(update or {}), "todos": []}
+        if state.get("todos") and _replaces_and_writes_todos(state):
+            # Incremental clients consume plain lists. Publish the merged plan after both tools.
+            return {**(update or {}), "todos": state["todos"]}
         return update
 
     @hook_config(can_jump_to=["model"])
@@ -131,7 +111,13 @@ class RunInputMiddleware(AgentMiddleware):
         control = run_input_control(request.runtime.context)
         if control is not None and request.tool_call["name"] == "task":
             return await control.wait_tool(request, handler)
-        return await handler(request)
+        result = await handler(request)
+        if request.tool_call["name"] != "write_todos" or not request.state.get("todos"):
+            return result
+        # The explicit plan wins over the replace tool's clear in either tool order.
+        if isinstance(result, Command) and isinstance(result.update, dict) and isinstance(result.update.get("todos"), list) and _replaces_and_writes_todos(request.state):
+            return replace(result, update={**result.update, "todos": Overwrite(result.update["todos"])})
+        return result
 
     @hook_config(can_jump_to=["model"])
     async def aafter_agent(self, state, runtime):
