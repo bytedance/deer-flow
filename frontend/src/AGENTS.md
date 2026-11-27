@@ -32,6 +32,9 @@ pnpm test:e2e                    # Playwright, for anything that depends on a re
 - **Do not rejoin a completed run.** Recovery for a reopened chat lists active
   runs, and that read can be stale. Run IDs that the mounted hook has seen complete
   stay excluded.
+- **A run that no stream follows gets no `onFinish`.** After recovery gives up,
+  or when the Gateway cannot stream the run, only the runs read reports its end.
+  Poll it while no stream follows, and refresh the thread when the run ends.
 - **Unsupported stream modes fail before the request.** Forwarding part of the
   list, or defaulting to `values`, hides a caller bug.
 - **Stream updates use the SDK `throttle: true` mode.** A numeric delay changes

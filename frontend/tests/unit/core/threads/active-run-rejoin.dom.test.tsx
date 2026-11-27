@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 
+import { AuthQueryScopeContext } from "@/core/auth/query-scope";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 import { DEFAULT_LOCAL_SETTINGS } from "@/core/settings/local";
@@ -25,6 +26,8 @@ type StreamOptions = {
 
 const apiMockState = rs.hoisted(() => ({
   listRuns: rs.fn(async () => [] as Run[]),
+  // GET /api/threads/thread-1/inputs reports this as the active run.
+  inputsActiveRunId: null as string | null,
 }));
 
 const streamMockState = rs.hoisted(() => ({
@@ -67,26 +70,33 @@ const ACTIVE_RUN_META = {
   run_id: "run-active",
 };
 
-function createWrapper(queryClient: QueryClient) {
+function createWrapper(queryClient: QueryClient, account?: string) {
   return function ActiveRunRejoinTestWrapper({
     children,
   }: {
     children: ReactNode;
   }) {
+    const content = createElement(
+      I18nContext.Provider,
+      {
+        value: {
+          locale: "en-US",
+          setLocale: () => undefined,
+          t: enUS,
+        },
+      },
+      children,
+    );
     return createElement(
       QueryClientProvider,
       { client: queryClient },
-      createElement(
-        I18nContext.Provider,
-        {
-          value: {
-            locale: "en-US",
-            setLocale: () => undefined,
-            t: enUS,
-          },
-        },
-        children,
-      ),
+      account
+        ? createElement(
+            AuthQueryScopeContext.Provider,
+            { value: account },
+            content,
+          )
+        : content,
     );
   };
 }
@@ -99,7 +109,7 @@ async function flushFrames() {
   }
 }
 
-function renderThread(threadId = "thread-1") {
+function renderThread(threadId = "thread-1", account?: string) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -111,10 +121,20 @@ function renderThread(threadId = "thread-1") {
       }),
     {
       initialProps: { activeThreadId: threadId },
-      wrapper: createWrapper(queryClient),
+      wrapper: createWrapper(queryClient, account),
     },
   );
   return { queryClient, ...rendered };
+}
+
+function requestPath(input: RequestInfo | URL) {
+  const url =
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.href
+        : input.url;
+  return new URL(url, "http://localhost").pathname;
 }
 
 function failActiveRecoveredStream() {
@@ -125,23 +145,32 @@ function failActiveRecoveredStream() {
 }
 
 beforeEach(() => {
-  rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  rs.useFakeTimers({
+    toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"],
+  });
   window.sessionStorage.clear();
   apiMockState.listRuns.mockReset();
   apiMockState.listRuns.mockResolvedValue([ACTIVE_RUN]);
+  apiMockState.inputsActiveRunId = null;
   streamMockState.isLoading = false;
   streamMockState.joinStream.mockReset();
   streamMockState.joinStream.mockResolvedValue(undefined);
   streamMockState.options = undefined;
   rs.stubGlobal(
     "fetch",
-    rs.fn(
-      async () =>
-        new Response(
-          JSON.stringify({ data: [], has_more: false, next_before_seq: null }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        ),
-    ),
+    rs.fn(async (input: RequestInfo | URL) => {
+      const path = requestPath(input);
+      const body =
+        path === "/api/features"
+          ? { run_inputs: true }
+          : path === "/api/threads/thread-1/inputs"
+            ? { items: [], active_run_id: apiMockState.inputsActiveRunId }
+            : { data: [], has_more: false, next_before_seq: null };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }),
   );
 });
 
@@ -394,11 +423,10 @@ test("clears the old retry when the active run changes", async () => {
   expect(streamMockState.joinStream).toHaveBeenCalledWith("run-active");
 
   act(() => failActiveRecoveredStream());
+  const nextRuns = [{ ...ACTIVE_RUN, run_id: "run-next", status: "pending" }];
+  apiMockState.listRuns.mockResolvedValue(nextRuns as Run[]);
   act(() => {
-    queryClient.setQueryData(
-      ["thread", "thread-1"],
-      [{ ...ACTIVE_RUN, run_id: "run-next", status: "pending" }],
-    );
+    queryClient.setQueryData(["thread", "thread-1"], nextRuns);
   });
   await flushFrames();
   await act(async () => {
@@ -531,5 +559,98 @@ test("exposes the active run's server start until that run finishes", async () =
   rerender({ activeThreadId: "thread-1" });
 
   expect(result.current.activeRunStartedAt).toBeNull();
+  unmount();
+});
+
+function historyReads() {
+  return rs
+    .mocked(fetch)
+    .mock.calls.filter(([input]) =>
+      requestPath(input).startsWith("/api/threads/thread-1/messages"),
+    ).length;
+}
+
+async function exhaustActiveRunRecovery() {
+  await flushFrames();
+  act(() => failActiveRecoveredStream());
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(1_000);
+  });
+  act(() => failActiveRecoveredStream());
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(2_000);
+  });
+  act(() => failActiveRecoveredStream());
+  expect(streamMockState.joinStream).toHaveBeenCalledTimes(3);
+}
+
+test("settles a run that finishes after recovery gives up", async () => {
+  apiMockState.inputsActiveRunId = "run-active";
+  const { result, unmount } = renderThread("thread-1", "account-1");
+  await exhaustActiveRunRecovery();
+  await flushFrames();
+  expect(result.current.thread.isLoading).toBe(true);
+
+  // The run keeps going on the server: keep watching it, without a 4th join.
+  const runsReads = apiMockState.listRuns.mock.calls.length;
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(4_000);
+  });
+  expect(apiMockState.listRuns.mock.calls.length).toBe(runsReads + 2);
+  expect(streamMockState.joinStream).toHaveBeenCalledTimes(3);
+  expect(result.current.thread.isLoading).toBe(true);
+
+  apiMockState.listRuns.mockResolvedValue([
+    { ...ACTIVE_RUN, status: "success" },
+  ]);
+  apiMockState.inputsActiveRunId = null;
+  const historyBefore = historyReads();
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(2_000);
+  });
+  await flushFrames();
+
+  expect(result.current.activeRunId).toBeUndefined();
+  expect(result.current.thread.isLoading).toBe(false);
+  // No onFinish arrives for this run, so the end refreshes the thread instead.
+  expect(historyReads()).toBeGreaterThan(historyBefore);
+
+  const settledReads = apiMockState.listRuns.mock.calls.length;
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(10_000);
+  });
+  expect(apiMockState.listRuns.mock.calls.length).toBe(settledReads);
+  expect(streamMockState.joinStream).toHaveBeenCalledTimes(3);
+  unmount();
+});
+
+test("polls runs only while no stream follows the active run", async () => {
+  // The SDK's own reconnect is streaming the run.
+  streamMockState.isLoading = true;
+  const { rerender, unmount } = renderThread();
+  await flushFrames();
+  const runsReads = apiMockState.listRuns.mock.calls.length;
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(10_000);
+  });
+  expect(apiMockState.listRuns.mock.calls.length).toBe(runsReads);
+
+  streamMockState.isLoading = false;
+  rerender({ activeThreadId: "thread-1" });
+  await flushFrames();
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(2_000);
+  });
+  expect(apiMockState.listRuns.mock.calls.length).toBe(runsReads + 1);
+
+  // A stream follows the run again: stop polling, and do not treat it as an end.
+  const historyBefore = historyReads();
+  streamMockState.isLoading = true;
+  rerender({ activeThreadId: "thread-1" });
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(10_000);
+  });
+  expect(apiMockState.listRuns.mock.calls.length).toBe(runsReads + 1);
+  expect(historyReads()).toBe(historyBefore);
   unmount();
 });

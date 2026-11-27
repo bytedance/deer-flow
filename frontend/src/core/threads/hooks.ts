@@ -476,6 +476,7 @@ const ACTIVE_RUN_STATUSES = new Set(["pending", "running"]);
 const ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS = [1_000, 2_000] as const;
 const MAX_ACTIVE_RUN_REJOIN_ATTEMPTS =
   ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS.length + 1;
+const UNFOLLOWED_ACTIVE_RUN_POLL_MS = 2_000;
 
 type ActiveRunRejoinState = {
   attempts: number;
@@ -2221,8 +2222,12 @@ export function useThreadStream({
     enabled: !isMock,
     pendingSupersededRunIds,
   });
+  const [pollUnfollowedActiveRun, setPollUnfollowedActiveRun] = useState(false);
   const runsQuery = useThreadRuns(onStreamThreadId ?? undefined, {
     enabled: !isMock,
+    refetchInterval: pollUnfollowedActiveRun
+      ? UNFOLLOWED_ACTIVE_RUN_POLL_MS
+      : false,
   });
   const activeRunId = useMemo(
     () =>
@@ -2879,6 +2884,41 @@ export function useThreadStream({
     },
     [onStreamThreadId],
   );
+
+  // A run that no stream follows gets no onFinish: recovery gave up on it, or
+  // the Gateway cannot stream it. The runs read is then its only end signal,
+  // so poll it, and refresh the thread as a finish would once the run ends.
+  const unfollowedActiveRunId =
+    !isThreadLoading &&
+    activeRunId &&
+    !completedRunIdsRef.current.has(activeRunId)
+      ? activeRunId
+      : null;
+  const unfollowedActiveRunRef = useRef<{
+    threadId: string;
+    runId: string;
+  } | null>(null);
+  useEffect(() => {
+    const previous = unfollowedActiveRunRef.current;
+    unfollowedActiveRunRef.current =
+      onStreamThreadId && unfollowedActiveRunId
+        ? { threadId: onStreamThreadId, runId: unfollowedActiveRunId }
+        : null;
+    setPollUnfollowedActiveRun(unfollowedActiveRunRef.current !== null);
+    if (
+      previous &&
+      previous.threadId === onStreamThreadId &&
+      previous.runId !== activeRunId
+    ) {
+      invalidateStoppedThreadCaches(queryClient, previous.threadId, isMock);
+    }
+  }, [
+    activeRunId,
+    isMock,
+    onStreamThreadId,
+    queryClient,
+    unfollowedActiveRunId,
+  ]);
 
   const stopThread = useCallback(async () => {
     settlePendingApproval(false);
@@ -4373,7 +4413,10 @@ export function useInfiniteThreads(
 
 export function useThreadRuns(
   threadId?: string,
-  { enabled = true }: { enabled?: boolean } = {},
+  {
+    enabled = true,
+    refetchInterval = false,
+  }: { enabled?: boolean; refetchInterval?: number | false } = {},
 ) {
   const apiClient = getAPIClient();
   return useQuery<AppRun[]>({
@@ -4386,6 +4429,7 @@ export function useThreadRuns(
       return response as AppRun[];
     },
     enabled: enabled && Boolean(threadId),
+    refetchInterval,
     refetchOnWindowFocus: false,
     retry: false,
   });
