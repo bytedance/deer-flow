@@ -351,78 +351,98 @@ class TestTelegramNewMessageRetryAfter:
         assert sleeps == [1, 2]
 
 
-class TestTelegramFinalEditRetryAfter:
-    def test_final_chunk_edit_caps_large_retry_after(self, monkeypatch):
-        async def go():
-            channel, bot = _channel_with_bot()
-            sleeps: list[float] = []
+def _malformed_flood_app(monkeypatch, calls, sleep_list, *, always_fail=False):
+    """Real PTB Application whose SDK request sits on a mock transport.
 
-            async def fake_sleep(delay):
-                sleeps.append(delay)
+    The transport answers malformed 429s (retry_after "invalid") and then
+    succeeds (or keeps failing when always_fail is set), exercising the
+    response-boundary normalization in _BoundedRetryAfterRequest (#8548).
+    """
+    import httpx
+    from telegram.ext import ApplicationBuilder
 
-            monkeypatch.setattr("app.channels.telegram.asyncio.sleep", fake_sleep)
-            real_edit = bot.edit_message_text
-            calls = {"n": 0}
+    from app.channels.telegram import _BoundedRetryAfterRequest
 
-            async def flaky(**kwargs):
-                calls["n"] += 1
-                if calls["n"] == 1:
-                    raise _flood(timedelta(hours=2))
-                return await real_edit(**kwargs)
+    def respond(request):
+        calls["n"] += 1
+        if always_fail or calls["n"] <= 1:
+            return httpx.Response(
+                429,
+                json={
+                    "ok": False,
+                    "error_code": 429,
+                    "description": "flood",
+                    "parameters": {"retry_after": "invalid"},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "result": {"message_id": 100, "date": 1700000000, "chat": {"id": 12345, "type": "private"}},
+            },
+        )
 
-            bot.edit_message_text = flaky
-            edited = await channel._edit_final_chunk(bot, 12345, 100, "hello")
+    request = _BoundedRetryAfterRequest.build(httpx_kwargs={"transport": httpx.MockTransport(respond)})
+    app = ApplicationBuilder().token("test-token").request(request).build()
+
+    async def fake_sleep(delay):
+        sleep_list.append(delay)
+
+    monkeypatch.setattr("app.channels.telegram.asyncio.sleep", fake_sleep)
+    return app
+
+
+def test_final_chunk_edit_malformed_429_beneath_the_real_sdk(monkeypatch):
+    async def go():
+        calls = {"n": 0}
+        sleeps: list[float] = []
+        app = _malformed_flood_app(monkeypatch, calls, sleeps)
+        channel, _bot = _channel_with_bot()
+        channel._application = app
+        try:
+            # The SDK's own RetryAfter retry absorbs the normalized hint and
+            # the edit completes instead of crashing on the parse failure.
+            edited = await channel._edit_final_chunk(app.bot, 12345, 100, "hello")
             assert edited is True
-            assert sleeps == [60.0]
+            assert calls["n"] == 2
+        finally:
+            await app.shutdown()
 
-        _run(go())
+    _run(go())
 
-    def test_final_chunk_edit_falls_back_on_unusable_hint(self, monkeypatch):
-        async def go():
-            channel, bot = _channel_with_bot()
-            sleeps: list[float] = []
 
-            async def fake_sleep(delay):
-                sleeps.append(delay)
-
-            monkeypatch.setattr("app.channels.telegram.asyncio.sleep", fake_sleep)
-            real_edit = bot.edit_message_text
-            calls = {"n": 0}
-
-            async def flaky(**kwargs):
-                calls["n"] += 1
-                if calls["n"] == 1:
-                    raise _flood("invalid")
-                return await real_edit(**kwargs)
-
-            bot.edit_message_text = flaky
-            edited = await channel._edit_final_chunk(bot, 12345, 100, "hello")
-            assert edited is True
-            assert sleeps == [1.0]
-
-        _run(go())
-
-    def test_rich_edit_caps_large_retry_after(self, monkeypatch):
-        async def go():
-            channel, bot = _channel_with_bot()
-            sleeps: list[float] = []
-
-            async def fake_sleep(delay):
-                sleeps.append(delay)
-
-            monkeypatch.setattr("app.channels.telegram.asyncio.sleep", fake_sleep)
-            real_rich = bot.do_api_request
-            calls = {"n": 0}
-
-            async def flaky(endpoint, api_kwargs):
-                calls["n"] += 1
-                if calls["n"] == 1:
-                    raise _flood(timedelta(hours=2))
-                return await real_rich(endpoint, api_kwargs)
-
-            bot.do_api_request = flaky
+def test_rich_edit_malformed_429_beneath_the_real_sdk(monkeypatch):
+    async def go():
+        calls = {"n": 0}
+        sleeps: list[float] = []
+        app = _malformed_flood_app(monkeypatch, calls, sleeps)
+        channel, _bot = _channel_with_bot()
+        channel._application = app
+        try:
             edited = await channel._edit_rich_message("12345", 100, "**answer**")
             assert edited is True
-            assert sleeps == [60.0]
+            assert calls["n"] == 2
+        finally:
+            await app.shutdown()
 
-        _run(go())
+    _run(go())
+
+
+def test_repeated_malformed_429_engages_the_bounded_fallback(monkeypatch):
+    async def go():
+        calls = {"n": 0}
+        sleeps: list[float] = []
+        app = _malformed_flood_app(monkeypatch, calls, sleeps, always_fail=True)
+        channel, _bot = _channel_with_bot()
+        channel._application = app
+        try:
+            # The channel's bounded flood-wait (1s base backoff) engages after
+            # the SDK's internal retry exhausts, instead of the pre-fix skip.
+            edited = await channel._edit_final_chunk(app.bot, 12345, 100, "hello")
+            assert edited is False
+            assert 1.0 in sleeps
+        finally:
+            await app.shutdown()
+
+    _run(go())
