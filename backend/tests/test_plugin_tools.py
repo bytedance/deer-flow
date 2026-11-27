@@ -251,7 +251,7 @@ async def test_artifact_is_independent_json_snapshot(installed):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["plain", "tuple", "bad-content", "list-artifact", "nan", "object", "int-key", "bool-key", "null-key", "float-key", "key-collision", "nested-key", "list-key", "tuple-key"])
+@pytest.mark.parametrize("kind", ["plain", "tuple", "bad-content", "bad-status", "list-artifact", "nan", "object", "int-key", "bool-key", "null-key", "float-key", "key-collision", "nested-key", "list-key", "tuple-key"])
 async def test_opt_in_invalid_result_is_sanitized_without_artifact(installed, kind):
     from deerflow_extension_api import PluginToolResult
 
@@ -260,6 +260,7 @@ async def test_opt_in_invalid_result_is_sanitized_without_artifact(installed, ki
         "plain": {"sensitive": "secret"},
         "tuple": ("visible", {"sensitive": "secret"}),
         "bad-content": PluginToolResult({"sensitive": "secret"}, None),
+        "bad-status": PluginToolResult("sensitive", status="failed"),
         "list-artifact": PluginToolResult("visible", ["secret"]),
         "nan": PluginToolResult("visible", {"score": float("nan")}),
         "object": PluginToolResult("visible", {"sensitive": object()}),

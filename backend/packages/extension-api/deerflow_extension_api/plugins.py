@@ -46,10 +46,16 @@ class ToolContext(ActionContext):
 
 @dataclass(frozen=True)
 class PluginToolResult:
-    """Model-visible text plus optional JSON artifact for an opted-in tool."""
+    """Model-visible text, an optional JSON artifact and an optional invocation status.
+
+    Set status to report a business failure or to mark successful text that
+    resembles an error. When omitted, the host recognizes legacy error content
+    for results without an artifact.
+    """
 
     content: str
     artifact: Mapping[str, Any] | None = None
+    status: Literal["success", "error"] | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)

@@ -232,27 +232,30 @@ async def test_missing_image_creates_no_artifact_before_or_after_compaction(tmp_
     assert not any("missing.png [available]" in message.content for message in compacted_request)
 
 
+_PLUGIN_REPORT_URL = "https://files.example/report.pdf"
+_PLUGIN_REPORT = "Error: the report summarizes past validation failures."
+_PLUGIN_REPORT_ARTIFACT = {"structured_content": {"file": _PLUGIN_REPORT_URL}}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "outcome,expected_error",
     [
-        pytest.param("typed-result", None, id="typed-result"),
-        pytest.param(200, None, id="http-200"),
-        pytest.param(404, "not_found", id="http-404"),
-        pytest.param("tool-exception", "unknown", id="tool-exception"),
+        pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT), None, id="typed-result"),
+        pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT | {"deerflow_http_response": {"status_code": 200}}), None, id="http-200"),
+        pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT | {"deerflow_http_response": {"status_code": 404}}, status="success"), "not_found", id="http-404"),
+        pytest.param(PluginToolResult(_PLUGIN_REPORT, status="success"), None, id="text-only-success"),
+        pytest.param(PluginToolResult("Could not generate the report.", _PLUGIN_REPORT_ARTIFACT, status="error"), "unknown", id="explicit-error"),
+        pytest.param(PluginToolResult(f"Error: Could not generate {_PLUGIN_REPORT_URL}"), "unknown", id="legacy-text-error"),
+        pytest.param(PluginToolResult(json.dumps({"error": f"Could not generate {_PLUGIN_REPORT_URL}"})), "unknown", id="legacy-json-error"),
+        pytest.param(ToolException(f"Error: Could not generate {_PLUGIN_REPORT_URL}"), "unknown", id="tool-exception"),
     ],
 )
 async def test_plugin_report_artifacts_follow_invocation_status_through_compaction(outcome, expected_error):
-    report_url = "https://files.example/report.pdf"
-    report = "Error: the report summarizes past validation failures."
-    artifact = {"structured_content": {"file": report_url}}
-    if isinstance(outcome, int):
-        artifact["deerflow_http_response"] = {"status_code": outcome}
-
     async def handler(payload, context):
-        if outcome == "tool-exception":
-            raise ToolException(f"Error: Could not generate {report_url}")
-        return PluginToolResult(report, artifact)
+        if isinstance(outcome, ToolException):
+            raise outcome
+        return outcome
 
     declaration = ModelTool("report", "Generate a report.", {"type": "object"}, handler, response_format="content_and_artifact")
     registry = ExtensionRegistry()
@@ -264,20 +267,25 @@ async def test_plugin_report_artifacts_follow_invocation_status_through_compacti
     config = {"configurable": {"thread_id": THREAD_ID}}
     context = {"thread_id": THREAD_ID}
 
-    result = await agent.ainvoke({"messages": [HumanMessage(content="Generate the report.")]}, config, context=context)
-    message = next(message for message in result["messages"] if isinstance(message, ToolMessage))
+    await agent.ainvoke({"messages": [HumanMessage(content="Generate the report.")]}, config, context=context)
+    before = (await agent.aget_state(config)).values
+    message = next(message for message in before["messages"] if isinstance(message, ToolMessage))
+    model_result = next(message for message in model.received[1] if isinstance(message, ToolMessage))
     success = expected_error is None
-    compacted_request = await _compact_and_check_artifacts(agent, model, config, context, [report_url] if success else [])
     expected_status = "success" if success else "error"
     meta = message.additional_kwargs[TOOL_META_KEY]
     assert meta["status"] == expected_status
     assert meta.get("error_type") == expected_error
-    if outcome == "tool-exception":
+    assert json.loads(model_result.content) == {TOOL_META_KEY: {"status": expected_status, "source": "tool_return"}, "content": message.content}
+    if isinstance(outcome, ToolException):
         assert message.status == "error"
         assert message.artifact is None
     else:
-        assert message.content == report
-        assert message.artifact == artifact
+        assert message.content == outcome.content
+        assert message.artifact == outcome.artifact
+        assert message.status == (outcome.status or "success")
+    expected_refs = [_PLUGIN_REPORT_URL] if success and message.artifact else []
+    compacted_request = await _compact_and_check_artifacts(agent, model, config, context, expected_refs)
     if not success:
         assert not any("report.pdf [available]" in item.content for item in compacted_request)
 

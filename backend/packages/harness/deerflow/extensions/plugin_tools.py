@@ -99,6 +99,9 @@ def _build_tool(source, plugin, declaration):
             if declaration.response_format == "content_and_artifact":
                 if not isinstance(result, PluginToolResult) or not isinstance(result.content, str) or (result.artifact is not None and not isinstance(result.artifact, Mapping)):
                     raise TypeError("Expected PluginToolResult with text and a JSON object artifact")
+                status = result.status
+                if status not in (None, "success", "error"):
+                    raise ValueError("Invalid plugin tool result status")
                 _validate_artifact_keys(result.artifact)
                 artifact = result.artifact
                 if artifact is not None and not isinstance(artifact, dict):
@@ -109,13 +112,16 @@ def _build_tool(source, plugin, declaration):
                     raise ToolException("Plugin result exceeds 64 KiB.")
                 if runtime.tool_call_id is None:
                     return result.content
+                # Unstamped text-only results keep the legacy error recognition.
+                reported_success = status == "success" or (status is None and artifact is not None)
                 # A JSON roundtrip detaches nested values retained by the handler.
                 return ToolMessage(
                     content=result.content,
                     artifact=json.loads(encoded)["artifact"],
                     name=name,
                     tool_call_id=runtime.tool_call_id,
-                    additional_kwargs={TOOL_META_KEY: {"status": "success", "source": "tool_return"}},
+                    status=status or "success",
+                    additional_kwargs={TOOL_META_KEY: {"status": "success", "source": "tool_return"}} if reported_success else {},
                 )
             encoded = json.dumps(result, ensure_ascii=False, allow_nan=False)
             if len(encoded.encode()) > 64 * 1024:
