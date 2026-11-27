@@ -120,7 +120,7 @@ Get an API key at [e2b.dev/dashboard](https://e2b.dev/dashboard) and either set 
 
 ### BytePlus veFaaS Cloud Sandbox
 
-Commands run in serverless [BytePlus Function Service (veFaaS)](https://www.byteplus.com/en/product/vefaas) cloud sandboxes running the `all-in-one-sandbox` image (see the [veFaaS documentation](https://docs.byteplus.com/en/docs/vefaas/what-is-vefaas)). DeerFlow manages the sandbox lifecycle over the veFaaS OpenAPI (`Version=2024-06-06`, SigV4) with no extra cloud SDK dependency and reuses the `AioSandbox` HTTP data plane.
+Commands run in serverless [BytePlus Function Service (veFaaS)](https://www.byteplus.com/en/product/vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) cloud sandboxes running the `all-in-one-sandbox` image (see the [veFaaS documentation](https://docs.byteplus.com/en/docs/vefaas/what-is-vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)). DeerFlow manages the sandbox lifecycle over the veFaaS OpenAPI (`Version=2024-06-06`, SigV4) with no extra cloud SDK dependency and reuses the `AioSandbox` HTTP data plane.
 
 - **Best for**: serverless production deployments, multi-tenant cloud workloads, teams wanting fast cold-start mitigation (**speculative prewarm**, **image precaching**, **pause/resume**), and persistent workspaces via **thread-scoped snapshots** or optional **TOS object storage mounts**.
 - **Trade-off**: requires a BytePlus veFaaS Sandbox Application and SigV4 access keys. Multi-worker gateways sharing one veFaaS app require `ownership.type: redis`.
