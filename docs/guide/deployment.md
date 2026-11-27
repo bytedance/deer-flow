@@ -106,13 +106,15 @@ for the retention constraints.
 **Production** (builds images locally, mounts runtime config and data):
 
 ```bash
-make up     # Build images and start all production services
-make down   # Stop and remove containers
+make up         # Build images and start all production services
+make prod-logs  # Follow production container logs
+make down       # Stop and remove containers
 ```
 
 Access: http://localhost:2026
 
-`make up` waits for the Gateway `/health` endpoint before reporting success.
+`make up` uses Docker Compose to wait for the services to start and for the
+Gateway's `/health/ready` probe to pass before reporting success.
 If the Gateway does not become healthy within the startup window, deployment
 exits non-zero and prints the container status plus recent Gateway logs. The
 production image starts from its already-built environment and never resolves
