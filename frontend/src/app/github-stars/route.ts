@@ -4,10 +4,15 @@ import { env } from "@/env";
 // The explicit fetch revalidate below still caches GitHub data for one hour.
 export const revalidate = 0;
 
+function isValidCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
 /**
- * Return only the public star count using the server's runtime GitHub token.
- * No input; missing credentials, upstream failures, or invalid counts yield 204
- * so the header hides the counter. Stays outside nginx's /api Gateway proxy.
+ * Return public repository star and fork counts using the server's runtime
+ * GitHub token. No input; missing credentials, upstream failures, or invalid
+ * star counts yield 204 so the UI hides the counters. Stays outside nginx's
+ * /api Gateway proxy.
  */
 export async function GET() {
   const token = env.GITHUB_OAUTH_TOKEN;
@@ -26,13 +31,18 @@ export async function GET() {
       },
     );
     if (response.ok) {
-      const data = (await response.json()) as { stargazers_count?: unknown };
-      if (
-        typeof data.stargazers_count === "number" &&
-        Number.isSafeInteger(data.stargazers_count) &&
-        data.stargazers_count >= 0
-      ) {
-        return Response.json({ stars: data.stargazers_count }, { headers });
+      const data = (await response.json()) as {
+        stargazers_count?: unknown;
+        forks_count?: unknown;
+      };
+      if (isValidCount(data.stargazers_count)) {
+        const payload: { stars: number; forks?: number } = {
+          stars: data.stargazers_count,
+        };
+        if (isValidCount(data.forks_count)) {
+          payload.forks = data.forks_count;
+        }
+        return Response.json(payload, { headers });
       }
     }
   } catch {

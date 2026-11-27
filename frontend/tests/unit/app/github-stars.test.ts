@@ -44,6 +44,37 @@ describe("runtime GitHub stars", () => {
     expect(response.headers.get("Cache-Control")).toBe("no-store");
   });
 
+  it("includes validated fork counts alongside stars when present", async () => {
+    env.GITHUB_OAUTH_TOKEN = "runtime-test-token";
+    rs.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        stargazers_count: 43210,
+        forks_count: 3650,
+        private_data: "not-for-the-client",
+      }),
+    );
+    const response = await GET();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ stars: 43210, forks: 3650 });
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  it.each([-1, "3650", 1.5, null])(
+    "omits invalid forks_count values (%j) while preserving valid stars",
+    async (forksCount) => {
+      env.GITHUB_OAUTH_TOKEN = "runtime-test-token";
+      rs.spyOn(globalThis, "fetch").mockResolvedValue(
+        Response.json({
+          stargazers_count: 43210,
+          forks_count: forksCount,
+        }),
+      );
+      const response = await GET();
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ stars: 43210 });
+    },
+  );
+
   it("hides the count when GitHub rejects the token", async () => {
     env.GITHUB_OAUTH_TOKEN = "invalid-test-token";
     rs.spyOn(globalThis, "fetch").mockResolvedValue(

@@ -4,12 +4,17 @@ import { StarFilledIcon } from "@radix-ui/react-icons";
 import { useEffect, useState } from "react";
 
 import { NumberTicker } from "@/components/ui/number-ticker";
+import { cn } from "@/lib/utils";
+
+export type StarCounterProps = {
+  className?: string;
+};
 
 /**
  * Add the runtime star count to a prerendered header without a client-side token.
- * No props; hides the optional count while unavailable and cancels on unmount.
+ * Hides the optional count while unavailable and cancels the request on unmount.
  */
-export function StarCounter() {
+export function StarCounter({ className }: StarCounterProps) {
   const [stars, setStars] = useState<number | null>(null);
 
   useEffect(() => {
@@ -37,9 +42,15 @@ export function StarCounter() {
 
   if (stars === null) return null;
   return (
-    <>
-      <StarFilledIcon className="size-4 transition-colors duration-300 group-hover:text-yellow-500" />
-      <NumberTicker className="font-mono tabular-nums" value={stars} />
-    </>
+    <span className={cn("inline-flex items-center gap-1", className)}>
+      <StarFilledIcon
+        className="size-3.5 text-[var(--df-accent)] transition-colors duration-150 group-hover:text-[var(--df-accent-strong)]"
+        aria-hidden="true"
+      />
+      <NumberTicker
+        className="font-mono text-xs font-medium text-inherit tabular-nums"
+        value={stars}
+      />
+    </span>
   );
 }

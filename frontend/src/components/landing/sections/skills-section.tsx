@@ -1,39 +1,51 @@
 "use client";
 
-import dynamic from "next/dynamic";
-import { useRef } from "react";
+import { DEFAULT_LOCALE, type Locale } from "@/core/i18n/locale";
 
-import { useRenderActivity } from "@/core/dom/render-activity";
-import { cn } from "@/lib/utils";
-
+import ProgressiveSkillsAnimation from "../progressive-skills-animation";
 import { Section } from "../section";
 
-const ProgressiveSkillsAnimation = dynamic(
-  () => import("../progressive-skills-animation"),
-  { ssr: false },
-);
+type SkillsCopy = {
+  eyebrow: string;
+  title: string;
+  subtitle: string;
+};
 
-export function SkillsSection({ className }: { className?: string }) {
-  const animationRef = useRef<HTMLDivElement>(null);
-  const renderAnimation = useRenderActivity(animationRef, false);
+const SKILLS_COPY: Record<Locale, SkillsCopy> = {
+  "en-US": {
+    eyebrow: "Progressive Context",
+    title: "Agent Skills",
+    subtitle:
+      "DeerFlow scans lightweight skill manifests up front and loads full Markdown instructions and scripts only when a task matches — keeping context focused and fast.",
+  },
+  "zh-CN": {
+    eyebrow: "渐进式上下文",
+    title: "智能体技能（Agent Skills）",
+    subtitle:
+      "DeerFlow 启动时仅读取轻量级技能清单，仅在任务匹配时按需加载完整 Markdown 指令与脚本，既保持上下文精简，又支持随时扩展新能力。",
+  },
+};
+
+export function SkillsSection({
+  className,
+  locale = DEFAULT_LOCALE,
+}: {
+  className?: string;
+  locale?: Locale;
+}) {
+  const copy = SKILLS_COPY[locale] ?? SKILLS_COPY["en-US"];
 
   return (
     <Section
-      className={cn("h-[calc(100vh-64px)] w-full bg-white/2", className)}
-      title="Agent Skills"
-      subtitle={
-        <div>
-          Agent Skills are loaded progressively — only what&apos;s needed, when
-          it&apos;s needed.
-          <br />
-          Extend DeerFlow with your own skill files, or use our built-in
-          library.
-        </div>
-      }
+      id="skills"
+      index="02"
+      variant="default"
+      className={className}
+      eyebrow={copy.eyebrow}
+      title={copy.title}
+      subtitle={copy.subtitle}
     >
-      <div ref={animationRef} className="relative min-h-96 overflow-hidden">
-        {renderAnimation && <ProgressiveSkillsAnimation />}
-      </div>
+      <ProgressiveSkillsAnimation locale={locale} />
     </Section>
   );
 }

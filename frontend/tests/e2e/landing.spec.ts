@@ -3,7 +3,9 @@ import { expect, test } from "@playwright/test";
 import { mockLangGraphAPI } from "./utils/mock-api";
 
 test.describe("Landing page", () => {
-  test("renders the header and hero section", async ({ page }) => {
+  test("renders the header, hero, and interactive 3-tier architecture blueprint", async ({
+    page,
+  }) => {
     await page.goto("/");
 
     await expect(
@@ -14,8 +16,96 @@ test.describe("Landing page", () => {
 
     // "Get Started" call-to-action button in hero
     await expect(
-      page.getByRole("link", { name: /get started/i }),
+      page.locator("main").getByRole("link", { name: /get started/i }),
     ).toBeVisible();
+
+    // Interactive 3-tier Agent Harness Blueprint renders core runtime & modules
+    const diagram = page.locator("#architecture");
+    await expect(diagram).toBeVisible();
+    await expect(diagram.getByText("Lead Agent Loop")).toBeVisible();
+    await expect(diagram.getByText("Subagent Orchestrator")).toBeVisible();
+    await expect(diagram.getByText("Models")).toBeVisible();
+    await expect(diagram.getByText("Sandboxes")).toBeVisible();
+    await expect(diagram.getByText("Skills")).toBeVisible();
+    await expect(diagram.getByText("MCP Tools")).toBeVisible();
+
+    const trace = diagram.getByTestId("architecture-trace");
+    await expect(trace).toContainText("skill:deep-research");
+
+    // Switching workflow mode updates the live execution trace
+    const sandboxTab = diagram.getByRole("tab", { name: "Code & Sandbox" });
+    await sandboxTab.click();
+    await expect(sandboxTab).toHaveAttribute("aria-selected", "true");
+    await expect(trace).toContainText("sandbox:exec tests");
+  });
+
+  test("defaults to light theme and toggles dark mode", async ({ page }) => {
+    await page.goto("/");
+
+    const html = page.locator("html");
+    await expect(html).not.toHaveClass(/\bdark\b/);
+
+    await page.getByRole("button", { name: /switch to dark theme/i }).click();
+    await expect(html).toHaveClass(/\bdark\b/);
+
+    await page.getByRole("button", { name: /switch to light theme/i }).click();
+    await expect(html).not.toHaveClass(/\bdark\b/);
+  });
+
+  test("toggles landing copy between English and Chinese", async ({ page }) => {
+    await page.goto("/");
+
+    await expect(page.locator("h1")).toContainText(
+      "DeerFlow: Open-Source SuperAgent Harness.",
+    );
+
+    await page.getByRole("button", { name: /switch language/i }).click();
+    await page.getByRole("menuitem", { name: /简体中文/ }).click();
+    await expect(page.getByRole("menu")).toBeHidden();
+
+    await expect(page.locator("h1")).toContainText(
+      "DeerFlow：开源超级智能体引擎",
+    );
+    await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
+
+    await page.getByRole("button", { name: "切换语言" }).click();
+    await page.getByRole("menuitem", { name: /English/ }).click();
+    await expect(page.getByRole("menu")).toBeHidden();
+
+    await expect(page.locator("h1")).toContainText(
+      "DeerFlow: Open-Source SuperAgent Harness.",
+    );
+    await expect(page.locator("html")).toHaveAttribute("lang", "en-US");
+  });
+
+  test("shows announcement banner and allows dismissal", async ({ page }) => {
+    await page.goto("/");
+
+    const dismissButton = page.getByRole("button", {
+      name: /dismiss announcement/i,
+    });
+    await expect(dismissButton).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          getComputedStyle(document.documentElement)
+            .getPropertyValue("--df-header-height")
+            .trim(),
+        ),
+      )
+      .toBe("100px");
+
+    await dismissButton.click();
+    await expect(dismissButton).toBeHidden();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          getComputedStyle(document.documentElement)
+            .getPropertyValue("--df-header-height")
+            .trim(),
+        ),
+      )
+      .toBe("64px");
   });
 
   for (const width of [320, 375, 390]) {
@@ -35,7 +125,9 @@ test.describe("Landing page", () => {
 
     await page.goto("/");
 
-    const getStarted = page.getByRole("link", { name: /get started/i });
+    const getStarted = page
+      .locator("main")
+      .getByRole("link", { name: /get started/i });
     await getStarted.click();
 
     // Should redirect to /workspace/chats/new

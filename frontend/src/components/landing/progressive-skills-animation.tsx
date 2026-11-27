@@ -1,697 +1,839 @@
 "use client";
 
 import {
-  Folder,
-  FileText,
-  Search,
-  Globe,
+  ArrowRight,
   Check,
-  Sparkles,
-  Terminal,
-  Play,
+  FileCode2,
+  FolderOpen,
+  Layers,
   Pause,
+  Play,
+  RotateCcw,
+  Terminal,
 } from "lucide-react";
-import { motion, AnimatePresence } from "motion/react";
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import { Tooltip } from "@/components/workspace/tooltip";
+import { usePrefersReducedMotion } from "@/core/dom/render-activity";
+import { DEFAULT_LOCALE, type Locale } from "@/core/i18n/locale";
+import { cn } from "@/lib/utils";
 
-type AnimationPhase =
-  | "idle"
-  | "user-input"
-  | "scanning"
-  | "load-skill"
-  | "load-template"
-  | "researching"
-  | "load-frontend"
-  | "building"
-  | "load-deploy"
-  | "deploying"
-  | "done";
+type ProgressionStepId = "discover" | "load" | "execute";
 
-interface FileItem {
-  name: string;
-  type: "folder" | "file";
-  indent: number;
-  highlight?: boolean;
-  active?: boolean;
-  done?: boolean;
-  dragging?: boolean;
-}
-
-const searchSteps = [
-  { type: "search", text: "mRNA lipid nanoparticle delivery 2024" },
-  { type: "fetch", text: "nature.com/articles/s41587-024..." },
-  { type: "search", text: "LNP ionizable lipids efficiency" },
-  { type: "fetch", text: "pubs.acs.org/doi/10.1021/..." },
-  { type: "search", text: "targeted mRNA tissue-specific" },
+const STEP_ORDER: readonly ProgressionStepId[] = [
+  "discover",
+  "load",
+  "execute",
 ];
 
-// Animation duration configuration - adjust the duration for each step here
-const ANIMATION_DELAYS = {
-  "user-input": 0, // User input phase duration (milliseconds)
-  scanning: 2000, // Scanning phase duration
-  "load-skill": 1500, // Load skill phase duration
-  "load-template": 1200, // Load template phase duration
-  researching: 800, // Researching phase duration
-  "load-frontend": 800, // Load frontend phase duration
-  building: 1200, // Building phase duration
-  "load-deploy": 2500, // Load deploy phase duration
-  deploying: 1200, // Deploying phase duration
-  done: 2500, // Done phase duration (final step)
-} as const;
+const STEP_DURATION_MS: Record<ProgressionStepId, number> = {
+  discover: 2200,
+  load: 2400,
+  execute: 3200,
+};
 
-export default function ProgressiveSkillsAnimation() {
-  const [phase, setPhase] = useState<AnimationPhase>("idle");
-  const [searchIndex, setSearchIndex] = useState(0);
-  const [buildIndex, setBuildIndex] = useState(0);
-  const [, setChatMessages] = useState<React.ReactNode[]>([]);
-  const [, setShowWorkspace] = useState(false);
+type SkillId = "deep-research" | "slide-deck" | "data-analysis" | "code-review";
+
+type SkillSpec = {
+  id: SkillId;
+  manifestTokens: number;
+  fullTokens: number;
+  tagline: string;
+  prompt: string;
+  triggers: string[];
+  templateFile: string;
+  instructions: string[];
+  command: string;
+  outputs: string[];
+  artifactPath: string;
+};
+
+type StepMeta = {
+  id: ProgressionStepId;
+  number: string;
+  title: string;
+  caption: string;
+};
+
+type InspectorCopy = {
+  railAriaLabel: string;
+  skillsListAriaLabel: string;
+  mountPath: string;
+  installedHeading: string;
+  manifestOnlyLabel: string;
+  loadedLabel: string;
+  executingLabel: string;
+  fullPromptSuffix: string;
+  manifestSuffix: string;
+  budgetTitle: string;
+  budgetSavedPrefix: string;
+  budgetSavedSuffix: string;
+  eagerPrefix: string;
+  play: string;
+  pause: string;
+  reset: string;
+  promptLabel: string;
+  frontmatterHeading: string;
+  instructionsHeading: string;
+  sandboxHeading: string;
+  onDemandHint: string;
+  executeHint: string;
+  artifactDelivered: string;
+  stepStatus: Record<ProgressionStepId, string>;
+  steps: StepMeta[];
+  skills: SkillSpec[];
+};
+
+const INSPECTOR_COPY: Record<Locale, InspectorCopy> = {
+  "en-US": {
+    railAriaLabel: "Skill loading progression steps",
+    skillsListAriaLabel: "DeerFlow skills",
+    mountPath: "/mnt/skills/",
+    installedHeading: "Skill Registry",
+    manifestOnlyLabel: "manifest",
+    loadedLabel: "loaded",
+    executingLabel: "running",
+    fullPromptSuffix: "tok full",
+    manifestSuffix: "~180 tokens",
+    budgetTitle: "Context budget",
+    budgetSavedPrefix: "Saved",
+    budgetSavedSuffix: "vs eager load",
+    eagerPrefix: "Eager all-skills:",
+    play: "Play",
+    pause: "Pause",
+    reset: "Reset",
+    promptLabel: "MATCHED TASK",
+    frontmatterHeading: "01 · YAML Frontmatter (always indexed)",
+    instructionsHeading: "02 · On-Demand Instructions & References",
+    sandboxHeading: "03 · Sandbox Execution Trace",
+    onDemandHint:
+      "Select step 02 or press Play to inject the full SKILL.md instructions.",
+    executeHint:
+      "Advance to step 03 to run bundled scripts inside the thread sandbox.",
+    artifactDelivered: "Deliverable saved",
+    stepStatus: {
+      discover: "Scanning frontmatter",
+      load: "Injecting matched SKILL.md",
+      execute: "Running in sandbox",
+    },
+    steps: [
+      {
+        id: "discover",
+        number: "01",
+        title: "Discover Manifest",
+        caption: "Index ~180 tokens of YAML metadata per skill.",
+      },
+      {
+        id: "load",
+        number: "02",
+        title: "Load On-Demand",
+        caption: "Read full SKILL.md & templates only on match.",
+      },
+      {
+        id: "execute",
+        number: "03",
+        title: "Execute in Sandbox",
+        caption: "Run bundled scripts and emit verified outputs.",
+      },
+    ],
+    skills: [
+      {
+        id: "deep-research",
+        manifestTokens: 180,
+        fullTokens: 1420,
+        tagline: "Multi-source synthesis & cited reports",
+        prompt:
+          "Compare open-source agent sandboxes and compile a cited engineering brief.",
+        triggers: ["research", "citations", "literature", "brief"],
+        templateFile: "references/citation-matrix.md",
+        instructions: [
+          "Decompose the query into 3–5 orthogonal sub-questions before searching.",
+          "Cross-check claims across primary documentation and benchmark repos.",
+          "Write structured findings with inline source links to outputs/report.md.",
+        ],
+        command: "python /mnt/skills/deep-research/scripts/verify_links.py",
+        outputs: [
+          "Verified 18 primary citations (0 broken)",
+          "Compiled structured matrix (6 runtimes × 5 dimensions)",
+        ],
+        artifactPath: "/mnt/user-data/outputs/sandbox-brief.md",
+      },
+      {
+        id: "slide-deck",
+        manifestTokens: 175,
+        fullTokens: 1180,
+        tagline: "Structured narrative & HTML/PPTX decks",
+        prompt:
+          "Turn the Q3 architecture review notes into a 10-slide executive deck.",
+        triggers: ["slides", "presentation", "deck", "pptx"],
+        templateFile: "templates/editorial-grid.json",
+        instructions: [
+          "Outline one thesis per slide with max 35 words of body copy.",
+          "Select matching visual layout blocks from editorial-grid.json.",
+          "Render vector charts before assembling the final .pptx archive.",
+        ],
+        command:
+          "node /mnt/skills/slide-deck/scripts/build_deck.mjs --theme warm",
+        outputs: [
+          "Rendered 10 slides with calibrated typography",
+          "Embedded 3 SVG architecture diagrams",
+        ],
+        artifactPath: "/mnt/user-data/outputs/q3-architecture.pptx",
+      },
+      {
+        id: "data-analysis",
+        manifestTokens: 185,
+        fullTokens: 1540,
+        tagline: "Exploratory notebooks & visual charts",
+        prompt:
+          "Analyze churn drivers in subscriptions.csv and export cohort charts.",
+        triggers: ["csv", "pandas", "cohort", "statistics"],
+        templateFile: "references/chart-spec.md",
+        instructions: [
+          "Profile schema, missing values, and outlier quantiles before modeling.",
+          "Compute cohort retention tables with confidence intervals.",
+          "Export clean high-DPI PNG figures alongside a summary notebook.",
+        ],
+        command: "python /mnt/skills/data-analysis/scripts/cohort_report.py",
+        outputs: [
+          "Profiled 148,290 rows across 14 columns",
+          "Generated retention_heatmap.png & summary.html",
+        ],
+        artifactPath: "/mnt/user-data/outputs/churn-analysis.html",
+      },
+      {
+        id: "code-review",
+        manifestTokens: 170,
+        fullTokens: 1060,
+        tagline: "Diff auditing, test gaps & risk checks",
+        prompt:
+          "Audit the sandbox provisioner PR for concurrency and cleanup bugs.",
+        triggers: ["review", "diff", "audit", "regression"],
+        templateFile: "checklists/async-safety.md",
+        instructions: [
+          "Inspect state transitions, timeout cleanup, and error propagation.",
+          "Flag blocking I/O or leaked handles on async request paths.",
+          "Propose minimal reproduction tests for every high-severity finding.",
+        ],
+        command: "python /mnt/skills/code-review/scripts/scan_diff.py --strict",
+        outputs: [
+          "Checked 12 changed modules against async-safety.md",
+          "Flagged 2 lifecycle edge cases with patch suggestions",
+        ],
+        artifactPath: "/mnt/user-data/outputs/review-summary.md",
+      },
+    ],
+  },
+  "zh-CN": {
+    railAriaLabel: "技能加载三阶段进度",
+    skillsListAriaLabel: "DeerFlow 技能列表",
+    mountPath: "/mnt/skills/",
+    installedHeading: "技能注册表",
+    manifestOnlyLabel: "仅清单",
+    loadedLabel: "已加载",
+    executingLabel: "执行中",
+    fullPromptSuffix: "tok 完整",
+    manifestSuffix: "~180 tokens",
+    budgetTitle: "上下文 Token 预算",
+    budgetSavedPrefix: "节省",
+    budgetSavedSuffix: "（对比全量加载）",
+    eagerPrefix: "全量加载开销：",
+    play: "播放",
+    pause: "暂停",
+    reset: "重置",
+    promptLabel: "命中任务",
+    frontmatterHeading: "01 · YAML 元数据清单（始终常驻索引）",
+    instructionsHeading: "02 · 按需注入的技能指令与参考模板",
+    sandboxHeading: "03 · 沙箱执行轨迹",
+    onDemandHint: "点击步骤 02 或播放按钮，查看完整 SKILL.md 按需注入效果。",
+    executeHint: "切换至步骤 03，查看在会话沙箱中运行内置脚本与产物交付。",
+    artifactDelivered: "交付物已生成",
+    stepStatus: {
+      discover: "扫描前置元数据",
+      load: "按需注入 SKILL.md",
+      execute: "沙箱内执行脚本",
+    },
+    steps: [
+      {
+        id: "discover",
+        number: "01",
+        title: "扫描技能清单",
+        caption: "每个技能仅索引约 180 tokens 的 YAML 元数据。",
+      },
+      {
+        id: "load",
+        number: "02",
+        title: "按需加载上下文",
+        caption: "仅在任务命中时读取完整 SKILL.md 与模板。",
+      },
+      {
+        id: "execute",
+        number: "03",
+        title: "沙箱内执行交付",
+        caption: "运行配套脚本并在隔离目录输出可验证成果。",
+      },
+    ],
+    skills: [
+      {
+        id: "deep-research",
+        manifestTokens: 180,
+        fullTokens: 1420,
+        tagline: "多源交叉检索与可溯源研究报告",
+        prompt: "对比主流开源 Agent 沙箱方案，输出带引用来源的工程评估报告。",
+        triggers: ["research", "citations", "literature", "brief"],
+        templateFile: "references/citation-matrix.md",
+        instructions: [
+          "先将研究目标拆解为 3–5 个正交子问题再并行检索。",
+          "优先核对官方文档与基准测试仓库，避免二手转述偏差。",
+          "附带行内引用链接输出结构化报告至 outputs/report.md。",
+        ],
+        command: "python /mnt/skills/deep-research/scripts/verify_links.py",
+        outputs: [
+          "已校验 18 条一手引用链接（0 失效）",
+          "已生成 6 种运行时 × 5 个维度的对比矩阵",
+        ],
+        artifactPath: "/mnt/user-data/outputs/sandbox-brief.md",
+      },
+      {
+        id: "slide-deck",
+        manifestTokens: 175,
+        fullTokens: 1180,
+        tagline: "结构化叙事与 HTML/PPTX 演示文稿",
+        prompt: "将 Q3 架构评审记录整理为 10 页高管汇报演示文稿。",
+        triggers: ["slides", "presentation", "deck", "pptx"],
+        templateFile: "templates/editorial-grid.json",
+        instructions: [
+          "每页仅聚焦一个核心论点，正文控制在精炼要点内。",
+          "依据 editorial-grid.json 匹配信息密度与版式网格。",
+          "先渲染矢量图表，再打包生成可编辑 .pptx 交付文件。",
+        ],
+        command:
+          "node /mnt/skills/slide-deck/scripts/build_deck.mjs --theme warm",
+        outputs: ["已渲染 10 页统一排版演示文稿", "已嵌入 3 张 SVG 架构示意图"],
+        artifactPath: "/mnt/user-data/outputs/q3-architecture.pptx",
+      },
+      {
+        id: "data-analysis",
+        manifestTokens: 185,
+        fullTokens: 1540,
+        tagline: "探索性数据分析与可视化图表",
+        prompt: "分析 subscriptions.csv 中的用户流失驱动因素并输出留存图表。",
+        triggers: ["csv", "pandas", "cohort", "statistics"],
+        templateFile: "references/chart-spec.md",
+        instructions: [
+          "建模前先完成字段分布、缺失值与异常分位检查。",
+          "按队列计算留存率曲线及显著性置信区间。",
+          "导出高分辨率图表与可交互分析报告 HTML。",
+        ],
+        command: "python /mnt/skills/data-analysis/scripts/cohort_report.py",
+        outputs: [
+          "已分析 148,290 行 × 14 列订阅记录",
+          "已生成 retention_heatmap.png 与 summary.html",
+        ],
+        artifactPath: "/mnt/user-data/outputs/churn-analysis.html",
+      },
+      {
+        id: "code-review",
+        manifestTokens: 170,
+        fullTokens: 1060,
+        tagline: "变更审计、并发风险与测试缺口定位",
+        prompt: "审查沙箱调度器 PR 中的异步并发与资源释放隐患。",
+        triggers: ["review", "diff", "audit", "regression"],
+        templateFile: "checklists/async-safety.md",
+        instructions: [
+          "逐项检查状态机迁移、超时回收与异常传播路径。",
+          "排查异步请求链路中的阻塞 I/O 与未关闭句柄。",
+          "针对每条高危问题给出最小复现测试与修复建议。",
+        ],
+        command: "python /mnt/skills/code-review/scripts/scan_diff.py --strict",
+        outputs: [
+          "已按 async-safety.md 扫描 12 个变更模块",
+          "定位 2 处生命周期边界问题并附修复补丁",
+        ],
+        artifactPath: "/mnt/user-data/outputs/review-summary.md",
+      },
+    ],
+  },
+};
+
+export default function ProgressiveSkillsAnimation({
+  locale = DEFAULT_LOCALE,
+  className,
+}: {
+  locale?: Locale;
+  className?: string;
+}) {
+  const copy = INSPECTOR_COPY[locale] ?? INSPECTOR_COPY["en-US"];
+  const reducedMotion = usePrefersReducedMotion();
+  const [activeStep, setActiveStep] = useState<ProgressionStepId>("load");
+  const [selectedSkillId, setSelectedSkillId] =
+    useState<SkillId>("deep-research");
   const [isPlaying, setIsPlaying] = useState(false);
-  const [hasPlayed, setHasPlayed] = useState(false);
   const [hasAutoPlayed, setHasAutoPlayed] = useState(false);
-  const chatMessagesRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const timeoutsRef = useRef<NodeJS.Timeout[]>([]);
 
-  // Additional display duration after the final step (done) completes, used to show the final result
-  const FINAL_DISPLAY_DURATION = 3000; // milliseconds
+  const stepIndex = STEP_ORDER.indexOf(activeStep);
+  const selectedSkill =
+    copy.skills.find((skill) => skill.id === selectedSkillId) ??
+    copy.skills[0]!;
 
-  // Play animation only when isPlaying is true
+  const totalManifestTokens = copy.skills.reduce(
+    (sum, skill) => sum + skill.manifestTokens,
+    0,
+  );
+  const totalEagerTokens = copy.skills.reduce(
+    (sum, skill) => sum + skill.fullTokens,
+    0,
+  );
+  const activeTokens =
+    stepIndex === 0
+      ? totalManifestTokens
+      : totalManifestTokens -
+        selectedSkill.manifestTokens +
+        selectedSkill.fullTokens;
+  const savedPercent = Math.round(
+    ((totalEagerTokens - activeTokens) / totalEagerTokens) * 100,
+  );
+  const usageWidthPercent = Math.min(
+    100,
+    Math.max(12, Math.round((activeTokens / totalEagerTokens) * 100)),
+  );
+
   useEffect(() => {
-    if (!isPlaying) {
-      // Clear all timeouts when paused
-      timeoutsRef.current.forEach(clearTimeout);
-      timeoutsRef.current = [];
+    if (reducedMotion) {
+      setIsPlaying(false);
+      setActiveStep("execute");
       return;
     }
-
-    const timeline = [
-      { phase: "user-input" as const, delay: ANIMATION_DELAYS["user-input"] },
-      { phase: "scanning" as const, delay: ANIMATION_DELAYS.scanning },
-      { phase: "load-skill" as const, delay: ANIMATION_DELAYS["load-skill"] },
-      {
-        phase: "load-template" as const,
-        delay: ANIMATION_DELAYS["load-template"],
-      },
-      { phase: "researching" as const, delay: ANIMATION_DELAYS.researching },
-      {
-        phase: "load-frontend" as const,
-        delay: ANIMATION_DELAYS["load-frontend"],
-      },
-      { phase: "building" as const, delay: ANIMATION_DELAYS.building },
-      { phase: "load-deploy" as const, delay: ANIMATION_DELAYS["load-deploy"] },
-      { phase: "deploying" as const, delay: ANIMATION_DELAYS.deploying },
-      { phase: "done" as const, delay: ANIMATION_DELAYS.done },
-    ];
-
-    let totalDelay = 0;
-    const timeouts: NodeJS.Timeout[] = [];
-
-    timeline.forEach(({ phase, delay }) => {
-      totalDelay += delay;
-      timeouts.push(setTimeout(() => setPhase(phase), totalDelay));
-    });
-
-    // Reset after animation completes
-    // Total duration for the final step = ANIMATION_DELAYS["done"] + FINAL_DISPLAY_DURATION
-    timeouts.push(
-      setTimeout(() => {
-        setPhase("idle");
-        setChatMessages([]);
-        setSearchIndex(0);
-        setBuildIndex(0);
-        setShowWorkspace(false);
-        setIsPlaying(false);
-      }, totalDelay + FINAL_DISPLAY_DURATION),
-    );
-
-    timeoutsRef.current = timeouts;
-
-    return () => {
-      timeouts.forEach(clearTimeout);
-      timeoutsRef.current = [];
-    };
-  }, [isPlaying]);
-
-  const handlePlay = () => {
-    setIsPlaying(true);
-    setHasPlayed(true);
-    setPhase("idle");
-    setChatMessages([]);
-    setSearchIndex(0);
-    setBuildIndex(0);
-    setShowWorkspace(false);
-  };
-
-  const handleTogglePlayPause = () => {
-    if (isPlaying) {
-      setIsPlaying(false);
-    } else {
-      // If animation hasn't started or is at idle, restart from beginning
-      if (phase === "idle") {
-        handlePlay();
-      } else {
-        // Resume from current phase
-        setIsPlaying(true);
-      }
-    }
-  };
-
-  // Auto-play when component enters viewport for the first time
-  useEffect(() => {
     if (hasAutoPlayed || !containerRef.current) return;
+    if (typeof IntersectionObserver === "undefined") return;
 
-    const containerElement = containerRef.current;
+    const element = containerRef.current;
     const observer = new IntersectionObserver(
       (entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting && !hasAutoPlayed && !isPlaying) {
-            setHasAutoPlayed(true);
-            // Small delay before auto-playing for better UX
-            setTimeout(() => {
-              setIsPlaying(true);
-              setHasPlayed(true);
-              setPhase("idle");
-              setChatMessages([]);
-              setSearchIndex(0);
-              setBuildIndex(0);
-              setShowWorkspace(false);
-            }, 300);
-          }
-        });
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setHasAutoPlayed(true);
+          setActiveStep("discover");
+          setIsPlaying(true);
+        }
       },
-      {
-        threshold: 0.3, // Trigger when 30% of the component is visible
-        rootMargin: "0px",
-      },
+      { threshold: 0.25 },
     );
 
-    observer.observe(containerElement);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [hasAutoPlayed, reducedMotion]);
 
-    return () => {
-      if (containerElement) {
-        observer.unobserve(containerElement);
-      }
-    };
-  }, [hasAutoPlayed, isPlaying]);
-
-  // Handle search animation
   useEffect(() => {
-    if (phase === "researching" && searchIndex < searchSteps.length) {
-      const timer = setTimeout(() => {
-        setSearchIndex((i) => i + 1);
-      }, 350);
-      return () => clearTimeout(timer);
-    }
-  }, [phase, searchIndex]);
+    if (!isPlaying || reducedMotion) return;
 
-  // Handle build animation
-  useEffect(() => {
-    if (phase === "building" && buildIndex < 3) {
-      const timer = setTimeout(() => {
-        setBuildIndex((i) => i + 1);
-      }, 600);
-      return () => clearTimeout(timer);
-    }
-    if (phase === "building") {
-      setShowWorkspace(true);
-    }
-  }, [phase, buildIndex]);
+    const timer = setTimeout(() => {
+      const nextIdx = (stepIndex + 1) % STEP_ORDER.length;
+      setActiveStep(STEP_ORDER[nextIdx] ?? "discover");
+    }, STEP_DURATION_MS[activeStep]);
 
-  // Auto scroll chat to bottom when messages change
-  useEffect(() => {
-    if (chatMessagesRef.current && phase !== "idle") {
-      chatMessagesRef.current.scrollTo({
-        top: chatMessagesRef.current.scrollHeight,
-        behavior: "smooth",
-      });
-    }
-  }, [phase, searchIndex, buildIndex]);
+    return () => clearTimeout(timer);
+  }, [activeStep, isPlaying, reducedMotion, stepIndex]);
 
-  const getFileTree = (): FileItem[] => {
-    const base: FileItem[] = [
-      {
-        name: "deep-search",
-        type: "folder",
-        indent: 0,
-        highlight: phase === "scanning",
-        active: ["load-skill", "load-template", "researching"].includes(phase),
-        done: [
-          "researching",
-          "load-frontend",
-          "building",
-          "load-deploy",
-          "deploying",
-          "done",
-        ].includes(phase),
-      },
-      {
-        name: "SKILL.md",
-        type: "file",
-        indent: 1,
-        highlight: phase === "scanning",
-        dragging: phase === "load-skill",
-        done: [
-          "load-template",
-          "researching",
-          "load-frontend",
-          "building",
-          "load-deploy",
-          "deploying",
-          "done",
-        ].includes(phase),
-      },
-      {
-        name: "biotech.md",
-        type: "file",
-        indent: 1,
-        highlight: phase === "load-template",
-        dragging: phase === "load-template",
-        done: [
-          "researching",
-          "load-frontend",
-          "building",
-          "load-deploy",
-          "deploying",
-          "done",
-        ].includes(phase),
-      },
-      { name: "computer-science.md", type: "file", indent: 1 },
-      { name: "physics.md", type: "file", indent: 1 },
-      {
-        name: "frontend-design",
-        type: "folder",
-        indent: 0,
-        highlight: phase === "scanning",
-        active: ["load-frontend", "building"].includes(phase),
-        done: ["building", "load-deploy", "deploying", "done"].includes(phase),
-      },
-      {
-        name: "SKILL.md",
-        type: "file",
-        indent: 1,
-        highlight: phase === "scanning",
-        dragging: phase === "load-frontend",
-        done: ["building", "load-deploy", "deploying", "done"].includes(phase),
-      },
-      {
-        name: "deploy",
-        type: "folder",
-        indent: 0,
-        highlight: phase === "scanning",
-        active: ["load-deploy", "deploying"].includes(phase),
-        done: ["deploying", "done"].includes(phase),
-      },
-      {
-        name: "SKILL.md",
-        type: "file",
-        indent: 1,
-        highlight: phase === "scanning",
-        dragging: phase === "load-deploy",
-        done: ["deploying", "done"].includes(phase),
-      },
-      {
-        name: "scripts",
-        type: "folder",
-        indent: 1,
-        done: ["deploying", "done"].includes(phase),
-      },
-      {
-        name: "deploy.sh",
-        type: "file",
-        indent: 2,
-        done: ["deploying", "done"].includes(phase),
-      },
-    ];
-    return base;
+  const handleSelectStep = (step: ProgressionStepId) => {
+    setIsPlaying(false);
+    setActiveStep(step);
   };
 
-  const workspaceFiles = ["index.html", "index.css", "index.js"];
+  const handleSelectSkill = (skillId: SkillId) => {
+    setIsPlaying(false);
+    setSelectedSkillId(skillId);
+  };
+
+  const handleTogglePlay = () => {
+    if (isPlaying) {
+      setIsPlaying(false);
+      return;
+    }
+    if (activeStep === "execute") {
+      setActiveStep("discover");
+    }
+    setIsPlaying(true);
+  };
+
+  const handleReset = () => {
+    setIsPlaying(false);
+    setActiveStep("discover");
+    setSelectedSkillId("deep-research");
+  };
 
   return (
     <div
       ref={containerRef}
-      className="relative flex h-[calc(100vh-280px)] w-full items-center justify-center overflow-hidden p-8"
+      className={cn("w-full min-w-0 space-y-6", className)}
     >
-      {/* Overlay and Play Button */}
-      <AnimatePresence>
-        {!isPlaying && !hasPlayed && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="absolute inset-0 z-50 flex items-center justify-center"
-          >
-            <motion.button
-              initial={{ scale: 0.8, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.8, opacity: 0 }}
-              onClick={handlePlay}
-              className="group flex flex-col items-center gap-4 transition-transform hover:scale-105 active:scale-95"
+      {/* Horizontal 3-Step Progression Rail */}
+      <div
+        role="group"
+        aria-label={copy.railAriaLabel}
+        className="grid grid-cols-1 gap-3 md:grid-cols-3 md:gap-4"
+      >
+        {copy.steps.map((step, idx) => {
+          const isCurrent = step.id === activeStep;
+          const isCompleted = idx < stepIndex;
+
+          return (
+            <button
+              key={step.id}
+              type="button"
+              onClick={() => handleSelectStep(step.id)}
+              aria-pressed={isCurrent}
+              className={cn(
+                "group focus-visible:ring-ring/50 relative flex min-w-0 flex-col rounded-xl border p-4 text-left transition-all duration-200 focus-visible:ring-2 focus-visible:outline-none sm:p-5",
+                isCurrent
+                  ? "border-[var(--df-accent)]/60 bg-[var(--df-panel)] shadow-[0_8px_22px_var(--df-shadow)]"
+                  : "border-[var(--df-border)] bg-[var(--df-surface)] hover:border-[var(--df-border-strong)] hover:bg-[var(--df-panel)]",
+              )}
             >
-              <div className="flex h-24 w-24 items-center justify-center rounded-full bg-white/10 backdrop-blur-md transition-all group-hover:bg-white/20">
-                <Play
-                  size={48}
-                  className="ml-1 text-white transition-transform group-hover:scale-110"
-                  fill="white"
-                />
+              <div className="flex items-center justify-between gap-2">
+                <span
+                  className={cn(
+                    "inline-flex size-7 shrink-0 items-center justify-center rounded-full font-mono text-xs font-semibold tabular-nums transition-colors duration-150",
+                    isCurrent
+                      ? "bg-[var(--df-cta)] text-[var(--df-cta-fg)]"
+                      : isCompleted
+                        ? "bg-[var(--df-accent-soft,rgba(28,93,74,0.09))] text-[var(--df-accent)]"
+                        : "border border-[var(--df-border-strong)] bg-[var(--df-panel)] text-[var(--df-muted-fg)]",
+                  )}
+                >
+                  {isCompleted ? (
+                    <Check className="size-3.5" aria-hidden="true" />
+                  ) : (
+                    step.number
+                  )}
+                </span>
+
+                {idx < copy.steps.length - 1 && (
+                  <ArrowRight
+                    className={cn(
+                      "hidden size-4 shrink-0 md:block",
+                      isCurrent || isCompleted
+                        ? "text-[var(--df-accent)]"
+                        : "text-[var(--df-border-strong)]",
+                    )}
+                    aria-hidden="true"
+                  />
+                )}
               </div>
-              <span className="text-lg font-medium text-white">
-                Click to play
+
+              <p className="mt-3 text-sm font-semibold text-[var(--df-ink)] sm:text-base">
+                {step.number} {step.title}
+              </p>
+              <p className="mt-1 text-xs leading-5 text-[var(--df-muted-fg)] sm:text-sm">
+                {step.caption}
+              </p>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* 2-Pane Skill Inspector */}
+      <div className="w-full min-w-0 overflow-hidden rounded-2xl border border-[var(--df-border)] bg-[var(--df-panel)] shadow-[0_8px_26px_var(--df-shadow)]">
+        {/* Inspector Header */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--df-border)] bg-[var(--df-bg-soft)] px-4 py-3 sm:px-6">
+          <div className="flex min-w-0 flex-wrap items-center gap-2.5">
+            <span
+              className="size-2 shrink-0 rounded-full bg-[var(--df-accent)]"
+              aria-hidden="true"
+            />
+            <span className="font-mono text-xs font-semibold text-[var(--df-ink)]">
+              {copy.mountPath}
+            </span>
+            <span className="text-[var(--df-border-strong)]" aria-hidden="true">
+              /
+            </span>
+            <span className="truncate font-mono text-xs text-[var(--df-accent)]">
+              {copy.stepStatus[activeStep]}
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--df-accent-soft,rgba(28,93,74,0.09))] px-3 py-1 font-mono text-[11px] font-medium text-[var(--df-accent)] tabular-nums">
+              <Layers className="size-3 shrink-0" aria-hidden="true" />
+              <span>
+                {activeTokens.toLocaleString()} /{" "}
+                {totalEagerTokens.toLocaleString()} tok
               </span>
-            </motion.button>
-          </motion.div>
-        )}
-      </AnimatePresence>
+            </span>
 
-      {/* Bottom Left Play/Pause Button */}
-      <Tooltip content="Play / Pause">
-        <div className="absolute bottom-12 left-12 z-40 flex items-center gap-2">
-          <motion.button
-            initial={{ opacity: 0, scale: 0.8 }}
-            animate={{ opacity: 1, scale: 1 }}
-            onClick={handleTogglePlayPause}
-            className="flex h-12 w-12 items-center justify-center rounded-full bg-white/10 backdrop-blur-md transition-all hover:scale-110 hover:bg-white/20 active:scale-95"
-          >
-            {isPlaying ? (
-              <Pause size={24} className="text-white" fill="white" />
-            ) : (
-              <Play size={24} className="ml-0.5 text-white" fill="white" />
-            )}
-          </motion.button>
-          <span className="text-lg font-medium">
-            Click to {isPlaying ? "pause" : "play"}
-          </span>
-        </div>
-      </Tooltip>
+            <button
+              type="button"
+              onClick={handleTogglePlay}
+              aria-label={isPlaying ? copy.pause : copy.play}
+              className={cn(
+                "focus-visible:ring-ring/50 inline-flex min-h-[34px] items-center gap-1.5 rounded-full px-3.5 py-1 font-mono text-xs font-medium transition-colors duration-150 focus-visible:ring-2 focus-visible:outline-none",
+                isPlaying
+                  ? "bg-[var(--df-cta)] text-[var(--df-cta-fg)] hover:bg-[var(--df-cta-hover)]"
+                  : "border border-[var(--df-border-strong)] bg-[var(--df-panel)] text-[var(--df-ink)] hover:border-[var(--df-accent)] hover:text-[var(--df-accent)]",
+              )}
+            >
+              {isPlaying ? (
+                <Pause className="size-3.5" aria-hidden="true" />
+              ) : (
+                <Play className="size-3.5" aria-hidden="true" />
+              )}
+              <span>{isPlaying ? copy.pause : copy.play}</span>
+            </button>
 
-      <div className="flex h-full max-h-[700px] w-full max-w-6xl gap-8">
-        {/* Left: File Tree */}
-        <div className="flex flex-1 flex-col">
-          <motion.div
-            className="mb-4 font-mono text-sm text-zinc-500"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-          >
-            /mnt/skills/
-          </motion.div>
-
-          <div className="space-y-2">
-            {getFileTree().map((item, index) => (
-              <motion.div
-                key={`${item.name}-${index}`}
-                className={`flex items-center gap-3 text-lg font-medium transition-all duration-300 ${
-                  item.done
-                    ? "text-green-500"
-                    : item.dragging
-                      ? "translate-x-8 scale-105 text-blue-400"
-                      : item.active
-                        ? "text-white"
-                        : item.highlight
-                          ? "text-purple-400"
-                          : "text-zinc-600"
-                }`}
-                style={{ paddingLeft: `${item.indent * 24}px` }}
-                animate={
-                  item.done
-                    ? {
-                        scale: 1,
-                        opacity: 1,
-                      }
-                    : {}
-                }
-              >
-                {item.type === "folder" ? (
-                  <Folder
-                    size={20}
-                    className={
-                      item.done
-                        ? "text-green-500"
-                        : item.highlight
-                          ? "text-purple-400"
-                          : ""
-                    }
-                  />
-                ) : (
-                  <FileText
-                    size={20}
-                    className={
-                      item.done
-                        ? "text-green-500"
-                        : item.highlight
-                          ? "text-purple-400"
-                          : ""
-                    }
-                  />
-                )}
-                <span>{item.name}</span>
-                {item.done && <Check size={16} className="text-green-500" />}
-                {item.highlight && !item.done && (
-                  <Sparkles size={16} className="text-purple-400" />
-                )}
-              </motion.div>
-            ))}
+            <button
+              type="button"
+              onClick={handleReset}
+              aria-label={copy.reset}
+              className="focus-visible:ring-ring/50 inline-flex min-h-[34px] items-center justify-center rounded-full border border-[var(--df-border)] bg-[var(--df-panel)] px-2.5 py-1 text-[var(--df-muted-fg)] transition-colors duration-150 hover:border-[var(--df-accent)] hover:text-[var(--df-ink)] focus-visible:ring-2 focus-visible:outline-none"
+            >
+              <RotateCcw className="size-3.5" aria-hidden="true" />
+            </button>
           </div>
         </div>
 
-        {/* Right: Chat Interface */}
-        <div className="flex flex-1 flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/50">
-          {/* Chat Header */}
-          <div className="border-b border-zinc-800 p-4">
-            <div className="flex items-center gap-2">
-              <div className="h-3 w-3 rounded-full bg-green-500" />
-              <span className="text-sm text-zinc-400">DeerFlow Agent</span>
+        {/* Split Body */}
+        <div className="grid grid-cols-1 divide-y divide-[var(--df-border)] lg:grid-cols-12 lg:divide-x lg:divide-y-0">
+          {/* Left Pane: Interactive Skill Registry & Token Budget */}
+          <div className="flex min-w-0 flex-col justify-between bg-[var(--df-surface)] p-4 sm:p-6 lg:col-span-5">
+            <div>
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <span className="font-mono text-[11px] font-semibold tracking-[0.16em] text-[var(--df-muted-fg)] uppercase">
+                  {copy.installedHeading}
+                </span>
+                <span className="font-mono text-[11px] text-[var(--df-accent)]">
+                  {copy.manifestSuffix}
+                </span>
+              </div>
+
+              <div
+                role="group"
+                aria-label={copy.skillsListAriaLabel}
+                className="space-y-2"
+              >
+                {copy.skills.map((skill) => {
+                  const isSelected = skill.id === selectedSkill.id;
+                  const isFullLoaded = isSelected && stepIndex >= 1;
+                  const isRunning = isSelected && stepIndex === 2;
+
+                  return (
+                    <button
+                      key={skill.id}
+                      type="button"
+                      onClick={() => handleSelectSkill(skill.id)}
+                      aria-pressed={isSelected}
+                      className={cn(
+                        "focus-visible:ring-ring/50 flex w-full min-w-0 flex-col rounded-xl border p-3.5 text-left transition-all duration-150 focus-visible:ring-2 focus-visible:outline-none",
+                        isSelected
+                          ? "border-[var(--df-accent)]/60 bg-[var(--df-panel)] shadow-[0_4px_14px_var(--df-shadow)]"
+                          : "border-[var(--df-border-soft)] bg-[var(--df-panel)]/65 hover:border-[var(--df-border-strong)] hover:bg-[var(--df-panel)]",
+                      )}
+                    >
+                      <div className="flex w-full min-w-0 items-center justify-between gap-2">
+                        <span className="flex min-w-0 items-center gap-2 font-mono text-xs font-semibold text-[var(--df-ink)]">
+                          <FolderOpen
+                            className={cn(
+                              "size-3.5 shrink-0",
+                              isSelected
+                                ? "text-[var(--df-accent)]"
+                                : "text-[var(--df-muted-fg)]",
+                            )}
+                            aria-hidden="true"
+                          />
+                          <span className="truncate">{skill.id}</span>
+                        </span>
+
+                        <span
+                          className={cn(
+                            "shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px] font-medium",
+                            isRunning
+                              ? "bg-[var(--df-cta)] text-[var(--df-cta-fg)]"
+                              : isFullLoaded
+                                ? "bg-[var(--df-accent-soft,rgba(28,93,74,0.09))] text-[var(--df-accent)]"
+                                : "border border-[var(--df-border)] bg-[var(--df-surface)] text-[var(--df-muted-fg)]",
+                          )}
+                        >
+                          {isRunning
+                            ? copy.executingLabel
+                            : isFullLoaded
+                              ? copy.loadedLabel
+                              : copy.manifestOnlyLabel}
+                        </span>
+                      </div>
+
+                      <p className="mt-1.5 text-xs leading-5 text-[var(--df-muted-fg)]">
+                        {skill.tagline}
+                      </p>
+
+                      <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 font-mono text-[11px] tabular-nums">
+                        <span className="text-[var(--df-text-soft)]">
+                          {isFullLoaded
+                            ? `${skill.fullTokens.toLocaleString()} tok`
+                            : `~${skill.manifestTokens} tok`}
+                        </span>
+                        <span className="text-[var(--df-muted-fg)]">
+                          {skill.fullTokens.toLocaleString()}{" "}
+                          {copy.fullPromptSuffix}
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Context Budget Savings Card */}
+            <div className="mt-5 rounded-xl border border-[var(--df-border)] bg-[var(--df-panel)] p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-mono text-[11px] font-semibold tracking-[0.12em] text-[var(--df-ink)] uppercase">
+                  {copy.budgetTitle}
+                </span>
+                <span className="rounded-full bg-[var(--df-accent-soft,rgba(28,93,74,0.09))] px-2.5 py-0.5 font-mono text-[11px] font-semibold text-[var(--df-accent)] tabular-nums">
+                  {copy.budgetSavedPrefix} {savedPercent}%{" "}
+                  {copy.budgetSavedSuffix}
+                </span>
+              </div>
+
+              <div
+                className="mt-3 h-2 w-full overflow-hidden rounded-full bg-[var(--df-muted)]"
+                aria-hidden="true"
+              >
+                <div
+                  className="h-full rounded-full bg-[var(--df-cta)] transition-all duration-300"
+                  style={{ width: `${usageWidthPercent}%` }}
+                />
+              </div>
+
+              <p className="mt-2 font-mono text-[11px] text-[var(--df-muted-fg)] tabular-nums">
+                {copy.eagerPrefix} {totalEagerTokens.toLocaleString()} tok
+              </p>
             </div>
           </div>
 
-          {/* Chat Messages */}
-          <div
-            ref={chatMessagesRef}
-            className="flex-1 space-y-4 overflow-y-auto p-6"
-          >
-            {/* User Message */}
-            <AnimatePresence>
-              {phase !== "idle" && (
-                <motion.div
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="flex justify-end"
-                >
-                  <div className="max-w-[90%] rounded-2xl rounded-tr-sm bg-blue-600 px-5 py-3">
-                    <p className="text-base">
-                      Research mRNA delivery, build a landing page, deploy to
-                      Vercel
-                    </p>
+          {/* Right Pane: YAML Frontmatter & Execution Inspector */}
+          <div className="flex min-w-0 flex-col bg-[var(--df-panel)] p-4 sm:p-6 lg:col-span-7">
+            {/* Active Prompt Context */}
+            <div className="rounded-xl border border-[var(--df-border)] bg-[var(--df-surface)] p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-mono text-[10px] font-semibold tracking-[0.18em] text-[var(--df-accent)] uppercase">
+                  {copy.promptLabel}
+                </span>
+                <span className="font-mono text-[11px] text-[var(--df-muted-fg)]">
+                  /mnt/skills/{selectedSkill.id}/SKILL.md
+                </span>
+              </div>
+              <p className="mt-1.5 text-sm leading-6 font-medium text-[var(--df-ink)]">
+                {selectedSkill.prompt}
+              </p>
+            </div>
+
+            {/* Step 01: YAML Frontmatter */}
+            <div className="mt-5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="flex items-center gap-1.5 font-mono text-xs font-semibold text-[var(--df-ink)]">
+                  <FileCode2
+                    className="size-3.5 shrink-0 text-[var(--df-accent)]"
+                    aria-hidden="true"
+                  />
+                  <span>{copy.frontmatterHeading}</span>
+                </p>
+                <span className="font-mono text-[11px] text-[var(--df-accent)] tabular-nums">
+                  ~{selectedSkill.manifestTokens} tok
+                </span>
+              </div>
+
+              <pre className="mt-2.5 overflow-x-auto rounded-xl border border-[var(--df-border-soft)] bg-[var(--df-bg-soft)] p-3.5 font-mono text-xs leading-6 text-[var(--df-text-soft)]">
+                <code>{`---\nname: ${selectedSkill.id}\ntriggers: [${selectedSkill.triggers.join(", ")}]\nreference: ${selectedSkill.templateFile}\n---`}</code>
+              </pre>
+            </div>
+
+            {/* Step 02: On-Demand Instructions */}
+            <div className="mt-5 border-t border-[var(--df-border-soft)] pt-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="font-mono text-xs font-semibold text-[var(--df-ink)]">
+                  {copy.instructionsHeading}
+                </p>
+                {stepIndex >= 1 && (
+                  <span className="font-mono text-[11px] text-[var(--df-accent)] tabular-nums">
+                    +{selectedSkill.fullTokens - selectedSkill.manifestTokens}{" "}
+                    tok
+                  </span>
+                )}
+              </div>
+
+              {stepIndex >= 1 ? (
+                <div className="mt-2.5 space-y-2 rounded-xl border border-[var(--df-border-soft)] bg-[var(--df-surface)] p-4">
+                  <div className="inline-flex items-center gap-1.5 rounded-md border border-[var(--df-border)] bg-[var(--df-panel)] px-2 py-0.5 font-mono text-[11px] text-[var(--df-accent)]">
+                    <Check className="size-3 shrink-0" aria-hidden="true" />
+                    <span>{selectedSkill.templateFile}</span>
                   </div>
-                </motion.div>
+                  <ol className="space-y-1.5 pt-1 text-xs leading-6 text-[var(--df-text-soft)] sm:text-sm">
+                    {selectedSkill.instructions.map((line, index) => (
+                      <li key={line} className="flex gap-2">
+                        <span className="shrink-0 font-mono text-xs font-semibold text-[var(--df-accent)] tabular-nums">
+                          {index + 1}.
+                        </span>
+                        <span>{line}</span>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              ) : (
+                <p className="mt-2 text-xs leading-6 text-[var(--df-muted-fg)]">
+                  {copy.onDemandHint}
+                </p>
               )}
-            </AnimatePresence>
+            </div>
 
-            {/* Agent Messages */}
-            <AnimatePresence>
-              {phase !== "idle" && phase !== "user-input" && (
-                <motion.div
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="space-y-3"
-                >
-                  {/* Found Skills */}
-                  {[
-                    "scanning",
-                    "load-skill",
-                    "load-template",
-                    "researching",
-                    "load-frontend",
-                    "building",
-                    "load-deploy",
-                    "deploying",
-                    "done",
-                  ].includes(phase) && (
-                    <div className="text-base text-zinc-300">
-                      <span className="text-purple-400">✨</span> Found 3 skills
-                    </div>
-                  )}
+            {/* Step 03: Sandbox Execution */}
+            <div className="mt-5 border-t border-[var(--df-border-soft)] pt-4">
+              <p className="flex items-center gap-1.5 font-mono text-xs font-semibold text-[var(--df-ink)]">
+                <Terminal
+                  className="size-3.5 shrink-0 text-[var(--df-accent)]"
+                  aria-hidden="true"
+                />
+                <span>{copy.sandboxHeading}</span>
+              </p>
 
-                  {/* Researching Section */}
-                  {[
-                    "load-skill",
-                    "load-template",
-                    "researching",
-                    "load-frontend",
-                    "building",
-                    "load-deploy",
-                    "deploying",
-                    "done",
-                  ].includes(phase) && (
-                    <div className="mt-4">
-                      <hr className="mb-3 border-zinc-700" />
-                      <div className="mb-3 text-zinc-300">
-                        🔬 Researching...
-                      </div>
-                      <div className="mb-3 space-y-2">
-                        {/* Loading SKILL.md */}
-                        {[
-                          "load-skill",
-                          "load-template",
-                          "researching",
-                          "load-frontend",
-                          "building",
-                          "load-deploy",
-                          "deploying",
-                          "done",
-                        ].includes(phase) && (
-                          <div className="flex items-center gap-2 pl-4 text-zinc-400">
-                            <FileText size={16} />
-                            <span>Loading deep-search/SKILL.md...</span>
-                          </div>
-                        )}
-                        {/* Loading biotech.md */}
-                        {[
-                          "load-template",
-                          "researching",
-                          "load-frontend",
-                          "building",
-                          "load-deploy",
-                          "deploying",
-                          "done",
-                        ].includes(phase) && (
-                          <div className="flex items-center gap-2 pl-4 text-zinc-400">
-                            <FileText size={16} />
-                            <span>
-                              Found biotech related topic, loading
-                              deep-search/biotech.md...
-                            </span>
-                          </div>
-                        )}
-                      </div>
-                      {/* Search steps */}
-                      {phase === "researching" && (
-                        <div className="max-h-[180px] space-y-2 overflow-hidden pl-4">
-                          {searchSteps.slice(0, searchIndex).map((step, i) => (
-                            <motion.div
-                              key={i}
-                              initial={{ opacity: 0, y: 10 }}
-                              animate={{ opacity: 1, y: 0 }}
-                              className="flex items-center gap-2 text-sm text-zinc-500"
-                            >
-                              {step.type === "search" ? (
-                                <Search size={14} className="text-blue-400" />
-                              ) : (
-                                <Globe size={14} className="text-green-400" />
-                              )}
-                              <span className="truncate">{step.text}</span>
-                            </motion.div>
-                          ))}
-                        </div>
-                      )}
-                      {[
-                        "load-frontend",
-                        "building",
-                        "load-deploy",
-                        "deploying",
-                        "done",
-                      ].includes(phase) && (
-                        <div className="max-h-[180px] space-y-2 overflow-hidden pl-4">
-                          {searchSteps.map((step, i) => (
-                            <motion.div
-                              key={i}
-                              initial={{ opacity: 0, y: 10 }}
-                              animate={{ opacity: 1, y: 0 }}
-                              className="flex items-center gap-2 text-sm text-zinc-500"
-                            >
-                              {step.type === "search" ? (
-                                <Search size={14} className="text-blue-400" />
-                              ) : (
-                                <Globe size={14} className="text-green-400" />
-                              )}
-                              <span className="truncate">{step.text}</span>
-                            </motion.div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Building */}
-                  {["building", "load-deploy", "deploying", "done"].includes(
-                    phase,
-                  ) && (
-                    <motion.div
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      className="mt-4"
-                    >
-                      <hr className="mb-3 border-zinc-700" />
-                      <div className="mb-3 text-zinc-300">🔨 Building...</div>
-                      <div className="mb-3 flex items-center gap-2 pl-4 text-zinc-400">
-                        <FileText size={16} />
-                        <span>Loading frontend-design/SKILL.md...</span>
-                      </div>
-                      <div className="space-y-2 pl-4">
-                        {workspaceFiles.slice(0, buildIndex).map((file) => (
-                          <motion.div
-                            key={file}
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            className="flex items-center gap-2 text-sm text-green-500"
-                          >
-                            <FileText size={14} />
-                            <span>Generating {file}...</span>
-                            <Check size={14} />
-                          </motion.div>
-                        ))}
-                      </div>
-                    </motion.div>
-                  )}
-
-                  {/* Deploying */}
-                  {["load-deploy", "deploying", "done"].includes(phase) && (
-                    <motion.div
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      className="mt-4"
-                    >
-                      <hr className="mb-3 border-zinc-700" />
-                      <div className="mb-3 text-zinc-300">🚀 Deploying...</div>
-                      <div className="mb-3 space-y-2">
-                        <div className="flex items-center gap-2 pl-4 text-zinc-400">
-                          <FileText size={16} />
-                          <span>Loading deploy/SKILL.md...</span>
-                        </div>
-                        {["deploying", "done"].includes(phase) && (
-                          <motion.div
-                            initial={{ opacity: 0 }}
-                            animate={{ opacity: 1 }}
-                            className="flex items-center gap-2 pl-4 text-zinc-400"
-                          >
-                            <Terminal size={16} />
-                            <span>Executing scripts/deploy.sh</span>
-                          </motion.div>
-                        )}
-                      </div>
-                      {phase === "done" && (
-                        <motion.div
-                          initial={{ opacity: 0, scale: 0.9 }}
-                          animate={{ opacity: 1, scale: 1 }}
-                          className="mt-4 rounded-xl border border-green-500/30 bg-green-500/10 p-4"
+              {stepIndex >= 2 ? (
+                <div className="mt-2.5 space-y-3">
+                  <pre className="overflow-x-auto rounded-xl border border-[var(--df-border-soft)] bg-[var(--df-bg-soft)] p-3.5 font-mono text-xs leading-6">
+                    <code className="block space-y-1">
+                      <div className="flex gap-2">
+                        <span
+                          className="shrink-0 font-semibold text-[var(--df-accent)] select-none"
+                          aria-hidden="true"
                         >
-                          <div className="text-lg font-medium text-green-500">
-                            ✅ Live at biotech-startup.vercel.app
-                          </div>
-                        </motion.div>
-                      )}
-                    </motion.div>
-                  )}
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
+                          $
+                        </span>
+                        <span className="font-medium text-[var(--df-ink)]">
+                          {selectedSkill.command}
+                        </span>
+                      </div>
+                      {selectedSkill.outputs.map((line) => (
+                        <div
+                          key={line}
+                          className="pl-4 text-emerald-700 dark:text-emerald-400"
+                        >
+                          ✔ {line}
+                        </div>
+                      ))}
+                    </code>
+                  </pre>
 
-          {/* Chat Input (decorative) */}
-          <div className="border-t border-zinc-800 p-4">
-            <div className="rounded-xl bg-zinc-800 px-4 py-3 text-sm text-zinc-500">
-              Ask DeerFlow anything...
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--df-accent)]/35 bg-[var(--df-accent-soft,rgba(28,93,74,0.09))] px-3.5 py-2.5 font-mono text-xs text-[var(--df-accent)]">
+                    <span className="inline-flex items-center gap-1.5 font-medium">
+                      <Check className="size-3.5 shrink-0" aria-hidden="true" />
+                      <span>{copy.artifactDelivered}</span>
+                    </span>
+                    <span className="truncate font-semibold">
+                      {selectedSkill.artifactPath}
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <p className="mt-2 text-xs leading-6 text-[var(--df-muted-fg)]">
+                  {copy.executeHint}
+                </p>
+              )}
             </div>
           </div>
         </div>
