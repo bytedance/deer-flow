@@ -414,7 +414,7 @@ export function buildRunContext({
   const explicitEffort =
     typeof extraContext?.reasoning_effort === "string"
       ? extraContext.reasoning_effort
-      : getThreadEffortOverride(threadId, settings.reasoning_effort);
+      : getThreadEffortOverride(threadId);
   // Older Gateways read the flat values. New ones can distinguish mode
   // presets from a separate choice, even when both say "high".
   const modeDefaultFields: string[] = [];
@@ -2675,6 +2675,7 @@ export function useThreadStream({
     runId: string;
     text: string;
     mode: RunInputMode;
+    files: File[];
     id: string;
     context?: Record<string, unknown>;
   } | null>(null);
@@ -2687,7 +2688,7 @@ export function useThreadStream({
     [onStreamThreadId, runInputAccount],
   );
   const sendInput = useCallback(
-    async (text: string, mode: RunInputMode) => {
+    async (text: string, mode: RunInputMode, files: File[] = []) => {
       const targetThread = onStreamThreadId;
       const runId = inputQuery.data?.active_run_id;
       if (!targetThread || !runId)
@@ -2696,13 +2697,16 @@ export function useThreadStream({
       const attempt =
         previous?.threadId === targetThread &&
         previous.text === text &&
-        previous.mode === mode
+        previous.mode === mode &&
+        previous.files.length === files.length &&
+        previous.files.every((file, index) => file === files[index])
           ? previous
           : {
               threadId: targetThread,
               runId,
               text,
               mode,
+              files,
               id: uuid(),
               context:
                 mode === "queue"
@@ -2725,6 +2729,7 @@ export function useThreadStream({
           text,
           mode,
           context: attempt.context,
+          files: attempt.files,
           signal: controller.signal,
         });
         if (controller.signal.aborted)

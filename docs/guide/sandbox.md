@@ -6,6 +6,7 @@ DeerFlow supports multiple sandbox execution modes:
 - **Local Workspace** (files through workspace tools and configured mounts)
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
+- **Cloud Sandboxes** (serverless remote providers including [BytePlus veFaaS](../../backend/packages/harness/deerflow/community/vefaas_sandbox/README.md), E2B, OpenSandbox, boxd, and Tenki)
 
 When a provider returns a structured exit code, Bash tool status follows that
 code, including timeout failures. Providers that return plain text, including
@@ -112,6 +113,18 @@ runs each user/thread scope in an isolated boxd machine. A new machine receives
 the thread's files and skills before it is handed out, and release copies
 generated outputs back to thread storage with the same alias and path checks.
 See its [configuration](../../backend/docs/CONFIGURATION.md#sandbox).
+
+The optional [BytePlus veFaaS Cloud Sandbox provider](../../backend/packages/harness/deerflow/community/vefaas_sandbox/README.md)
+runs each user/thread scope in a serverless [BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas)
+AIO sandbox over the veFaaS OpenAPI (`Version=2024-06-06`, SigV4) with no extra
+cloud SDK dependency. It supports per-agent skill isolation, optional
+thread-scoped TOS mounts or automatic output mirroring on release, speculative
+`sandbox.prewarm`, opt-in idle pause/resume, thread-scoped snapshots with
+retention pruning, and asynchronous image precaching. Multi-worker gateways
+sharing one veFaaS sandbox application should enable `sandbox.ownership.type: redis`.
+See the [veFaaS documentation](https://docs.byteplus.com/en/docs/vefaas/what-is-vefaas)
+and [provider README](../../backend/packages/harness/deerflow/community/vefaas_sandbox/README.md)
+for setup and snapshot retention guidance.
 
 The [sandbox benchmark](../../backend/scripts/benchmark/sandbox/README.md#opensandbox)
 also supports OpenSandbox cold acquisition, warm reuse and concurrent scopes,

@@ -2674,6 +2674,7 @@ async def start_run(
         # Gateway-issued IDs, and old id-less run records remain comparable.
         request_input = _canonical_run_record_input(body.input, graph_input) if idempotency_key else None
         knowledge_default_request_hash = hashlib.sha256(json.dumps(request_input, sort_keys=True, ensure_ascii=False).encode()).hexdigest() if idempotency_key else None
+        queued_attachments = getattr(request.state, "queued_input_attachments", None)
         if isinstance(graph_input, dict):
             graph_input = _assign_missing_run_input_message_ids(graph_input, thread_id=thread_id, idempotency_key=input_message_idempotency_key or idempotency_key)
         # deerflow_trace_id is server-issued, so the caller's value is replaced
@@ -3061,6 +3062,43 @@ async def start_run(
                         raise
 
                 execution_context = replace(execution_context, verify_artifacts=verify_artifacts)
+            if queued_attachments is not None:
+                from app.gateway.run_input_files import publish_input_files
+
+                async def record_attachment_publication():
+                    try:
+                        await queued_attachments.source.publication_succeeded(queued_attachments.input_id, record.run_id, attempt=queued_attachments.attempt)
+                    except Exception:
+                        # Files are already published. A receipt write failure must
+                        # not requeue the message or prevent ordinary stage cleanup.
+                        logger.warning("Could not record queued attachment publication for run %s", record.run_id, exc_info=True)
+
+                async def publish_queued_attachments():
+                    # Only the admitted worker may expose this input's files to the thread.
+                    message = _current_human_message(graph_input)
+                    assert message is not None
+                    stage = queued_attachments.stage
+                    # Persist the fence before any copy. Recovery and a late
+                    # publisher must agree on which attempt owns this stage.
+                    await queued_attachments.source.begin_attachment_publication(queued_attachments.input_id, record.run_id, attempt=queued_attachments.attempt)
+                    try:
+                        files = await publish_input_files(thread_id, record.user_id, stage["id"], stage["files"], request=request, config=app_config, on_published=record_attachment_publication)
+                    except Exception as exc:
+                        # This run cannot reach the graph. Restore the input before
+                        # the worker reports it as finished and the queue stops polling.
+                        if not record.ownership_lost:
+                            try:
+                                await await_drained(queued_attachments.source.publication_failed(queued_attachments.input_id, record.run_id, attempt=queued_attachments.attempt))
+                            except Exception:
+                                logger.warning("Could not restore queued input after attachment publication failed for run %s", record.run_id, exc_info=True)
+                        raise RuntimeError("Could not publish queued attachments") from exc
+                    message.additional_kwargs["files"] = files
+                    # Keep the resolved attachment paths on the run record as
+                    # well as the graph input for clients reconnecting mid-run.
+                    record.kwargs["input"] = _canonical_run_record_input(body.input, graph_input)
+                    await run_mgr.persist_metadata(record.run_id)
+
+                execution_context = replace(execution_context, verify_artifacts=publish_queued_attachments)
             try:
                 await run_agent(
                     bridge,
@@ -3147,6 +3185,7 @@ async def start_run(
                             kwargs={
                                 "input": run_record_input,
                                 **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
+                                **({"queued_input_request_hash": knowledge_default_request_hash, "queued_input_checks_publication": True} if queued_attachments is not None else {}),
                                 "config": redact_config_secrets(body.config),
                                 **({"conversation_references": conversation_references} if conversation_references else {}),
                             },
@@ -3192,7 +3231,10 @@ async def start_run(
                         # today's default; explicit scopes and recovery do not use
                         # this compatibility path.
                         matches_legacy_default_request = accepts_knowledge_default and "knowledge_default_request_hash" not in stored and stored_input == request_input
-                        matches_input = matches_default_request or matches_legacy_default_request or stored_input == body.input or stored_input == request_input or stored_input == run_record_input
+                        # The worker fills the actual file names after acquiring the
+                        # thread. Reconcile retries against the original request.
+                        matches_queued_input = queued_attachments is not None and knowledge_default_request_hash is not None and stored.get("queued_input_request_hash") == knowledge_default_request_hash
+                        matches_input = matches_queued_input or matches_default_request or matches_legacy_default_request or stored_input == body.input or stored_input == request_input or stored_input == run_record_input
                     if not matches_idempotency_request or not matches_input or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
                         raise HTTPException(
                             status_code=409,
@@ -3312,6 +3354,7 @@ async def launch_scheduled_thread_run(
     metadata: dict[str, Any] | None = None,
     origin: dict[str, Any] | None = None,
     title: str | None = None,
+    subagent_enabled: bool = False,
 ) -> dict[str, Any]:
     """Start one scheduled occurrence as an internal run.
 
@@ -3345,6 +3388,11 @@ async def launch_scheduled_thread_run(
     graph_input: dict[str, Any] = {"messages": [message]}
     if title:
         graph_input["title"] = title
+    context: dict[str, Any] = {"non_interactive": True}
+    if owner_user_id:
+        context["user_id"] = owner_user_id
+    if subagent_enabled:
+        context["subagent_enabled"] = True
     body = RunCreateRequest(
         assistant_id=assistant_id,
         input=graph_input,
@@ -3355,7 +3403,7 @@ async def launch_scheduled_thread_run(
         # runtime-context consumers without a ContextVar fallback (e.g.
         # user-scoped GuardrailMiddleware providers) see the owning user;
         # ``inject_authenticated_user_context`` skips the internal user.
-        context=({"non_interactive": True, "user_id": owner_user_id} if owner_user_id else {"non_interactive": True}),
+        context=context,
         webhook=None,
         checkpoint_id=None,
         checkpoint=None,

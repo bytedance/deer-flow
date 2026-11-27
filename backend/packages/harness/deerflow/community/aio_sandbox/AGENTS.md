@@ -77,6 +77,13 @@ make test-blocking-io
   egress. Reject a host that the policy denies before any DNS lookup.
 - **An approval never replays a tool call.** Subagent and non-interactive runs
   deny without asking.
+- **Denial recording is bounded and best effort.** The sidecar's only writable
+  space is a 16 MiB tmpfs, and a sandbox can deny unlimited unique hosts, so
+  superseded and resolved events are pruned inside the recording transaction.
+  Retention orders resolved rows by when the decision was applied and reserves
+  room for pending approvals. A surfaced undecided row is a card the user is
+  looking at and survives pruning, and a policy-database failure still returns
+  a denial rather than closing the connection.
 - **Discovery and enumeration are read-only**, also when the policy or network
   mode does not match. Only the provider replaces a sandbox, under the teardown
   reservation and the cross-instance lease. The sandbox, its sidecar and both
