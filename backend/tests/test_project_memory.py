@@ -125,6 +125,50 @@ def test_corrections_preserve_old_fact_when_replacement_is_rejected(repo):
     assert [f["content"] for f in repo.get("p1", "u1")["facts"]] == ["Use API v2"]
 
 
+@pytest.mark.parametrize(
+    ("removal_fields", "new_facts", "expected"),
+    [
+        ({"replacementFactIndex": None}, [], ["Reports exclude tax"]),
+        ({"replacementFactIndex": "0"}, [fact("Reports include tax")], ["Reports exclude tax", "Reports include tax"]),
+        ({"replacementFactIndex": 0}, [fact("Reports include tax")], ["Reports include tax"]),
+        ({}, [], []),
+    ],
+    ids=["null-preserves-old", "invalid-index-preserves-old", "valid-correction", "explicit-retraction"],
+)
+def test_project_memory_correction_requires_a_valid_replacement(repo, tmp_path, removal_fields, new_facts, expected):
+    from unittest.mock import Mock
+
+    from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
+    from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage
+    from deerflow.agents.memory.backends.deermem.deermem.core.updater import MemoryUpdater
+    from deerflow.projects.memory import prepare_project_extraction, with_project_memory
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+    assert repo.apply("p1", "u1", "t1", 0, {"newFacts": [fact()]}) == 1
+    initial = repo.get("p1", "u1")
+    removal = {
+        "id": initial["facts"][0]["id"],
+        "scope": "project",
+        "reason": "The user corrected or retracted the existing tax convention",
+        **removal_fields,
+    }
+    model = Mock()
+    model.invoke.return_value = AIMessage(content=json.dumps({"user": {}, "history": {}, "newFacts": new_facts, "factsToRemove": [removal]}))
+    config = DeerMemConfig(storage_path=str(tmp_path / "global"), token_counting="char", staleness_review_enabled=False)
+    config.project_memory = lambda messages, thread_id, user_id: prepare_project_extraction(messages, thread_id, user_id, repo=repo)
+    updater = MemoryUpdater(config=config, storage=FileMemoryStorage(config), llm=model)
+    messages = with_project_memory(
+        [
+            HumanMessage(content="Please update the project's tax convention.", id="h1"),
+            AIMessage(content="I will apply the new convention.", id="a1"),
+        ],
+        {PROJECT_CONTEXT_KEY: {"project_id": "p1", "memory": initial}},
+    )
+    assert updater.update_memory(messages, thread_id="t1", agent_name="__default__", user_id="u1")
+    assert model.invoke.call_count == 1
+    assert [f["content"] for f in repo.get("p1", "u1")["facts"]] == expected
+
+
 def test_archived_and_deleted_projects_reject_extraction(repo):
     with repo._sf() as session:
         row = session.get(ProjectRow, "p1")

@@ -148,7 +148,7 @@ class ProjectMemoryRepository:
                 if not isinstance(removal, dict) or removal.get("scope") != "project" or not str(removal.get("reason", "")).strip():
                     continue
                 replacement = removal.get("replacementFactIndex")
-                if replacement is not None and (type(replacement) is not int or replacement not in accepted):
+                if "replacementFactIndex" in removal and (type(replacement) is not int or replacement not in accepted):
                     continue
                 facts = [f for f in facts if f["id"] != removal.get("id") or f["id"] == accepted.get(replacement)]
             # Keep recent whole facts, with enough space for the injection header.
