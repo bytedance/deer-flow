@@ -2,11 +2,14 @@
 
 Tool steps mark explicit execution failures. Scheduled-task steps show completed
 operations only after a valid response, rather than when the request is issued.
-A step's label uses the call's `description` argument when it is a non-empty
-string. When it is missing, empty or another type, such as an object, the label
-falls back to the step's default, and for an MCP tool that is
-`Use "<tool>" tool`. A subagent's search step without a string `query` shows its
-description or the tool name instead.
+MCP and other unrecognized tool steps, and the `ls`, `read_file`, `write_file`,
+`str_replace` and `bash` steps, take their label from the call's `description`
+argument when it is a non-empty string. When it is missing, empty or another
+type, such as an object, the step shows its default label; for an MCP tool that
+is `Use "<tool>" tool`. Search, web fetch and the other built-in steps keep
+their own labels. A running subagent's card header shows a search call's
+`query`, and without a string `query` it shows the description or the tool
+name.
 
 In the chat UI, enable **Token Usage → Debug** to inspect generic/MCP tool calls.
 Each **Tool details** panel starts collapsed and shows the tool name, call ID,
