@@ -1,5 +1,6 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
   cleanup,
@@ -17,6 +18,7 @@ import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 import { zhCN } from "@/core/i18n/locales/zh-CN";
 import * as messageUtils from "@/core/messages/utils";
+import { useSkills } from "@/core/skills/hooks";
 
 const installState = rs.hoisted(() => ({
   user: null as { id: string; system_role: string } | null,
@@ -321,33 +323,58 @@ describe("uploaded Skill archive installation", () => {
     filename: "分析.skill",
     size: 512,
     path: "/mnt/user-data/uploads/分析.skill",
-    status: "uploaded",
+    status: "uploaded" as const,
   };
 
-  function renderArchive(file = archive) {
+  const queryClients: QueryClient[] = [];
+
+  function renderMessage(
+    message: Message,
+    queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+    }),
+    children?: React.ReactNode,
+  ) {
+    queryClients.push(queryClient);
     return render(
       withI18n(
-        <ArtifactDraftsProvider>
-          <SidebarProvider>
-            <ArtifactsProvider>
-              <MessageListItem
-                message={
-                  {
-                    ...makeMessage("human"),
-                    additional_kwargs: { files: [file] },
-                  } as unknown as Message
-                }
-                threadId="thread-1"
-                showCopyButton={false}
-              />
-            </ArtifactsProvider>
-          </SidebarProvider>
-        </ArtifactDraftsProvider>,
+        <QueryClientProvider client={queryClient}>
+          <ArtifactDraftsProvider>
+            <SidebarProvider>
+              <ArtifactsProvider>
+                <MessageListItem
+                  message={message}
+                  threadId="thread-1"
+                  showCopyButton={false}
+                />
+                {children}
+              </ArtifactsProvider>
+            </SidebarProvider>
+          </ArtifactDraftsProvider>
+        </QueryClientProvider>,
       ),
     );
   }
 
+  function renderArchive(file: messageUtils.FileInMessage = archive) {
+    return renderMessage({
+      ...makeMessage("human"),
+      additional_kwargs: { files: [file] },
+    } as unknown as Message);
+  }
+
+  function AvailableSkills() {
+    const { skills } = useSkills();
+    return (
+      <output data-testid="available-skills">
+        {skills.map((skill) => skill.name).join(",")}
+      </output>
+    );
+  }
+
   afterEach(() => {
+    for (const client of queryClients) client.clear();
+    queryClients.length = 0;
     installState.user = null;
     installState.success.mockClear();
     installState.error.mockClear();
@@ -398,7 +425,8 @@ describe("uploaded Skill archive installation", () => {
 
   it.each([
     { ...archive, filename: "notes.zip" },
-    { ...archive, status: "uploading" },
+    { ...archive, status: "uploading" as const },
+    { ...archive, status: undefined },
     { ...archive, path: "" },
   ])(
     "does not install an ordinary, pending, or unavailable attachment: %j",
@@ -454,6 +482,100 @@ describe("uploaded Skill archive installation", () => {
         ),
       ),
     );
+  });
+
+  it.each(["current_uploads", "uploaded_files"])(
+    "keeps %s text-derived attachments preview-only",
+    (tag) => {
+      installState.user = { id: "admin", system_role: "admin" };
+      const fetch = rs.spyOn(globalThis, "fetch");
+      renderMessage({
+        ...makeMessage("human"),
+        content: `<${tag}>\n- ${archive.filename} (512 B)\n  Path: ${archive.path}\n</${tag}>`,
+      } as Message);
+      const preview = screen.getByRole("button", {
+        name: `${archive.filename} SKILL · 0.5 KB`,
+      });
+      expect(preview).toBeDefined();
+      expect(
+        screen.queryByRole("button", { name: `Install ${archive.filename}` }),
+      ).toBeNull();
+      fireEvent.click(preview);
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not install an assistant attachment even with completed upload metadata", () => {
+    installState.user = { id: "admin", system_role: "admin" };
+    renderMessage({
+      ...makeMessage("ai"),
+      additional_kwargs: { files: [archive] },
+    } as unknown as Message);
+    expect(
+      screen.getByRole("button", {
+        name: `${archive.filename} SKILL · 0.5 KB`,
+      }),
+    ).toBeDefined();
+    expect(
+      screen.queryByRole("button", { name: `Install ${archive.filename}` }),
+    ).toBeNull();
+  });
+
+  it("refreshes a mounted skills consumer only after a successful installation", async () => {
+    installState.user = { id: "admin", system_role: "admin" };
+    let installed = false;
+    let reads = 0;
+    const fetch = rs
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (_url, init) => {
+        if (init?.method === "POST") {
+          installed = true;
+          return new Response(
+            JSON.stringify({
+              success: true,
+              skill_name: "analysis",
+              message: "Installed analysis",
+            }),
+          );
+        }
+        reads++;
+        return new Response(
+          JSON.stringify({
+            skills: installed
+              ? [
+                  {
+                    name: "analysis",
+                    description: "Uploaded analysis skill",
+                    category: "custom",
+                    license: "MIT",
+                    enabled: true,
+                    editable: true,
+                  },
+                ]
+              : [],
+          }),
+        );
+      });
+    renderMessage(
+      {
+        ...makeMessage("human"),
+        additional_kwargs: { files: [archive] },
+      } as unknown as Message,
+      undefined,
+      <AvailableSkills />,
+    );
+    await waitFor(() => expect(reads).toBe(1));
+    expect(screen.getByTestId("available-skills").textContent).toBe("");
+    fireEvent.click(
+      screen.getByRole("button", { name: `Install ${archive.filename}` }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("available-skills").textContent).toBe(
+        "analysis",
+      ),
+    );
+    expect(reads).toBe(2);
+    expect(fetch).toHaveBeenCalledTimes(3);
   });
 
   it("reports a permission revoked after the attachment was rendered", async () => {

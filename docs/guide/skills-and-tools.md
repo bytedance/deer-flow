@@ -260,7 +260,10 @@ opening the file card still previews it. Installation uses the original uploaded
 archive, preserving its `SKILL.md`, scripts, assets, and nested files, and runs the
 same Gateway security review and duplicate-name checks as other skill installs.
 The result appears as a notification; a rejected installation can be retried
-explicitly after the problem is corrected.
+explicitly after the problem is corrected. Successful installation refreshes the
+chat composer's skills list so the skill can be selected with `@` immediately.
+Compatibility file cards reconstructed from message text remain preview-only;
+installation is offered only for confirmed, completed uploads.
 
 Data-analysis Markdown exports escape pipes and backslashes in column names and values, and render cell line breaks as `<br>` so multiline data stays within its table cell.
 

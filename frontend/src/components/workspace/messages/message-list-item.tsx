@@ -1,4 +1,5 @@
 import type { Message } from "@langchain/langgraph-sdk";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   CheckIcon,
   Loader2Icon,
@@ -517,9 +518,16 @@ function MessageContent_({
     [contentToDisplay, isHuman, knowledgeSources],
   );
 
+  const hasUploadMetadata =
+    Array.isArray(message.additional_kwargs?.files) &&
+    message.additional_kwargs.files.length > 0;
   const filesList =
     files && files.length > 0 ? (
-      <RichFilesList files={files} threadId={threadId} />
+      <RichFilesList
+        files={files}
+        threadId={threadId}
+        allowSkillInstall={isHuman && hasUploadMetadata}
+      />
     ) : null;
 
   // Uploading state: mock AI message shown while files upload
@@ -742,9 +750,11 @@ function formatBytes(bytes: number): string {
 function RichFilesList({
   files,
   threadId,
+  allowSkillInstall,
 }: {
   files: FileInMessage[];
   threadId: string;
+  allowSkillInstall: boolean;
 }) {
   if (files.length === 0) return null;
   return (
@@ -754,6 +764,7 @@ function RichFilesList({
           key={`${file.filename}-${index}`}
           file={file}
           threadId={threadId}
+          allowSkillInstall={allowSkillInstall}
         />
       ))}
     </div>
@@ -766,9 +777,11 @@ function RichFilesList({
 function RichFileCard({
   file,
   threadId,
+  allowSkillInstall,
 }: {
   file: FileInMessage;
   threadId: string;
+  allowSkillInstall: boolean;
 }) {
   const { t } = useI18n();
   const { select, setOpen } = useArtifacts();
@@ -845,9 +858,11 @@ function RichFileCard({
           </span>
         </span>
       </button>
-      {file.filename.toLowerCase().endsWith(".skill") && (
-        <UploadedSkillInstallButton file={file} threadId={threadId} />
-      )}
+      {allowSkillInstall &&
+        file.status === "uploaded" &&
+        file.filename.toLowerCase().endsWith(".skill") && (
+          <UploadedSkillInstallButton file={file} threadId={threadId} />
+        )}
     </div>
   );
 }
@@ -861,6 +876,7 @@ function UploadedSkillInstallButton({
 }) {
   const { t } = useI18n();
   const { user } = useAuth();
+  const queryClient = useQueryClient();
   const installing = useRef(false);
   const [isInstalling, setIsInstalling] = useState(false);
 
@@ -876,6 +892,7 @@ function UploadedSkillInstallButton({
         path: file.path,
       });
       if (result.success) {
+        void queryClient.invalidateQueries({ queryKey: ["skills"] });
         toast.success(result.message);
       } else {
         toast.error(result.message || t.settings.skills.installFailed);
