@@ -112,14 +112,59 @@ it("renders the valid presented files next to malformed entries", () => {
 
   renderList({
     files: presented.flatMap((message) =>
-      extractPresentFilesFromMessage(message),
+      extractPresentFilesFromMessage(message, presented),
     ),
   });
 
   expect(
     screen.getByRole("button", { name: "report.md Markdown" }),
   ).toBeTruthy();
-  expect(screen.queryByText("bad.md")).toBeNull();
+  expect(screen.queryByRole("button", { name: /bad\.md/ })).toBeNull();
+});
+
+// The backend rejects the whole call when a path is outside the outputs
+// directory, and the card must not offer files it never presented.
+it("omits the files of a present_files call the backend rejected", () => {
+  const group = [
+    {
+      type: "ai",
+      content: "",
+      tool_calls: [
+        {
+          id: "present-rejected",
+          name: "present_files",
+          args: {
+            filepaths: [files[1], "/mnt/user-data/uploads/secret.md"],
+          },
+        },
+        {
+          id: "present-accepted",
+          name: "present_files",
+          args: { filepaths: [files[0]] },
+        },
+      ],
+    },
+    {
+      type: "tool",
+      tool_call_id: "present-rejected",
+      content:
+        "Error: Only files in /mnt/user-data/outputs can be presented: /mnt/user-data/uploads/secret.md",
+      additional_kwargs: { deerflow_tool_meta: { status: "error" } },
+    },
+    {
+      type: "tool",
+      tool_call_id: "present-accepted",
+      content: "Successfully presented files",
+    },
+  ] as unknown as Message[];
+
+  renderList({ files: extractPresentFilesFromMessage(group[0]!, group) });
+
+  expect(
+    screen.getByRole("button", { name: "report.md Markdown" }),
+  ).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /data\.csv/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /secret\.md/ })).toBeNull();
 });
 
 describe("ArtifactFileList archive download", () => {
