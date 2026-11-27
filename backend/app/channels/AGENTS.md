@@ -87,6 +87,8 @@ make test-blocking-io                                  # channels share the Gate
 
 - The webhook route skips session auth and CSRF because the HMAC signature
   authenticates it. It is mounted only when `GITHUB_WEBHOOK_SECRET` is set.
+- Triggers fail closed on author authorization (`allow_authors` or
+  sender-matched `allow_author_associations`).
 - Outbound is log-only. The agent uses configured GitHub tools for outbound
   actions. Webhook admission stays independent of tool authentication.
 - Follow-up buffering while a thread is busy is process-local. Read
