@@ -132,7 +132,7 @@ NULL END AS ratio`. Finite numbers, nulls, and text such as `'NaN'` remain valid
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `--files` | Yes | Space-separated paths to Excel/CSV files |
+| `--files` | Yes | Space-separated paths to Excel/CSV files. Quote CSV paths such as `'orders[1].csv'` so the shell passes the literal name. |
 | `--action` | Yes | One of: `inspect`, `query`, `summary` |
 | `--sql` | For `query` | SQL query to execute |
 | `--table` | For `summary` | Table/sheet name to summarize |

@@ -501,6 +501,8 @@ class SubagentBatchService:
     async def _execute_leased_item(self, item: dict[str, Any], lease: BatchItemLease) -> None:
         item_id = item["id"]
         execution_id: str | None = None
+        result = None
+        effective_model: str | None = None
         try:
             batch = item["batch"]
             self._item_batches[item_id] = batch["id"]
@@ -671,6 +673,10 @@ class SubagentBatchService:
                 "Durable subagent batch item failed (item_id=%s)",
                 item_id,
             )
+            # Keep the tokens this attempt spent, e.g. when the finalize that
+            # carried them rolled back. If that finalize committed, the lease
+            # is gone and this call writes nothing, so nothing counts twice.
+            usage = _usage(getattr(result, "token_usage_records", None))
             await self._repository.finalize_item(
                 item_id,
                 lease_owner=lease.owner,
@@ -680,8 +686,8 @@ class SubagentBatchService:
                 result_truncated=False,
                 error=str(exc)[:4_000],
                 stop_reason=None,
-                token_usage=None,
-                model_name=None,
+                token_usage=usage,
+                model_name=effective_model if usage else None,
                 completed_at=datetime.now(UTC),
             )
         finally:

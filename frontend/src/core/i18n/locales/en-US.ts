@@ -812,7 +812,9 @@ export const enUS: Translations = {
     steerModeHelp: "Adjust the current task at the next available point",
     runInputSend: "Send update",
     runInputTextOnly:
-      "Send plain text while a task is running. Attachments and slash commands can be sent when it finishes.",
+      "Use plain text to steer. Choose Queue to send attachments.",
+    runInputUnsupported:
+      "Send references and slash commands after the current task finishes.",
     runInputUnavailable:
       "The message was not confirmed. Check the task status and try again; your draft is kept.",
     stopRun: "Stop current task",
@@ -1727,6 +1729,8 @@ export const enUS: Translations = {
     branchFailed: "Failed to branch conversation.",
     streamReplayGap:
       "Some live updates expired. The conversation was restored from saved state.",
+    sandboxBusy:
+      "Sandboxes are temporarily unavailable. Please try again shortly.",
     streamServerError: (status) =>
       `The service is temporarily unavailable (HTTP ${status}). Please try again.`,
     outlineLabel: "Conversation outline",

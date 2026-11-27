@@ -350,7 +350,7 @@ before review.
 python -m pip install -r tests/skills/requirements.txt
 python -m pytest tests/skills -q
 
-# Default backend tests (six parallel shards matching CI; excludes live, blocking-I/O and bundled-extension tests)
+# Default backend tests (six parallel shards matching CI; excludes live, blocking-I/O, bundled-extension and benchmark tests)
 cd backend
 make test
 

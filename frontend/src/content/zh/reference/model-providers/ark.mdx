@@ -1,8 +1,61 @@
 ---
-title: 火山方舟
-description: 火山方舟模型接入指南。
+title: BytePlus ModelArk 与火山方舟
+description: BytePlus Agent Plan（个人版 / 企业版）与火山方舟 Coding Plan 模型接入指南。
 ---
 
-# 火山方舟
+# BytePlus ModelArk 与火山方舟
 
-## Coding Plan
+## BytePlus Agent Plan（个人版 & 企业版）
+
+[BytePlus Agent Plan](https://www.byteplus.com/en/activity/agentplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) 通过统一的 **AFP（Agent Fuel Points）** 额度体系，用**一把专属 API Key** 同时驱动 DeerFlow 的对话/推理大模型、**Seedream** 生图/PPT 视觉生成与 **Seedance 2.5** 原生音画同步视频生成：
+
+- **Base URL**：`https://ark.ap-southeast.bytepluses.com/api/plan/v3`
+- **订阅控制台**：[ModelArk Agent Plan](https://console.byteplus.com/ark/region:ap-southeast-1/subscription/agent-plan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
+- **官方文档**：[个人版文档](https://console.byteplus.com/ark/region:ap-southeast-1/docs/agent-plan-personal-plan-overview?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) · [企业版文档](https://console.byteplus.com/ark/region:ap-southeast-1/docs/agent-plan-enterprise-plan-overview?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
+
+> **套餐档位说明**：语言模型（`dola-seed-2.1-turbo`、`deepseek-v4-pro`、`deepseek-v4.1-flash`、`seed-2.0-lite`、`seed-2.0-mini`）与 Seedream 生图模型（`dola-seedream-5.0-pro`、`dola-seedream-5.5`、`dola-seedream-5.0-flash`）支持全档位套餐；**Seedance 2.5** 生视频模型（`dreamina-seedance-2.5`、`dreamina-seedance-2.5-flash`）需订阅 **Large**、**Max** 或 **企业版共享包（Shared Package）**。
+
+### 快速配置（`make setup`）
+
+执行 `make setup` 并选择 **BytePlus Agent Plan**，向导会配置主模型，并明确询问是否将 `BYTEPLUS_AGENTPLAN_API_KEY` 共享到 `sandbox.environment`（默认否）；勾选共享后即可复用同一把 Key 打通生图（`image-generation`）、PPT 视觉生成（`ppt-generation`）与视频生成（`video-generation`）。
+
+### 手动配置 `config.yaml`
+
+```yaml
+models:
+  - name: dola-seed-2.1-turbo-ap
+    display_name: Dola-Seed-2.1-Turbo (BytePlus Agent Plan)
+    use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+    model: dola-seed-2.1-turbo
+    api_base: https://ark.ap-southeast.bytepluses.com/api/plan/v3
+    api_key: $BYTEPLUS_AGENTPLAN_API_KEY
+    timeout: 600.0
+    max_retries: 2
+    supports_thinking: true
+    supports_vision: true
+    supports_reasoning_effort: true
+    when_thinking_enabled:
+      extra_body:
+        thinking:
+          type: enabled
+    when_thinking_disabled:
+      extra_body:
+        thinking:
+          type: disabled
+
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  environment:
+    BYTEPLUS_AGENTPLAN_API_KEY: $BYTEPLUS_AGENTPLAN_API_KEY
+    # 可选覆盖参数：
+    # BYTEPLUS_AGENTPLAN_IMAGE_MODEL: dola-seedream-5.0-pro
+    # BYTEPLUS_AGENTPLAN_VIDEO_MODEL: dreamina-seedance-2.5
+    # BYTEPLUS_AGENTPLAN_VIDEO_RESOLUTION: 720p
+    # BYTEPLUS_AGENTPLAN_VIDEO_DURATION: "6"
+```
+
+若为企业团队部署批量多模态或短视频工作流，可参考[企业版文档](https://console.byteplus.com/ark/region:ap-southeast-1/docs/agent-plan-enterprise-plan-overview?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)选择团队席位或共享包方案，并搭配 **BytePlus veFaaS Cloud Sandbox** 使用。
+
+## 火山方舟 Coding Plan（中国大陆）
+
+中国大陆开发者使用火山引擎 Coding Plan 时，可在 `make setup` 中选择 **Volcengine Coding Plan**，或参考 `config.example.yaml` 配置 `api_base: https://ark.cn-beijing.volces.com/api/coding/v3` 与 `$VOLCENGINE_API_KEY`。
