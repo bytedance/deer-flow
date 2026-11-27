@@ -1889,6 +1889,45 @@ hibernation wake on the call. Downloads are restricted to `/mnt/user-data` and
 capped while streaming. Like the other remote providers, `replicas` is a
 per-Gateway-process soft cap.
 
+**BytePlus veFaaS Cloud Sandbox** (runs each thread sandbox in a serverless [BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) AIO sandbox; see the [veFaaS documentation](https://docs.byteplus.com/en/docs/vefaas/what-is-vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)):
+
+```yaml
+sandbox:
+  use: deerflow.community.vefaas_sandbox:VeFaaSSandboxProvider
+  # prewarm: true                      # optional: overlap sandbox creation with the first model turn
+  vefaas:
+    region: ap-southeast-1
+    endpoint: https://vefaas.ap-southeast-1.byteplusapi.com
+    function_id: $BYTEPLUS_VEFAAS_SANDBOX_APP_ID
+    sandbox_base_url: $BYTEPLUS_VEFAAS_SANDBOX_BASE_URL
+    access_key_env: BYTEPLUS_ACCESS_KEY_ID
+    secret_key_env: BYTEPLUS_SECRET_ACCESS_KEY
+    cpu_milli: 1000
+    memory_mb: 2048
+    timeout_minutes: 60
+    # pause_on_idle: true              # optional: pause idle sandboxes and auto-resume
+    # snapshot_on_idle: true           # optional: thread-scoped snapshots with retention pruning
+    # snapshot_retention_days: 7
+    # max_snapshots_per_sandbox: 3
+    # precache_images:
+    #   - cr-ap-southeast-1.cr.bytepluses.com/namespace/all-in-one-sandbox:latest
+    # precache_on_startup: true
+    tos_mount:
+      enabled: false
+      bucket: $BYTEPLUS_TOS_BUCKET
+      prefix: deerflow-user-data
+  replicas: 3
+  idle_timeout: 600
+  # ownership:                         # required when more than one gateway shares a veFaaS app
+  #   type: redis
+```
+
+No extra Python SDK is needed — `VeFaaSSandboxProvider` talks to the veFaaS
+OpenAPI (`Version=2024-06-06`, SigV4) over `httpx` and reuses `agent-sandbox`
+for the AIO data plane. See the
+[veFaaS sandbox provider README](../packages/harness/deerflow/community/vefaas_sandbox/README.md)
+for the complete option reference, snapshot retention guidance, and TOS mount details.
+
 Choose between local execution or Docker-based isolation:
 
 **Option 1: Local Sandbox** (default, simpler setup):
