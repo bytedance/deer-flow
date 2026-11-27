@@ -500,6 +500,63 @@ def test_skill_activation_survives_a_retried_model_call_in_real_agent_graph(monk
     assert run.result["messages"][1].additional_kwargs["skill_usage"]["name"] == "data-analysis"
 
 
+class _WindowLimitedChatModel(_ScriptedChatModel):
+    """Rejects a request whose content exceeds its context window, like a provider."""
+
+    window: int = 32_768
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        size = sum(len(str(message.content)) for message in messages)
+        if size > self.window:
+            raise ValueError(f"request of {size} tokens exceeds the {self.window}-token window")
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+def test_replayed_slash_skill_counts_toward_the_compaction_trigger(monkeypatch, tmp_path):
+    # The replayed reminder lives only in the model request. The summarization
+    # trigger must count it, or a follow-up that fits in state can exceed the
+    # model window once the skill is added: 30,050 in state + the replayed skill
+    # > 32,768 while still under the 32,000 trigger.
+    from unittest.mock import MagicMock
+
+    from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+
+    skill = _make_skill(tmp_path, "data-analysis", content="# Data Analysis\n" + "Use pandas. " * 250)
+    monkeypatch.setattr(middleware_module, "get_or_new_skill_storage", lambda **kwargs: _make_storage(tmp_path, [skill]))
+
+    @as_tool
+    def echo(text: str) -> str:
+        """Echo the text back."""
+        return "r" * 3000
+
+    summary_model = MagicMock()
+    summary_model.invoke.return_value = SimpleNamespace(text="earlier turn summary")
+    summary_model.with_config.return_value = summary_model
+    summarization = DeerFlowSummarizationMiddleware(
+        model=summary_model,
+        trigger=("tokens", 32_000),
+        keep=("messages", 2),
+        token_counter=lambda messages: sum(len(str(message.content)) for message in messages),
+    )
+    model = _WindowLimitedChatModel(
+        responses=[
+            AIMessage(content="", tool_calls=[{"name": "echo", "args": {"text": "hi"}, "id": "call-1"}]),
+            AIMessage(content="final answer"),
+        ]
+    )
+    graph = create_agent(model=model, tools=[echo], middleware=[summarization, SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)])
+    history = [HumanMessage(content="earlier question", id="old-user"), AIMessage(content="a" * 27_000, id="old-ai")]
+    graph_input = {"messages": [*history, HumanMessage(content="/data-analysis analyze uploads/foo.csv", id="msg-1")]}
+
+    result = graph.invoke(graph_input, context={"thread_id": "thread-1"}, config={"recursion_limit": 20})
+
+    assert result["messages"][-1].content == "final answer"
+    assert summary_model.invoke.called
+    follow_up = model.seen_messages[-1]
+    assert sum(is_slash_skill_activation_reminder(message) for message in follow_up) == 1
+    assert all(message.id != "old-ai" for message in follow_up)
+
+
 def test_skill_activation_survives_an_empty_response_retry_in_real_agent_graph(monkeypatch, tmp_path):
     # An empty response is not an exception inside this wrap: the handler returns,
     # and LLMErrorHandling raises only after it, outside. The retry must still

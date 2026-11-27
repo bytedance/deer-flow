@@ -375,6 +375,11 @@ class SkillActivationMiddleware(AgentMiddleware):
         )
 
     @staticmethod
+    def _activation_content(activation: _Activation) -> str:
+        items = (activation, *activation.additional_activations)
+        return "\n\n".join(SkillActivationMiddleware._build_activation_reminder(item, include_user_request=index == 0) for index, item in enumerate(items))
+
+    @staticmethod
     def _build_activation_reminder(activation: _Activation, *, include_user_request: bool = True) -> str:
         user_request = activation.remaining_text or ("No additional task text was provided after the slash skill command. Ask the user what they want to do with this skill if the next step is unclear.")
         escaped_user_request = html.escape(user_request, quote=False)
@@ -583,7 +588,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             # (computed once there, threaded through here) rather than recomputed.
             if run_context is not None:
                 run_context[_SLASH_SKILL_ACTIVATION_RUN_KEY] = _RecordedActivation(run_key=run_key, activation=activation)
-        activation_msg = self._make_activation_message(target, "\n\n".join(self._build_activation_reminder(item, include_user_request=index == 0) for index, item in enumerate((activation, *activation.additional_activations))))
+        activation_msg = self._make_activation_message(target, self._activation_content(activation))
         messages = list(request.messages)
         messages.insert(target_index, activation_msg)
         # A follow-up call's response is not the activation response: the
@@ -1027,3 +1032,24 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         if isinstance(prepared, AIMessage):
             return prepared
         return self._stamp_usage(await handler(prepared), activation)
+
+
+def replayed_slash_activation_messages(messages: list, run_context: object) -> list[HumanMessage]:
+    """The reminder a later model call of this run will replay, for budget counting.
+
+    The reminder lives only in the model request, so state-based token counts
+    (summarization's trigger) miss it. Return the same message this middleware
+    will insert, or nothing when no recorded activation applies to ``messages``.
+    """
+    recorded = run_context.get(_SLASH_SKILL_ACTIVATION_RUN_KEY) if isinstance(run_context, dict) else None
+    if not isinstance(recorded, _RecordedActivation):
+        return []
+    target_index = next((idx for idx in range(len(messages) - 1, -1, -1) if _is_user_activation_target(messages[idx])), None)
+    if target_index is None:
+        return []
+    target = messages[target_index]
+    if SkillActivationMiddleware._has_existing_activation_for_target(messages, target_index, target):
+        return []
+    if SkillActivationMiddleware._activation_run_key(target) != recorded.run_key:
+        return []
+    return [SkillActivationMiddleware._make_activation_message(target, SkillActivationMiddleware._activation_content(recorded.activation))]
