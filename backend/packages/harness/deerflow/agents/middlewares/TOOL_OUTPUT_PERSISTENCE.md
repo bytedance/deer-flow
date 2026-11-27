@@ -43,9 +43,10 @@ thread-data maintenance.
 
 The artifact registry retains the blob reference for saved failure diagnostics.
 After compaction removes the tool message, the resolver passes the concrete path
-to tool policies. Once those policies allow the call, the restore middleware
-materializes the diagnostic under the current Gateway's thread outputs directory
-using the same digest and path checks as message-based recovery.
+to tool policies. The restore middleware checks the final approved arguments and
+materializes the diagnostics they still reference under the current Gateway's
+thread outputs directory. It uses the same digest and path checks as
+message-based recovery.
 
 ## Structured tool results
 

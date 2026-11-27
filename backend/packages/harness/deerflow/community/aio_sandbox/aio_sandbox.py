@@ -18,7 +18,7 @@ from deerflow.sandbox.command_scope import COMMAND_OWNER_ENV, CommandScopeCancel
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
 from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
-from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
+from deerflow.sandbox.sandbox import CommandOutput, Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
 
 from .backend import sandbox_http_trust_env
@@ -806,7 +806,7 @@ class AioSandbox(Sandbox):
         if status == "hard_timeout":
             notice = cls._format_timeout_notice(timeout)
             output = f"{output}\n{notice}" if output else notice
-            return f"{output}\nExit Code: 124"
+            return CommandOutput(f"{output}\nExit Code: 124", 124)
 
         if status == "no_change_timeout":
             effective_no_change_timeout = cls._effective_no_change_timeout(timeout)
@@ -821,9 +821,15 @@ class AioSandbox(Sandbox):
             notice = cls._unexpected_status_notice(status)
             return f"{output}\n{notice}" if output else notice
 
+        return cls._render_completed_command(output, exit_code)
+
+    @staticmethod
+    def _render_completed_command(output: str, exit_code: int | None) -> str:
+        # Preserve the plain-text exit marker for older consumers.
         if exit_code not in (0, None):
             output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
-        return output if output else "(no output)"
+        output = output or "(no output)"
+        return CommandOutput(output, exit_code) if type(exit_code) is int else output
 
     @property
     def home_dir(self) -> str:
@@ -1069,7 +1075,7 @@ class AioSandbox(Sandbox):
         if status == "timed_out":
             notice = self._format_timeout_notice(timeout)
             output = f"{output}\n{notice}" if output else notice
-            return f"{output}\nExit Code: 124", status
+            return CommandOutput(f"{output}\nExit Code: 124", 124), status
 
         if status == "killed":
             notice = "Command was killed before completion."
@@ -1086,11 +1092,7 @@ class AioSandbox(Sandbox):
             output = f"{output}\n{notice}" if output else notice
             return output, status
 
-        if exit_code not in (0, None):
-            # Mirror LocalSandbox: keep the actual shell status in the
-            # output text (acceptance-checklist evidence).
-            output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
-        return output if output else "(no output)", status
+        return self._render_completed_command(output, exit_code), status
 
     def _run_owned_bash(self, command, env, timeout, scope):
         scope.check()

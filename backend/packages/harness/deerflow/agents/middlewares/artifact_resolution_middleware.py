@@ -11,7 +11,7 @@ error without executing the tool.
 from __future__ import annotations
 
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, override
 
@@ -35,6 +35,27 @@ _PENDING_DIAGNOSTIC_BLOBS = "__deerflow_pending_diagnostic_blobs"
 @dataclass(frozen=True, slots=True)
 class _PendingDiagnosticBlobs:
     payloads: list[Mapping[str, Any]]
+    resolved_argument_text: tuple[str, ...]
+
+
+def _argument_strings(value: Any) -> Iterator[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, Mapping):
+        for child in value.values():
+            yield from _argument_strings(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _argument_strings(child)
+
+
+def _retains_path(path: str, original: Sequence[str], approved: Sequence[str]) -> bool:
+    if path in approved:
+        return True
+    # Preserve paths embedded in compound arguments, such as shell commands.
+    # A literal path argument cannot turn into an embedded match after editing.
+    pattern = re.compile(rf"""(?:^|[\s"'`=|&;<>()\[\]{{}}]){re.escape(path)}(?=$|[\s"'`|&;<>()\[\]{{}}])""")
+    return any(value != path and pattern.search(value) for value in original) and any(pattern.search(value) for value in approved)
 
 
 class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
@@ -109,17 +130,11 @@ class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
         if blobs:
             # Keep the restore plan on this request copy. Policies see the
             # resolved arguments and the checkpoint retains the original state.
-            request = request.override(state={**state, _PENDING_DIAGNOSTIC_BLOBS: _PendingDiagnosticBlobs(blobs)})
+            request = request.override(state={**state, _PENDING_DIAGNOSTIC_BLOBS: _PendingDiagnosticBlobs(blobs, tuple(_argument_strings(resolved_args)))})
         return request.override(tool_call={**request.tool_call, "args": resolved_args})
 
     def _referenced_handles(self, value) -> set[str]:
-        if isinstance(value, str):
-            return {match.group(1) or match.group(2) for match in self._handle_re.finditer(value)}
-        if isinstance(value, dict):
-            value = list(value.values())
-        if isinstance(value, list):
-            return set().union(*(self._referenced_handles(item) for item in value))
-        return set()
+        return {match.group(1) or match.group(2) for text in _argument_strings(value) for match in self._handle_re.finditer(text)}
 
     def _resolve_value(self, value, handle_map: dict[str, str]):
         if isinstance(value, str):
@@ -145,10 +160,15 @@ class ArtifactBlobRestoreMiddleware(AgentMiddleware[AgentState]):
     """Materialize diagnostics only for tool calls that passed the policy gates."""
 
     @staticmethod
-    def _pending(request: ToolCallRequest) -> _PendingDiagnosticBlobs | None:
+    def _approved_payloads(request: ToolCallRequest) -> list[Mapping[str, Any]]:
         state = request.state
         pending = state.get(_PENDING_DIAGNOSTIC_BLOBS) if isinstance(state, Mapping) else None
-        return pending if isinstance(pending, _PendingDiagnosticBlobs) else None
+        if not isinstance(pending, _PendingDiagnosticBlobs):
+            return []
+        approved = tuple(_argument_strings(request.tool_call.get("args")))
+        if approved == pending.resolved_argument_text:
+            return pending.payloads
+        return [payload for payload in pending.payloads if isinstance(path := payload.get("virtual_path"), str) and _retains_path(path, pending.resolved_argument_text, approved)]
 
     @override
     def wrap_tool_call(
@@ -156,8 +176,8 @@ class ArtifactBlobRestoreMiddleware(AgentMiddleware[AgentState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
-        if pending := self._pending(request):
-            restore_tool_artifact_blobs(request, pending.payloads)
+        if payloads := self._approved_payloads(request):
+            restore_tool_artifact_blobs(request, payloads)
         return handler(request)
 
     @override
@@ -166,6 +186,6 @@ class ArtifactBlobRestoreMiddleware(AgentMiddleware[AgentState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
-        if pending := self._pending(request):
-            await run_sync_lifecycle_operation(restore_tool_artifact_blobs, request, pending.payloads)
+        if payloads := self._approved_payloads(request):
+            await run_sync_lifecycle_operation(restore_tool_artifact_blobs, request, payloads)
         return await handler(request)

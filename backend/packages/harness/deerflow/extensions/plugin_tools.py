@@ -21,9 +21,8 @@ from langchain_core.tools import StructuredTool, ToolException
 
 from deerflow.config.plugin_settings import defaults
 from deerflow.runtime.user_context import resolve_runtime_user_id
-from deerflow.tools.artifact_registry import has_structured_file_reference
 from deerflow.tools.tool_provenance import tag_plugin_tool
-from deerflow.utils.messages import TOOL_META_KEY, make_tool_result_meta
+from deerflow.utils.messages import LEGACY_PLUGIN_FILE_REFS_KEY, TOOL_META_KEY, make_tool_result_meta
 
 logger = logging.getLogger(__name__)
 
@@ -115,16 +114,20 @@ def _build_tool(source, plugin, declaration):
                     return result.content
                 # A JSON roundtrip detaches nested values retained by the handler.
                 artifact = json.loads(encoded)["artifact"]
-                # Older plugins sometimes put an error heading on a completed report.
-                # Use the explicit file reference to disambiguate that legacy prose.
-                legacy_report = status is None and result.content.startswith("Error:") and artifact is not None and has_structured_file_reference(artifact)
+                additional_kwargs = {}
+                if status == "success":
+                    additional_kwargs[TOOL_META_KEY] = make_tool_result_meta(status="success")
+                elif status is None and artifact:
+                    # An older producer can declare a file without declaring
+                    # invocation success. Keep its two signals independent.
+                    additional_kwargs[LEGACY_PLUGIN_FILE_REFS_KEY] = True
                 return ToolMessage(
                     content=result.content,
                     artifact=artifact,
                     name=name,
                     tool_call_id=runtime.tool_call_id,
                     status=status or "success",
-                    additional_kwargs={TOOL_META_KEY: make_tool_result_meta(status="success")} if status == "success" or legacy_report else {},
+                    additional_kwargs=additional_kwargs,
                 )
             encoded = json.dumps(result, ensure_ascii=False, allow_nan=False)
             if len(encoded.encode()) > 64 * 1024:

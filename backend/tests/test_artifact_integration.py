@@ -242,6 +242,7 @@ async def test_missing_image_creates_no_artifact_before_or_after_compaction(tmp_
 _PLUGIN_REPORT_URL = "https://files.example/report.pdf"
 _PLUGIN_REPORT = "Error: the report summarizes past validation failures."
 _PLUGIN_REPORT_ARTIFACT = {"structured_content": {"file": _PLUGIN_REPORT_URL}}
+_PLUGIN_DIAGNOSTIC = "/mnt/user-data/outputs/diagnostic.log"
 
 
 def _report_plugin_tool(handler):
@@ -255,26 +256,27 @@ def _report_plugin_tool(handler):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "outcome,expected_error",
+    "outcome,expected_error,expected_refs",
     [
-        pytest.param(PluginToolResult("The report is ready.", _PLUGIN_REPORT_ARTIFACT), None, id="legacy-report"),
-        pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT), None, id="legacy-report-error-prefix"),
-        pytest.param(PluginToolResult(_PLUGIN_REPORT, {"resource_links": [{"uri": _PLUGIN_REPORT_URL}]}), None, id="legacy-resource-link-error-prefix"),
-        pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT, status="success"), None, id="explicit-report"),
-        pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT | {"deerflow_http_response": {"status_code": 200}}, status="success"), None, id="http-200"),
-        pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT | {"deerflow_http_response": {"status_code": 404}}, status="success"), "not_found", id="http-404"),
-        pytest.param(PluginToolResult(_PLUGIN_REPORT, status="success"), None, id="text-only-success"),
-        pytest.param(PluginToolResult("Could not generate the report.", _PLUGIN_REPORT_ARTIFACT, status="error"), "unknown", id="explicit-error"),
-        pytest.param(PluginToolResult(f"Error: Could not generate {_PLUGIN_REPORT_URL}"), "unknown", id="legacy-text-error"),
-        pytest.param(PluginToolResult(json.dumps({"error": f"Could not generate {_PLUGIN_REPORT_URL}"})), "unknown", id="legacy-json-error"),
-        pytest.param(PluginToolResult(json.dumps({"error": f"Could not generate {_PLUGIN_REPORT_URL}"}), {}), "unknown", id="legacy-json-error-empty-artifact"),
-        pytest.param(PluginToolResult(json.dumps({"error": f"Could not generate {_PLUGIN_REPORT_URL}"}), {"request_id": "req-1"}), "unknown", id="legacy-json-error-diagnostic"),
-        pytest.param(PluginToolResult(json.dumps({"error": "Report generation failed."}), _PLUGIN_REPORT_ARTIFACT), "unknown", id="legacy-json-error-with-file-reference"),
-        pytest.param(PluginToolResult("Error: Report generation failed.", {"structured_content": {"request_id": "req-1"}}), "unknown", id="legacy-text-error-with-diagnostic"),
-        pytest.param(ToolException(f"Error: Could not generate {_PLUGIN_REPORT_URL}"), "unknown", id="tool-exception"),
+        pytest.param(PluginToolResult("The report is ready.", _PLUGIN_REPORT_ARTIFACT), None, [_PLUGIN_REPORT_URL], id="legacy-report"),
+        pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT), "unknown", [_PLUGIN_REPORT_URL], id="legacy-report-error-prefix"),
+        pytest.param(PluginToolResult(_PLUGIN_REPORT, {"resource_links": [{"uri": _PLUGIN_REPORT_URL}]}), "unknown", [_PLUGIN_REPORT_URL], id="legacy-resource-link-error-prefix"),
+        pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT, status="success"), None, [_PLUGIN_REPORT_URL], id="explicit-report"),
+        pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT | {"deerflow_http_response": {"status_code": 200}}, status="success"), None, [_PLUGIN_REPORT_URL], id="http-200"),
+        pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT | {"deerflow_http_response": {"status_code": 404}}, status="success"), "not_found", [], id="http-404"),
+        pytest.param(PluginToolResult(_PLUGIN_REPORT, status="success"), None, [], id="text-only-success"),
+        pytest.param(PluginToolResult("Could not generate the report.", _PLUGIN_REPORT_ARTIFACT, status="error"), "unknown", [], id="explicit-error"),
+        pytest.param(PluginToolResult(f"Error: Could not generate {_PLUGIN_REPORT_URL}"), "unknown", [], id="legacy-text-error"),
+        pytest.param(PluginToolResult(f"Error: Could not generate {_PLUGIN_REPORT_URL}", {"structured_content": {"file": _PLUGIN_DIAGNOSTIC}}), "unknown", [_PLUGIN_DIAGNOSTIC], id="legacy-text-error-with-diagnostic-file"),
+        pytest.param(PluginToolResult(json.dumps({"error": f"Could not generate {_PLUGIN_REPORT_URL}"})), "unknown", [], id="legacy-json-error"),
+        pytest.param(PluginToolResult(json.dumps({"error": f"Could not generate {_PLUGIN_REPORT_URL}"}), {}), "unknown", [], id="legacy-json-error-empty-artifact"),
+        pytest.param(PluginToolResult(json.dumps({"error": f"Could not generate {_PLUGIN_REPORT_URL}"}), {"request_id": "req-1"}), "unknown", [], id="legacy-json-error-diagnostic"),
+        pytest.param(PluginToolResult(json.dumps({"error": "Report generation failed."}), _PLUGIN_REPORT_ARTIFACT), "unknown", [_PLUGIN_REPORT_URL], id="legacy-json-error-with-file-reference"),
+        pytest.param(PluginToolResult("Error: Report generation failed.", {"structured_content": {"request_id": "req-1"}}), "unknown", [], id="legacy-text-error-with-diagnostic"),
+        pytest.param(ToolException(f"Error: Could not generate {_PLUGIN_REPORT_URL}"), "unknown", [], id="tool-exception"),
     ],
 )
-async def test_plugin_report_artifacts_follow_invocation_status_through_compaction(outcome, expected_error):
+async def test_plugin_report_artifacts_follow_invocation_status_through_compaction(outcome, expected_error, expected_refs):
     async def handler(payload, context):
         if isinstance(outcome, ToolException):
             raise outcome
@@ -303,9 +305,8 @@ async def test_plugin_report_artifacts_follow_invocation_status_through_compacti
         assert message.content == outcome.content
         assert message.artifact == outcome.artifact
         assert message.status == (outcome.status or "success")
-    expected_refs = [_PLUGIN_REPORT_URL] if success and message.artifact else []
     compacted_request = await _compact_and_check_artifacts(agent, model, config, context, expected_refs)
-    if not success:
+    if _PLUGIN_REPORT_URL not in expected_refs:
         assert not any("report.pdf [available]" in item.content for item in compacted_request)
 
 
@@ -442,7 +443,7 @@ async def test_crawl4ai_artifacts_follow_fetch_status_through_compaction(monkeyp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider_name", ["opensandbox", "e2b"])
+@pytest.mark.parametrize("provider_name", ["opensandbox", "e2b", "aio"])
 async def test_sandbox_success_keeps_report_artifact_through_compaction(tmp_path, monkeypatch, provider_name):
     outputs = tmp_path / "outputs"
     outputs.mkdir()
@@ -452,6 +453,8 @@ async def test_sandbox_success_keeps_report_artifact_through_compaction(tmp_path
         (outputs / "report.md").write_text("Historical failures", encoding="utf-8")
         if provider_name == "e2b":
             return e2b.CommandResult(stdout=stdout, stderr="", exit_code=0, error=None)
+        if provider_name == "aio":
+            return SimpleNamespace(data=SimpleNamespace(output=stdout, exit_code=0, status="completed"))
         return SimpleNamespace(exit_code=0, logs=SimpleNamespace(stdout=[SimpleNamespace(text=stdout)], stderr=[]))
 
     def read_mounted_report(path):
@@ -464,10 +467,19 @@ async def test_sandbox_success_keeps_report_artifact_through_compaction(tmp_path
         from deerflow.community.e2b_sandbox.e2b_sandbox import E2BSandbox
 
         sandbox = E2BSandbox("e2b:report", SimpleNamespace(commands=commands, files=SimpleNamespace(read=read_mounted_report)))
+    elif provider_name == "aio":
+        from deerflow.community.aio_sandbox import aio_sandbox
+
+        def read_aio_report(*, file):
+            return SimpleNamespace(data=SimpleNamespace(content=read_mounted_report(file)))
+
+        sdk = SimpleNamespace(shell=SimpleNamespace(exec_command=run), file=SimpleNamespace(read_file=read_aio_report))
+        monkeypatch.setattr(aio_sandbox, "AioSandboxClient", lambda **kwargs: sdk)
+        sandbox = aio_sandbox.AioSandbox("aio:report", "http://localhost:8080", home_dir="/home/user")
     else:
         sdk = SimpleNamespace(commands=commands, files=SimpleNamespace(read_file=read_mounted_report))
         sandbox = OpenSandboxSandbox("opensandbox:report", sdk, run_command_opts_cls=SimpleNamespace)
-    provider = Mock(spec=sandbox_provider.SandboxProvider, uses_thread_data_mounts=provider_name == "opensandbox")
+    provider = Mock(spec=sandbox_provider.SandboxProvider, uses_thread_data_mounts=provider_name != "e2b")
     provider.get.return_value = sandbox
     provider.get_scoped.return_value = sandbox
     monkeypatch.setattr(sandbox_provider, "_default_sandbox_provider", provider)

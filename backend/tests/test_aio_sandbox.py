@@ -131,19 +131,23 @@ def test_sandbox_info_from_dict_keeps_missing_broker_attestation_unverified():
     assert SandboxInfo.from_dict({"sandbox_id": "s", "sandbox_url": "http://x", "lark_cli_broker": False}).lark_cli_broker is False
 
 
-def test_exec_command_appends_exit_marker_when_failure_has_output(sandbox):
-    """The legacy exec path must propagate the structured exit_code into the
-    output text (LocalSandbox parity) instead of discarding it."""
-    sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="5 passed, 1 error\n", exit_code=1)))
+@pytest.mark.parametrize("env", [None, {"A": "1"}], ids=["shell", "bash"])
+@pytest.mark.parametrize("exit_code", [0, 1, None], ids=["success", "failure", "unknown"])
+def test_execute_command_preserves_sdk_exit_code_and_output(sandbox, env, exit_code):
+    from deerflow.sandbox.sandbox import CommandOutput
 
-    assert sandbox.execute_command("make test") == "5 passed, 1 error\n\nExit Code: 1"
+    stdout = "Error: historical issues are listed in the report.\n"
+    response = SimpleNamespace(data=SimpleNamespace(output=stdout, stdout=stdout, stderr="", exit_code=exit_code, status="completed"))
+    sandbox._client.shell.exec_command = MagicMock(return_value=response)
+    sandbox._client.bash.exec = MagicMock(return_value=response)
 
-
-def test_bash_exec_appends_exit_marker_when_failure_has_output(sandbox):
-    """The bash.exec (env-bearing) path must propagate exit_code the same way."""
-    sandbox._client.bash.exec = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(stdout="5 passed, 1 error\n", stderr="", exit_code=1)))
-
-    assert sandbox.execute_command("make test", env={"A": "1"}) == "5 passed, 1 error\n\nExit Code: 1"
+    result = sandbox.execute_command("make report", env=env)
+    assert result == (f"{stdout}\nExit Code: 1" if exit_code == 1 else stdout)
+    if exit_code is None:
+        assert not isinstance(result, CommandOutput)
+    else:
+        assert isinstance(result, CommandOutput)
+        assert result.exit_code == exit_code
 
 
 def _execute_with_open_session_stdin(command, env=None, *, shell="/bin/sh", terminal=False, **_kwargs):

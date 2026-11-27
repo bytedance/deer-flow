@@ -15,8 +15,9 @@ from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.prebuilt.tool_node import ToolCallRequest
-from langgraph.types import Overwrite
+from langgraph.types import Command, Overwrite
 
+from deerflow.agents.lead_agent.agent import _insert_hitl_approval_middleware
 from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
 from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactBlobRestoreMiddleware, ArtifactResolutionMiddleware
 from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
@@ -28,6 +29,7 @@ from deerflow.agents.middlewares.tool_transform_meta import TOOL_OUTPUT_BLOB_KEY
 from deerflow.agents.thread_state import ThreadState, merge_artifacts, merge_tool_artifacts
 from deerflow.config.app_config import AppConfig
 from deerflow.config.guardrails_config import GuardrailProviderConfig, GuardrailsConfig
+from deerflow.config.hitl_approval_config import HitlApprovalConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.guardrails.middleware import GuardrailMiddleware
 from deerflow.guardrails.provider import GuardrailDecision
@@ -167,8 +169,17 @@ def test_policy_and_audit_receive_resolved_arguments():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_call", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("allow", [False, True], ids=["denied", "allowed"])
-async def test_diagnostic_blob_io_follows_tool_authorization(tmp_path, monkeypatch, async_call, allow):
+@pytest.mark.parametrize(
+    "allow, approval",
+    [
+        pytest.param(False, None, id="denied"),
+        pytest.param(True, None, id="allowed"),
+        pytest.param(True, "approve", id="approved"),
+        pytest.param(True, "edit-path", id="edited-path"),
+        pytest.param(True, "edit-description", id="edited-description"),
+    ],
+)
+async def test_diagnostic_blob_io_follows_tool_authorization(tmp_path, monkeypatch, async_call, allow, approval):
     store = LocalFsBlobStore(tmp_path / "blobs")
     blob = store.put_bytes(b"diagnostic", kind="tool-output", content_type="text/plain; charset=utf-8")
     get_bytes = Mock(wraps=store.get_bytes)
@@ -176,19 +187,25 @@ async def test_diagnostic_blob_io_follows_tool_authorization(tmp_path, monkeypat
     monkeypatch.setattr("deerflow.agents.middlewares.tool_output_budget_middleware.get_blob_store_if_enabled", lambda: store)
     outputs = tmp_path / "outputs"
     path = "/mnt/user-data/outputs/.tool-results/diagnostic.log"
+    edited_path = f"{path}.backup"
     artifact = entry(path)
     artifact[TOOL_OUTPUT_BLOB_KEY] = {"version": 1, "ref": blob.model_dump(mode="json"), "virtual_path": path, "storage_subdir": ".tool-results", "encoding": "utf-8"}
     calls = []
+    if approval == "edit-path":
+        edited_file = outputs / ".tool-results" / "diagnostic.log.backup"
+        edited_file.parent.mkdir(parents=True)
+        edited_file.write_text("backup", encoding="utf-8")
 
     @tool
-    def read_file(path: str) -> str:
+    def read_file(path: str, description: str = "") -> str:
         """Read a diagnostic file."""
         calls.append(path)
-        return (outputs / ".tool-results" / "diagnostic.log").read_text(encoding="utf-8")
+        return (outputs / path.removeprefix("/mnt/user-data/outputs/")).read_text(encoding="utf-8")
 
     config = AppConfig(
         sandbox=SandboxConfig(use="test"),
         guardrails=GuardrailsConfig(enabled=True, provider=GuardrailProviderConfig(use="deerflow.guardrails.builtin:AllowlistProvider", config={"allowed_tools": ["read_file"] if allow else []})),
+        hitl_approval=HitlApprovalConfig(enabled=approval is not None, tools=["read_file"]),
     )
     model = FakeToolCallingModel(
         responses=[
@@ -196,14 +213,35 @@ async def test_diagnostic_blob_io_follows_tool_authorization(tmp_path, monkeypat
             AIMessage(content="done"),
         ]
     )
-    graph = create_agent(model=model, tools=[read_file], middleware=safety_chain(config), state_schema=ThreadState)
+    chain = safety_chain(config)
+    _insert_hitl_approval_middleware(chain, [read_file], config, supports_resume=True)
+    graph = create_agent(model=model, tools=[read_file], middleware=chain, state_schema=ThreadState, checkpointer=InMemorySaver())
+    graph_config = {"configurable": {"thread_id": "t"}}
+
+    async def invoke(value):
+        if async_call:
+            return await graph.ainvoke(value, graph_config, context={"thread_id": "t"})
+        return await asyncio.to_thread(graph.invoke, value, graph_config, context={"thread_id": "t"})
+
     inputs = {"messages": [HumanMessage(content="Read the diagnostic.")], "thread_data": {"outputs_path": str(outputs)}, "tool_artifacts": [artifact]}
-    if async_call:
-        result = await graph.ainvoke(inputs, context={"thread_id": "t"})
-    else:
-        result = await asyncio.to_thread(graph.invoke, inputs, context={"thread_id": "t"})
+    result = await invoke(inputs)
+    if approval:
+        action = result["__interrupt__"][0].value["actions"][0]
+        assert not calls
+        get_bytes.assert_not_called()
+        decision = {"tool_call_id": action["tool_call_id"], "request_id": action["request_id"], "option_id": "approve" if approval == "approve" else "edit"}
+        if approval == "edit-path":
+            decision["args"] = {"path": edited_path}
+        elif approval == "edit-description":
+            decision["args"] = {"path": path, "description": "Still read the same diagnostic."}
+        result = await invoke(Command(resume={"responses": [decision]}))
     reply = next(message for message in result["messages"] if isinstance(message, ToolMessage))
-    if allow:
+    if approval == "edit-path":
+        assert reply.status == "success" and reply.content == "backup"
+        assert calls == [edited_path]
+        assert not (outputs / ".tool-results" / "diagnostic.log").exists()
+        get_bytes.assert_not_called()
+    elif allow:
         assert reply.status == "success" and reply.content == "diagnostic"
         assert calls == [path]
         assert get_bytes.call_count == 1

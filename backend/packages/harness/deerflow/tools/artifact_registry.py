@@ -17,15 +17,14 @@ import json
 import re
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from urllib.parse import urlsplit
 
 from langchain_core.messages import ToolMessage
 
-from deerflow.utils.messages import get_tool_message_status
-
-if TYPE_CHECKING:
-    from deerflow.agents.thread_state import ArtifactEntry
+from deerflow.agents.middlewares.tool_transform_meta import TOOL_OUTPUT_BLOB_KEY, read_tool_transforms
+from deerflow.agents.thread_state import ArtifactEntry
+from deerflow.utils.messages import LEGACY_PLUGIN_FILE_REFS_KEY, get_tool_message_status
 
 _HANDLE_PREFIX = "art_"
 _HANDLE_LENGTH = 8
@@ -281,15 +280,6 @@ def _iter_resource_links(artifact: dict) -> Iterator[tuple[str, dict]]:
                 yield uri, link
 
 
-def has_structured_file_reference(artifact: dict) -> bool:
-    """Check whether a tool artifact explicitly supplies a registerable file reference."""
-    found: list[tuple[str, str]] = []
-    if _collect_structured_refs(artifact.get("structured_content"), found):
-        if any(key in _STRUCTURED_REF_KEYS and _is_referenceable_url(value) for key, value in found):
-            return True
-    return next(_iter_resource_links(artifact), None) is not None
-
-
 def _serialize_bounded_data(value: Any) -> str | None:
     """Keep complete JSON only when its shape and UTF-8 size fit the budget.
 
@@ -343,8 +333,6 @@ def _display_name_for_ref(ref: str) -> str:
 
 
 def _externalized_output_path(result: ToolMessage) -> str | None:
-    from deerflow.agents.middlewares.tool_transform_meta import read_tool_transforms
-
     prefix = f"{_SANDBOX_PATH_PREFIX}outputs/"
     for transform in reversed(read_tool_transforms(result)):
         if transform["kind"] != "externalized" or transform.get("by") != "ToolOutputBudgetMiddleware":
@@ -417,33 +405,36 @@ def extract_artifacts_from_result(
        conservatively for sandbox paths and remote file URLs (gated by
        ``detect_refs_in_text``).
 
-    Error results can register an output file explicitly recorded by the budget
-    middleware. Every distinct reference from one result gets its own handle
+    Error results can register a saved diagnostic and explicit file references
+    from legacy plugin artifacts. Every distinct reference gets its own handle
     via a sequential ordinal; the same ``real_ref``
     surfaced by several sources (e.g. a ``resource_links`` entry and the
     placeholder text the conversion layer wrote for the same link) is kept
     only from the first source, so one resource never gets two handles.
     """
     failed = get_tool_message_status(result) == "error"
+    kwargs = result.additional_kwargs or {}
+    legacy_files = failed and result.status != "error" and kwargs.get(LEGACY_PLUGIN_FILE_REFS_KEY) is True
     diagnostic_path = _externalized_output_path(result) if failed else None
-    if failed and diagnostic_path is None:
+    if failed and diagnostic_path is None and not legacy_files:
         return []
 
     now = _utc_now_iso()
     tool_name = result.name or "unknown"
     tool_call_id = result.tool_call_id or ""
     sink = _EntrySink(thread_id=thread_id, tool_call_id=tool_call_id, call_index=call_index, created_at=now, tool_name=tool_name, occurrence_id=result.id)
-    if diagnostic_path is not None:
-        from deerflow.agents.middlewares.tool_transform_meta import TOOL_OUTPUT_BLOB_KEY
-
-        entry = sink.add(artifact_type="file", display_name=_display_name_for_ref(diagnostic_path), real_ref=diagnostic_path)
-        blob = (result.additional_kwargs or {}).get(TOOL_OUTPUT_BLOB_KEY)
-        if isinstance(blob, dict) and blob.get("virtual_path") == diagnostic_path:
-            entry[TOOL_OUTPUT_BLOB_KEY] = blob
-        return [entry]
-
     entries: list[ArtifactEntry] = []
     seen_refs: set[str] = set()
+
+    if diagnostic_path is not None:
+        entry = sink.add(artifact_type="file", display_name=_display_name_for_ref(diagnostic_path), real_ref=diagnostic_path)
+        blob = kwargs.get(TOOL_OUTPUT_BLOB_KEY)
+        if isinstance(blob, dict) and blob.get("virtual_path") == diagnostic_path:
+            entry[TOOL_OUTPUT_BLOB_KEY] = blob
+        entries.append(entry)
+        if not legacy_files:
+            return entries
+        seen_refs.add(diagnostic_path)
 
     def _add_unique(**fields: Any) -> None:
         # Several sources can surface the same ref for one result — e.g. the
@@ -463,10 +454,12 @@ def extract_artifacts_from_result(
             if _collect_structured_refs(structured, found):
                 for key, value in found:
                     is_task = key in _STRUCTURED_TASK_KEYS
+                    if failed and is_task:
+                        continue
                     if not (_is_referenceable_task_id(value) if is_task else _is_referenceable_url(value)):
                         continue
                     _add_unique(artifact_type="task" if is_task else "file", display_name=_display_name_for_ref(value), real_ref=value)
-                if not entries and not any(value.startswith(("data:", "blob:")) for _, value in found):
+                if not failed and not entries and not any(value.startswith(("data:", "blob:")) for _, value in found):
                     encoded = _serialize_bounded_data(structured)
                     if encoded is not None:
                         _add_unique(artifact_type="data", display_name=f"{tool_name} structured result", real_ref=encoded)
@@ -480,6 +473,9 @@ def extract_artifacts_from_result(
                 real_ref=uri,
                 mime_type=mime if isinstance(mime, str) and mime else None,
             )
+
+    if failed:
+        return entries
 
     content = result.content
     if isinstance(content, str):
