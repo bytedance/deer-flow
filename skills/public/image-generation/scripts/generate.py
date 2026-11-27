@@ -23,6 +23,7 @@ BYTEPLUS_AGENTPLAN_ASPECT_SIZES = {
     "3:4": "1728x2304",
     "3:2": "2496x1664",
     "2:3": "1664x2496",
+    "21:9": "3136x1344",
 }
 MAX_REDIRECTS = 5
 # MiniMax image-01 caps the prompt at 1500 characters and rejects longer requests
@@ -93,7 +94,22 @@ def _byteplus_agentplan_size(aspect_ratio: str) -> str:
     override = os.getenv("BYTEPLUS_AGENTPLAN_IMAGE_SIZE", "").strip()
     if override:
         return override
-    return BYTEPLUS_AGENTPLAN_ASPECT_SIZES.get(aspect_ratio.strip(), "2048x2048")
+    normalized = aspect_ratio.strip()
+    size = BYTEPLUS_AGENTPLAN_ASPECT_SIZES.get(normalized)
+    if size is None:
+        supported = ", ".join(BYTEPLUS_AGENTPLAN_ASPECT_SIZES)
+        raise ValueError(
+            f"Unsupported aspect ratio {aspect_ratio!r} for BytePlus Agent Plan Seedream "
+            f"(supported: {supported}; or set BYTEPLUS_AGENTPLAN_IMAGE_SIZE)"
+        )
+    return size
+
+
+def _byteplus_agentplan_output_format(output_file: str) -> str:
+    extension = os.path.splitext(output_file)[1].lower()
+    if extension in {".jpg", ".jpeg"}:
+        return "jpeg"
+    return "png"
 
 
 def _openai_size(aspect_ratio: str, model: str) -> str:
@@ -153,10 +169,68 @@ def _guess_mime(image_path: str) -> str:
     }.get(ext, "image/jpeg")
 
 
+def _detect_image_format(image_bytes: bytes) -> str | None:
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "PNG"
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return "JPEG"
+    if (
+        len(image_bytes) >= 12
+        and image_bytes[:4] == b"RIFF"
+        and image_bytes[8:12] == b"WEBP"
+    ):
+        return "WEBP"
+    if image_bytes.startswith((b"GIF87a", b"GIF89a")):
+        return "GIF"
+    return None
+
+
+def _convert_image_for_output(image_bytes: bytes, output_file: str) -> bytes:
+    """Convert recognized image bytes when the provider codec mismatches output_file."""
+    target_formats = {
+        ".jpg": "JPEG",
+        ".jpeg": "JPEG",
+        ".png": "PNG",
+        ".webp": "WEBP",
+    }
+    target = target_formats.get(os.path.splitext(output_file)[1].lower())
+    actual = _detect_image_format(image_bytes)
+    if not target or not actual or actual == target:
+        return image_bytes
+
+    from io import BytesIO
+    from PIL import Image  # lazy import: keeps module importable without Pillow
+
+    with Image.open(BytesIO(image_bytes)) as img:
+        if target == "JPEG":
+            if img.mode in {"RGBA", "LA"} or (
+                img.mode == "P" and "transparency" in img.info
+            ):
+                rgba = img.convert("RGBA")
+                background = Image.new("RGB", rgba.size, (255, 255, 255))
+                background.paste(rgba, mask=rgba.getchannel("A"))
+                converted = background
+            else:
+                converted = img.convert("RGB")
+        else:
+            converted = img
+        buffer = BytesIO()
+        converted.save(buffer, format=target)
+        return buffer.getvalue()
+
+
 def _to_data_url(image_path: str) -> str:
     with open(image_path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode("utf-8")
-    return f"data:{_guess_mime(image_path)};base64,{b64}"
+        data = f.read()
+    fmt = _detect_image_format(data)
+    mime = {
+        "PNG": "image/png",
+        "JPEG": "image/jpeg",
+        "WEBP": "image/webp",
+        "GIF": "image/gif",
+    }.get(fmt or "", _guess_mime(image_path))
+    b64 = base64.b64encode(data).decode("utf-8")
+    return f"data:{mime};base64,{b64}"
 
 
 def _ensure_output_dir(output_file: str) -> None:
@@ -382,7 +456,9 @@ def _generate_image_gemini(
     raise Exception("Failed to generate image")
 
 
-def _write_openai_image(payload: dict, output_file: str) -> str:
+def _write_openai_image(
+    payload: dict, output_file: str, *, convert_to_extension: bool = False
+) -> str:
     images = payload.get("data") or []
     if not images or not isinstance(images[0], dict):
         raise Exception("OpenAI-compatible provider returned no image data")
@@ -407,6 +483,9 @@ def _write_openai_image(payload: dict, output_file: str) -> str:
     # Fail before the output is opened so an existing image is preserved.
     if not image_bytes:
         raise ValueError("Provider returned an empty image")
+
+    if convert_to_extension:
+        image_bytes = _convert_image_for_output(image_bytes, output_file)
 
     _ensure_output_dir(output_file)
     with open(output_file, "wb") as f:
@@ -483,9 +562,10 @@ def _generate_image_byteplus_agentplan(
     )
     body: dict[str, object] = {
         "model": model,
-        "prompt": _minimax_prompt(prompt),
+        "prompt": prompt,
         "size": _byteplus_agentplan_size(aspect_ratio),
         "response_format": "b64_json",
+        "output_format": _byteplus_agentplan_output_format(output_file),
         "watermark": False,
     }
     if reference_images:
@@ -501,7 +581,7 @@ def _generate_image_byteplus_agentplan(
         json=body,
         timeout=180,
     )
-    return _write_openai_image(response.json(), output_file)
+    return _write_openai_image(response.json(), output_file, convert_to_extension=True)
 
 
 def generate_image(

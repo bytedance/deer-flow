@@ -65,7 +65,9 @@ class TestProviders:
         provider = next(p for p in LLM_PROVIDERS if p.name == "byteplus_agentplan")
         assert provider.default_model == "dola-seed-2.1-turbo"
         assert provider.extra_config_for("dola-seed-2.1-turbo")["supports_vision"] is True
+        assert provider.extra_config_for("deepseek-v4.1-flash")["supports_vision"] is True
         assert provider.extra_config_for("deepseek-v4-pro")["supports_vision"] is False
+        assert provider.extra_config_for("deepseek-v4.1-flash-economy")["supports_vision"] is False
 
         content = build_minimal_config(
             provider_use=provider.use,

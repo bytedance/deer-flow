@@ -833,7 +833,7 @@ def test_byteplus_agentplan_download_allowlist_and_custom_hosts(monkeypatch, tmp
     def fake_get(url, **kw):
         if url.endswith("/contents/generations/tasks/cgt-1"):
             return FakeResp({"status": "succeeded", "content": {"video_url": untrusted}})
-        pytest.fail("untrusted download URL must not be fetched")
+        raise AssertionError("untrusted download URL must not be fetched")
 
     monkeypatch.setattr(vid.requests, "get", fake_get)
     pf = tmp_path / "prompt.json"

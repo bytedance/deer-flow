@@ -889,8 +889,12 @@ def test_byteplus_agentplan_generation_writes_base64(monkeypatch, tmp_path, alia
         return FakeResp({"data": [{"b64_json": base64.b64encode(b"seedream-img").decode()}]})
 
     monkeypatch.setattr(img.requests, "post", fake_post)
+    structured_prompt = (
+        '{"prompt": "glassmorphism slide", "style": "keynote", '
+        '"composition": "wide hero", "negative_prompt": "cluttered"}'
+    )
     prompt_file = tmp_path / "prompt.json"
-    prompt_file.write_text('{"prompt": "glassmorphism slide", "style": "keynote"}', encoding="utf-8")
+    prompt_file.write_text(structured_prompt, encoding="utf-8")
     output_file = tmp_path / "nested" / "slide.jpg"
 
     result = img.generate_image(str(prompt_file), [], str(output_file), "16:9")
@@ -899,13 +903,69 @@ def test_byteplus_agentplan_generation_writes_base64(monkeypatch, tmp_path, alia
     assert captured["headers"]["Authorization"] == "Bearer bp-key"
     assert captured["json"] == {
         "model": "dola-seedream-5.0-pro",
-        "prompt": "glassmorphism slide",
+        "prompt": structured_prompt,
         "size": "2560x1440",
         "response_format": "b64_json",
+        "output_format": "jpeg",
         "watermark": False,
     }
     assert output_file.read_bytes() == b"seedream-img"
     assert "Successfully generated image" in result
+
+
+def test_byteplus_agentplan_aspect_ratio_21_9_and_unmapped_rejected(monkeypatch, tmp_path):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    captured = []
+
+    def fake_post(url, headers=None, json=None, **kwargs):
+        captured.append(json)
+        return FakeResp({"data": [{"b64_json": base64.b64encode(b"wide-img").decode()}]})
+
+    monkeypatch.setattr(img.requests, "post", fake_post)
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("cinematic panorama", encoding="utf-8")
+
+    img.generate_image(str(prompt_file), [], str(tmp_path / "wide.png"), "21:9")
+    assert captured[0]["size"] == "3136x1344"
+    assert captured[0]["output_format"] == "png"
+
+    with pytest.raises(ValueError, match="Unsupported aspect ratio '5:4'"):
+        img.generate_image(str(prompt_file), [], str(tmp_path / "bad.png"), "5:4")
+    assert len(captured) == 1
+
+
+def test_byteplus_agentplan_converts_mismatched_png_for_jpg_slide_chain(monkeypatch, tmp_path):
+    from io import BytesIO
+    from PIL import Image
+
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    png_buf = BytesIO()
+    Image.new("RGBA", (8, 6), (20, 120, 220, 255)).save(png_buf, format="PNG")
+    png_bytes = png_buf.getvalue()
+    assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+
+    posts = []
+
+    def fake_post(url, headers=None, json=None, **kwargs):
+        posts.append(json)
+        return FakeResp({"data": [{"b64_json": base64.b64encode(png_bytes).decode()}]})
+
+    monkeypatch.setattr(img.requests, "post", fake_post)
+    prompt_file = tmp_path / "prompt.json"
+    prompt_file.write_text('{"prompt": "title slide", "style": "clean"}', encoding="utf-8")
+
+    slide1 = tmp_path / "slide-01.jpg"
+    slide2 = tmp_path / "slide-02.jpg"
+    img.generate_image(str(prompt_file), [], str(slide1), "16:9")
+    img.generate_image(str(prompt_file), [str(slide1)], str(slide2), "16:9")
+
+    assert posts[0]["output_format"] == "jpeg"
+    assert slide1.read_bytes().startswith(b"\xff\xd8\xff")
+    assert slide2.read_bytes().startswith(b"\xff\xd8\xff")
+    ref_data_url = posts[1]["image"]
+    assert isinstance(ref_data_url, str)
+    assert ref_data_url.startswith("data:image/jpeg;base64,")
+    assert base64.b64decode(ref_data_url.split(",", 1)[1]).startswith(b"\xff\xd8\xff")
 
 
 def test_byteplus_agentplan_single_and_multi_reference_images_and_overrides(monkeypatch, tmp_path):
@@ -933,6 +993,7 @@ def test_byteplus_agentplan_single_and_multi_reference_images_and_overrides(monk
     assert posts[0][0] == "https://plan.example/api/plan/v3/images/generations"
     assert posts[0][1]["model"] == "dola-seedream-5.5"
     assert posts[0][1]["size"] == "2K"
+    assert posts[0][1]["output_format"] == "png"
     assert isinstance(posts[0][1]["image"], str)
     assert posts[0][1]["image"].startswith("data:image/png;base64,")
 

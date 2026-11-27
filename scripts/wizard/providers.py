@@ -148,10 +148,10 @@ LLM_PROVIDERS: list[LLMProvider] = [
         },
         model_vision_overrides={
             "dola-seed-2.1-turbo": True,
+            "deepseek-v4.1-flash": True,
             "seed-2.0-lite": True,
             "seed-2.0-mini": True,
             "deepseek-v4-pro": False,
-            "deepseek-v4.1-flash": False,
             "deepseek-v4.1-flash-economy": False,
         },
         sandbox_env_vars=("BYTEPLUS_AGENTPLAN_API_KEY",),

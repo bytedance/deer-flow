@@ -132,14 +132,14 @@ def _capabilities(provider: str, model: str) -> dict[str, Any]:
             when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
             when_thinking_disabled={"extra_body": {"thinking": {"type": "disabled"}}},
         )
-    elif provider == "byteplus-agent-plan" and model in {"dola-seed-2.1-turbo", "seed-2.0-lite", "seed-2.0-mini"}:
+    elif provider == "byteplus-agent-plan" and model in {"dola-seed-2.1-turbo", "deepseek-v4.1-flash", "seed-2.0-lite", "seed-2.0-mini"}:
         result.update(
             supports_vision=True,
             reasoning={"thinking": "optional", "dialect": "openai_extra_body", "history": "preserve"},
             when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
             when_thinking_disabled={"extra_body": {"thinking": {"type": "disabled"}}},
         )
-    elif provider == "byteplus-agent-plan" and model in {"deepseek-v4-pro", "deepseek-v4.1-flash", "deepseek-v4.1-flash-economy"}:
+    elif provider == "byteplus-agent-plan" and model in {"deepseek-v4-pro", "deepseek-v4.1-flash-economy"}:
         result.update(
             reasoning={"thinking": "optional", "dialect": "openai_extra_body", "history": "preserve"},
             when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},

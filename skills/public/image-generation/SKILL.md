@@ -210,8 +210,8 @@ BytePlus Agent Plan settings:
 - `BYTEPLUS_AGENTPLAN_API_KEY` (required; available on all Personal and Enterprise Agent Plan tiers)
 - `BYTEPLUS_AGENTPLAN_BASE_URL` (default `https://ark.ap-southeast.bytepluses.com/api/plan/v3`)
 - `BYTEPLUS_AGENTPLAN_IMAGE_MODEL` (default `dola-seedream-5.0-pro`; also supports `dola-seedream-5.5` and `dola-seedream-5.0-flash`)
-- `BYTEPLUS_AGENTPLAN_IMAGE_SIZE` (optional fixed-size override such as `2K` or `2048x2048`; by default maps `--aspect-ratio` to Seedream 2K dimensions)
-- Reference images passed via `--reference-images` are sent as data URLs in the JSON `image` field of `POST {base_url}/images/generations` (single string for one image, list for multiple images). Responses decode base64 before opening the destination file, preserving any existing output on decode or download failure.
+- `BYTEPLUS_AGENTPLAN_IMAGE_SIZE` (optional fixed-size override such as `2K` or `2048x2048`; by default maps `--aspect-ratio` across `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`, and `21:9` to Seedream 2K dimensions and rejects unmapped ratios explicitly)
+- The full structured JSON prompt is forwarded intact (preserving `style`, `composition`, `negative_prompt`, and slide instructions), and `output_format` matches the destination suffix (`.jpg`/`.jpeg` requests `jpeg`; other extensions request `png`). If a response returns a different image codec than the destination suffix, the bytes are converted in memory before opening the output file, preserving any existing output on decode, conversion, or download failure. Reference images passed via `--reference-images` are sent as data URLs in the JSON `image` field of `POST {base_url}/images/generations` (single string for one image, list for multiple images).
 
 OpenAI-compatible settings:
 

@@ -403,6 +403,17 @@ def test_reasoning_cannot_override_preset_routing_or_credentials(path):
         ManagedModel(provider="openai", model="x", api_key="secret-test-key", reasoning={"thinking": "required", "effort": {"values": ["high"], "default": "high", "path": path}})
 
 
+def test_byteplus_agent_plan_vision_capabilities_match_documented_models():
+    for model_id in ("dola-seed-2.1-turbo", "deepseek-v4.1-flash", "seed-2.0-lite", "seed-2.0-mini"):
+        runtime = ManagedModel(provider="byteplus-agent-plan", model=model_id, api_key="test-key").runtime_config()
+        assert runtime.supports_vision is True
+        assert runtime.supports_thinking is True
+    for model_id in ("deepseek-v4-pro", "deepseek-v4.1-flash-economy"):
+        runtime = ManagedModel(provider="byteplus-agent-plan", model=model_id, api_key="test-key").runtime_config()
+        assert runtime.supports_vision is False
+        assert runtime.supports_thinking is True
+
+
 def test_reasoning_contract_override_is_preserved_and_validated(store):
     profile = ManagedModel(provider="deepseek", model="deepseek-v4-pro", api_key="test", reasoning={"thinking": "unsupported", "dialect": "none"}, supports_vision=False)
     saved = store.save(profile, expected_revision=None)
