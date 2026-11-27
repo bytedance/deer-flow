@@ -916,17 +916,22 @@ def test_provisioner_is_alive_raises_on_request_exception(monkeypatch):
         backend._provisioner_is_alive("abc123")
 
 
-def test_provisioner_is_alive_raises_on_server_error(monkeypatch):
-    backend = RemoteSandboxBackend("http://provisioner:8002")
+def test_provisioner_is_alive_raises_on_server_error_without_upstream_body(monkeypatch):
+    # _check_tracked_sandbox_alive logs this error, so an upstream body that
+    # echoes headers or proxy diagnostics would bypass the transport redaction.
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key="secret")
+    upstream_body = "unavailable; X-API-Key: secret"
 
     def mock_get(url: str, timeout: int, headers=None):
         response = _StubResponse(status_code=503)
-        response.text = "unavailable"
+        response.text = upstream_body
         return response
 
     monkeypatch.setattr(requests, "get", mock_get)
-    with pytest.raises(RuntimeError, match="HTTP 503 unavailable"):
+    with pytest.raises(RuntimeError, match="Provisioner health check failed for abc123: HTTP 503") as excinfo:
         backend._provisioner_is_alive("abc123")
+    assert upstream_body not in str(excinfo.value)
+    assert "secret" not in str(excinfo.value)
 
 
 def test_discover_delegates_to_provisioner_discover(monkeypatch):

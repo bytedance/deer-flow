@@ -521,7 +521,10 @@ class RemoteSandboxBackend(SandboxBackend):
         if resp.status_code == 404:
             return False
         if not resp.ok:
-            raise RuntimeError(f"Provisioner health check failed for {sandbox_id}: HTTP {resp.status_code} {resp.text}")
+            # The upstream body can echo request headers or proxy diagnostics,
+            # and this error is logged by _check_tracked_sandbox_alive; report
+            # the operation and status without copying it.
+            raise RuntimeError(f"Provisioner health check failed for {sandbox_id}: HTTP {resp.status_code}")
 
         data = resp.json()
         return data.get("status") == "Running"
