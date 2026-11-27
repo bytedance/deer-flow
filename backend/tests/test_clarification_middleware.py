@@ -823,6 +823,39 @@ class TestClarificationDisabled:
 
         assert isinstance(result, ToolMessage)
 
+    @pytest.mark.parametrize("call_id", [None, ""])
+    def test_reply_tolerates_a_call_without_an_id(self, middleware, call_id):
+        """A call can arrive with no id, and the reply still has to be built.
+
+        ``ToolMessage.tool_call_id`` is a ``str``; ``request.tool_call.get("id", "")``
+        only substitutes for a *missing key*, so an explicit ``None`` used to reach
+        the constructor and raise a pydantic ``ValidationError``. The disabled
+        path then failed the run instead of nudging the agent to proceed, and the
+        interrupt path failed before it could ask the question at all.
+        """
+        from langchain_core.messages import ToolMessage
+
+        request = self._request(runtime_context={"disable_clarification": True})
+        request.tool_call["id"] = call_id
+
+        result = middleware.wrap_tool_call(request, lambda _req: pytest.fail("handler should not be called"))
+
+        assert isinstance(result, ToolMessage)
+        assert result.tool_call_id == ""
+        assert "disabled" in result.content.lower()
+
+    def test_interrupt_reply_tolerates_a_call_without_an_id(self, middleware):
+        """The interrupting path builds a ToolMessage too, so it needs the same fix."""
+        from langgraph.types import Command
+
+        request = self._request(runtime_context={})
+        request.tool_call["id"] = None
+
+        result = middleware.wrap_tool_call(request, lambda _req: pytest.fail("handler should not be called"))
+
+        assert isinstance(result, Command)
+        assert result.update["messages"][0].tool_call_id == ""
+
     def test_not_disabled_still_interrupts(self, middleware):
         """Without the flag, the original goto=END behavior is preserved."""
         from langgraph.types import Command
