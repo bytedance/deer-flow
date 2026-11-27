@@ -58,8 +58,11 @@ describe("memory API proxy", () => {
     );
   });
 
-  it("proxies to the server-only internal gateway instead of the public base URL", async () => {
-    rs.stubEnv("DEER_FLOW_INTERNAL_GATEWAY_BASE_URL", "http://internal:8001");
+  it.each([
+    ["http://internal:8001", "http://internal:8001/api/memory"],
+    ["   ", "http://public:9999/api/memory"],
+  ])("resolves the gateway upstream from %p", async (internal, expected) => {
+    rs.stubEnv("DEER_FLOW_INTERNAL_GATEWAY_BASE_URL", internal);
     rs.stubEnv("NEXT_PUBLIC_BACKEND_BASE_URL", "http://public:9999");
     // The route resolves its upstream at module load, so import it after the
     // environment is in place.
@@ -75,6 +78,6 @@ describe("memory API proxy", () => {
 
     const [target] = fetchMock.mock.calls[0]!;
     expect(target).toBeInstanceOf(URL);
-    expect((target as URL).href).toBe("http://internal:8001/api/memory");
+    expect((target as URL).href).toBe(expected);
   });
 });
