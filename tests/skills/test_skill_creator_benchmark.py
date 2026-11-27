@@ -589,6 +589,45 @@ def test_cli_omits_delta_when_baseline_runs_have_no_grades(tmp_path, benchmark_s
     assert "| Pass Rate | 100% ± 0% | — | — |" in markdown
 
 
+def write_flat_grade(benchmark_dir, eval_id, config, pass_rate):
+    config_dir = benchmark_dir / f"eval-{eval_id}" / config
+    config_dir.mkdir(parents=True)
+    grading = {"summary": {"pass_rate": pass_rate}}
+    (config_dir / "grading.json").write_text(json.dumps(grading), encoding="utf-8")
+
+
+def test_cli_omits_delta_when_no_eval_measured_both_sides(tmp_path, benchmark_script):
+    write_flat_grade(tmp_path, 1, "with_skill", 1.0)
+    write_flat_grade(tmp_path, 2, "old_skill", 0.0)
+
+    completed = run_cli(benchmark_script, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((tmp_path / "benchmark.json").read_text(encoding="utf-8"))
+    assert len(report["runs"]) == 2
+    assert report["run_summary"]["delta"] == {}
+    markdown = (tmp_path / "benchmark.md").read_text(encoding="utf-8")
+    assert "Comparison incomplete" in markdown
+    assert "| Pass Rate | 100% ± 0% | 0% ± 0% | — |" in markdown
+    assert "+1.00" not in markdown + completed.stdout
+
+
+def test_cli_computes_delta_over_shared_evals_only(tmp_path, benchmark_script):
+    write_flat_grade(tmp_path, 1, "with_skill", 0.5)
+    write_flat_grade(tmp_path, 1, "old_skill", 0.25)
+    write_flat_grade(tmp_path, 2, "with_skill", 1.0)
+
+    completed = run_cli(benchmark_script, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((tmp_path / "benchmark.json").read_text(encoding="utf-8"))
+    assert report["run_summary"]["with_skill"]["pass_rate"]["mean"] == 0.75
+    assert report["run_summary"]["delta"]["pass_rate"] == "+0.25"
+    assert report["metadata"]["delta_eval_ids"] == [1]
+    markdown = (tmp_path / "benchmark.md").read_text(encoding="utf-8")
+    assert "Delta covers only the evals measured in both configurations: 1." in markdown
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 @pytest.mark.parametrize(
     "metadata,expected",
@@ -601,6 +640,10 @@ def test_cli_omits_delta_when_baseline_runs_have_no_grades(tmp_path, benchmark_s
             "Eval 1: with_skill=2, without_skill=1",
         ),
         ({"runs_per_configuration": 3}, "3 runs per configuration"),
+        (
+            {"runs_per_configuration": 1, "delta_eval_ids": [1, 3]},
+            "Delta covers only the evals measured in both configurations: 1, 3.",
+        ),
     ],
 )
 def test_viewer_shows_run_counts(metadata, expected):

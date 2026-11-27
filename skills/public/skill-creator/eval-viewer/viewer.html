@@ -1202,7 +1202,10 @@
       html += "</tbody></table>";
 
       if (incomplete) {
-        html += "<p style='color: var(--text-muted); font-size: 0.875rem;'>Comparison incomplete: delta omitted until both configurations have accepted runs.</p>";
+        html += "<p style='color: var(--text-muted); font-size: 0.875rem;'>Comparison incomplete: delta omitted until both configurations have accepted runs for the same eval.</p>";
+      }
+      if (metadata.delta_eval_ids) {
+        html += "<p style='color: var(--text-muted); font-size: 0.875rem;'>" + escapeHtml("Delta covers only the evals measured in both configurations: " + metadata.delta_eval_ids.join(", ") + ".") + "</p>";
       }
 
       // Per-eval breakdown (if runs data available)

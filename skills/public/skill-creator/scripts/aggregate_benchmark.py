@@ -212,6 +212,14 @@ def load_run_results(benchmark_dir: Path) -> dict:
     return results
 
 
+def shared_eval_ids(results: dict) -> set:
+    """Eval IDs with accepted runs in both of the compared (first two) configs."""
+    compared = list(results.values())[:2]
+    if len(compared) < 2:
+        return set()
+    return {r["eval_id"] for r in compared[0]} & {r["eval_id"] for r in compared[1]}
+
+
 def aggregate_results(results: dict) -> dict:
     """
     Aggregate run results into summary statistics.
@@ -242,18 +250,20 @@ def aggregate_results(results: dict) -> dict:
             "tokens": calculate_stats(token_counts)
         }
 
-    # Calculate delta between the first two configs. It needs accepted runs on
-    # both sides: an unmeasured baseline is not a zero score.
-    if len(configs) < 2 or not results[configs[0]] or not results[configs[1]]:
+    # Calculate delta between the first two configs, using only the evals both
+    # of them measured: different prompts are not a comparison.
+    shared = shared_eval_ids(results)
+    if not shared:
         run_summary["delta"] = {}
         return run_summary
 
-    primary = run_summary[configs[0]]
-    baseline = run_summary[configs[1]]
+    def shared_mean(config: str, key: str) -> float:
+        values = [r.get(key, 0) for r in results[config] if r["eval_id"] in shared]
+        return calculate_stats(values)["mean"]
 
-    delta_pass_rate = primary.get("pass_rate", {}).get("mean", 0) - baseline.get("pass_rate", {}).get("mean", 0)
-    delta_time = primary.get("time_seconds", {}).get("mean", 0) - baseline.get("time_seconds", {}).get("mean", 0)
-    delta_tokens = primary.get("tokens", {}).get("mean", 0) - baseline.get("tokens", {}).get("mean", 0)
+    delta_pass_rate = shared_mean(configs[0], "pass_rate") - shared_mean(configs[1], "pass_rate")
+    delta_time = shared_mean(configs[0], "time_seconds") - shared_mean(configs[1], "time_seconds")
+    delta_tokens = shared_mean(configs[0], "tokens") - shared_mean(configs[1], "tokens")
 
     run_summary["delta"] = {
         "pass_rate": f"{delta_pass_rate:+.2f}",
@@ -302,6 +312,10 @@ def generate_benchmark(benchmark_dir: Path, skill_name: str = "", skill_path: st
     observed_counts = {count for counts in counts_by_eval.values() for count in counts.values()}
     uniform_count = next(iter(observed_counts)) if len(observed_counts) == 1 else None
 
+    # Record which evals the delta covers when it leaves some of them out
+    shared = shared_eval_ids(results)
+    delta_eval_ids = sorted(shared) if shared and len(shared) < len(eval_ids) else None
+
     benchmark = {
         "metadata": {
             "skill_name": skill_name or "<skill-name>",
@@ -312,6 +326,7 @@ def generate_benchmark(benchmark_dir: Path, skill_name: str = "", skill_path: st
             "evals_run": eval_ids,
             "runs_per_configuration": uniform_count,
             **({"run_counts_by_eval": counts_by_eval} if len(observed_counts) > 1 else {}),
+            **({"delta_eval_ids": delta_eval_ids} if delta_eval_ids else {}),
         },
         "runs": runs,
         "run_summary": run_summary,
@@ -376,6 +391,10 @@ def generate_markdown(benchmark: dict) -> str:
     b_tokens = b_summary.get("tokens", {})
     lines.append(f"| Tokens | {a_tokens.get('mean', 0):.0f} ± {a_tokens.get('stddev', 0):.0f} | {b_tokens.get('mean', 0):.0f} ± {b_tokens.get('stddev', 0):.0f} | {delta.get('tokens', '—')} |")
 
+    if metadata.get("delta_eval_ids"):
+        covered = ", ".join(map(str, metadata["delta_eval_ids"]))
+        lines.extend(["", f"Delta covers only the evals measured in both configurations: {covered}."])
+
     if not delta:
         # Show an unmeasured side as missing rather than as a zero score
         measured = {run["configuration"] for run in benchmark["runs"]}
@@ -385,7 +404,7 @@ def generate_markdown(benchmark: dict) -> str:
                 if config not in measured:
                     cells[column] = " — "
             lines[index] = "|".join(cells)
-        lines.extend(["", "Comparison incomplete: delta omitted until both configurations have accepted runs."])
+        lines.extend(["", "Comparison incomplete: delta omitted until both configurations have accepted runs for the same eval."])
 
     # Notes section
     if benchmark.get("notes"):
