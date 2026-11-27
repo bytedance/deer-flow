@@ -1,3 +1,4 @@
+import { throwGatewayApiError } from "@/core/api/errors";
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
 import {
   ARTIFACT_PREVIEW_MAX_BYTES,
@@ -124,9 +125,7 @@ export async function getProject(projectId: string): Promise<Project> {
   });
 
   if (!response.ok) {
-    throw new Error(
-      await readProjectAPIError(response, "Failed to load project."),
-    );
+    return throwGatewayApiError(response, "Failed to load project.");
   }
 
   return (await response.json()) as Project;
@@ -166,13 +165,10 @@ export async function patchProject(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      ...(input.name !== undefined ? { name: input.name } : {}),
-      ...(input.instructions !== undefined
-        ? { instructions: input.instructions }
-        : {}),
-      ...(input.presentation !== undefined
-        ? { presentation: input.presentation }
-        : {}),
+      name: input.name,
+      instructions: input.instructions,
+      expected_instructions: input.expected_instructions,
+      presentation: input.presentation,
     }),
   });
 

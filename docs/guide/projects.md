@@ -30,6 +30,11 @@ new run sees the latest saved instructions. Instructions are capped at
 multi-byte characters count as their UTF-8 byte length. Oversized instructions
 are rejected with a `422` at write time and are never silently truncated.
 
+If another tab changes the instructions or promotes a memory while you are
+editing, the editor keeps your draft and shows the saved text below it. Merge
+the changes you want to keep into your draft, confirm that you have reviewed
+the saved version, then save.
+
 ## Project memory
 
 With DeerMem automatic memory enabled, project conversations also accumulate

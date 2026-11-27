@@ -36,6 +36,16 @@ logger = logging.getLogger(__name__)
 ProjectStatus = Literal["active", "archived"]
 
 
+async def _begin_immediate_if_sqlite(session: AsyncSession) -> None:
+    # SQLite has no row locks. Acquire its write lock before a read-then-write.
+    if session.get_bind().dialect.name == "sqlite":
+        await session.execute(text("BEGIN IMMEDIATE"))
+
+
+class ProjectInstructionsConflictError(ValueError):
+    """The saved instructions changed after the caller started editing."""
+
+
 class ProjectNotAssignableError(ValueError):
     """Raised when a thread cannot be assigned to a project.
 
@@ -117,14 +127,20 @@ class ProjectRepository:
         *,
         name: str | None = None,
         instructions: str | None = None,
+        expected_instructions: str | None = None,
         presentation: dict | None = None,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> dict | None:
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectRepository.patch")
+        check_instructions = instructions is not None and expected_instructions is not None
         async with self._sf() as session:
-            row = await session.get(ProjectRow, project_id)
+            if check_instructions:
+                await _begin_immediate_if_sqlite(session)
+            row = await session.get(ProjectRow, project_id, with_for_update=check_instructions)
             if row is None or (resolved_user_id is not None and row.user_id != resolved_user_id):
                 return None
+            if check_instructions and row.instructions != expected_instructions:
+                raise ProjectInstructionsConflictError("Project instructions changed. Review the saved instructions before saving your draft.")
             if name is not None:
                 row.name = name
             if instructions is not None:
@@ -213,14 +229,6 @@ class ProjectDocumentRepository:
         return d
 
     @staticmethod
-    async def _begin_immediate_if_sqlite(session: AsyncSession) -> None:
-        if session.get_bind().dialect.name == "sqlite":
-            # Read-then-write transaction: take the write lock up front
-            # (ThreadMetaRepository precedent) so a concurrent writer cannot
-            # interleave between the project lock and the mutation.
-            await session.execute(text("BEGIN IMMEDIATE"))
-
-    @staticmethod
     async def _lock_active_project(session: AsyncSession, project_id: str, resolved_user_id: str | None) -> ProjectRow | None:
         """Lock the owned ``status='active'`` project row inside the transaction."""
         stmt = select(ProjectRow).where(ProjectRow.id == project_id, ProjectRow.status == "active")
@@ -257,7 +265,7 @@ class ProjectDocumentRepository:
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.insert_active")
         async with self._sf() as session:
-            await self._begin_immediate_if_sqlite(session)
+            await _begin_immediate_if_sqlite(session)
             if await self._lock_active_project(session, project_id, resolved_user_id) is None:
                 await session.rollback()
                 return None
@@ -404,7 +412,7 @@ class ProjectDocumentRepository:
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.trash")
         async with self._sf() as session:
-            await self._begin_immediate_if_sqlite(session)
+            await _begin_immediate_if_sqlite(session)
             # Route to the owning project: the authoritative validation is the
             # locked re-read below, so this unlocked probe leaks nothing.
             probe = await session.get(ProjectDocumentRow, document_id)
@@ -487,7 +495,7 @@ class ProjectDocumentRepository:
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.stage_live_copy")
         async with self._sf() as session:
-            await self._begin_immediate_if_sqlite(session)
+            await _begin_immediate_if_sqlite(session)
             locked = (await session.execute(select(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id).with_for_update())).scalar_one_or_none()
             if locked is None or locked.project_id != project_id or locked.trashed_at is not None or (resolved_user_id is not None and locked.user_id != resolved_user_id):
                 await session.rollback()
@@ -530,7 +538,7 @@ class ProjectDocumentRepository:
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.publish_under_live_lock")
         async with self._sf() as session:
-            await self._begin_immediate_if_sqlite(session)
+            await _begin_immediate_if_sqlite(session)
             locked = (await session.execute(select(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id).with_for_update())).scalar_one_or_none()
             if locked is None or locked.project_id != project_id or locked.trashed_at is not None or (resolved_user_id is not None and locked.user_id != resolved_user_id):
                 await session.rollback()
@@ -620,7 +628,7 @@ class ProjectDocumentRepository:
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.restore")
         async with self._sf() as session:
-            await self._begin_immediate_if_sqlite(session)
+            await _begin_immediate_if_sqlite(session)
             locked_project = await self._lock_active_project(session, target_project_id, resolved_user_id)
             if locked_project is None:
                 await session.rollback()
@@ -726,7 +734,7 @@ class ProjectDocumentRepository:
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.purge")
         async with self._sf() as session:
-            await self._begin_immediate_if_sqlite(session)
+            await _begin_immediate_if_sqlite(session)
             lock_stmt = select(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id)
             if resolved_user_id is not None:
                 lock_stmt = lock_stmt.where(ProjectDocumentRow.user_id == resolved_user_id)

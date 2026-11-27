@@ -1,18 +1,36 @@
 """Tests for ProjectRepository (SQLAlchemy-backed)."""
 
-import pytest
+import asyncio
+import os
+from uuid import uuid4
 
-from deerflow.persistence.projects import ProjectRepository
+import pytest
+from sqlalchemy.schema import DropSchema
+from support.postgres import asyncpg_test_url
+
+from deerflow.persistence.projects import ProjectInstructionsConflictError, ProjectRepository
 
 
 @pytest.fixture
-async def repo(tmp_path):
-    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+async def repo(tmp_path, request):
+    from deerflow.persistence.engine import close_engine, get_engine, get_session_factory, init_engine
 
-    url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
-    yield ProjectRepository(get_session_factory())
-    await close_engine()
+    schema = None
+    if getattr(request, "param", "sqlite") == "postgres":
+        uri = os.environ.get("TEST_POSTGRES_URI")
+        if not uri:
+            pytest.skip("requires TEST_POSTGRES_URI")
+        schema = f"test_projects_{uuid4().hex}"
+        await init_engine("postgres", url=asyncpg_test_url(uri), postgres_schema=schema)
+    else:
+        await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'test.db'}", sqlite_dir=str(tmp_path))
+    try:
+        yield ProjectRepository(get_session_factory())
+    finally:
+        if schema:
+            async with get_engine().begin() as conn:
+                await conn.execute(DropSchema(schema, cascade=True))
+        await close_engine()
 
 
 class TestProjectRepository:
@@ -53,6 +71,22 @@ class TestProjectRepository:
     async def test_patch_foreign_is_none(self, repo):
         row = await repo.create(name="p", user_id="u1")
         assert await repo.patch(row["id"], name="x", user_id="u2") is None
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("repo", ["sqlite", "postgres"], indirect=True)
+    async def test_only_one_draft_can_replace_the_same_instructions(self, repo):
+        project = await repo.create(name="Finance", user_id="u1")
+        start = asyncio.Barrier(2)
+
+        async def save(instructions):
+            await start.wait()
+            return await repo.patch(project["id"], instructions=instructions, expected_instructions="", user_id="u1")
+
+        results = await asyncio.gather(save("Use USD"), save("Use EUR"), return_exceptions=True)
+        assert sum(isinstance(result, ProjectInstructionsConflictError) for result in results) == 1
+        (winner,) = [result for result in results if isinstance(result, dict)]
+        stored = await repo.get(project["id"], user_id="u1")
+        assert stored["instructions"] == winner["instructions"]
 
     @pytest.mark.anyio
     async def test_set_status_is_idempotent(self, repo):

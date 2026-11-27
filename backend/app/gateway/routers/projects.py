@@ -12,6 +12,7 @@ from app.gateway.deps import get_config, get_project_repo, get_thread_store
 from app.gateway.persistent_writes import run_drained_write
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.projects_config import ProjectsConfig
+from deerflow.persistence.projects import ProjectInstructionsConflictError
 from deerflow.projects.memory import MAX_FACTS, get_project_memory_repository
 from deerflow.runtime.secret_context import redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
@@ -42,6 +43,7 @@ class ProjectCreateRequest(BaseModel):
 class ProjectPatchRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     instructions: str | None = None
+    expected_instructions: str | None = None
     presentation: dict | None = None
 
 
@@ -231,7 +233,10 @@ async def get_project(project_id: str, request: Request) -> ProjectResponse:
 @require_permission("projects", "write")
 async def patch_project(project_id: str, body: ProjectPatchRequest, request: Request) -> ProjectResponse:
     await asyncio.to_thread(_validate_instructions_length, body.instructions)
-    row = await get_project_repo(request).patch(project_id, name=body.name, instructions=body.instructions, presentation=body.presentation)
+    try:
+        row = await get_project_repo(request).patch(project_id, name=body.name, instructions=body.instructions, expected_instructions=body.expected_instructions, presentation=body.presentation)
+    except ProjectInstructionsConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if row is None:
         raise _not_found()
     return _to_response(row)

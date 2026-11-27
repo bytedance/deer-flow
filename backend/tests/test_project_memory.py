@@ -170,19 +170,25 @@ def test_project_memory_honors_global_and_agent_opt_out(agent_enabled, global_en
     assert ("Learned fact" in block) == (agent_enabled and global_enabled and injection_enabled)
 
 
-def test_http_actions_and_owner_permissions(repo, monkeypatch):
+@pytest.fixture
+def memory_app(repo, monkeypatch):
     from fastapi import FastAPI
-    from fastapi.testclient import TestClient
     from test_projects_router import _StubAuthMiddleware
 
     from app.gateway.routers import projects
 
-    apply(repo, [fact()])
     app = FastAPI()
     app.add_middleware(_StubAuthMiddleware)
     app.include_router(projects.router)
     monkeypatch.setattr(projects, "get_project_memory_repository", lambda: repo)
-    with TestClient(app) as client:
+    return app
+
+
+def test_http_actions_and_owner_permissions(repo, memory_app):
+    from fastapi.testclient import TestClient
+
+    apply(repo, [fact()])
+    with TestClient(memory_app) as client:
         headers = {"x-test-user": "u1"}
         path = "/api/projects/p1/memory"
         result = client.get(path, headers=headers)
@@ -198,6 +204,42 @@ def test_http_actions_and_owner_permissions(repo, monkeypatch):
         assert promoted.json()["instructions"] == "- Reports exclude tax"
         assert promoted.json()["memory"]["facts"] == []
         assert client.delete(path + f"/{item['id']}", headers=headers).status_code == 404
+
+
+@pytest.mark.anyio
+async def test_stale_instruction_patch_after_promotion_preserves_both_edits(repo, memory_app):
+    from httpx import ASGITransport, AsyncClient
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.projects import ProjectRepository
+
+    apply(repo, [fact()])
+    item = repo.get("p1", "u1")["facts"][0]
+    engine = create_async_engine(repo._sf.kw["bind"].url.set(drivername="sqlite+aiosqlite"))
+    memory_app.state.project_repo = ProjectRepository(async_sessionmaker(engine))
+    path = "/api/projects/p1"
+    try:
+        async with AsyncClient(transport=ASGITransport(memory_app), base_url="http://test", headers={"x-test-user": "u1"}) as client:
+            base = (await client.get(path)).json()["instructions"]
+            assert base == ""
+            promoted = await client.post(f"{path}/memory/{item['id']}/promote", json={"expected_instructions": base})
+            assert promoted.status_code == 200
+            saved = promoted.json()["instructions"]
+            assert saved == "- Reports exclude tax"
+
+            draft = {"name": "New name", "instructions": "Use USD", "expected_instructions": base}
+            assert (await client.patch(path, json=draft, headers={"x-test-user": "u2"})).status_code == 404
+            assert (await client.patch(path, json=draft)).status_code == 409
+            project = (await client.get(path)).json()
+            assert (project["name"], project["instructions"]) == ("Finance", saved)
+            assert (await client.get(f"{path}/memory")).json()["facts"] == []
+
+            merged = f"Use USD\n{saved}"
+            retry = await client.patch(path, json={"instructions": merged, "expected_instructions": saved})
+            assert retry.status_code == 200
+            assert (await client.get(path)).json()["instructions"] == merged
+    finally:
+        await engine.dispose()
 
 
 def test_same_llm_call_routes_project_facts_without_global_leak(repo, tmp_path, monkeypatch):
