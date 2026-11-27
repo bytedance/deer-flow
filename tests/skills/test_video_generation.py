@@ -11,6 +11,7 @@ from skill_loader import FakeResp, load  # noqa: E402
 vid = load("video-generation")
 GEMINI_VIDEO = "https://generativelanguage.googleapis.com/download/v1beta/files/video"
 MINIMAX_VIDEO = "https://filecdn.minimax.chat/v.mp4"
+BYTEPLUS_VIDEO = "https://bucket.tos-ap-southeast-1.volces.com/generated/v.mp4"
 
 
 @pytest.fixture(autouse=True)
@@ -18,12 +19,19 @@ def clean_env(monkeypatch):
     for key in (
         "GEMINI_API_KEY",
         "MINIMAX_API_KEY",
+        "BYTEPLUS_AGENTPLAN_API_KEY",
         "VIDEO_GENERATION_PROVIDER",
         "MINIMAX_API_HOST",
         "MINIMAX_VIDEO_DOWNLOAD_HOSTS",
         "MINIMAX_VIDEO_MODEL",
         "MINIMAX_VIDEO_RESOLUTION",
         "MINIMAX_VIDEO_DURATION",
+        "BYTEPLUS_AGENTPLAN_BASE_URL",
+        "BYTEPLUS_AGENTPLAN_VIDEO_MODEL",
+        "BYTEPLUS_AGENTPLAN_VIDEO_RESOLUTION",
+        "BYTEPLUS_AGENTPLAN_VIDEO_DURATION",
+        "BYTEPLUS_AGENTPLAN_GENERATE_AUDIO",
+        "BYTEPLUS_AGENTPLAN_VIDEO_DOWNLOAD_HOSTS",
     ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(vid.time, "sleep", lambda *_: None)
@@ -664,3 +672,196 @@ def test_gemini_forwards_aspect_ratio_to_predict_request(monkeypatch, tmp_path):
 
     assert "predictLongRunning" in captured["url"]
     assert captured["json"]["parameters"]["aspectRatio"] == "9:16"
+
+
+def test_resolve_falls_back_to_byteplus_agentplan(monkeypatch):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    assert vid._resolve_provider("VIDEO_GENERATION_PROVIDER", "gemini", False) == "byteplus_agentplan"
+
+
+def test_resolve_prefers_minimax_before_byteplus_agentplan(monkeypatch):
+    monkeypatch.setenv("MINIMAX_API_KEY", "m")
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    assert vid._resolve_provider("VIDEO_GENERATION_PROVIDER", "gemini", False) == "minimax"
+
+
+@pytest.mark.parametrize("alias", ["byteplus", "byteplus_agentplan", "byteplus-agentplan", "seedance"])
+def test_byteplus_agentplan_full_flow_and_aliases(monkeypatch, tmp_path, alias):
+    monkeypatch.setenv("VIDEO_GENERATION_PROVIDER", alias)
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, **kw):
+        captured["post_url"] = url
+        captured["post_headers"] = headers
+        captured["post_json"] = json
+        assert kw["allow_redirects"] is False
+        return FakeResp({"id": "cgt-123"})
+
+    def fake_get(url, headers=None, **kw):
+        assert kw["allow_redirects"] is False
+        if url.endswith("/contents/generations/tasks/cgt-123"):
+            assert headers["Authorization"] == "Bearer bp-key"
+            return FakeResp({"id": "cgt-123", "status": "succeeded", "content": {"video_url": BYTEPLUS_VIDEO}})
+        assert url == BYTEPLUS_VIDEO
+        assert not headers
+        return FakeResp(content=b"SEEDANCE_MP4")
+
+    monkeypatch.setattr(vid.requests, "post", fake_post)
+    monkeypatch.setattr(vid.requests, "get", fake_get)
+
+    out = tmp_path / "seedance.mp4"
+    pf = tmp_path / "prompt.json"
+    pf.write_text("cinematic sunset over mountains", encoding="utf-8")
+    msg = vid.generate_video(str(pf), [], str(out), "9:16")
+
+    assert out.read_bytes() == b"SEEDANCE_MP4"
+    assert captured["post_url"] == "https://ark.ap-southeast.bytepluses.com/api/plan/v3/contents/generations/tasks"
+    assert captured["post_headers"]["Authorization"] == "Bearer bp-key"
+    assert captured["post_json"] == {
+        "model": "dreamina-seedance-2.5",
+        "content": [{"type": "text", "text": "cinematic sunset over mountains"}],
+        "ratio": "9:16",
+        "generate_audio": True,
+        "watermark": False,
+    }
+    assert "successfully" in msg.lower()
+
+
+def test_byteplus_agentplan_env_overrides_and_multiple_references(monkeypatch, tmp_path):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_BASE_URL", "https://plan.example/api/plan/v3/")
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_VIDEO_MODEL", "dreamina-seedance-2.5-flash")
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_VIDEO_RESOLUTION", "480p")
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_VIDEO_DURATION", "15")
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_GENERATE_AUDIO", "false")
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, **kw):
+        captured["url"] = url
+        captured["json"] = json
+        return FakeResp({"id": "cgt-456"})
+
+    def fake_get(url, headers=None, **kw):
+        if url.endswith("/contents/generations/tasks/cgt-456"):
+            return FakeResp({"status": "succeeded", "content": {"video_url": BYTEPLUS_VIDEO}})
+        return FakeResp(content=b"FLASH_MP4")
+
+    monkeypatch.setattr(vid.requests, "post", fake_post)
+    monkeypatch.setattr(vid.requests, "get", fake_get)
+
+    ref1 = tmp_path / "a.jpg"
+    ref1.write_bytes(b"\xff\xd8first")
+    ref2 = tmp_path / "b.png"
+    ref2.write_bytes(b"\x89PNGsecond")
+    pf = tmp_path / "prompt.json"
+    pf.write_text("product showcase", encoding="utf-8")
+    out = tmp_path / "out.mp4"
+
+    vid.generate_video(str(pf), [str(ref1), str(ref2)], str(out), "16:9")
+
+    assert captured["url"] == "https://plan.example/api/plan/v3/contents/generations/tasks"
+    payload = captured["json"]
+    assert payload["model"] == "dreamina-seedance-2.5-flash"
+    assert payload["resolution"] == "480p"
+    assert payload["duration"] == 15
+    assert payload["generate_audio"] is False
+    assert payload["ratio"] == "16:9"
+    assert len(payload["content"]) == 3
+    assert payload["content"][1]["role"] == "reference_image"
+    assert payload["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert payload["content"][2]["role"] == "reference_image"
+    assert payload["content"][2]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+@pytest.mark.parametrize("duration", ["abc", "0", "3", "31", "-2", "6.5"])
+def test_byteplus_agentplan_rejects_invalid_duration_before_submission(monkeypatch, tmp_path, duration):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_VIDEO_DURATION", duration)
+    monkeypatch.setattr(vid.requests, "post", lambda *a, **kw: pytest.fail("must not submit invalid duration"))
+    pf = tmp_path / "prompt.json"
+    pf.write_text("a cat", encoding="utf-8")
+    with pytest.raises(ValueError, match="BYTEPLUS_AGENTPLAN_VIDEO_DURATION"):
+        vid.generate_video(str(pf), [], str(tmp_path / "v.mp4"), "16:9")
+
+
+def test_byteplus_agentplan_rejects_unsupported_aspect_ratio_before_submission(monkeypatch, tmp_path):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    monkeypatch.setattr(vid.requests, "post", lambda *a, **kw: pytest.fail("must not submit invalid ratio"))
+    pf = tmp_path / "prompt.json"
+    pf.write_text("a cat", encoding="utf-8")
+    with pytest.raises(ValueError, match="Unsupported aspect ratio"):
+        vid.generate_video(str(pf), [], str(tmp_path / "v.mp4"), "5:4")
+
+
+def test_byteplus_agentplan_403_reports_plan_tier_upgrade_hint(monkeypatch, tmp_path):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-small-key")
+    monkeypatch.setattr(
+        vid.requests,
+        "post",
+        lambda *a, **kw: FakeResp({"error": {"message": "model not available in plan"}}, status_code=403),
+    )
+    pf = tmp_path / "prompt.json"
+    pf.write_text("a cat", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="Large, Max, or Enterprise Shared Package"):
+        vid.generate_video(str(pf), [], str(tmp_path / "v.mp4"), "16:9")
+
+
+def test_byteplus_agentplan_task_failure_and_timeout(monkeypatch, tmp_path):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    monkeypatch.setattr(vid.requests, "post", lambda *a, **kw: FakeResp({"id": "cgt-fail"}))
+    monkeypatch.setattr(
+        vid.requests,
+        "get",
+        lambda *a, **kw: FakeResp({"id": "cgt-fail", "status": "failed", "error": {"message": "safety filtered"}}),
+    )
+    pf = tmp_path / "prompt.json"
+    pf.write_text("x", encoding="utf-8")
+    with pytest.raises(Exception, match="safety filtered"):
+        vid.generate_video(str(pf), [], str(tmp_path / "v.mp4"), "16:9")
+
+    monkeypatch.setattr(vid.requests, "get", lambda *a, **kw: FakeResp({"id": "cgt-slow", "status": "running"}))
+    with pytest.raises(Exception, match="timed out"):
+        vid._poll_byteplus_agentplan_task("https://ark.ap-southeast.bytepluses.com/api/plan/v3", "Bearer bp-key", "cgt-slow", max_attempts=2, interval=0)
+
+
+def test_byteplus_agentplan_download_allowlist_and_custom_hosts(monkeypatch, tmp_path):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    untrusted = "https://evil.example/video.mp4"
+    monkeypatch.setattr(vid.requests, "post", lambda *a, **kw: FakeResp({"id": "cgt-1"}))
+
+    def fake_get(url, **kw):
+        if url.endswith("/contents/generations/tasks/cgt-1"):
+            return FakeResp({"status": "succeeded", "content": {"video_url": untrusted}})
+        raise AssertionError("untrusted download URL must not be fetched")
+
+    monkeypatch.setattr(vid.requests, "get", fake_get)
+    pf = tmp_path / "prompt.json"
+    pf.write_text("x", encoding="utf-8")
+    out = tmp_path / "v.mp4"
+    out.write_bytes(b"existing")
+    with pytest.raises(ValueError, match="outside the provider allowlist"):
+        vid.generate_video(str(pf), [], str(out), "16:9")
+    assert out.read_bytes() == b"existing"
+
+    # Explicit operator approval allows custom HTTPS host.
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_VIDEO_DOWNLOAD_HOSTS", "cdn.partner.test")
+    custom_url = "https://cdn.partner.test/v.mp4"
+    monkeypatch.setattr(
+        vid.requests,
+        "get",
+        lambda url, **kw: FakeResp({"status": "succeeded", "content": {"video_url": custom_url}})
+        if url.endswith("/contents/generations/tasks/cgt-1")
+        else FakeResp(content=b"approved-bytes"),
+    )
+    vid.generate_video(str(pf), [], str(out), "16:9")
+    assert out.read_bytes() == b"approved-bytes"
+
+
+def test_byteplus_agentplan_rejects_cross_origin_api_redirect(monkeypatch, tmp_path):
+    host = "https://ark.ap-southeast.bytepluses.com/api/plan/v3"
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    sent = mock_http_transport(monkeypatch, [(307, "https://other.example/tasks")])
+    with pytest.raises(ValueError, match="changes origin"):
+        vid._generate_video_byteplus_agentplan("a cat", [], str(tmp_path / "v.mp4"), "16:9")
+    assert [request.url for request in sent] == [f"{host}/contents/generations/tasks"]

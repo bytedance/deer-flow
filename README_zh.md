@@ -27,11 +27,11 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 - [**LLM Space**](https://github.com/deer-flow/llm-space) - 认识 DeerFlow 背后的秘密武器——一款桌面工具，用于原型化 agent 想法、检查 harness 的每个步骤、回放失败用例并基准测试性能。
 
-## 字节跳动火山引擎方舟 Coding Plan
+## BytePlus Agent Plan 与火山引擎方舟 Coding Plan
 
-- 我们推荐使用 Doubao-Seed-2.0-Code、DeepSeek v3.2 和 Kimi 2.5 运行 DeerFlow
-- [现在就加入 Coding Plan](https://www.volcengine.com/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
-- [海外地区的开发者请点击这里](https://www.byteplus.com/en/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
+- **BytePlus Agent Plan（个人版 & 企业版）**：一把 API Key 打通 DeerFlow 全链路——旗舰对话模型（`dola-seed-2.1-turbo`、`deepseek-v4-pro`、`deepseek-v4.1-flash`）、**Seedream 5.0/5.5** 生图与 PPT 视觉生成（`image-generation` / `ppt-generation`），以及 **Seedance 2.5** 原生音画同步视频生成（`video-generation`，Large / Max / 企业共享包可用），统一以透明的 AFP（Agent Fuel Points）计量。
+- [了解 BytePlus Agent Plan](https://www.byteplus.com/en/activity/agentplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) · [控制台](https://console.byteplus.com/ark/region:ap-southeast-1/subscription/agent-plan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) · [个人版文档](https://console.byteplus.com/ark/region:ap-southeast-1/docs/agent-plan-personal-plan-overview?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) · [企业版文档](https://console.byteplus.com/ark/region:ap-southeast-1/docs/agent-plan-enterprise-plan-overview?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
+- [中国大陆地区的开发者请点击这里（火山引擎 Coding Plan）](https://www.volcengine.com/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
 
 ## InfoQuest
 
@@ -50,7 +50,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
   - [官网](#官网)
   - [姐妹项目](#姐妹项目)
-  - [字节跳动火山引擎方舟 Coding Plan](#字节跳动火山引擎方舟-coding-plan)
+  - [BytePlus Agent Plan 与火山引擎方舟 Coding Plan](#byteplus-agent-plan-与火山引擎方舟-coding-plan)
   - [InfoQuest](#infoquest)
   - [目录](#目录)
   - [一句话交给 Coding Agent 安装](#一句话交给-coding-agent-安装)
