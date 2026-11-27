@@ -843,7 +843,7 @@ class SubagentBatchRepository:
                     ).scalars()
                 )
                 for item in items:
-                    unknown = item.status == "outcome_unknown"
+                    unknown = item.status == "outcome_unknown" or (batch.recovery_policy == "conservative" and item.dispatch_started_at is not None)
                     item.cancel_requested_at = now
                     item.updated_at = now
                     item.status = "cancelled"

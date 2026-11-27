@@ -212,6 +212,30 @@ async def test_supervisor_uncertainty_requires_current_dispatched_claim(repo):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("policy", "mark_running"), [("conservative", False), ("conservative", True), ("retry", True)])
+async def test_cancel_after_dispatch_before_recovery_poll(repo, policy, mark_running):
+    await create(repo, policy=policy)
+    # Cancel the leased item with a live lease, and the running item after expiry but before recovery.
+    now = datetime.now(UTC)
+    if mark_running:
+        now -= timedelta(minutes=1)
+    item = (await claim(repo, now))[0]
+    assert await repo.mark_item_dispatch_started(item["id"], lease_owner="worker", now=now)
+    if mark_running:
+        assert await repo.mark_item_running(item["id"], lease_owner="worker", now=now)
+
+    cancelled = await repo.cancel_batch("batch", user_id="owner")
+    dispatched, pending = await repo.list_items("batch", user_id="owner")
+    assert cancelled["status"] == dispatched["status"] == pending["status"] == "cancelled"
+    assert dispatched["attempt_id"] == item["attempt_id"] and dispatched["dispatch_started_at"] is not None
+    assert pending["error"] == "Cancelled by user"
+    if policy == "conservative":
+        assert "unknown" in dispatched["error"].lower()
+    else:
+        assert dispatched["error"] == "Cancelled by user"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("control", ["expiry", "cancel"])
 async def test_dispatch_intent_refuses_expired_or_cancelled_claim(repo, control):
     await create(repo)

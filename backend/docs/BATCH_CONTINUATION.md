@@ -34,9 +34,11 @@ Unknown items use no execution slot. Independent items may finish, but dependent
 items remain waiting and the batch cannot trigger its requested follow-up.
 The browser labels unknown outcomes and retains report inspection and export.
 Pause/resume never clears uncertainty. Cancelling the batch stops pending work
-and follow-up while retaining attempt evidence; cancellation does not undo or
-disprove an external write. This slice provides no reconciliation or unknown
-retry operation. Inspect the external system before arranging further work.
+and follow-up while retaining attempt evidence. A cancelled item with a
+dispatch marker and no saved outcome reports that the outcome remains unknown,
+even before the next recovery poll. The external operation may already have
+taken effect. This slice provides no reconciliation or unknown retry operation.
+Inspect the external system before arranging further work.
 
 Migration `0053_batch_recovery` adds nullable policy, attempt and dispatch fields;
 legacy batches retain `retry`. Upgrade all batch workers before enabling this
