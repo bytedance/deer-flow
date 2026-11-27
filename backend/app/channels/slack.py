@@ -17,6 +17,7 @@ from app.channels.allowed_users import parse_allowed_users, parse_string_or_int_
 from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
+from app.channels.inbound_files import open_inbound_http_client
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
     InboundMessage,
@@ -685,10 +686,7 @@ class SlackChannel(Channel):
         """
         chunks: list[bytes] = []
         total = 0
-        # Constructing AsyncClient loads the CA bundle synchronously (SSLContext.load_verify_locations).
-        # Build it off the event loop so a single attachment cannot stall other gateway work.
-        client = await asyncio.to_thread(httpx.AsyncClient, timeout=httpx.Timeout(20.0))
-        async with client:
+        async with await open_inbound_http_client(timeout=httpx.Timeout(20.0)) as client:
             async with client.stream(
                 "GET",
                 url,

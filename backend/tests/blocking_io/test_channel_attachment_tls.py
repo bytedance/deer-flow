@@ -9,6 +9,7 @@ still run on the loop. These tests pin the certificate-loading thread explicitly
 because the strict blocking-I/O detector cannot see the native loader call.
 """
 
+import asyncio
 import ssl
 import threading
 from pathlib import Path
@@ -19,6 +20,7 @@ import httpx
 import pytest
 
 from app.channels.discord import DiscordChannel
+from app.channels.inbound_files import open_inbound_http_client
 from app.channels.message_bus import INBOUND_FILE_CONTENT_KEY, InboundMessage, MessageBus
 from app.channels.slack import SlackChannel
 
@@ -82,3 +84,46 @@ async def test_attachment_tls_loading_runs_off_event_loop(channel_kind, tmp_path
         url_key, url = "url", "https://cdn.discordapp.com/attachments/1/2/report.txt"
 
     await _assert_tls_off_loop(channel, url_key, url)
+
+
+@pytest.mark.parametrize("extra_cancel", [0, 1])
+async def test_cancelled_client_construction_is_closed(extra_cancel):
+    """A client built after cancellation must still be closed, not leaked.
+
+    ``asyncio.to_thread`` cannot be cancelled once its worker starts. Without
+    shielding and draining, the client built after the caller was cancelled
+    would be discarded with no ``aclose()``. Repeated cancellation must not
+    abandon the drain either.
+    """
+    construction_entered = threading.Event()
+    release = threading.Event()
+    loop_thread = threading.get_ident()
+    clients = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            assert threading.get_ident() != loop_thread, "construction must be off the loop"
+            construction_entered.set()
+            assert release.wait(timeout=10), "construction was never released"
+            self.closed = False
+            clients.append(self)
+
+        async def aclose(self):
+            self.closed = True
+
+    def fake_client_factory(*args, **kwargs):
+        return FakeClient(*args, **kwargs)
+
+    with patch.object(httpx, "AsyncClient", fake_client_factory):
+        waiter = asyncio.create_task(open_inbound_http_client(timeout=httpx.Timeout(20.0)))
+        await asyncio.wait_for(asyncio.to_thread(construction_entered.wait, 10), timeout=10)
+        waiter.cancel()
+        if extra_cancel:
+            await asyncio.sleep(0)  # second cancellation while the drain is running
+            waiter.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+    assert len(clients) == 1, "exactly one client should have been constructed"
+    assert clients[0].closed, "the late client must be closed exactly once"
