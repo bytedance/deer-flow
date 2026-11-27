@@ -20,7 +20,14 @@ from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.read_file_contract import slice_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, is_user_data_path, path_matches, should_ignore_path_under_root, truncate_line
+from deerflow.sandbox.search import (
+    GrepMatch,
+    is_user_data_path,
+    normalize_sandbox_path,
+    path_matches,
+    should_ignore_path_under_root,
+    truncate_line,
+)
 
 from .backend import sandbox_http_trust_env
 from .command_cleanup import cleanup_command
@@ -1414,35 +1421,101 @@ class AioSandbox(Sandbox):
                 raise
 
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
-        root_path = path.rstrip("/") or "/"
+        # The server returns canonical entry paths even when the caller spelled
+        # the root with ``//`` or ``./``, so scope comparisons use the canonical
+        # spelling; the request keeps the caller's path.
+        root_path = normalize_sandbox_path(path) if path else "/"
         # AIO keeps DeerFlow's virtual paths, so the root itself carries the label.
         user_data = is_user_data_path(root_path)
-        if not include_dirs:
-            result = self._client.file.find_files(path=path, glob=pattern)
-            files = result.data.files if result.data and result.data.files else []
-            filtered = [file_path for file_path in files if not should_ignore_path_under_root(file_path, root_path, glob=pattern, user_data=user_data)]
-            truncated = len(filtered) > max_results
-            return filtered[:max_results], truncated
+        hard_limit = max(max_results * 4, max_results + 50)
+        if include_dirs:
+            return self._glob_matches(
+                self._list_path_entries(path),
+                root_path=root_path,
+                pattern=pattern,
+                user_data=user_data,
+                include_dirs=True,
+                max_results=max_results,
+            )
 
-        result = self._client.file.list_path(path=path, recursive=True, show_hidden=False)
+        try:
+            result = self._client.file.glob_files(
+                path=path,
+                pattern=pattern,
+                files_only=True,
+                include_hidden=True,
+                include_metadata=False,
+                max_results=hard_limit,
+            )
+        except ApiError as error:
+            if error.status_code != 404:
+                raise
+            # Images that predate /v1/file/glob still serve the typed listing
+            # endpoint, so the same client-side filter can decide file types.
+            # That listing walks the whole tree, costlier than a server-side
+            # glob; the default frozen image pays it because it has no glob
+            # endpoint.
+            return self._glob_matches(
+                self._list_path_entries(path),
+                root_path=root_path,
+                pattern=pattern,
+                user_data=user_data,
+                include_dirs=False,
+                max_results=max_results,
+            )
+
         entries = result.data.files if result.data and result.data.files else []
+        matches, truncated = self._glob_matches(
+            entries,
+            root_path=root_path,
+            pattern=pattern,
+            user_data=user_data,
+            include_dirs=False,
+            max_results=max_results,
+        )
+        # The server cap can truncate before the ignore filter runs, so its flag
+        # is conservative evidence of an incomplete result on its own.
+        return matches, truncated or bool(result.data and result.data.truncated)
+
+    def _list_path_entries(self, path: str) -> list:
+        # show_hidden stays on: hidden names are ordinary user files unless an
+        # ignore rule rejects them, and the ignore filter runs here, not in the
+        # file API. A hidden directory (``.cache``) must not hide its children.
+        result = self._client.file.list_path(path=path, recursive=True, show_hidden=True)
+        return result.data.files if result.data and result.data.files else []
+
+    def _glob_matches(
+        self,
+        entries: list,
+        *,
+        root_path: str,
+        pattern: str,
+        user_data: bool,
+        include_dirs: bool,
+        max_results: int,
+    ) -> tuple[list[str], bool]:
         matches: list[str] = []
         root_prefix = root_path if root_path == "/" else f"{root_path}/"
         for entry in entries:
-            if entry.path != root_path and not entry.path.startswith(root_prefix):
+            entry_path = entry if isinstance(entry, str) else entry.path
+            if not include_dirs and getattr(entry, "is_directory", False):
                 continue
-            if should_ignore_path_under_root(entry.path, root_path, glob=pattern, user_data=user_data):
+            entry_key = normalize_sandbox_path(entry_path)
+            if entry_key != root_path and not entry_key.startswith(root_prefix):
                 continue
-            rel_path = entry.path[len(root_path) :].lstrip("/")
+            if should_ignore_path_under_root(entry_key, root_path, glob=pattern, user_data=user_data):
+                continue
+            rel_path = entry_key[len(root_path) :].lstrip("/")
+            if not rel_path:
+                continue
             if path_matches(pattern, rel_path):
-                matches.append(entry.path)
+                matches.append(entry_path)
                 # Look one match past the cap before deciding. Returning on
                 # the max-th match cannot tell a listing that held exactly
                 # ``max_results`` from one that held more, so an exhausted
                 # listing was reported as truncated; it also returned a match
-                # for ``max_results=0``. The ``include_dirs=False`` branch
-                # below and the shared ``parse_remote_search_output`` path
-                # decide the same way.
+                # for ``max_results=0``. The grep path and the shared
+                # ``parse_remote_search_output`` path decide the same way.
                 if len(matches) > max_results:
                     return matches[:max_results], True
         return matches, False
@@ -1465,18 +1538,28 @@ class AioSandbox(Sandbox):
         # generic remote API error.
         _re.compile(regex_source, 0 if case_sensitive else _re.IGNORECASE)
         total_cap = max(max_results * 4, max_results + 50)
-        result = self._client.file.grep_files(
-            path=path,
-            pattern=pattern,
-            case_insensitive=not case_sensitive,
-            fixed_strings=literal,
-            max_results=total_cap,
-            max_file_size="1M",
-            recursive=True,
-        )
+        grep_kwargs = {
+            "path": path,
+            "pattern": pattern,
+            "case_insensitive": not case_sensitive,
+            "fixed_strings": literal,
+            "max_results": total_cap,
+            "max_file_size": "1M",
+            "recursive": True,
+        }
+        if glob is not None:
+            # The server applies its own repository filter and never reports a
+            # match it skipped, so the caller's explicit glob must reach it.
+            # ``include`` matches basenames (the SDK documents the parameter
+            # with ``*.py``-style examples), so pass the basename portion as a
+            # coarse pre-filter; ``path_matches`` below enforces the directory
+            # scope, the same split E2B uses.
+            include_pattern = glob.rstrip("/").rsplit("/", 1)[-1] or glob
+            grep_kwargs["include"] = [include_pattern]
+        result = self._client.file.grep_files(**grep_kwargs)
         data = result.data
         provider_matches = data.matches if data and data.matches else []
-        root = path.rstrip("/") or "/"
+        root = normalize_sandbox_path(path) if path else "/"
         root_prefix = root if root == "/" else f"{root}/"
         user_data = is_user_data_path(root)
 
@@ -1484,12 +1567,13 @@ class AioSandbox(Sandbox):
         truncated = bool(data and data.truncated)
         for match in provider_matches:
             file_path = match.file
-            if should_ignore_path_under_root(file_path, root, glob=glob, user_data=user_data):
+            file_key = normalize_sandbox_path(file_path)
+            if should_ignore_path_under_root(file_key, root, glob=glob, user_data=user_data):
                 continue
-            if file_path == root:
-                rel_path = file_path.rsplit("/", 1)[-1]
-            elif file_path.startswith(root_prefix):
-                rel_path = file_path[len(root_prefix) :]
+            if file_key == root:
+                rel_path = file_key.rsplit("/", 1)[-1]
+            elif file_key.startswith(root_prefix):
+                rel_path = file_key[len(root_prefix) :]
             else:
                 continue
             if glob is not None and not path_matches(glob, rel_path):

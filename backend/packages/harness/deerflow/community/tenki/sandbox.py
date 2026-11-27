@@ -251,6 +251,15 @@ class TenkiSandbox(Sandbox):
             return f"{VIRTUAL_PATH_PREFIX}/{resolved[len(self._home_dir) :].lstrip('/')}"
         return resolved
 
+    def resolve_access_control_path(self, path: str) -> str:
+        """Map a reported virtual path back under ``home_dir`` for access checks.
+
+        ``skills.container_path`` is the sandbox-internal spelling (for example
+        ``/home/tenki/skills``), so the disabled-skill filter must see those
+        paths in that form rather than under ``VIRTUAL_PATH_PREFIX``.
+        """
+        return self._resolve_path(path)
+
     # ── command execution ───────────────────────────────────────────────
 
     def execute_command(

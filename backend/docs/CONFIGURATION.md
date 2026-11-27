@@ -2206,9 +2206,9 @@ If you rebuild the runtime from scratch instead of extending the published image
 - `file.read_file(...)`
 - `file.write_file(...)`, including base64 writes for binary content
 - streamed `file.download_file(...)`
-- `file.find_files(...)`
+- `file.glob_files(...)`
+- `file.grep_files(...)`
 - `file.list_path(...)`
-- `file.search_in_file(...)`
 
 Custom images must also keep these compatibility constraints:
 

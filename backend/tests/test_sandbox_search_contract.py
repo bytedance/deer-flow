@@ -10,6 +10,7 @@ lifecycle, or provider provisioning.
 
 from __future__ import annotations
 
+import fnmatch
 import glob as filesystem_glob
 import os
 import re
@@ -100,25 +101,49 @@ class _Transport:
         program.chmod(0o755)
         self.env["PATH"] = str(directory) + os.pathsep + self.env.get("PATH", "")
 
-    def find_files(self, *, path: str, glob: str):
+    def glob_files(
+        self,
+        *,
+        path: str,
+        pattern: str,
+        files_only: bool = True,
+        include_hidden: bool = True,
+        include_metadata: bool = False,
+        max_results: int | None = None,
+    ):
         self.check(path)
+        assert include_metadata is False
         # Python's filesystem glob is independent of DeerFlow's path_matches.
+        # The real endpoint has been observed returning directories even when
+        # the caller asked for files only, so the fake keeps both types: the
+        # provider must filter files itself before applying its cap.
         host = self._to_host(path)
-        matches = sorted(p for p in filesystem_glob.glob(filesystem_glob.escape(host) + "/" + glob, recursive=True) if Path(p).is_file())
-        return SimpleNamespace(data=SimpleNamespace(files=[self._to_virtual(p) for p in matches]))
+        matches = sorted(filesystem_glob.glob(filesystem_glob.escape(host) + "/" + pattern, recursive=True))
+        truncated = max_results is not None and len(matches) > max_results
+        if truncated:
+            matches = matches[:max_results]
+        return SimpleNamespace(
+            data=SimpleNamespace(
+                files=[SimpleNamespace(path=self._to_virtual(p), is_directory=Path(p).is_dir()) for p in matches],
+                truncated=truncated,
+            )
+        )
 
     def list_path(self, *, path: str, recursive: bool, show_hidden: bool):
         self.check(path)
-        assert recursive and not show_hidden
+        assert recursive and show_hidden
         host = Path(self._to_host(path))
-        return SimpleNamespace(data=SimpleNamespace(files=[SimpleNamespace(path=self._to_virtual(str(p))) for p in sorted(host.rglob("*")) if not p.name.startswith(".")]))
+        return SimpleNamespace(data=SimpleNamespace(files=[SimpleNamespace(path=self._to_virtual(str(p)), is_directory=p.is_dir()) for p in sorted(host.rglob("*"))]))
 
-    def grep_files(self, *, path: str, pattern: str, case_insensitive: bool, fixed_strings: bool, max_results: int, max_file_size: str, recursive: bool):
+    def grep_files(self, *, path: str, pattern: str, case_insensitive: bool, fixed_strings: bool, max_results: int, max_file_size: str, recursive: bool, include=None):
         self.check(path)
         assert recursive and max_file_size == "1M"
+        includes = list(include) if include else None
         matcher = re.compile(re.escape(pattern) if fixed_strings else pattern, re.IGNORECASE if case_insensitive else 0)
         root = Path(self._to_host(path))
         files = [root] if root.is_file() else sorted(p for p in root.rglob("*") if p.is_file())
+        if includes:
+            files = [p for p in files if any(fnmatch.fnmatchcase(p.name, pattern) for pattern in includes)]
         matches = []
         for file in files:
             for number, line in enumerate(file.read_text(encoding="utf-8").splitlines(), 1):
@@ -429,17 +454,17 @@ def user_data_tree(provider, tmp_path, monkeypatch):
         checkout = build_checkout(tmp_path)
         provider.transport.path_map[virtual_uploads] = str(uploads)
         provider.transport.path_map["/workspace/checkout"] = str(checkout)
-        return SimpleNamespace(uploads=virtual_uploads, checkout="/workspace/checkout")
+        return SimpleNamespace(uploads=virtual_uploads, checkout="/workspace/checkout", host_uploads=uploads)
 
     if name == "local":
         # local resolves host paths itself; it always uses the real tmp_path.
         build_uploads(tmp_path / "user-data")
         build_checkout(tmp_path)
         provider.sandbox = LocalSandbox("search-contract", [PathMapping(virtual_uploads, str(tmp_path / "user-data" / "uploads"))])
-        return SimpleNamespace(uploads=virtual_uploads, checkout=str(tmp_path / "checkout"))
-    # e2b/Tenki echo the rewritten home path back, which on a POSIX host is
-    # separator-free like every other tmp_path fixture.
-    build_uploads(tmp_path / "user-data")
+        return SimpleNamespace(uploads=virtual_uploads, checkout=str(tmp_path / "checkout"), host_uploads=tmp_path / "user-data" / "uploads")
+    # e2b/Tenki back the virtual prefix with a configurable home directory and
+    # report the paths they return under that prefix again.
+    host_uploads = build_uploads(tmp_path / "user-data")
     build_checkout(tmp_path)
     home_str = str(tmp_path / "user-data")
     checkout_arg = str(tmp_path / "checkout")
@@ -455,13 +480,12 @@ def user_data_tree(provider, tmp_path, monkeypatch):
         provider.sandbox = sandbox
     else:
         raise AssertionError(f"Unregistered user-data provider: {name}")
-    return SimpleNamespace(uploads=virtual_uploads, checkout=checkout_arg)
+    return SimpleNamespace(uploads=virtual_uploads, checkout=checkout_arg, host_uploads=host_uploads)
 
 
 def _user_data_relative(paths, root):
     # Providers legitimately present either the container path they were given
-    # or its backing host path (Tenki maps back to virtual; e2b keeps the
-    # rewritten home path). Names below the root must agree either way.
+    # or its backing host path. Names below the root must agree either way.
     suffix = "/uploads/"
     relatives = set()
     for path in paths:
@@ -524,6 +548,44 @@ def test_explicit_data_directory_glob_wins_inside_a_checkout(provider, user_data
     assert truncated is False
     matches, truncated = provider.sandbox.grep(user_data_tree.checkout, "FATAL", glob="logs/*.txt")
     assert [(Path(m.path).name, m.line_number) for m in matches] == [("run.txt", 1)]
+    assert truncated is False
+
+
+def test_files_only_glob_drops_directories(provider, user_data_tree):
+    """The file API reports directories among the matches; a files-only
+    search must filter them out before returning results, and must still
+    return every data file the search asked for."""
+    matches, truncated = provider.sandbox.glob(user_data_tree.uploads, "**/*")
+    assert _user_data_relative(matches, user_data_tree.uploads) == {"app.log", "logs/worker.log", "notes.txt"}
+    assert truncated is False
+
+
+def test_hidden_data_directory_is_searchable_with_directories_included(provider, user_data_tree):
+    """An explicit hidden-name glob must see through the directory: turning
+    include_dirs on must not hide ``.cache`` and its contents."""
+    cache = user_data_tree.host_uploads / ".cache"
+    cache.mkdir(exist_ok=True)
+    (cache / "trace.txt").write_text("FATAL cache\n", encoding="utf-8")
+
+    matches, truncated = provider.sandbox.glob(user_data_tree.uploads, ".cache/*.txt", include_dirs=True)
+    assert [Path(path).name for path in matches] == ["trace.txt"]
+    assert truncated is False
+    matches, truncated = provider.sandbox.glob(user_data_tree.uploads, ".cache/*.txt")
+    assert [Path(path).name for path in matches] == ["trace.txt"]
+    assert truncated is False
+
+
+@pytest.mark.parametrize("provider", HOME_REWRITE_PROVIDERS, indirect=True)
+def test_ls_paths_from_a_user_data_root_can_be_searched_back(provider, user_data_tree):
+    """A path from ``ls`` must be usable as a search root again: both
+    home-backed providers report virtual paths, so the user-data label
+    survives the round trip."""
+    listed = provider.sandbox.list_dir(user_data_tree.uploads)
+    logs_dir = next(path for path in listed if path.rstrip("/").endswith("/logs"))
+    assert logs_dir.startswith(VIRTUAL_PATH_PREFIX)
+
+    matches, truncated = provider.sandbox.grep(logs_dir, "FATAL")
+    assert [(Path(match.path).name, match.line_number) for match in matches] == [("worker.log", 1)]
     assert truncated is False
 
 

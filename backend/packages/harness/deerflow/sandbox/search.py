@@ -1,6 +1,7 @@
 import errno
 import fnmatch
 import os
+import posixpath
 import re
 import stat
 from collections.abc import Callable
@@ -147,6 +148,20 @@ def ignore_rules_for(search_root: Path, *, glob: str | None = None, user_data: b
     return _rules_for_search(glob=glob, user_data=user_data)
 
 
+def normalize_sandbox_path(path: str) -> str:
+    """Collapse redundant separators and ``.`` segments in a POSIX sandbox path.
+
+    Remote tools pass the caller's path through, so ``/mnt//user-data`` and
+    ``/mnt/./user-data`` address the same tree as ``/mnt/user-data`` and must
+    receive the same ignore rules.
+    """
+    normalized = posixpath.normpath(path.replace("\\", "/"))
+    if normalized.startswith("//"):
+        # POSIX reserves a leading ``//``; the sandboxes treat it as ``/``.
+        normalized = "/" + normalized.lstrip("/")
+    return normalized
+
+
 def is_user_data_path(path: str) -> bool:
     """Whether a container path belongs to the user's own files.
 
@@ -156,7 +171,7 @@ def is_user_data_path(path: str) -> bool:
     original path before rewriting: their backing directory can also hold
     non-user-data trees.
     """
-    normalized = path.replace("\\", "/").rstrip("/")
+    normalized = normalize_sandbox_path(path)
     return normalized == VIRTUAL_PATH_PREFIX or normalized.startswith(VIRTUAL_PATH_PREFIX + "/")
 
 
@@ -204,20 +219,22 @@ def should_ignore_path_under_root(path: str, root: str, *, glob: str | None = No
     :func:`ignore_rules_for` does for the local walk: a user-data root treats
     ``*.log`` and ``logs/`` as content, and a glob the caller spelled out wins
     over the defaults. The caller labels the root (see :func:`is_user_data_path`).
+    Both arguments are normalized first, so ``/mnt//user-data`` and
+    ``/mnt/./user-data`` scope like their canonical spelling instead of falling
+    back to an absolute check that sees the root's own name as an ignored one.
     """
     rules = _rules_for_search(glob=glob, user_data=user_data)
-    root_clean = root.rstrip("/")
-    if not root_clean:
-        root_clean = "/"
-    if path == root_clean:
+    root_clean = normalize_sandbox_path(root) if root else "/"
+    path_clean = normalize_sandbox_path(path) if path else path
+    if path_clean == root_clean:
         # The caller asked for this exact path. There is nothing relative to
         # test, and an ignored name must not hide what was explicitly
         # requested (a single-file ``grep`` hits this on every match).
         return False
     prefix = "/" if root_clean == "/" else f"{root_clean}/"
-    if path.startswith(prefix):
-        return should_ignore_path(path[len(prefix) :], rules=rules)
-    return should_ignore_path(path, rules=rules)
+    if path_clean.startswith(prefix):
+        return should_ignore_path(path_clean[len(prefix) :], rules=rules)
+    return should_ignore_path(path_clean, rules=rules)
 
 
 def path_matches(pattern: str, rel_path: str) -> bool:

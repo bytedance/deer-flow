@@ -58,6 +58,18 @@ def test_trailing_slash_on_the_root_is_ignored() -> None:
     assert should_ignore_path_under_root("/data/build/app.js", "/data/build/") is False
 
 
+def test_non_canonical_spellings_scope_like_the_canonical_root() -> None:
+    """Remote tools pass the caller's spelling through, so a root written with
+    ``//`` or ``./`` must not fall back to an absolute check that sees the
+    root's own ancestor as an ignored name."""
+    assert should_ignore_path_under_root("/mnt/user-data/uploads/app.log", "/mnt//user-data/uploads", user_data=True) is False
+    assert should_ignore_path_under_root("/mnt/user-data/uploads/node_modules/x.js", "/mnt//user-data/uploads", user_data=True) is True
+    assert should_ignore_path_under_root("/mnt//user-data/uploads/app.log", "/mnt/user-data/uploads", user_data=True) is False
+    assert should_ignore_path_under_root("/workspace/build/app.js", "/workspace/./build") is False
+    assert should_ignore_path_under_root("/workspace//build/app.js", "/workspace/build") is False
+    assert should_ignore_path_under_root("/workspace/node_modules/pkg/index.js", "/workspace/./node_modules") is False
+
+
 def test_user_data_root_keeps_data_looking_names() -> None:
     """The remote parity of ignore_rules_for(user_data=True): uploads are content."""
     assert should_ignore_path_under_root("/mnt/user-data/uploads/app.log", "/mnt/user-data/uploads", user_data=True) is False
@@ -94,10 +106,14 @@ def test_user_data_root_scoping_is_unchanged() -> None:
         ("/mnt/user-data/", True),
         ("/mnt/user-data/uploads", True),
         ("/mnt/user-data/uploads/app.log", True),
+        ("/mnt//user-data/uploads", True),
+        ("/mnt/./user-data/uploads", True),
+        ("//mnt/user-data/uploads", True),
         ("/mnt/user-data-extra/uploads", False),
         ("/mnt/skills/public", False),
         ("/home/user/uploads", False),
         ("/workspace/repo", False),
+        ("/mnt/user-data/../etc", False),
     ],
 )
 def test_is_user_data_path_labels_container_paths(path: str, expected: bool) -> None:

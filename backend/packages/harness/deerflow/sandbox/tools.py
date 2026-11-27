@@ -63,7 +63,7 @@ from deerflow.sandbox.read_file_contract import (
 )
 from deerflow.sandbox.sandbox import CommandOutput, Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
-from deerflow.sandbox.search import GrepMatch
+from deerflow.sandbox.search import GrepMatch, normalize_sandbox_path
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE
 from deerflow.tools.types import Runtime
 from deerflow.utils.file_io import await_drained
@@ -239,11 +239,12 @@ def _extract_skill_name_from_skills_path(path: str) -> str | None:
     /mnt/skills/public/bootstrap/ → "bootstrap"
     Returns None if the path doesn't contain a recognizable skill name pattern.
     """
-    skills_prefix = _get_skills_container_path()
-    if not _is_skills_path(path):
+    skills_prefix = normalize_sandbox_path(_get_skills_container_path())
+    normalized = normalize_sandbox_path(path)
+    if not (normalized == skills_prefix or normalized.startswith(f"{skills_prefix}/")):
         return None
     # Strip the skills prefix, e.g. "/mnt/skills/"
-    relative = path[len(skills_prefix) :].lstrip("/")
+    relative = normalized[len(skills_prefix) :].lstrip("/")
     if not relative:
         return None
     # Expected patterns: "public/<name>/...", "custom/<name>/...",
@@ -286,8 +287,8 @@ def _is_disabled_skill_path(path: str, *, user_id: str | None = None) -> bool:
         from deerflow.skills.storage import get_or_new_user_skill_storage
 
         # Determine the category from the path
-        skills_prefix = _get_skills_container_path()
-        relative = path[len(skills_prefix) :].lstrip("/")
+        skills_prefix = normalize_sandbox_path(_get_skills_container_path())
+        relative = normalize_sandbox_path(path)[len(skills_prefix) :].lstrip("/")
         if relative.startswith("public/"):
             category = "public"
         elif relative.startswith("custom/"):
@@ -325,7 +326,7 @@ def _is_disabled_skill_path(path: str, *, user_id: str | None = None) -> bool:
         return True
 
 
-def _drop_disabled_skill_paths(paths: list[str], *, user_id: str | None = None) -> list[str]:
+def _drop_disabled_skill_paths(paths: list[str], *, user_id: str | None = None, sandbox: Sandbox | None = None) -> list[str]:
     """Filter out paths that belong to a disabled skill.
 
     ``_is_disabled_skill_path`` gates the *requested* path, which is enough for
@@ -333,6 +334,12 @@ def _drop_disabled_skill_paths(paths: list[str], *, user_id: str | None = None) 
     ``grep`` return paths other than the one they were given, so a root anywhere
     above a disabled skill still surfaces its files.  This applies the same check
     to the results.
+
+    Providers that back ``VIRTUAL_PATH_PREFIX`` with another directory report
+    those results virtually, while the enabled-state check compares against
+    ``skills.container_path`` in the provider-internal spelling. Passing the
+    sandbox lets each path be mapped back before extraction, so a result
+    cannot dodge the check by using the virtual alias.
 
     The enabled-state lookup re-reads ``extensions_config.json`` (or the per-user
     skill state) on every call, so the verdict is memoized per skill — a 100-match
@@ -342,17 +349,24 @@ def _drop_disabled_skill_paths(paths: list[str], *, user_id: str | None = None) 
     verdicts: dict[tuple[str, str], bool] = {}
     kept: list[str] = []
     for path in paths:
-        skill_name = _extract_skill_name_from_skills_path(path)
+        skill_path = path
+        skill_name = _extract_skill_name_from_skills_path(skill_path)
+        if skill_name is None and sandbox is not None:
+            try:
+                skill_path = sandbox.resolve_access_control_path(path)
+            except (OSError, ValueError):
+                skill_path = path
+            skill_name = _extract_skill_name_from_skills_path(skill_path)
         if skill_name is None:
             kept.append(path)
             continue
         # Leading segment (the category, or the skill itself in the direct
         # layout) plus the name identifies the skill the same way
         # _is_disabled_skill_path does, so paths sharing a key share a verdict.
-        category = path[len(skills_prefix) :].lstrip("/").split("/")[0]
+        category = skill_path[len(skills_prefix) :].lstrip("/").split("/")[0]
         key = (category, skill_name)
         if key not in verdicts:
-            verdicts[key] = _is_disabled_skill_path(path, user_id=user_id)
+            verdicts[key] = _is_disabled_skill_path(skill_path, user_id=user_id)
         if not verdicts[key]:
             kept.append(path)
     return kept
@@ -3045,7 +3059,7 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str | ToolMes
             output = mask_local_paths_in_output(output, thread_data)
         # The gate above only covers `path` itself; the listing descends into
         # children, so a root above a disabled skill still exposes its files.
-        entries = _drop_disabled_skill_paths(output.splitlines(), user_id=user_id)
+        entries = _drop_disabled_skill_paths(output.splitlines(), user_id=user_id, sandbox=sandbox)
         if not entries:
             return "(empty)"
         output = "\n".join(entries)
@@ -3121,7 +3135,7 @@ def glob_tool(
             matches = [mask_local_paths_in_output(match, thread_data) for match in matches]
         # The gate above only covers `path` itself; the search descends into it,
         # so a root above a disabled skill still surfaces its files.
-        matches = _drop_disabled_skill_paths(matches, user_id=user_id)
+        matches = _drop_disabled_skill_paths(matches, user_id=user_id, sandbox=sandbox)
         return _format_glob_results(requested_path, matches, truncated)
     except SandboxCapacityExceededError as e:
         return _sandbox_capacity_result(runtime, e, "glob")
@@ -3223,7 +3237,7 @@ def grep_tool(
             ]
         # The gate above only covers `path` itself; the search descends into it,
         # so a root above a disabled skill still surfaces its file contents.
-        allowed = set(_drop_disabled_skill_paths([match.path for match in matches], user_id=user_id))
+        allowed = set(_drop_disabled_skill_paths([match.path for match in matches], user_id=user_id, sandbox=sandbox))
         matches = [match for match in matches if match.path in allowed]
         return _format_grep_results(requested_path, matches, truncated)
     except SandboxCapacityExceededError as e:

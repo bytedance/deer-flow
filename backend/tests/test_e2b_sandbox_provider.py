@@ -4483,7 +4483,9 @@ def test_sync_outputs_to_host_skips_oversize_files(monkeypatch, tmp_path):
 # intended one) and assert ``E2BSandbox.grep`` narrows it down to the
 # caller's real directory scope via ``path_matches`` -- the same helper
 # ``glob()`` already uses -- exactly as verified empirically against a real
-# GNU grep binary during development of this fix.
+# GNU grep binary during development of this fix. Results are reported under
+# the virtual prefix, not the backing home dir, so callers can feed them
+# straight back into the file APIs.
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -4502,8 +4504,8 @@ def test_grep_scoped_glob_excludes_unrelated_directory_matches():
     matches, truncated = sb.grep("/mnt/user-data/workspace", "needle", glob="src/*.js")
 
     paths = [m.path for m in matches]
-    assert paths == ["/home/user/workspace/src/app.js"]
-    assert "/home/user/workspace/other_dir/unrelated.js" not in paths
+    assert paths == ["/mnt/user-data/workspace/src/app.js"]
+    assert "/mnt/user-data/workspace/other_dir/unrelated.js" not in paths
     assert truncated is False
 
 
@@ -4519,8 +4521,8 @@ def test_grep_plain_glob_matches_files_in_any_directory():
 
     paths = {m.path for m in matches}
     assert paths == {
-        "/home/user/workspace/other_dir/deep/mod.py",
-        "/home/user/workspace/src/app.py",
+        "/mnt/user-data/workspace/other_dir/deep/mod.py",
+        "/mnt/user-data/workspace/src/app.py",
     }
     assert truncated is False
 
@@ -4547,7 +4549,7 @@ def test_grep_without_glob_is_unaffected():
 
     matches, truncated = sb.grep("/mnt/user-data/workspace", "needle")
 
-    assert [m.path for m in matches] == ["/home/user/workspace/anywhere/file.txt"]
+    assert [m.path for m in matches] == ["/mnt/user-data/workspace/anywhere/file.txt"]
     assert truncated is False
 
 
@@ -4559,7 +4561,7 @@ def test_grep_single_file_path_with_matching_glob():
 
     matches, truncated = sb.grep("/mnt/user-data/uploads/report.md", "needle", glob="*.md")
 
-    assert [m.path for m in matches] == ["/home/user/uploads/report.md"]
+    assert [m.path for m in matches] == ["/mnt/user-data/uploads/report.md"]
     assert truncated is False
 
 
@@ -6213,7 +6215,7 @@ def test_list_dir_preserves_trailing_space_in_filename():
     client = FakeClient(commands=FakeCommandsAPI([listing]))
     sb = _make_sandbox(client)
 
-    assert sb.list_dir("/home/user") == ["/home/user/notes.txt ", "/home/user/sub"]
+    assert sb.list_dir("/home/user") == ["/mnt/user-data/notes.txt ", "/mnt/user-data/sub"]
 
 
 def test_list_dir_raises_when_command_fails():
@@ -6252,7 +6254,7 @@ def test_list_dir_returns_entries_when_head_truncation_exits_141():
     client = FakeClient(commands=FakeCommandsAPI([_raise_exit(stdout, "", 141)]))
     sb = _make_sandbox(client)
 
-    assert sb.list_dir("/home/user") == ["/home/user", "/home/user/a", "/home/user/b"]
+    assert sb.list_dir("/home/user") == ["/mnt/user-data", "/mnt/user-data/a", "/mnt/user-data/b"]
 
 
 def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path():
@@ -6281,8 +6283,39 @@ def test_glob_preserves_trailing_space_in_filename():
 
     matches, truncated = sb.glob("/home/user", "notes*")
 
-    assert matches == ["/home/user/notes.txt "]
+    assert matches == ["/mnt/user-data/notes.txt "]
     assert truncated is False
+
+
+def test_resolve_access_control_path_maps_virtual_paths_back_to_the_home():
+    """The disabled-skill filter compares against skills.container_path, which
+    uses the sandbox-internal home spelling, not the virtual prefix."""
+    sb = _make_sandbox(FakeClient())
+
+    assert sb.resolve_access_control_path("/mnt/user-data/skills/public/demo/SKILL.md") == "/home/user/skills/public/demo/SKILL.md"
+    assert sb.resolve_access_control_path("/home/user/skills/public/demo/SKILL.md") == "/home/user/skills/public/demo/SKILL.md"
+    assert sb.resolve_access_control_path("/mnt/skills/public/demo/SKILL.md") == "/mnt/skills/public/demo/SKILL.md"
+
+
+def test_disabled_skill_filter_resolves_the_e2b_virtual_alias(monkeypatch):
+    """The provider mapping and the tools filter must agree on the spelling:
+    a result reported under the virtual prefix is checked against the backing
+    home path the configured skills root uses."""
+    from deerflow.sandbox import tools as sandbox_tools
+
+    sb = _make_sandbox(FakeClient())
+    monkeypatch.setattr(sandbox_tools, "_get_skills_container_path", lambda: "/home/user/skills")
+    monkeypatch.setattr(sandbox_tools, "_is_disabled_skill_path", lambda path, user_id=None: "secret-skill" in path)
+
+    kept = sandbox_tools._drop_disabled_skill_paths(
+        [
+            "/mnt/user-data/skills/public/secret-skill/SKILL.md",
+            "/mnt/user-data/skills/public/open-skill/SKILL.md",
+        ],
+        sandbox=sb,
+    )
+
+    assert kept == ["/mnt/user-data/skills/public/open-skill/SKILL.md"]
 
 
 @pytest.mark.parametrize("missing_exc", [FileNotFoundError, FileNotFoundException])

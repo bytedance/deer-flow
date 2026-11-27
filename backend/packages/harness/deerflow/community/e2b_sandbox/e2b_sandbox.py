@@ -136,6 +136,28 @@ class E2BSandbox(Sandbox):
             return f"{self._home_dir}/{tail}".rstrip("/") if tail else self._home_dir
         return normalised
 
+    def _virtual_path(self, resolved: str) -> str:
+        """Inverse of :meth:`_resolve_path` — the form callers gave us.
+
+        Everything that *returns* paths (``list_dir``/``glob``/``grep``) reports
+        them under ``VIRTUAL_PATH_PREFIX``, not the sandbox-internal home dir, so
+        results can be fed straight back into the other file APIs.
+        """
+        if resolved == self._home_dir:
+            return VIRTUAL_PATH_PREFIX
+        if resolved.startswith(f"{self._home_dir}/"):
+            return f"{VIRTUAL_PATH_PREFIX}/{resolved[len(self._home_dir) :].lstrip('/')}"
+        return resolved
+
+    def resolve_access_control_path(self, path: str) -> str:
+        """Map a reported virtual path back under ``home_dir`` for access checks.
+
+        ``skills.container_path`` is the sandbox-internal spelling (for example
+        ``/home/user/skills``), so the disabled-skill filter must see those
+        paths in that form rather than under ``VIRTUAL_PATH_PREFIX``.
+        """
+        return self._resolve_path(path)
+
     def execute_command(
         self,
         command: str,
@@ -359,12 +381,13 @@ class E2BSandbox(Sandbox):
             except Exception as e:
                 logger.error("Failed to list_dir %s in e2b sandbox: %s", resolved, e)
                 raise OSError(f"Failed to list_dir {resolved} in e2b sandbox: {e}") from e
-            return parse_remote_list_dir_output(
+            entries = parse_remote_list_dir_output(
                 getattr(result, "stdout", "") or "",
                 resolved,
                 pipeline_exit_code=getattr(result, "exit_code", None),
                 user_data=user_data,
             )
+            return [self._virtual_path(entry) for entry in entries]
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         resolved = self._resolve_path(path)
@@ -452,7 +475,7 @@ class E2BSandbox(Sandbox):
             if not rel_path:
                 continue
             if path_matches(pattern, rel_path):
-                matches.append(entry)
+                matches.append(self._virtual_path(entry))
                 # Look one match past the cap before deciding: returning on the
                 # max-th match cannot tell a search that held exactly
                 # ``max_results`` from one that held more, so an exhausted tree
@@ -551,7 +574,7 @@ class E2BSandbox(Sandbox):
                     continue
             matches.append(
                 GrepMatch(
-                    path=file_path,
+                    path=self._virtual_path(file_path),
                     line_number=line_number,
                     line=truncate_line(line_text),
                 )
