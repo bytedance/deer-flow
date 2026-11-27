@@ -78,6 +78,7 @@ def _host_path_limit(root: Path, *, windows: bool | None = None) -> int:
 
 _PROMPT_INPUT_DIRS = {"references", "templates"}
 _PROMPT_INPUT_SUFFIXES = frozenset({".json", ".markdown", ".md", ".rst", ".txt", ".yaml", ".yml"})
+_ARCHIVE_MODEL_REVIEW_TIMEOUT_SECONDS = 120
 
 
 class SkillAlreadyExistsError(ValueError):
@@ -435,10 +436,19 @@ async def _prepare_model_review(skill_dir: Path, skill_name: str) -> list[tuple[
 async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str, *, app_config=None) -> list[StaticFinding]:
     """Run the skill security scanner against all installable text and script files."""
     static_findings = await _scan_static_skill_archive_or_raise(skill_dir, skill_name, app_config=app_config)
-    for rel_path, executable, content in await _prepare_model_review(skill_dir, skill_name):
+    review_files = await _prepare_model_review(skill_dir, skill_name)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _ARCHIVE_MODEL_REVIEW_TIMEOUT_SECONDS
+    for rel_path, executable, content in review_files:
         if content is None:
             content = await asyncio.to_thread(_read_required_text, skill_dir / rel_path, f"{skill_name}/{rel_path}")
-        await _scan_skill_file_or_raise(content, rel_path, skill_name, executable=executable, static_findings=_findings_for_file(static_findings, rel_path), app_config=app_config)
+        try:
+            if loop.time() >= deadline:
+                raise TimeoutError
+            async with asyncio.timeout_at(deadline):
+                await _scan_skill_file_or_raise(content, rel_path, skill_name, executable=executable, static_findings=_findings_for_file(static_findings, rel_path), app_config=app_config)
+        except TimeoutError as exc:
+            raise SkillSecurityScanError(f"Security scan failed for {skill_name}: archive model review timed out", skill_name=skill_name) from exc
     return static_findings
 
 

@@ -1147,6 +1147,51 @@ def test_safe_extract_rejects_members_that_normalize_to_the_root(tmp_path, name)
             safe_extract_skill_archive(zf, dest)
 
 
+@pytest.mark.asyncio
+async def test_archive_review_deadline_cancels_inflight_model_before_publication(tmp_path, monkeypatch):
+    archive = tmp_path / "reviewed.skill"
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr("reviewed/SKILL.md", "---\nname: reviewed\ndescription: A test skill\n---\n\n# Reviewed\n")
+        package.writestr("reviewed/references/guide.md", "# Guide\n")
+
+    loop = asyncio.get_running_loop()
+    original_time = loop.time
+    elapsed = 0
+    model_calls = 0
+    cancelled = False
+    monkeypatch.setattr(loop, "time", lambda: original_time() + elapsed)
+
+    class ReviewModel:
+        async def ainvoke(self, messages, *, config):
+            nonlocal elapsed, model_calls, cancelled
+            model_calls += 1
+            if model_calls == 1:
+                elapsed += 80
+            else:
+                elapsed += 41
+                try:
+                    # Advance past the package budget and let the scheduled timer fire.
+                    await asyncio.sleep(0)
+                    await asyncio.sleep(0)
+                except asyncio.CancelledError:
+                    cancelled = True
+                    raise
+            return SimpleNamespace(content='{"decision":"allow","reason":"ok"}')
+
+    config = SimpleNamespace(skill_evolution=SimpleNamespace(moderation_model_name=None))
+    monkeypatch.setattr("deerflow.skills.security_scanner.create_chat_model", lambda **kwargs: ReviewModel())
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    storage = LocalSkillStorage(host_path=str(skills_root), app_config=config)
+
+    with pytest.raises(SkillSecurityScanError, match="archive model review timed out"):
+        await storage.ainstall_skill_from_archive(archive)
+
+    assert model_calls == 2
+    assert cancelled
+    assert not (skills_root / "custom" / "reviewed").exists()
+
+
 def test_safe_extract_allows_explicit_directory_before_nested_file(tmp_path):
     zip_path = tmp_path / "ok.zip"
     with zipfile.ZipFile(zip_path, "w") as zf:
