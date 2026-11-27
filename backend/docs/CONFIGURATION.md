@@ -354,6 +354,7 @@ are:
 | `qwen-cn` | Alibaba Cloud Bailian / Qwen, China | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Chat Completions / Bearer |
 | `doubao` | Volcengine Beijing, ordinary API | `https://ark.cn-beijing.volces.com/api/v3` | Chat Completions / Bearer |
 | `doubao-coding` | Volcengine Coding Plan, separate key/plan | `https://ark.cn-beijing.volces.com/api/coding/v3` | Chat Completions / Bearer |
+| `byteplus-agent-plan` | BytePlus Agent Plan (Personal & Enterprise), separate key/plan | `https://ark.ap-southeast.bytepluses.com/api/plan/v3` | Chat Completions / Bearer |
 | `moonshot-cn` | Moonshot / Kimi, China API | `https://api.moonshot.cn/v1` | Chat Completions / Bearer |
 | `zhipu-cn` | Zhipu, China ordinary API | `https://open.bigmodel.cn/api/paas/v4` | Chat Completions / Bearer |
 | `zai` | Z.AI, international ordinary API | `https://api.z.ai/api/paas/v4` | Chat Completions / Bearer |
@@ -1889,6 +1890,45 @@ hibernation wake on the call. Downloads are restricted to `/mnt/user-data` and
 capped while streaming. Like the other remote providers, `replicas` is a
 per-Gateway-process soft cap.
 
+**BytePlus veFaaS Cloud Sandbox** (runs each thread sandbox in a serverless [BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) AIO sandbox; see the [veFaaS documentation](https://docs.byteplus.com/en/docs/vefaas/what-is-vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)):
+
+```yaml
+sandbox:
+  use: deerflow.community.vefaas_sandbox:VeFaaSSandboxProvider
+  # prewarm: true                      # optional: overlap sandbox creation with the first model turn
+  vefaas:
+    region: ap-southeast-1
+    endpoint: https://vefaas.ap-southeast-1.byteplusapi.com
+    function_id: $BYTEPLUS_VEFAAS_SANDBOX_APP_ID
+    sandbox_base_url: $BYTEPLUS_VEFAAS_SANDBOX_BASE_URL
+    access_key_env: BYTEPLUS_ACCESS_KEY_ID
+    secret_key_env: BYTEPLUS_SECRET_ACCESS_KEY
+    cpu_milli: 1000
+    memory_mb: 2048
+    timeout_minutes: 60
+    # pause_on_idle: true              # optional: pause idle sandboxes and auto-resume
+    # snapshot_on_idle: true           # optional: thread-scoped snapshots with retention pruning
+    # snapshot_retention_days: 7
+    # max_snapshots_per_sandbox: 3
+    # precache_images:
+    #   - cr-ap-southeast-1.cr.bytepluses.com/namespace/all-in-one-sandbox:latest
+    # precache_on_startup: true
+    tos_mount:
+      enabled: false
+      bucket: $BYTEPLUS_TOS_BUCKET
+      prefix: deerflow-user-data
+  replicas: 3
+  idle_timeout: 600
+  # ownership:                         # required when more than one gateway shares a veFaaS app
+  #   type: redis
+```
+
+No extra Python SDK is needed — `VeFaaSSandboxProvider` talks to the veFaaS
+OpenAPI (`Version=2024-06-06`, SigV4) over `httpx` and reuses `agent-sandbox`
+for the AIO data plane. See the
+[veFaaS sandbox provider README](../packages/harness/deerflow/community/vefaas_sandbox/README.md)
+for the complete option reference, snapshot retention guidance, and TOS mount details.
+
 Choose between local execution or Docker-based isolation:
 
 **Option 1: Local Sandbox** (default, simpler setup):
@@ -1995,17 +2035,33 @@ With `approval: prompt`, a denied public domain becomes a Human Input card with
 **Deny**, **Allow temporarily**, and **Allow for this sandbox** choices. DeerFlow
 does not replay the failed command after approval because it may already have
 performed local side effects; the agent must retry it explicitly. Non-interactive
-runs auto-deny without opening a card or waiting for input. The sidecar rejects
-hostnames that policy does not allow before DNS resolution; allowed hostnames
-that resolve to loopback, private, link-local, multicast, IPv6 ULA/site-local,
-or cloud metadata destinations are rejected and can never be approved. This
-screening also unwraps IPv6 spellings that carry an IPv4 destination —
-IPv4-mapped, 6to4, NAT64 (`64:ff9b::/96`), IPv4-translated (`::ffff:0:0:0/96`),
-and the deprecated IPv4-compatible form — and judges the embedded IPv4
-address, while NAT64 spellings of public IPv4 targets stay reachable.
-The RFC 8215 local-use translation prefix (`64:ff9b:1::/48`) is rejected
-explicitly. Operator-defined NAT64 prefixes outside `64:ff9b::/96` are not
-recognized.
+runs auto-deny without opening a card or waiting for input.
+
+The sidecar records denials in a fixed-size tmpfs, so it keeps that history
+bounded: a sandbox can request an unlimited number of unique hosts, and a full
+tmpfs would stop both denial recording and approval handling. Once the limit is
+reached it drops denials that were superseded by another approval card, then
+trims resolved history — ordered by when each decision was applied, so a card
+answered just now is kept — to leave room for pending approvals. A card that is
+currently awaiting a decision is never dropped, so a burst of unanswered cards
+can exceed the limit, but reaching that needs one poll per tool call rather
+than a flood. Persisted request fields are truncated (the method to 16
+characters), so the row limit also bounds the bytes on disk. Recording is best
+effort: if the policy database cannot be read or written, the request is still
+denied with the policy message instead of the connection being closed. A failed
+policy lookup denies without recording, so a transient database error cannot
+create an approval card for a destination that already holds a grant.
+
+The sidecar rejects hostnames that policy does not allow before DNS resolution;
+allowed hostnames that resolve to loopback, private, link-local, multicast,
+IPv6 ULA/site-local, or cloud metadata destinations are rejected and can never
+be approved. This screening also unwraps IPv6 spellings that carry an IPv4
+destination — IPv4-mapped, 6to4, NAT64 (`64:ff9b::/96`), IPv4-translated
+(`::ffff:0:0:0/96`), and the deprecated IPv4-compatible form — and judges the
+embedded IPv4 address, while NAT64 spellings of public IPv4 targets stay
+reachable. The RFC 8215 local-use translation prefix (`64:ff9b:1::/48`) is
+rejected explicitly. Operator-defined NAT64 prefixes outside `64:ff9b::/96`
+are not recognized.
 Raw TCP/UDP, Git-over-SSH, and other non-HTTP protocols remain unavailable in
 restricted modes.
 

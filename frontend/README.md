@@ -95,6 +95,11 @@ NEXT_PUBLIC_BACKEND_BASE_URL="http://localhost:8001"
 NEXT_PUBLIC_LANGGRAPH_BASE_URL="http://localhost:8001/api"
 ```
 
+A direct Gateway URL is a different origin from the frontend. Add the frontend
+origin, for example `http://localhost:3000`, to the Gateway's
+`GATEWAY_CORS_ORIGINS`. REST and LangGraph requests then both send the session
+cookie.
+
 ## Project Structure
 
 ```

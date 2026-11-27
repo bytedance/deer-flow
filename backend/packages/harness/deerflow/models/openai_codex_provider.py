@@ -25,7 +25,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 
 from deerflow.models.credential_loader import CodexCliCredential, load_codex_cli_credential
 from deerflow.utils.file_io import await_drained
-from deerflow.utils.retry_after import bounded_retry_after_ms, parse_retry_after_date_ms
+from deerflow.utils.retry_after import retry_after_hint_ms
 
 logger = logging.getLogger(__name__)
 
@@ -39,29 +39,7 @@ def _is_valid_call_id(call_id: Any) -> bool:
 
 def _retry_after_ms(error: Exception) -> int | None:
     """Read a bounded retry hint from the error's response headers, if there is one."""
-    response = getattr(error, "response", None)
-    if response is None:
-        return None
-    headers = getattr(response, "headers", None)
-    if not headers:
-        return None
-
-    for header in ("retry-after-ms", "Retry-After-Ms", "retry-after", "Retry-After"):
-        raw = headers.get(header)
-        if not raw:
-            continue
-        try:
-            milliseconds = float(raw) * 1000 if "ms" not in (header.lower()) else float(raw)
-        except (TypeError, ValueError, OverflowError):
-            if "ms" in header.lower():
-                continue
-            milliseconds = parse_retry_after_date_ms(str(raw), now=time.time())
-            if milliseconds is None:
-                continue
-        bounded = bounded_retry_after_ms(milliseconds)
-        if bounded is not None:
-            return bounded
-    return None
+    return retry_after_hint_ms(error, now=time.time())
 
 
 def _calc_backoff_ms(attempt: int, error: Exception | None = None) -> int:

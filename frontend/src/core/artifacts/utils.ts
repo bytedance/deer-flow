@@ -2,7 +2,10 @@ import type { AIMessage, Message, ToolMessage } from "@langchain/langgraph-sdk";
 
 import { getBackendBaseURL } from "../config";
 import { indexToolResults } from "../messages/tool-result";
-import { extractPresentFilesFromMessage } from "../messages/utils";
+import {
+  extractPresentFilesFromMessage,
+  hasPresentFiles,
+} from "../messages/utils";
 import { isStaticWebsiteOnly } from "../static-mode";
 import type { AgentThreadState } from "../threads";
 
@@ -189,25 +192,29 @@ function extractSharedArtifactPaths(
 
 /**
  * Recovers artifact paths from history when the Gateway omits `artifacts`.
- * `present_files` contributes its paths directly. A shared artifact also needs
- * a confirmed handoff receipt. Returns `stateArtifacts` itself if neither
- * tool contributes paths.
+ * `present_files` contributes the paths of each call the backend did not
+ * reject. A shared artifact also needs a confirmed handoff receipt. Returns
+ * `stateArtifacts` itself if neither tool contributes paths.
  */
 export function collectThreadArtifactPaths(
   stateArtifacts: readonly string[],
   messages: readonly Message[],
 ): readonly string[] {
   let toolResults: ReturnType<typeof indexToolResults<Message>> | undefined;
+  const resultsAt = (index: number) =>
+    (toolResults ??= indexToolResults(messages)).get(index);
   const presented = messages
     .flatMap((message, index) => {
-      const paths = extractPresentFilesFromMessage(message);
+      const paths = hasPresentFiles(message)
+        ? extractPresentFilesFromMessage(message, resultsAt(index) ?? [])
+        : [];
       if (
         message.type !== "ai" ||
         !message.tool_calls?.some((call) => call.name === SHARED_ARTIFACT_TOOL)
       ) {
         return paths;
       }
-      const results = (toolResults ??= indexToolResults(messages)).get(index);
+      const results = resultsAt(index);
       if (!results) return paths;
       return [
         ...paths,

@@ -453,6 +453,97 @@ describe("artifact URL helpers", () => {
     expect(collectThreadArtifactPaths(state, [messages[0]!])).toBe(state);
   });
 
+  // The backend rejects the whole call when a path is outside the outputs
+  // directory. A result reports the failure by its status, which these cases
+  // check apart from the text; history saved before results carried a status
+  // marks it only by the "Error:" prefix.
+  test.each([
+    [
+      "an error status",
+      {
+        content: "present_files was not run",
+        additional_kwargs: { deerflow_tool_meta: { status: "error" } },
+      },
+    ],
+    [
+      "a ToolMessage error status",
+      { content: "present_files was not run", status: "error" },
+    ],
+    [
+      "only the error prefix",
+      {
+        content:
+          "Error: Only files in /mnt/user-data/outputs can be presented: /mnt/user-data/uploads/secret.md",
+      },
+    ],
+  ])(
+    "collectThreadArtifactPaths skips a present_files call rejected with %s",
+    async (_label, result) => {
+      const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
+      const messages = [
+        { type: "human", id: "h", content: "go" },
+        {
+          type: "ai",
+          id: "a1",
+          content: "",
+          tool_calls: [
+            {
+              id: "p1",
+              name: "present_files",
+              args: {
+                filepaths: [
+                  "/mnt/user-data/outputs/a.md",
+                  "/mnt/user-data/uploads/secret.md",
+                ],
+              },
+            },
+            {
+              id: "p2",
+              name: "present_files",
+              args: { filepaths: ["/mnt/user-data/outputs/b.md"] },
+            },
+          ],
+        },
+        {
+          type: "tool",
+          id: "t1",
+          tool_call_id: "p1",
+          ...result,
+        },
+        {
+          type: "tool",
+          id: "t2",
+          tool_call_id: "p2",
+          content: "Successfully presented files",
+        },
+      ] as Parameters<typeof collectThreadArtifactPaths>[1];
+
+      expect(collectThreadArtifactPaths([], messages)).toEqual([
+        "/mnt/user-data/outputs/b.md",
+      ]);
+    },
+  );
+
+  // Spreading a list this long into one call exceeds the engine's argument
+  // limit, which would keep the thread from opening.
+  test("collectThreadArtifactPaths keeps a saved present_files list of any length", async () => {
+    const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
+    const filepaths = Array.from(
+      { length: 200_000 },
+      (_, index) => `/mnt/user-data/outputs/${index}.md`,
+    );
+    const messages = [
+      {
+        type: "ai",
+        id: "a1",
+        content: "",
+        tool_calls: [{ id: "p1", name: "present_files", args: { filepaths } }],
+      },
+    ] as Parameters<typeof collectThreadArtifactPaths>[1];
+
+    expect(collectThreadArtifactPaths([], messages)).toHaveLength(200_000);
+  });
+
   describe("shared artifacts in thread history", () => {
     const origin = "source-thread";
     const sha256 = "a".repeat(64);

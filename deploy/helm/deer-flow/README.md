@@ -397,7 +397,10 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   `PROVISIONER_API_KEY`: the provisioner's `verify_api_key` middleware
   answers 401 to every `/api/*` request while its key is empty or differs
   from the one the gateway sends, so a deployment without it cannot create a
-  single sandbox. The chart injects the same Secret value into both Pods and
+  single sandbox. Each side strips surrounding whitespace from its
+  configured value before comparing, so a key that arrives with a trailing
+  newline (for example from `kubectl create secret --from-file`) still
+  authenticates. The chart injects the same Secret value into both Pods and
   the default `config` references it as `sandbox.provisioner_api_key:
   $PROVISIONER_API_KEY` (keep that line when you override `config:`; the
   harness refuses to start when a referenced variable is unset). With

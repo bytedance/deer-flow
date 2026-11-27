@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import logging
 import ntpath
@@ -3598,25 +3599,172 @@ async def _write_file_tool_async(
 write_file_tool.coroutine = _write_file_tool_async
 
 
-def _to_crlf(text: str) -> str:
-    return text.replace("\r\n", "\n").replace("\n", "\r\n")
+def _replace_keeping_line_endings(content: str, old_str: str, new_str: str, replace_all: bool) -> str | None:
+    """Return ``content`` with ``old_str`` replaced, or None when it is absent.
 
+    A file without CRLF is matched and written literally. In a file with CRLF,
+    a CRLF is one line break, and a match never starts or ends between its
+    ``\\r`` and ``\\n``. An ``old_str`` without ``\\r\\n``, as a ranged read
+    (lines joined with ``\\n``) or the model writes it, matches with each
+    ``\\n`` read as an LF or a CRLF and every other character, ``\\r``
+    included, matching itself. An ``old_str`` with ``\\r\\n``, as copied from
+    a full read, matches as written or with every line break spelled CRLF; a
+    leading ``\\n`` may also be the LF of a CRLF.
+    Matches are taken in file order without overlapping, as ``str.replace``
+    takes them: the first one, or every one with ``replace_all``. The n-th line
+    break of ``new_str`` is written in the ending of the n-th line break inside
+    the match, and later ones in the ending of the last; a match without a line
+    break lends the ending of the line it is on (on a last line without one,
+    the line before). Everything outside the matches keeps its bytes.
 
-def _match_line_endings(content: str, old_str: str, new_str: str) -> tuple[str, str]:
-    """Spell ``old_str`` and ``new_str`` with the CRLF line endings ``content`` uses.
-
-    Full reads return line endings as stored, but the model tends to write
-    ``\\n`` (and ranged reads join lines with ``\\n``), so a multi-line
-    ``old_str`` would never match a CRLF file and inserted lines would be LF.
-    A CRLF-only file takes both strings in CRLF; a mixed file does so only
-    when the LF spelling is absent and the CRLF one is present.
+    Every search is a fixed number of forward scans of ``content``, so the
+    time is linear in the file and the snippet whatever they contain. That is why a snippet that
+    itself mixes ``\\r\\n`` and ``\\n`` does not also match lines that mix their
+    endings in another way: that search is a subset match, which no forward
+    scan does, and checking each overlapping candidate in turn is quadratic.
     """
-    if "\r\n" not in content:
-        return old_str, new_str
-    crlf_old = _to_crlf(old_str)
-    if content.count("\r\n") == content.count("\n") or (old_str not in content and crlf_old in content):
-        return crlf_old, _to_crlf(new_str)
-    return old_str, new_str
+    if not old_str:
+        # str_replace treats an empty old_str as a no-op edit.
+        return content
+    count = -1 if replace_all else 1
+    if "\r\n" not in content or not ("\r" in old_str or "\n" in old_str or "\n" in new_str):
+        # Without CRLF in the file, or without a line break or CR on either
+        # side, the rule above matches and writes exactly as str.replace.
+        return content.replace(old_str, new_str, count) if old_str in content else None
+    flat_old = old_str.replace("\r\n", "\n")
+    lf_new = new_str.replace("\r\n", "\n")
+    if content.count("\r\n") == content.count("\n") and not flat_old.endswith("\r"):
+        # Every line break is a CRLF, so the CRLF spelling of old_str finds the
+        # same matches in place. Only a trailing bare "\r" could differ, by
+        # matching the "\r" of a CRLF, and that case takes the general path.
+        crlf_old = flat_old.replace("\n", "\r\n")
+        return content.replace(crlf_old, lf_new.replace("\n", "\r\n"), count) if crlf_old in content else None
+    if "\r\n" not in old_str:
+        spans = _flat_spans(content, flat_old)
+    else:
+        spans = _spelled_spans(content, old_str, flat_old.replace("\n", "\r\n"))
+    return _splice_keeping_line_endings(content, spans, lf_new, count)
+
+
+def _flat_spans(content: str, flat_old: str) -> Iterator[tuple[int, int]]:
+    """Yield, in file order and without overlap, the spans of ``content`` that read as ``flat_old`` with CRLF read as LF."""
+    flat = content.replace("\r\n", "\n")
+    # content[:pos] reads as flat[:flat_pos]. Matches arrive in file order, so
+    # each step counts only the CRLFs since the previous one: linear time and
+    # no per-line bookkeeping.
+    pos = flat_pos = 0
+    index = flat.find(flat_old)
+    while index >= 0:
+        bounds = []
+        for target in (index, index + len(flat_old)):
+            while True:
+                end = pos + target - flat_pos
+                crlfs = content.count("\r\n", pos, end)
+                if end > pos and content[end - 1] == "\r" and content.startswith("\n", end):
+                    # A CRLF is one flat character: never stop between its \r and \n.
+                    crlfs += 1
+                    end += 1
+                flat_pos += end - pos - crlfs
+                pos = end
+                if not crlfs:
+                    break
+            bounds.append(pos)
+        yield bounds[0], bounds[1]
+        index = flat.find(flat_old, index + len(flat_old))
+
+
+def _spelled_spans(content: str, *spellings: str) -> Iterator[tuple[int, int]]:
+    """Yield, in file order and without overlap, the spans of ``content`` spelled as one of ``spellings``."""
+    finders = [_crlf_safe_finder(content, spelling) for spelling in dict.fromkeys(spellings)]
+    found = [find(0) for find in finders]
+    while spans := [span for span in found if span is not None]:
+        start, stop = min(spans)
+        yield start, stop
+        # Two spellings that match at the same offset match the same text:
+        # elsewhere they differ where one has "\n" and the other "\r\n". A
+        # finder searches again only when its next match overlaps the one
+        # just taken, from where that ends.
+        found = [span if span is None or span[0] >= stop else find(stop) for span, find in zip(found, finders)]
+
+
+def _crlf_safe_finder(content: str, spelling: str) -> Callable[[int], tuple[int, int] | None]:
+    """Return a function that finds ``spelling`` in ``content`` from an offset, never splitting a CRLF.
+
+    Inside a match, the spelling's own characters already tell a CRLF from a
+    bare ``\\r`` or LF; only its first and last character can meet half a
+    CRLF of the file. A leading ``\\n`` may be the LF of a CRLF, and the match
+    then starts at that CRLF's ``\\r``. A trailing ``\\r`` must not be the CR
+    of a CRLF.
+    """
+    if spelling.endswith("\r") and spelling + "\n" in content:
+        # Skipping a candidate that ends on the CR of a CRLF and searching
+        # again from the next offset rescans the overlap of every skipped
+        # candidate, which is quadratic. re scans a pattern whose literal
+        # prefix is the whole spelling with a KMP overlap table, and checks the
+        # lookahead once per candidate. Compiling costs time linear in the
+        # spelling, so plain str.find serves every file where no candidate
+        # can be skipped.
+        regex = re.compile(re.escape(spelling) + r"(?!\n)")
+
+        def locate(pos: int) -> int:
+            match = regex.search(content, pos)
+            return match.start() if match else -1
+
+    else:
+
+        def locate(pos: int) -> int:
+            return content.find(spelling, pos)
+
+    def find(pos: int) -> tuple[int, int] | None:
+        index = locate(pos)
+        if index < 0:
+            return None
+        start = index - 1 if spelling.startswith("\n") and index > 0 and content[index - 1] == "\r" else index
+        return start, index + len(spelling)
+
+    return find
+
+
+def _splice_keeping_line_endings(content: str, spans: Iterator[tuple[int, int]], lf_new: str, count: int) -> str | None:
+    """Replace the first ``count`` of ``spans`` (all when negative) with ``lf_new`` in their line endings."""
+    new_lines = lf_new.split("\n")
+    out = io.StringIO()
+    copied = 0
+    line_end = -1
+    line_crlf = False
+    found = False
+    for start, stop in spans:
+        found = True
+        endings: list[str] = []
+        at = start
+        while len(endings) < len(new_lines) - 1:
+            at = content.find("\n", at, stop) + 1
+            if not at:
+                break
+            endings.append("\r\n" if content[at - 2 : at] == "\r\n" else "\n")
+        if not endings and len(new_lines) > 1:
+            if start > line_end:
+                line_end = content.find("\n", start)
+                if line_end < 0:
+                    line_end = len(content)
+                    line_break = content.rfind("\n", 0, start)
+                else:
+                    line_break = line_end
+                line_crlf = line_break > 0 and content[line_break - 1] == "\r"
+            endings.append("\r\n" if line_crlf else "\n")
+        out.write(content[copied:start])
+        out.write(new_lines[0])
+        for n, line in enumerate(new_lines[1:]):
+            out.write(endings[min(n, len(endings) - 1)])
+            out.write(line)
+        copied = stop
+        count -= 1
+        if not count:
+            break
+    if not found:
+        return None
+    out.write(content[copied:])
+    return out.getvalue()
 
 
 @tool("str_replace", parse_docstring=True)
@@ -3657,14 +3805,10 @@ def str_replace_tool(
                 # A no-op edit. str.replace("", new_str) would insert new_str at
                 # every character boundary, so this cannot fall through.
                 return "OK"
-            old_str, new_str = _match_line_endings(content, old_str, new_str)
-            if not content or old_str not in content:
+            replaced = _replace_keeping_line_endings(content, old_str, new_str, replace_all)
+            if replaced is None:
                 return f"Error: String to replace not found in file: {requested_path}"
-            if replace_all:
-                content = content.replace(old_str, new_str)
-            else:
-                content = content.replace(old_str, new_str, 1)
-            sandbox.write_file(path, content)
+            sandbox.write_file(path, replaced)
         return "OK"
     except SandboxCapacityExceededError as e:
         return _sandbox_capacity_result(runtime, e, "str_replace")

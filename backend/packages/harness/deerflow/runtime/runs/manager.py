@@ -3061,7 +3061,7 @@ class RunManager:
         if self.heartbeat_enabled:
             deadline = self._parse_lease_deadline(row.get("lease_expires_at"))
             if deadline is None or deadline <= datetime.now(UTC):
-                await self._mark_ownership_lost(record, reason="Scheduled goal cleanup lost its active run lease.", require_active=False)
+                await self._mark_ownership_lost(record, reason="The active admission lease is missing or expired.", require_active=False)
                 return False
         return not record.ownership_lost
 

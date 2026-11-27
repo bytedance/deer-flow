@@ -58,9 +58,13 @@ def test_github_block_parses_full_shape() -> None:
     assert pr.actions == ["opened", "reopened"]
     assert pr.require_mention is False
     assert pr.allow_authors == []
+    assert pr.allow_authors_bypass_mention is True
+    assert pr.allow_author_associations == ["OWNER", "MEMBER", "COLLABORATOR"]
     comment = binding.triggers["issue_comment"]
     assert comment.require_mention is True
     assert comment.allow_authors == ["zhfeng"]
+    assert comment.allow_authors_bypass_mention is True
+    assert comment.allow_author_associations == ["OWNER", "MEMBER", "COLLABORATOR"]
     assert comment.mention_login == "coding-llm-gateway-bot"
 
 
@@ -91,6 +95,47 @@ def test_github_trigger_invalid_type_raises() -> None:
 def test_github_bindings_must_have_repo() -> None:
     with pytest.raises(Exception):  # noqa: PT011
         AgentConfig(name="x", github={"bindings": [{"triggers": {}}]})
+
+
+def test_github_trigger_allow_author_associations_normalizes_and_deduplicates() -> None:
+    trigger = GitHubTriggerConfig(allow_author_associations=[" owner ", "collaborator", "OWNER"])
+    assert trigger.allow_author_associations == ["OWNER", "COLLABORATOR"]
+
+
+def test_github_trigger_allow_author_associations_empty_list_preserved() -> None:
+    trigger = GitHubTriggerConfig(allow_author_associations=[])
+    assert trigger.allow_author_associations == []
+
+
+def test_github_trigger_allow_author_associations_rejects_unknown_value() -> None:
+    with pytest.raises(ValueError, match="Unknown GitHub author_association"):
+        GitHubTriggerConfig(allow_author_associations=["OWNER", "ADMIN"])
+
+
+def test_github_trigger_allow_authors_strips_blank_entries() -> None:
+    trigger = GitHubTriggerConfig(allow_authors=[" alice ", "", "   ", "bob"])
+    assert trigger.allow_authors == ["alice", "bob"]
+
+
+def test_github_trigger_allow_authors_null_coerces_to_empty_list() -> None:
+    cfg = AgentConfig.model_validate(
+        {
+            "name": "x",
+            "github": {"bindings": [{"repo": "a/b", "triggers": {"issue_comment": {"allow_authors": None}}}]},
+        }
+    )
+    assert cfg.github is not None
+    assert cfg.github.bindings[0].triggers["issue_comment"].allow_authors == []
+
+
+def test_github_trigger_allow_authors_non_list_rejected() -> None:
+    with pytest.raises(Exception):  # noqa: PT011
+        GitHubTriggerConfig(allow_authors="alice")  # type: ignore[arg-type]
+
+
+def test_github_trigger_allow_author_associations_null_rejected() -> None:
+    with pytest.raises(Exception):  # noqa: PT011
+        GitHubTriggerConfig(allow_author_associations=None)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

@@ -546,13 +546,12 @@ class _BoundAgentRuns:
             return (await get_thread_state(thread_id, request)).model_dump(mode="json")
 
     async def send_input(self, *, thread_id, run_id, text, mode, request_id, context=None):
-        from app.gateway.routers.thread_runs import create_run_input
-        from app.gateway.run_inputs import RunInputRequest
+        from app.gateway.run_inputs import RunInputRequest, submit_run_input
 
         async with self._request("runs:create", thread_id) as request:
             body = RunInputRequest(request_id=request_id, text=text, mode=mode, context=_json_object(context) or {})
             body = body.model_copy(update={"request_id": hashlib.sha256(f"{self._plugin_namespace or 'host'}:{body.request_id}".encode()).hexdigest()})
-            return await create_run_input(thread_id, run_id, body, request)
+            return await submit_run_input(thread_id, run_id, body, request)
 
     async def dispatch_input(self, *, thread_id, run_id, input_id):
         from app.gateway.run_inputs import dispatch_one_input

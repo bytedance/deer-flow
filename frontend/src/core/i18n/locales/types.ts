@@ -662,6 +662,7 @@ export interface Translations {
     steerModeHelp: string;
     runInputSend: string;
     runInputTextOnly: string;
+    runInputUnsupported: string;
     runInputUnavailable: string;
     stopRun: string;
     runInputQueued: string;
@@ -1446,6 +1447,7 @@ export interface Translations {
     branchCreated: string;
     branchFailed: string;
     streamReplayGap: string;
+    sandboxBusy: string;
     streamServerError: (status: number) => string;
     outlineLabel: string;
     outlineAttachmentFallback: string;

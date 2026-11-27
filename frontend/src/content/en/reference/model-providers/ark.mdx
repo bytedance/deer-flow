@@ -1,8 +1,61 @@
 ---
-title: Volcano Ark
-description: Integration guide for the Volcano Ark model provider.
+title: BytePlus ModelArk & Volcano Ark
+description: Integration guide for BytePlus Agent Plan (Personal & Enterprise) and Volcano Ark Coding Plan.
 ---
 
-# Volcano Ark
+# BytePlus ModelArk & Volcano Ark
 
-## Coding Plan
+## BytePlus Agent Plan (Personal & Enterprise)
+
+[BytePlus Agent Plan](https://www.byteplus.com/en/activity/agentplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) provides a unified Agent Fuel Points (AFP) subscription across flagship LLMs, **Seedream** image generation, and **Seedance 2.5** video generation with native synchronized audio — using a single dedicated API key and OpenAI-compatible base URL:
+
+- **Base URL**: `https://ark.ap-southeast.bytepluses.com/api/plan/v3`
+- **Subscription Console**: [ModelArk Agent Plan](https://console.byteplus.com/ark/region:ap-southeast-1/subscription/agent-plan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
+- **Official Docs**: [Personal Edition](https://console.byteplus.com/ark/region:ap-southeast-1/docs/agent-plan-personal-plan-overview?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) · [Enterprise / Team Edition](https://console.byteplus.com/ark/region:ap-southeast-1/docs/agent-plan-enterprise-plan-overview?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
+
+> **Plan Tiers Note**: Language models (`dola-seed-2.1-turbo`, `deepseek-v4-pro`, `deepseek-v4.1-flash`, `seed-2.0-lite`, `seed-2.0-mini`) and Seedream image models (`dola-seedream-5.0-pro`, `dola-seedream-5.5`, `dola-seedream-5.0-flash`) are included across all tiers (Small, Medium, Large, Max, and Enterprise Shared Package). **Seedance 2.5** video generation (`dreamina-seedance-2.5` and `dreamina-seedance-2.5-flash`) requires **Large**, **Max**, or **Enterprise Shared Package**.
+
+### Quick Setup (`make setup`)
+
+Run `make setup` and choose **BytePlus Agent Plan**. The wizard writes your LLM model profile and asks whether to also share `BYTEPLUS_AGENTPLAN_API_KEY` with `sandbox.environment` (default: No) so `image-generation` (Seedream), `ppt-generation`, and `video-generation` (Seedance 2.5) can reuse the same key inside sandboxes.
+
+### Manual `config.yaml` Configuration
+
+```yaml
+models:
+  - name: dola-seed-2.1-turbo-ap
+    display_name: Dola-Seed-2.1-Turbo (BytePlus Agent Plan)
+    use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+    model: dola-seed-2.1-turbo
+    api_base: https://ark.ap-southeast.bytepluses.com/api/plan/v3
+    api_key: $BYTEPLUS_AGENTPLAN_API_KEY
+    timeout: 600.0
+    max_retries: 2
+    supports_thinking: true
+    supports_vision: true
+    supports_reasoning_effort: true
+    when_thinking_enabled:
+      extra_body:
+        thinking:
+          type: enabled
+    when_thinking_disabled:
+      extra_body:
+        thinking:
+          type: disabled
+
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  environment:
+    BYTEPLUS_AGENTPLAN_API_KEY: $BYTEPLUS_AGENTPLAN_API_KEY
+    # Optional overrides:
+    # BYTEPLUS_AGENTPLAN_IMAGE_MODEL: dola-seedream-5.0-pro
+    # BYTEPLUS_AGENTPLAN_VIDEO_MODEL: dreamina-seedance-2.5
+    # BYTEPLUS_AGENTPLAN_VIDEO_RESOLUTION: 720p
+    # BYTEPLUS_AGENTPLAN_VIDEO_DURATION: "6"
+```
+
+For multi-user team deployments running batch multimodal or video workloads, see the [Enterprise / Team Edition documentation](https://console.byteplus.com/ark/region:ap-southeast-1/docs/agent-plan-enterprise-plan-overview?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) for team seat and shared-package options, and pair with the **BytePlus veFaaS Cloud Sandbox** provider.
+
+## Volcano Ark Coding Plan (China Mainland)
+
+For developers in Mainland China using Volcengine Coding Plan, select **Volcengine Coding Plan** in `make setup` or configure `api_base: https://ark.cn-beijing.volces.com/api/coding/v3` with `$VOLCENGINE_API_KEY` (see `config.example.yaml`).
