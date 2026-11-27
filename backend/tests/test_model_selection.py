@@ -94,6 +94,7 @@ def test_ordinary_tasks_quotes_and_conditional_text_are_not_controls(text):
         "Use Python 3.11 to run the script",
         "Use a Bayesian model to estimate customer churn",
         "Use an ARIMA model to forecast next month's revenue",
+        "Use a Monte Carlo model to price the option",
         "用回归模型分析这些销售数据",
     ],
 )
@@ -128,11 +129,20 @@ def test_versioned_tool_reference_in_a_task_stays_task_text(text):
     [
         "Use the Claude Sonnet model for this turn: summarize this report",
         "Use Claude Sonnet model for this turn: summarize this report",
+        "Use the Claude Sonnet model to summarize this report",
+        "Use the Gemini Flash model to summarize this report",
         "用 GPT-4 模型总结这段内容",
     ],
 )
 def test_explicitly_named_model_outside_the_catalog_is_unavailable(text):
     result = resolve_model_control(text, [DS, OPUS])
+    assert result["status"] == "unavailable"
+    assert result["model_name"] is None
+
+
+def test_chinese_product_tier_after_a_version_is_not_read_as_a_service():
+    # "服务版" is a tier name; the compact branch must not read it as "服务".
+    result = resolve_model_control("这次用 Qwen v3服务版帮我总结报告", [model("chat-default", "Chat Default")])
     assert result["status"] == "unavailable"
     assert result["model_name"] is None
 

@@ -19,7 +19,9 @@ _NON_MODEL_VERSION = re.compile(
     # read as "server"; the Chinese forms have no such boundary.
     r"\bv\d+(?:\.\d+)*(?:\s+of)?\s+(?:the\s+)?(?:apis?|sdks?|endpoints?|servers?|services?|interfaces?|clients?|versions?)\b"
     r"|\b(?:apis?|sdks?|endpoints?|servers?|services?|interfaces?|clients?)\s+v\d+(?:\.\d+)*"
-    r"|\bv\d+(?:\.\d+)*(?:\s+of)?\s*(?:接口|服务)",
+    # "服务版" is a product tier, not a service reference, so the compact Chinese
+    # branch stops before that suffix.
+    r"|\bv\d+(?:\.\d+)*(?:\s+of)?\s*(?:接口|服务)(?!版)",
     re.IGNORECASE,
 )
 
@@ -65,15 +67,23 @@ def _names_a_model(query: str, scope: ModelScope | None) -> bool:
     """A model noun names a choice only when the request says so.
 
     A name carrying a version ("GPT-4", "Qwen3") is a product wherever it
-    appears. A bare capitalised word is not: the broad "use … to …" grammar
-    reads "a Bayesian model to estimate churn" and "an ARIMA model to forecast"
-    as task wording, so there it stays text. Scoping the request to this turn or
-    the conversation ("for this turn", "这次用", "以后") makes the same shape a
-    choice.
+    appears, and so is a two-word capitalised name ("Claude Sonnet",
+    "Gemini Flash"). Statistical wording is not: the broad "use … to …" grammar
+    reads "a Bayesian model", "an ARIMA model" and "a Monte Carlo model" as
+    task text, and the indefinite article marks them as common nouns. A single
+    capitalised word stays text too unless the request is scoped to this turn or
+    the conversation ("for this turn", "这次用", "以后"); no grammar separates
+    "the Bayesian model" from "the Claude model", so the scoped form is where a
+    bare name counts.
     """
     if not re.search(r"\bmodels?\b|模型", query, re.IGNORECASE):
         return False
     if re.search(r"[A-Za-z][A-Za-z0-9._\-]*\d", query):
+        return True
+    # A two-word family and tier directly before the noun ("the Claude Sonnet
+    # model"). An indefinite article marks a common noun instead ("a Monte
+    # Carlo model").
+    if not re.match(r"(?:a|an)\s", query) and re.search(r"\b[A-Z][a-z][A-Za-z0-9._\-]*\s+[A-Z][a-z][A-Za-z0-9._\-]*\s+models?\b", query):
         return True
     if scope not in {"turn", "conversation"}:
         return False
