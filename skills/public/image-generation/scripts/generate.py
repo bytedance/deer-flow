@@ -264,10 +264,10 @@ def _generate_image_minimax(
 ) -> str:
     bearer_value = os.getenv("MINIMAX_API_KEY")
     if not bearer_value:
-        return "MINIMAX_API_KEY is not set"
+        raise ValueError("MINIMAX_API_KEY is not set")
     prompt = _minimax_prompt(prompt)
     if len(prompt) > MINIMAX_PROMPT_MAX_CHARS:
-        return (
+        raise ValueError(
             f"Prompt is {len(prompt)} characters but MiniMax image-01 accepts at most "
             f"{MINIMAX_PROMPT_MAX_CHARS}. Shorten the prompt to stay within the limit; "
             f"reference images plus a tighter description usually recover the detail."
@@ -310,6 +310,10 @@ def _generate_image_minimax(
 def _generate_image_gemini(
     prompt: str, reference_images: list[str], output_file: str, aspect_ratio: str
 ) -> str:
+    bearer_value = os.getenv("GEMINI_API_KEY")
+    if not bearer_value:
+        raise ValueError("GEMINI_API_KEY is not set")
+
     parts = []
     valid_reference_images = []
     for ref_img in reference_images:
@@ -328,9 +332,6 @@ def _generate_image_gemini(
             image_b64 = base64.b64encode(f.read()).decode("utf-8")
         parts.append({"inlineData": {"mimeType": "image/jpeg", "data": image_b64}})
 
-    bearer_value = os.getenv("GEMINI_API_KEY")
-    if not bearer_value:
-        return "GEMINI_API_KEY is not set"
     response = _post_image(
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent",
         headers={"x-goog-api-key": bearer_value, "Content-Type": "application/json"},
@@ -373,6 +374,11 @@ def _write_openai_image(payload: dict, output_file: str) -> str:
         else:
             image_bytes = _download_image(image_url)
 
+    # A provider can answer 200 with no bytes, or hand back an empty data URL.
+    # Fail before the output is opened so an existing image is preserved.
+    if not image_bytes:
+        raise ValueError("Provider returned an empty image")
+
     _ensure_output_dir(output_file)
     with open(output_file, "wb") as f:
         f.write(image_bytes)
@@ -384,7 +390,7 @@ def _generate_image_openai(
 ) -> str:
     bearer_value = os.getenv("IMAGE_GENERATION_API_KEY")
     if not bearer_value:
-        return "IMAGE_GENERATION_API_KEY is not set"
+        raise ValueError("IMAGE_GENERATION_API_KEY is not set")
 
     url = f"{_openai_base_url()}/images/generations"
     headers = {"Authorization": f"Bearer {bearer_value}"}

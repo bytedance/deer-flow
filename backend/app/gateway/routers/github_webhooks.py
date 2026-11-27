@@ -257,7 +257,7 @@ async def receive_github_webhook(
 
     # Parse JSON payload after signature is verified (verify-then-parse).
     try:
-        payload: dict[str, Any] = json.loads(body) if body else {}
+        parsed = json.loads(body) if body else {}
     except json.JSONDecodeError as exc:
         logger.warning(
             "github_webhook: invalid JSON body (event=%s delivery=%s): %s",
@@ -266,6 +266,9 @@ async def receive_github_webhook(
             exc,
         )
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    payload: dict[str, Any] = parsed
 
     if x_github_event in _KNOWN_EVENTS:
         logger.info(

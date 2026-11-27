@@ -18,6 +18,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.config import get_stream_writer
 from langgraph.types import Command
 
+from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.middlewares.receipt_verification import verify_receipt_citations
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.community.ragflow.sources import cited_source_artifact
@@ -35,7 +36,7 @@ from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_h
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
 from deerflow.subagents.acceptance_checks import check_acceptance_criteria_async, render_acceptance_section
 from deerflow.subagents.capacity import SubagentExecutionCapacity, configured_subagent_queue_timeout_seconds
-from deerflow.subagents.config import resolve_subagent_model_name
+from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 from deerflow.subagents.context_snapshot import ParentContextSnapshot
 from deerflow.subagents.executor import (
     SubagentStatus,
@@ -106,7 +107,7 @@ def _preflight_delegation_checks(
     context_mode: str,
     runtime_app_config: Any | None,
     allowed_subagents: Any | None,
-) -> tuple[Any | None, str | None]:
+) -> tuple[SubagentConfig, None] | tuple[None, str]:
     """Read-only preflight (validate-then-mutate).
 
     Runs every precondition check in one pass before any side-effecting
@@ -133,8 +134,6 @@ def _preflight_delegation_checks(
     after all checks pass, so a rejected recovery request does not consume the
     source task (see issue #7633).
     """
-    config: Any | None = None
-
     if context_mode not in {"isolated", "snapshot"}:
         return None, f"Unknown context_mode '{context_mode}'. Use isolated or snapshot."
 
@@ -1002,6 +1001,7 @@ async def task_tool(
             status="failed",
             error=preflight_error,
         )
+    assert preflight_config is not None
     config = preflight_config
     # Rejected delegations must not serialize the retained history. Capture
     # after delegation validation, before child setup (including tool loading).
@@ -1103,6 +1103,9 @@ async def task_tool(
 
     if overrides:
         config = replace(config, **overrides)
+
+    interaction_policy = resolve_run_interaction_policy({"configurable": runtime.config.get("configurable", {}) if runtime is not None else {}, "context": parent_context})
+    config = interaction_policy.apply_to_subagent(config)
 
     # Get available tools (excluding task tool to prevent nesting)
     # Lazy import to avoid circular dependency

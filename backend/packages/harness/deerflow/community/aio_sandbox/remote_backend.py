@@ -25,6 +25,7 @@ from pathlib import PurePosixPath
 
 import requests
 
+from deerflow.community.provider_credentials import REDACTION_MARKER, redact_secret
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.integrations.lark_cli import (
     PROVISIONER_CAPABILITY_REFRESH_HEADER,
@@ -214,7 +215,16 @@ class RemoteSandboxBackend(SandboxBackend):
                 request is sent.
         """
         self._provisioner_url = provisioner_url.rstrip("/")
-        self._api_key = api_key
+        # The provisioner is a standalone service whose image carries only
+        # app.py, so it cannot import provider_credentials: a shared rule that
+        # only one side can run would compare asymmetric values. Both sides
+        # therefore strip this symmetric secret inline. resolve_api_key would
+        # also read the .env.example placeholder as unset, breaking a
+        # deployment that configures the same placeholder on both sides.
+        # A Secret mounted through envFrom keeps its trailing newline; the raw
+        # value would make requests refuse the header with an error that quotes
+        # the whole key.
+        self._api_key = (api_key or "").strip()
         self._max_shell_sessions = max_shell_sessions
         self._max_bash_sessions = max_bash_sessions
         self._required_shell_sessions = max(required_shell_sessions, max_shell_sessions or 0)
@@ -227,6 +237,19 @@ class RemoteSandboxBackend(SandboxBackend):
 
     def _auth_headers(self) -> dict[str, str]:
         return {"X-API-Key": self._api_key} if self._api_key else {}
+
+    def _safe_error_text(self, exc: object) -> str:
+        """Error text with the configured key scrubbed out.
+
+        Transport refusals quote the offending header value, and these
+        messages reach the error log and the model-visible tool result. The
+        quoted value is repr-escaped, so a key with interior control characters
+        appears in escaped form; scrub both spellings.
+        """
+        text = redact_secret(exc, self._api_key)
+        if self._api_key:
+            text = text.replace(repr(self._api_key)[1:-1], REDACTION_MARKER)
+        return text
 
     def _requires_shell_capacity_replacement(self, payload: dict[str, object]) -> bool:
         if self._required_shell_sessions == 0:
@@ -319,7 +342,9 @@ class RemoteSandboxBackend(SandboxBackend):
                 return None
             return SandboxInfo(sandbox_id, "", container_id=generation, lark_cli_broker=None)
         except (requests.RequestException, ValueError) as exc:
-            raise RuntimeError(f"Could not inspect runtime for sandbox {sandbox_id}: {exc}") from exc
+            # from None: the cause keeps the unredacted transport text, and
+            # upstream logger.exception calls print the whole chain.
+            raise RuntimeError(f"Could not inspect runtime for sandbox {sandbox_id}: {self._safe_error_text(exc)}") from None
 
     def discover(self, sandbox_id: str) -> SandboxInfo | None:
         """Discover an existing sandbox via the provisioner.
@@ -372,7 +397,7 @@ class RemoteSandboxBackend(SandboxBackend):
             logger.info("Provisioner list_running: %d sandbox(es) found", len(infos))
             return infos
         except requests.RequestException as exc:
-            logger.warning("Provisioner list_running failed: %s", exc)
+            logger.warning("Provisioner list_running failed: %s", self._safe_error_text(exc))
             return []
 
     def _provisioner_create(
@@ -443,8 +468,8 @@ class RemoteSandboxBackend(SandboxBackend):
             return info
         except requests.RequestException as exc:
             self._drop_cached_lark_broker_mode_on_conflict(exc)
-            logger.error(f"Provisioner create failed for {sandbox_id}: {exc}")
-            raise RuntimeError(f"Provisioner create failed: {exc}") from exc
+            logger.error(f"Provisioner create failed for {sandbox_id}: {self._safe_error_text(exc)}")
+            raise RuntimeError(f"Provisioner create failed: {self._safe_error_text(exc)}") from None
 
     def _drop_cached_lark_broker_mode_on_conflict(self, exc: requests.RequestException) -> None:
         """Honor the provisioner's capability-refresh marker on create conflicts.
@@ -480,7 +505,7 @@ class RemoteSandboxBackend(SandboxBackend):
                 resp.raise_for_status()
             logger.info(f"Provisioner destroyed sandbox {sandbox_id}")
         except requests.RequestException as exc:
-            raise RuntimeError(f"Provisioner destroy failed for {sandbox_id}: {exc}") from exc
+            raise RuntimeError(f"Provisioner destroy failed for {sandbox_id}: {self._safe_error_text(exc)}") from None
 
     def _provisioner_is_alive(self, sandbox_id: str) -> bool:
         """GET /api/sandboxes/{sandbox_id} → check Pod phase."""
@@ -491,12 +516,15 @@ class RemoteSandboxBackend(SandboxBackend):
                 timeout=10,
             )
         except requests.RequestException as exc:
-            raise RuntimeError(f"Provisioner health check failed for {sandbox_id}: {exc}") from exc
+            raise RuntimeError(f"Provisioner health check failed for {sandbox_id}: {self._safe_error_text(exc)}") from None
 
         if resp.status_code == 404:
             return False
         if not resp.ok:
-            raise RuntimeError(f"Provisioner health check failed for {sandbox_id}: HTTP {resp.status_code} {resp.text}")
+            # The upstream body can echo request headers or proxy diagnostics,
+            # and this error is logged by _check_tracked_sandbox_alive; report
+            # the operation and status without copying it.
+            raise RuntimeError(f"Provisioner health check failed for {sandbox_id}: HTTP {resp.status_code}")
 
         data = resp.json()
         return data.get("status") == "Running"
@@ -515,5 +543,5 @@ class RemoteSandboxBackend(SandboxBackend):
             data = resp.json()
             return self._sandbox_info(data, sandbox_id)
         except requests.RequestException as exc:
-            logger.debug(f"Provisioner discover failed for {sandbox_id}: {exc}")
+            logger.debug(f"Provisioner discover failed for {sandbox_id}: {self._safe_error_text(exc)}")
             return None

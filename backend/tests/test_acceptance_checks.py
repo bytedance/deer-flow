@@ -608,16 +608,24 @@ class TestAsyncAdmission:
 
     @pytest.mark.parametrize("allow", [True, False])
     @pytest.mark.parametrize("content", [None, b"x" * 60_000], ids=["missing", "large"])
-    def test_loop_affine_provider_decides_on_the_loop(self, tmp_path, monkeypatch, allow, content):
+    @pytest.mark.parametrize("initialized", [True, False], ids=["initialized", "lazy"])
+    def test_loop_affine_provider_decides_on_the_loop(self, tmp_path, monkeypatch, allow, content, initialized):
         """Metadata-only leaves keep their definitive verdicts under a provider
         that can only be constructed on a running event loop."""
         import asyncio
 
+        from deerflow.config import paths
+        from deerflow.sandbox.local import LocalSandboxProvider
+
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(paths, "_paths", None)
         constructed_on = self._install_loop_affine_provider(monkeypatch, allow=allow)
+        provider = LocalSandboxProvider()
+        monkeypatch.setattr("deerflow.sandbox.tools.get_sandbox_provider", lambda: provider)
         if content is not None:
             (tmp_path / "report.md").write_bytes(content)
         runtime = SimpleNamespace(
-            state={"sandbox": {"sandbox_id": "local"}},
+            state={"sandbox": {"sandbox_id": "local"}} if initialized else {},
             context={"thread_id": "thread-1", "user_id": "user-1", "user_role": "user"},
         )
 
@@ -666,6 +674,45 @@ class TestAsyncAdmission:
         assert (leaf["checked"], leaf["holds"]) == (False, False)
         assert leaf["detail"] == "sandbox access denied; file unverified"
         probe.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_acceptance_drains_file_probe(self, tmp_path, monkeypatch):
+        import asyncio
+        import threading
+
+        from deerflow.subagents import acceptance_checks as checks
+
+        self._install_loop_affine_provider(monkeypatch, allow=True)
+        loop = asyncio.get_running_loop()
+        started = asyncio.Event()
+        finish = threading.Event()
+        cleaned_up = asyncio.Event()
+
+        def probe(*_args):
+            loop.call_soon_threadsafe(started.set)
+            assert finish.wait(timeout=5)
+            raise FileNotFoundError
+
+        monkeypatch.setattr(checks, "_probe_file_size", probe)
+        runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}}, context={"user_id": "user-1", "user_role": "user"})
+
+        async def check_then_cleanup():
+            try:
+                await check_acceptance_criteria_async(["file:report.md exists"], runtime=runtime, thread_data={"workspace_path": str(tmp_path)})
+            finally:
+                cleaned_up.set()
+
+        task = asyncio.create_task(check_then_cleanup())
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not cleaned_up.is_set()
+        finally:
+            finish.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert cleaned_up.is_set()
 
     def test_evidence_only_criteria_skip_admission(self, monkeypatch):
         authorize = Mock(side_effect=AssertionError("evidence-only criteria need no sandbox admission"))

@@ -4604,13 +4604,14 @@ async def test_start_run_peer_idempotent_reuse_does_not_reject_later_runs_after_
     assert follow_up.run_id != first.run_id
 
 
-def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):
+@pytest.mark.parametrize("options", [{}, {"subagent_enabled": False}, {"subagent_enabled": True}])
+def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config, options):
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import patch
 
     from app.gateway.routers.thread_runs import RunCreateRequest
-    from app.gateway.services import launch_scheduled_thread_run
+    from app.gateway.services import get_trusted_internal_owner_user_id, launch_scheduled_thread_run, merge_run_context_overrides
 
     async def _scenario():
         captured: dict[str, object] = {}
@@ -4619,6 +4620,10 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
             captured["body"] = body
             captured["thread_id"] = thread_id
             captured["context"] = body.context
+            captured["trusted_owner"] = get_trusted_internal_owner_user_id(request)
+            config: dict = {}
+            merge_run_context_overrides(config, body.context, internal=True)
+            captured["runtime_config"] = config
             captured["scheduled_task_runtime"] = scheduled_task_runtime
             captured["metadata"] = body.metadata
             captured["idempotency_key"] = idempotency_key
@@ -4637,6 +4642,7 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
                     "scheduled_task_id": "task-1",
                     "scheduled_task_run_id": "task-run-1",
                 },
+                **options,
             )
         return captured, result
 
@@ -4645,7 +4651,12 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
     assert captured["thread_id"] == "thread-scheduled"
     assert isinstance(captured["body"], RunCreateRequest)
     assert captured["body"].config == {"recursion_limit": 1000}
-    assert captured["context"] == {"non_interactive": True, "user_id": "user-1"}
+    expected_context = {"non_interactive": True, "user_id": "user-1"}
+    if options.get("subagent_enabled"):
+        expected_context["subagent_enabled"] = True
+    assert captured["context"] == expected_context
+    assert captured["trusted_owner"] == "user-1"
+    assert captured["runtime_config"]["context"] == expected_context
     assert captured["scheduled_task_runtime"] == {"task_id": "task-1", "occurrence_id": "task-run-1", "user_id": "user-1"}
     assert captured["metadata"] == {
         "scheduled_task_id": "task-1",

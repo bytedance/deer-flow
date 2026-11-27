@@ -13,8 +13,11 @@ full document never consumes the agent's context budget.
 Assembly drops a section's leading heading when it restates the section title
 (models habitually open each section with `# <title>` while the assembler
 already emits `## <title>`), which otherwise produces doubled headings across
-the whole report. Sections are scoped per user and per thread in the plugin's
-own SQLite file — no host database or host-internal imports.
+the whole report. Assembly parses the opening and closing Markdown markers
+once per heading, then compares the heading text ignoring whitespace. Literal
+`#` characters, such as the ones in `C#` and `#42`, remain significant.
+Sections are scoped per user and per thread in the plugin's own SQLite file —
+no host database or host-internal imports.
 
 ## Deployment
 

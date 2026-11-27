@@ -28,6 +28,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ChangeEvent,
   type ComponentProps,
   type ClipboardEvent,
@@ -69,6 +70,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
 } from "@/components/ui/dropdown-menu";
+import type { Agent } from "@/core/agents/types";
 import { fetch } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { getBackendBaseURL } from "@/core/config";
@@ -103,6 +105,11 @@ import {
   retireProjectAttachments,
   useStagedProjectAttachments,
 } from "@/core/projects/composer-attach";
+import {
+  getThreadEffortOverride,
+  reconcileThreadEffort,
+  subscribe,
+} from "@/core/settings/store";
 import {
   buildReferenceMessageMetadata,
   type SidecarContext,
@@ -329,6 +336,7 @@ export function InputBox({
   projectId,
   draftAgentName,
   defaultModelName,
+  agentReasoning,
   knowledgeScopeControl,
   initialValue,
   onContextChange,
@@ -379,6 +387,7 @@ export function InputBox({
    * (issue #4336). ``null`` / undefined = no agent default → use models[0].
    */
   defaultModelName?: string | null;
+  agentReasoning?: Pick<Agent, "thinking_enabled" | "reasoning_effort"> | null;
   /** Optional knowledge-scope control rendered directly after mode. */
   knowledgeScopeControl?: React.ReactNode;
   initialValue?: string;
@@ -415,7 +424,11 @@ export function InputBox({
     options?: InputBoxSubmitOptions,
   ) => void | Promise<void>;
   onStop?: () => void;
-  onBusySubmit?: (text: string, mode: RunInputMode) => Promise<unknown>;
+  onBusySubmit?: (
+    text: string,
+    mode: RunInputMode,
+    files: File[],
+  ) => Promise<unknown>;
   /**
    * Whether the caller's role holds `runs:cancel` (RFC #4063 Phase 4).
    * Defaults to true so callers that don't resolve permissions (pre-Phase-4
@@ -737,6 +750,11 @@ export function InputBox({
     uploadLimits,
   ]);
 
+  const threadEffort = useSyncExternalStore(
+    subscribe,
+    () => getThreadEffortOverride(threadId),
+    () => undefined,
+  );
   useEffect(() => {
     if (models.length === 0) {
       return;
@@ -749,6 +767,9 @@ export function InputBox({
       ? models.find((m) => m.name === defaultModelName)
       : undefined;
     const fallbackModel = currentModel ?? agentDefaultModel ?? models[0]!;
+    if (threadEffort && typeof context.model_name === "string") {
+      reconcileThreadEffort(threadId, context.model_name, fallbackModel);
+    }
     const nextModelName = fallbackModel.name;
     const nextMode = getResolvedMode(context.mode, fallbackModel);
     // A remembered effort may not exist in this model's contract (issue #5073);
@@ -775,7 +796,14 @@ export function InputBox({
       },
       { automatic: true },
     );
-  }, [context, models, defaultModelName, onContextChange]);
+  }, [
+    context,
+    models,
+    defaultModelName,
+    onContextChange,
+    threadId,
+    threadEffort,
+  ]);
 
   const selectedModel = useMemo(() => {
     if (models.length === 0) {
@@ -804,15 +832,27 @@ export function InputBox({
   );
 
   const supportReasoningEffort = reasoningEffortOptions.length > 0;
+  const thinkingForRun =
+    thinkingRequired ||
+    (supportThinking &&
+      (agentReasoning?.thinking_enabled ?? context.mode !== "flash"));
 
   const effectiveReasoningEffort = useMemo(
     () =>
       resolveReasoningEffort(
         selectedModel,
-        context.reasoning_effort ??
+        threadEffort ??
+          agentReasoning?.reasoning_effort ??
+          context.reasoning_effort ??
           reasoningEffortForMode(context.mode ?? "pro", selectedModel),
       ),
-    [context.mode, context.reasoning_effort, selectedModel],
+    [
+      threadEffort,
+      agentReasoning?.reasoning_effort,
+      context.mode,
+      context.reasoning_effort,
+      selectedModel,
+    ],
   );
 
   const reasoningEffortLabel = useCallback(
@@ -1646,22 +1686,42 @@ export function InputBox({
           if (runInputInFlight.current)
             return Promise.reject(new Error("input-in-flight"));
           if (
-            !message.text.trim() ||
-            message.files.length ||
             projectAttachments.length ||
             conversationReferences.length ||
             inlineRefs.length ||
             (sidecar?.conversationQuotes.length ?? 0) ||
             message.text.trimStart().startsWith("/")
           ) {
+            toast.info(t.inputBox.runInputUnsupported);
+            return Promise.reject(new Error("busy-input-unsupported"));
+          }
+          if (
+            runInputMode === "steer" &&
+            (!message.text.trim() || message.files.length)
+          ) {
             toast.info(t.inputBox.runInputTextOnly);
             return Promise.reject(new Error("text-input-required"));
+          }
+          const files = message.files.flatMap(({ file }) =>
+            file instanceof File ? [file] : [],
+          );
+          if (files.length !== message.files.length) {
+            toast.error(t.uploads.notReady);
+            return Promise.reject(new Error("Attachments not ready."));
+          }
+          if (!files.length && !message.text.trim()) {
+            return Promise.reject(new Error("empty-input"));
+          }
+          const { violations } = validateUploadLimits([], files, uploadLimits);
+          if (violations.length) {
+            reportUploadLimitViolations(violations);
+            return Promise.reject(new Error("Attachment limits exceeded."));
           }
           abortVoiceInput();
           runInputInFlight.current = true;
           setRunInputSending(true);
           try {
-            await onBusySubmit(message.text, runInputMode);
+            await onBusySubmit(message.text, runInputMode, files);
             return;
           } finally {
             runInputInFlight.current = false;
@@ -1784,13 +1844,17 @@ export function InputBox({
       projectAttachments.length,
       conversationReferences.length,
       inlineRefs.length,
+      reportUploadLimitViolations,
       sidecar?.conversationQuotes.length,
       status,
       submitThreadMessage,
       t.inputBox.goalTooLong,
       t.inputBox.pleaseWaitStreaming,
       t.inputBox.runInputTextOnly,
+      t.inputBox.runInputUnsupported,
       t.inputBox.startTurnUnavailable,
+      t.uploads.notReady,
+      uploadLimits,
     ],
   );
 
@@ -3409,7 +3473,7 @@ export function InputBox({
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
             {knowledgeScopeControl}
-            {supportReasoningEffort && context.mode !== "flash" && (
+            {supportReasoningEffort && thinkingForRun && (
               <PromptInputActionMenu>
                 <PromptInputActionMenuTrigger
                   className="hidden gap-1! px-2! sm:inline-flex"
@@ -3558,7 +3622,10 @@ export function InputBox({
                   variant="outline"
                   status={runInputSending ? "submitted" : "ready"}
                   disabled={
-                    composerLocked || voiceListening || !textInput.value.trim()
+                    composerLocked ||
+                    voiceListening ||
+                    (!textInput.value.trim() &&
+                      (runInputMode !== "queue" || !attachmentParts.length))
                   }
                 />
               </>
