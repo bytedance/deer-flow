@@ -14,6 +14,17 @@ from app.gateway.authz import AuthContext
 from app.gateway.extension_agent_runs import GatewayAgentRunsHost
 
 
+async def _expire_grant(workers, task_id):
+    """Move a grant's deadline behind the database clock, keeping the host clock honest."""
+    from sqlalchemy import update
+
+    from deerflow.persistence.clock import db_now
+    from deerflow.persistence.coordination.model import CoordinationGrantRow
+
+    async with workers.repo._sessions.begin() as session:
+        await session.execute(update(CoordinationGrantRow).where(CoordinationGrantRow.task_id == task_id).values(expires_at=db_now(session.get_bind().dialect.name) - 1))
+
+
 @pytest.fixture
 def host(monkeypatch):
     user = User(email="alice@example.com")
@@ -1657,8 +1668,7 @@ async def test_managed_worker_create_retry_returns_task_after_grant_expires(work
     task_id = first["task"]["id"]
     await asyncio.wait_for(entered.wait(), 10)
     try:
-        grant = await state.coordination_workers.repo.grant(owner, task_id)
-        monkeypatch.setattr("deerflow.persistence.coordination.workers.time", lambda: grant["expires_at"] + 1)
+        await _expire_grant(state.coordination_workers, task_id)
         detail = (await client.get(f"{url}/{task_id}")).raise_for_status().json()
         replay = (await client.post(url, json=body)).raise_for_status().json()
         assert replay == detail
@@ -1689,8 +1699,7 @@ async def test_managed_worker_replays_accepted_inputs_after_grant_expires(worker
         state.release_worker.set()
     finished = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
     workers = state.coordination_workers
-    grant = await workers.repo.grant(owner, task_id)
-    monkeypatch.setattr("deerflow.persistence.coordination.workers.time", lambda: grant["expires_at"] + 1)
+    await _expire_grant(workers, task_id)
     wake = Mock(side_effect=AssertionError("receipt replay must not wake a Worker"))
     monkeypatch.setattr(workers, "watch", wake)
 
@@ -1854,7 +1863,7 @@ async def test_managed_worker_admission_waits_for_restored_authorization(worker_
     service = state.coordination_workers
     task = await service.repo.create(owner, request_id="pending-admission", objective="continue")
     task_id = task["id"]
-    grant = service._new_grant(runs.capture_authority())
+    grant = await service._new_grant(runs.capture_authority())
     turn = await service.repo.prepare(owner, task_id, "lead_agent", initial_grant=grant)
     authorized, grant_id = await service.authority(owner, task_id)
     permissions = grant["authority"]["permissions"]

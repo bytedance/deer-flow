@@ -9,7 +9,7 @@ import pytest_asyncio
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from support.postgres import asyncpg_test_url
 
@@ -445,3 +445,53 @@ async def test_worker_admission_rechecks_grant_generation_and_session_version(da
     assert followup["turn"] == 2 and followup["run_id"] is None
     assert await workers.prepare("alice", task["id"], "lead_agent") is None
     assert (await workers.prepare("alice", task["id"]))[1] == followup
+
+
+@pytest.mark.asyncio
+async def test_worker_grant_expiry_follows_the_database_clock(database, monkeypatch):
+    """One Gateway mints a grant and any instance may revalidate it later.
+
+    The deadline is judged against the database clock the instances share, so a
+    Gateway whose host clock runs behind must not revive a grant that already
+    passed, and one running ahead must not hide a live task from recovery. The
+    patched ``time`` is what the pre-fix code read; this module no longer
+    imports it, so the assertions hold from the stored deadline alone.
+    """
+    from deerflow.persistence.clock import db_now
+    from deerflow.persistence.coordination import workers as coordination_workers
+    from deerflow.persistence.coordination.workers import RUN_GRANT_METADATA, RUN_KEY_PREFIX, CoordinationWorkerRepository
+    from deerflow.persistence.run import RunRepository
+    from deerflow.persistence.user.model import UserRow
+    from deerflow.runtime.runs.manager import ConflictError
+
+    engine, dialect, schema = database
+    await bootstrap.bootstrap_schema(engine, backend=dialect, postgres_schema=schema)
+    sessions = async_sessionmaker(engine)
+    workers, runs = CoordinationWorkerRepository(sessions), RunRepository(sessions)
+    async with sessions.begin() as session:
+        session.add(UserRow(id="alice", email="alice@example.com"))
+    async with sessions() as session:
+        now = (await session.execute(select(db_now(session.get_bind().dialect.name)))).scalar_one()
+    authority = {"token_version": 0, "source": "session", "permissions": ["runs:create"]}
+    expired = await workers.create("alice", request_id="expired", objective="Review")
+    expired_worker, expired_execution, _ = await workers.prepare("alice", expired["id"], "lead_agent", initial_grant={"id": "expired", "authority": authority, "channel": None, "expires_at": now - 60})
+    live = await workers.create("alice", request_id="live", objective="Review")
+    await workers.prepare("alice", live["id"], "lead_agent", initial_grant={"id": "live", "authority": authority, "channel": None, "expires_at": now + 3600})
+
+    # Behind by an hour: the old comparison would hand back the expired grant.
+    monkeypatch.setattr(coordination_workers, "time", lambda: now - 3600, raising=False)
+    assert await workers.grant("alice", expired["id"]) is None
+    # Ahead by an hour: the old comparison would drop the live grant.
+    monkeypatch.setattr(coordination_workers, "time", lambda: now + 3600, raising=False)
+    assert (await workers.grant("alice", live["id"]))["id"] == "live"
+    assert [row.id for row in await workers.recovery_page("")] == [live["id"]]
+    with pytest.raises(ConflictError, match="authorization"):
+        await runs.create_thread_operation_atomic(
+            "late",
+            thread_id=expired_worker["thread_id"],
+            user_id="alice",
+            owner_worker_id="worker",
+            lease_expires_at=None,
+            idempotency_key=RUN_KEY_PREFIX + expired_execution["id"],
+            metadata={RUN_GRANT_METADATA: "expired"},
+        )

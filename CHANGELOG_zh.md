@@ -33,6 +33,11 @@
 
 ### 修复
 
+- **协同任务：** 任务授权改为按数据库时钟判定过期。此前某个 Gateway 主机时钟偏差时，
+  已经过期的 24 小时授权仍可用于 Run 准入和 Coordinator 决策，或者让恢复扫描在偏差持续
+  期间都看不到仍在运行的任务；授权签发和三处过期检查现在统一使用各实例共享的数据库时间。
+  ([#8632](https://github.com/bytedance/deer-flow/issues/8632))
+
 - **调度器：** 定时任务发往 IM 的通知不再把不带密钥词形态的凭证原样发出。URL 中的账号信息
   （`postgres://admin:hunter2@host`）以及 `Authorization`、`Cookie` 请求头的值
   （`Authorization: Bearer ...`）此前会完整进入消息；现在替换为 `[redacted]`，协议名和句子

@@ -2,12 +2,12 @@
 
 from datetime import UTC, datetime
 from hashlib import sha256
-from time import time
 from uuid import uuid4
 
 from sqlalchemy import case, or_, select
 from sqlalchemy.orm import aliased
 
+from deerflow.persistence.clock import db_now
 from deerflow.persistence.coordination.model import CoordinationArtifactRow as Artifact
 from deerflow.persistence.coordination.model import CoordinationAssignmentRow as Assignment
 from deerflow.persistence.coordination.model import CoordinationExecutionRow as Execution
@@ -66,7 +66,20 @@ async def _grant_task_id(session, task):
 
 
 async def _grant_matches(session, owner, grant, grant_id):
-    return grant is not None and grant.id == grant_id and grant.expires_at > time() and await grant_owner_matches(session, owner, grant.authority) and await channel_binding_matches(session, owner, grant.channel, lock=True)
+    if grant is None or grant.id != grant_id:
+        return False
+    if grant.expires_at <= await _database_now(session):
+        return False
+    return await grant_owner_matches(session, owner, grant.authority) and await channel_binding_matches(session, owner, grant.channel, lock=True)
+
+
+async def _database_now(session):
+    """Epoch seconds from the database, the clock every Gateway instance shares.
+
+    Grants are written by whichever Gateway dispatches the task and read by any
+    instance during recovery, so host clock drift must not decide expiry.
+    """
+    return (await session.execute(select(db_now(session.get_bind().dialect.name)))).scalar_one()
 
 
 async def grant_owner_matches(session, owner, authority):
@@ -96,9 +109,14 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
         async with self._sessions() as session:
             task = await self._lookup(session, owner, task_id)
             row = await session.get(Grant, await _grant_task_id(session, task))
-            if row is None or row.expires_at <= time() or not await channel_binding_matches(session, owner, row.channel):
+            if row is None or row.expires_at <= await _database_now(session) or not await channel_binding_matches(session, owner, row.channel):
                 return None
             return row.to_dict()
+
+    async def now(self):
+        """Current database time in epoch seconds, for callers that mint deadlines."""
+        async with self._sessions() as session:
+            return await _database_now(session)
 
     async def set_grant(self, owner, task_id, grant):
         async with self._write() as session:
@@ -133,7 +151,7 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
                         CoordinationTaskRow.status.in_((TaskStatus.RUNNING, TaskStatus.CANCELLING)),
                         root.coordinator.is_(True) & (root.status == TaskStatus.RUNNING) & (CoordinationTaskRow.parent_id == root.id) & (CoordinationTaskRow.status == TaskStatus.QUEUED),
                     ),
-                    Grant.expires_at > time(),
+                    Grant.expires_at > db_now(session.get_bind().dialect.name),
                 )
                 .order_by(CoordinationTaskRow.id)
                 .limit(limit)

@@ -3,7 +3,6 @@
 import asyncio
 import logging
 from hashlib import sha256
-from time import time
 from uuid import uuid4
 
 from deerflow_extension_api.agent_runs import AgentRunError
@@ -46,19 +45,20 @@ class CoordinationWorkers:
             job.cancel()
         await asyncio.gather(*jobs, return_exceptions=True)
 
-    @staticmethod
-    def _new_grant(authority, *, channel=None):
+    async def _new_grant(self, authority, *, channel=None):
         if authority is None:
             raise AgentRunError(403, "A task requires restorable run authorization")
         return {
             "id": uuid4().hex,
             "authority": {**authority, "permissions": sorted(WORKER_PERMISSIONS.intersection(authority["permissions"]))},
             "channel": channel,
-            "expires_at": time() + GRANT_LIFETIME,
+            # Minted from the database clock: the grant is later revalidated by
+            # whichever Gateway instance recovers the task.
+            "expires_at": await self.repo.now() + GRANT_LIFETIME,
         }
 
     async def dispatch(self, runs, owner, task_id, assistant_id, *, channel=None):
-        grant = self._new_grant(runs.capture_authority(), channel=channel)
+        grant = await self._new_grant(runs.capture_authority(), channel=channel)
         turn = await self.repo.prepare(owner, task_id, assistant_id, initial_grant=grant)
         if turn is not None:
             authorized, grant_id = await self.authority(owner, task_id)
@@ -113,7 +113,7 @@ class CoordinationWorkers:
         return runs, grant["id"]
 
     async def authorize(self, runs, owner, task_id):
-        await self.repo.set_grant(owner, task_id, self._new_grant(runs.capture_authority()))
+        await self.repo.set_grant(owner, task_id, await self._new_grant(runs.capture_authority()))
         return await self.view(owner, task_id)
 
     async def submit_input(self, owner, task_id, *, request_id, content):

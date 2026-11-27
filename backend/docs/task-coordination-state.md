@@ -114,9 +114,13 @@ deliveries produced by that execution.
 ## Authorization and restart recovery
 
 Dispatch saves a task-scoped grant alongside the first Worker assignment. The
-grant expires after 24 hours. The Gateway revalidates the owner's account,
-session version, permissions and current grant on each host operation.
-Grant replacement and Run admission share the task tree lock.
+grant expires after 24 hours. Both the minted deadline and every expiry check
+use the database clock, because one Gateway dispatches the task while any
+instance may admit its next Run or recover it after a restart; comparing host
+clocks would let a lagging instance extend a grant and a fast one hide a live
+task from recovery. The Gateway revalidates the owner's account, session
+version, permissions and current grant on each host operation. Grant
+replacement and Run admission share the task tree lock.
 
 The Gateway can also mint a grant for an authenticated IM adapter after looking
 up the sender's current channel connection. Disconnecting or replacing the
