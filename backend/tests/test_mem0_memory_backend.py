@@ -607,6 +607,75 @@ class TestMem0ManagerGetContext:
         assert len(fake.search_calls) == 1
         assert fake.list_calls[0]["max_items"] == 8
 
+    @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize("hit", ["x" * 124, "   "], ids=["oversized", "blank"])
+    def test_unusable_search_hits_fall_back_to_recent_memories(self, asynchronous: bool, hit: str) -> None:
+        """Hits that render to nothing count as no match: the injected date
+        marker stops later turns from recalling, so the thread would keep
+        no memory although a recent one fits."""
+        paths: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            paths.append(request.url.path)
+            if request.url.path == "/v3/memories/search/":
+                return httpx.Response(200, json={"results": [{"id": "m1", "memory": hit, "score": 0.9}]})
+            return httpx.Response(200, json={"results": [{"id": "m2", "memory": "lives in Austin"}], "next": None})
+
+        mgr, _fake = _manager({"max_injection_chars": 64})
+        mgr._client = _client(handler)
+        try:
+            ctx = asyncio.run(mgr.aget_context("u1", query="weekend plans")) if asynchronous else mgr.get_context("u1", query="weekend plans")
+        finally:
+            mgr.close()
+
+        assert ctx == "- lives in Austin"
+        assert paths == ["/v3/memories/search/", "/v3/memories/"]
+
+    def test_search_hit_that_fits_skips_recent_listing(self) -> None:
+        mgr, fake = _manager({"max_injection_chars": 64})
+        fake.search_results = [
+            {"id": "m1", "memory": "x" * 124, "score": 0.9},
+            {"id": "m2", "memory": "researches battery chemistry", "score": 0.5},
+        ]
+        fake.list_results = [{"id": "m9", "memory": "most recent, unrelated"}]
+
+        assert mgr.get_context("u1", query="battery report") == "- researches battery chemistry"
+        assert fake.list_calls == []
+
+    def test_oversized_search_and_recent_memories_warn_once(self, caplog: pytest.LogCaptureFixture) -> None:
+        """The budget warning reports the shortest memory from either request."""
+        mgr, fake = _manager({"max_injection_chars": 20})
+        fake.search_results = [{"id": "m1", "memory": "x" * 40, "score": 0.9}]
+        fake.list_results = [{"id": "m2", "memory": "y" * 30}]
+
+        assert mgr.get_context("u1", query="report") == ""
+
+        budget_warnings = [r for r in caplog.records if "shortest recalled memory" in r.msg]
+        assert [r.args for r in budget_warnings] == [(20, 32)]
+        assert len(fake.list_calls) == 1
+
+    @pytest.mark.parametrize("policy", ["fail_open", "fail_closed"])
+    def test_listing_failure_after_unusable_hits_obeys_read_policy(self, policy: str) -> None:
+        from deerflow.agents.memory.manager import MemoryReadError
+
+        mgr, fake = _manager({"max_injection_chars": 64, "failure_policy": {"read": policy}})
+        fake.search_results = [{"id": "m1", "memory": "x" * 124, "score": 0.9}]
+        listing_attempts: list[dict[str, Any]] = []
+
+        def failing_list(**kwargs: Any) -> list[dict[str, Any]]:
+            listing_attempts.append(kwargs)
+            raise Mem0APIError("down")
+
+        fake.list_memories = failing_list
+
+        if policy == "fail_open":
+            assert mgr.get_context("u1", query="report") == ""
+        else:
+            with pytest.raises(MemoryReadError):
+                mgr.get_context("u1", query="report")
+        assert len(fake.search_calls) == 1
+        assert len(listing_attempts) == 1
+
     @pytest.mark.parametrize("query", [None, "", "   "], ids=["none", "empty", "blank"])
     def test_missing_query_keeps_recent_listing(self, query: str | None) -> None:
         mgr, fake = _manager()

@@ -42,8 +42,9 @@ mem0 receives the same placeholders that memory capture stored. The backend
 then runs a mem0 semantic search over the user's bucket and
 injects the best `top_k` matches with a score of at least `score_threshold`, in
 relevance order. When there is no hint, for example for an attachment-only
-message, or when the search finds no match, the backend injects the bucket's
-`top_k` most recent memories, as it did before. A greeting therefore still
+message, or when no match can be injected (none was found, or none fits in
+`max_injection_chars`), the backend injects the bucket's `top_k` most recent
+memories, as it did before. A greeting therefore still
 receives the user's memory for the rest of the thread.
 
 A failed search follows `failure_policy.read` and is not retried as a listing,

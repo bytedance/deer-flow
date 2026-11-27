@@ -78,6 +78,34 @@ def _deduplicate_context_records(records: list[dict[str, Any]]) -> list[dict[str
     return unique
 
 
+def _render_context(records: list[dict[str, Any]], budget: int) -> tuple[str, int | None]:
+    """Render memories as bullet lines within ``budget`` characters.
+
+    Returns the context and the length of the shortest non-empty line, or
+    ``None`` when no record has text. Truncation happens on entry boundaries:
+    only memories that fit whole within the remaining budget (+1 for the
+    joining newline) are kept, so the injection never ends mid-entry with a
+    dangling partial line. An oversized entry is skipped, because a shorter
+    later one may still fit.
+    """
+    lines: list[str] = []
+    used = 0
+    shortest_line: int | None = None
+    for record in records:
+        text = str(record.get("memory") or "").strip()
+        if not text:
+            continue
+        line = f"- {text}"
+        line_len = len(line)
+        shortest_line = line_len if shortest_line is None else min(shortest_line, line_len)
+        added = line_len if not lines else line_len + 1
+        if used + added > budget:
+            continue
+        lines.append(line)
+        used += added
+    return "\n".join(lines), shortest_line
+
+
 def _to_fact(record: dict[str, Any]) -> dict[str, Any]:
     """Map a mem0 record to the backend-neutral fact shape consumed by the
     host (agents/memory/tools.py): id/content/category/confidence/createdAt/
@@ -240,58 +268,43 @@ class Mem0Manager(MemoryManager):
         """Recall up to ``top_k`` memories for injection.
 
         With a ``query`` hint, mem0 semantic search ranks the bucket against
-        it (``score_threshold`` applies). When there is no hint, or search
-        finds nothing, the bucket's most recent memories are injected
-        instead: the host injects memory once per thread, so a greeting
-        with no semantic match must not leave the whole thread without
-        memory. A failed search is a failed read and is not retried as a
-        listing; the read policy decides it once.
+        it (``score_threshold`` applies). When there is no hint, or no search
+        hit can be injected (none matched, none has text, or none fits in
+        ``max_injection_chars``), the bucket's most recent memories are
+        injected instead: the host injects memory once per thread, so a
+        greeting with no usable match must not leave the whole thread
+        without memory. A failed search is a failed read and is not retried
+        as a listing; the read policy decides it once.
         """
         filters = _build_filters(user_id=user_id, agent_name=agent_name, run_id=thread_id)
         if filters is None:
             return ""
         top_k = self._config.top_k
+        budget = self._config.max_injection_chars
         query = query.strip() if isinstance(query, str) else None
 
-        def recall() -> list[dict[str, Any]]:
-            records: list[dict[str, Any]] = []
+        def recall() -> tuple[str, int | None]:
+            search_shortest: int | None = None
             if query:
-                records = self._client.search_memories(
+                hits = self._client.search_memories(
                     query=query,
                     filters=filters,
                     top_k=top_k,
                     threshold=self._config.score_threshold,
                 )
-            if not records:
-                records = self._client.list_memories(
-                    filters=filters,
-                    page_size=min(top_k, 200),
-                    max_items=top_k,
-                )
-            return _deduplicate_context_records(records)
+                context, search_shortest = _render_context(_deduplicate_context_records(hits), budget)
+                if context:
+                    return context, search_shortest
+            recent = self._client.list_memories(
+                filters=filters,
+                page_size=min(top_k, 200),
+                max_items=top_k,
+            )
+            context, recent_shortest = _render_context(_deduplicate_context_records(recent), budget)
+            lengths = [length for length in (search_shortest, recent_shortest) if length is not None]
+            return context, min(lengths, default=None)
 
-        records = self._read_or_fallback([], recall)
-        budget = self._config.max_injection_chars
-        lines: list[str] = []
-        used = 0
-        shortest_line: int | None = None
-        for record in records:
-            text = str(record.get("memory") or "").strip()
-            if not text:
-                continue
-            line = f"- {text}"
-            line_len = len(line)
-            shortest_line = line_len if shortest_line is None else min(shortest_line, line_len)
-            # Truncate on entry boundaries: keep only memories that fit whole
-            # within the remaining budget (+1 for the joining newline), so the
-            # injection never ends mid-entry with a dangling partial line. An
-            # oversized entry is skipped -- a shorter later one may still fit.
-            added = line_len if not lines else line_len + 1
-            if used + added > budget:
-                continue
-            lines.append(line)
-            used += added
-        context = "\n".join(lines)
+        context, shortest_line = self._read_or_fallback(("", None), recall)
         if not context and shortest_line is not None:
             # Every recalled memory was longer than the configured budget.
             # Keep the entry-boundary guarantee and surface the config problem
