@@ -21,6 +21,7 @@ from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, _delivery_content_with_outputs, run_agent
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.exceptions import SandboxCapacityExceededError, SandboxCommandError
 from deerflow.workspace_changes import WorkspaceChangeLimits, capture_workspace_snapshot
 from deerflow.workspace_changes.api import get_workspace_changes_response
 
@@ -433,6 +434,48 @@ async def test_unpresented_outputs_publish_an_error_frame_before_end(monkeypatch
             "name": "RunError",
         }
     ]
+    assert bridge.events[-1][0] == "end"
+
+
+_CAPACITY_ERROR = SandboxCapacityExceededError(active=4, replicas=4, retry_after_seconds=30.0)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("exc", "extra"),
+    [
+        # A run that acquires its sandbox before the model runs fails with the
+        # provider's capacity error; clients get its code and retry hint (#8586).
+        (_CAPACITY_ERROR, {"code": "SANDBOX_CAPACITY_EXCEEDED", "retryable": True, "retry_after_seconds": 30.0}),
+        # A non-finite hint is dropped; the code and retryable flag still arrive.
+        (SandboxCapacityExceededError(active=4, replicas=4, retry_after_seconds=float("nan")), {"code": "SANDBOX_CAPACITY_EXCEEDED", "retryable": True}),
+        (SandboxCapacityExceededError(active=4, replicas=4, retry_after_seconds=float("inf")), {"code": "SANDBOX_CAPACITY_EXCEEDED", "retryable": True}),
+        (SandboxCommandError("bash failed", exit_code=2), {}),
+        (RuntimeError("boom"), {}),
+    ],
+)
+async def test_run_error_frame_keeps_a_structured_errors_retry_fields(exc, extra):
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge = _RecordingBridge()
+
+    class FailingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            raise exc
+            yield  # pragma: no cover - make this an async generator
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=MemoryRunEventStore()),
+        agent_factory=lambda *, config: FailingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.error
+    assert [payload for event, payload in bridge.events if event == "error"] == [{"message": str(exc), "name": type(exc).__name__, **extra}]
     assert bridge.events[-1][0] == "end"
 
 

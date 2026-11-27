@@ -929,3 +929,41 @@ async def test_auth_middleware_unset_key(monkeypatch: pytest.MonkeyPatch, provis
 
         r = await client.get("/api/sandboxes", headers={"X-API-Key": "anything"})
         assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_strips_configured_key(monkeypatch: pytest.MonkeyPatch, provisioner_module) -> None:
+    """A Secret mounted through envFrom keeps its trailing newline; the clean key must still authenticate."""
+    monkeypatch.setattr(provisioner_module, "PROVISIONER_API_KEY", "test-secret\r\n")
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    transport = httpx.ASGITransport(app=provisioner_module.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        r = await client.get("/api/sandboxes", headers={"X-API-Key": "test-secret"})
+        assert r.status_code != 401
+
+        # Stripping must not turn the comparison into a prefix or substring match.
+        r = await client.get("/api/sandboxes", headers={"X-API-Key": "test-secret\r\n"})
+        assert r.status_code == 401
+        r = await client.get("/api/sandboxes", headers={"X-API-Key": "wrong-key"})
+        assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_whitespace_only_key_stays_unset(monkeypatch: pytest.MonkeyPatch, provisioner_module) -> None:
+    """A whitespace-only PROVISIONER_API_KEY reads as unset: every /api/* route stays 401."""
+    monkeypatch.setattr(provisioner_module, "PROVISIONER_API_KEY", " \r\n")
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    transport = httpx.ASGITransport(app=provisioner_module.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        r = await client.get("/health")
+        assert r.status_code == 200
+
+        r = await client.get("/api/sandboxes")
+        assert r.status_code == 401
+
+        r = await client.get("/api/sandboxes", headers={"X-API-Key": "anything"})
+        assert r.status_code == 401

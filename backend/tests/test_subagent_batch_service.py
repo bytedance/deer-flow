@@ -484,6 +484,79 @@ async def test_execute_item_polls_completion_without_waiting_for_lease_renewal(m
     assert repository.renews == 2
 
 
+@pytest.mark.asyncio
+async def test_failed_finalize_keeps_the_attempts_token_usage(monkeypatch) -> None:
+    result = SimpleNamespace(
+        status=FakeStatus.COMPLETED,
+        result="done",
+        error=None,
+        stop_reason=None,
+        token_usage_records=[{"input_tokens": 30, "output_tokens": 15, "total_tokens": 45}],
+    )
+
+    class Repository:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def claim_items(self, **_kwargs):
+            return [
+                {
+                    "id": "item-1",
+                    "item_key": "record-1",
+                    "prompt": "Process record 1",
+                    "batch": {
+                        "id": "batch-1",
+                        "thread_id": "thread-1",
+                        "user_id": "user-1",
+                        "run_id": "run-1",
+                        "execution_spec": _request().execution_spec,
+                    },
+                }
+            ]
+
+        async def mark_item_running(self, *_args, **_kwargs):
+            return True
+
+        async def renew_item_lease(self, *_args, **_kwargs):
+            return {"valid": True, "cancel_requested": False}
+
+        async def finalize_item(self, *_args, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                raise RuntimeError("commit rolled back")
+            return True
+
+    class Executor:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def execute_async(self, _prompt, task_id=None):
+            return "execution-1"
+
+    repository = Repository()
+    monkeypatch.setattr(service_module, "get_app_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(service_module, "resolve_subagent_model_name", lambda *_args, **_kwargs: "model-a")
+    monkeypatch.setattr(service_module, "SubagentExecutor", Executor)
+    monkeypatch.setattr(service_module, "SubagentStatus", FakeStatus)
+    monkeypatch.setattr(service_module, "get_background_task_result", lambda _execution_id: result)
+    monkeypatch.setattr(service_module, "cleanup_background_task", lambda _execution_id: None)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(poll_interval_seconds=0.1, lease_seconds=120),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+    )
+
+    await service.run_once(now=service_module.datetime.now(service_module.UTC))
+    await asyncio.wait_for(asyncio.gather(*list(service._executions.values())), timeout=1)
+
+    assert len(repository.calls) == 2
+    retry = repository.calls[1]
+    assert retry["succeeded"] is False
+    assert retry["token_usage"] == {"input_tokens": 30, "output_tokens": 15, "total_tokens": 45}
+    assert retry["model_name"] == "model-a"
+
+
 class _Registry:
     """Executor registry double with the real cleanup and cancellation timing."""
 
