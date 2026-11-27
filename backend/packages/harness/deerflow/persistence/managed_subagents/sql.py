@@ -7,8 +7,9 @@ import uuid
 from collections.abc import Hashable
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import Text, cast, delete, select, text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import defer
 
 from deerflow.persistence.agents.sql import get_sync_sessionmaker
 from deerflow.persistence.managed_subagents.base import (
@@ -43,14 +44,19 @@ class SqlManagedSubagentStore(ManagedSubagentStore):
         return ManagedSubagentDefinition.model_validate(row.definition)
 
     def list(self) -> list[ManagedSubagentDefinition]:
+        # Project stored JSON as text so one corrupt document in SQLite fails
+        # inside the per-row guard rather than during ORM row materialization.
         with self._Session() as session:
-            rows = list(session.execute(select(ManagedSubagentRow).order_by(ManagedSubagentRow.name.asc())).scalars())
+            rows = session.execute(select(ManagedSubagentRow.name, cast(ManagedSubagentRow.definition, Text)).order_by(ManagedSubagentRow.name.asc())).all()
         definitions: list[ManagedSubagentDefinition] = []
-        for row in rows:
+        for name, raw_definition in rows:
             try:
-                definitions.append(ManagedSubagentDefinition.model_validate(row.definition))
+                if raw_definition is None:
+                    definitions.append(ManagedSubagentDefinition.model_validate(None))
+                else:
+                    definitions.append(ManagedSubagentDefinition.model_validate_json(raw_definition))
             except Exception as e:  # noqa: BLE001 — one unreadable definition must not hide the catalog
-                logger.warning("Skipping unreadable managed subagent '%s': %s", row.name, e)
+                logger.warning("Skipping unreadable managed subagent '%s': %s", name, e)
         return definitions
 
     def create(self, definition: ManagedSubagentDefinition) -> None:
@@ -69,7 +75,7 @@ class SqlManagedSubagentStore(ManagedSubagentStore):
 
     def update(self, definition: ManagedSubagentDefinition) -> None:
         document = definition.model_dump(mode="json")
-        stmt = select(ManagedSubagentRow).where(ManagedSubagentRow.name == definition.name)
+        stmt = select(ManagedSubagentRow).options(defer(ManagedSubagentRow.definition)).where(ManagedSubagentRow.name == definition.name)
         with self._Session() as session:
             # Serialize writers before reading updated_at, so each sees the
             # preceding commit's stamp even when both clocks return the same time.

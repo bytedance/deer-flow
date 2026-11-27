@@ -20,10 +20,11 @@ import threading
 import uuid
 from collections.abc import Hashable
 from datetime import UTC, datetime
+from typing import Any
 
-from sqlalchemy import Engine, create_engine, delete, event, select
+from sqlalchemy import Engine, Text, cast, create_engine, delete, event, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, defer, sessionmaker
 
 from deerflow.config.agents_config import AgentConfig
 from deerflow.config.paths import get_paths
@@ -100,6 +101,18 @@ def _config_document(config: dict) -> dict:
     return {k: v for k, v in config.items() if k != "name"}
 
 
+def _decode_config_document(raw: str | None) -> dict[str, Any]:
+    """Decode one projected JSON config document inside a per-row error boundary."""
+    if raw is None:
+        return {}
+    decoded = json.loads(raw)
+    if decoded is None:
+        return {}
+    if not isinstance(decoded, dict):
+        raise TypeError(f"Agent config must be a JSON object, got {type(decoded).__name__}")
+    return decoded
+
+
 class SqlAgentStore(AgentStore):
     def __init__(self, url: str) -> None:
         self._Session = get_sync_sessionmaker(url)
@@ -108,50 +121,62 @@ class SqlAgentStore(AgentStore):
         stmt = select(AgentRow).where(AgentRow.user_id == user_id, AgentRow.name == name.lower())
         return session.execute(stmt).scalar_one_or_none()
 
+    def _row_without_config(self, session: Session, name: str, user_id: str) -> AgentRow | None:
+        stmt = select(AgentRow).options(defer(AgentRow.config)).where(AgentRow.user_id == user_id, AgentRow.name == name.lower())
+        return session.execute(stmt).scalar_one_or_none()
+
     def get(self, name: str, *, user_id: str | None = None) -> AgentConfig:
         effective_user = user_id or get_effective_user_id()
         with self._Session() as session:
             row = self._row(session, name, effective_user)
         if row is None:
             raise FileNotFoundError(f"Agent config not found: {name} (user {effective_user})")
-        return parse_agent_config(row.config or {}, row.name)
+        if row.config is None:
+            config_doc: dict[str, Any] = {}
+        elif isinstance(row.config, dict):
+            config_doc = row.config
+        else:
+            raise TypeError(f"Agent config must be a JSON object, got {type(row.config).__name__}")
+        return parse_agent_config(config_doc, row.name)
 
     def exists(self, name: str, *, user_id: str | None = None) -> bool:
         effective_user = user_id or get_effective_user_id()
+        stmt = select(AgentRow.id).where(AgentRow.user_id == effective_user, AgentRow.name == name.lower())
         with self._Session() as session:
-            return self._row(session, name, effective_user) is not None
+            return session.execute(stmt).scalar_one_or_none() is not None
 
     def get_soul(self, name: str, *, user_id: str | None = None) -> str | None:
         effective_user = user_id or get_effective_user_id()
+        stmt = select(AgentRow.soul).where(AgentRow.user_id == effective_user, AgentRow.name == name.lower())
         with self._Session() as session:
-            row = self._row(session, name, effective_user)
-        if row is None:
-            return None
-        return row.soul or None
+            soul = session.execute(stmt).scalar_one_or_none()
+        return soul or None
 
     def list(self, *, user_id: str | None = None) -> list[AgentConfig]:
         effective_user = user_id or get_effective_user_id()
-        stmt = select(AgentRow).where(AgentRow.user_id == effective_user).order_by(AgentRow.name.asc())
+        # Project stored JSON as text so one corrupt document in SQLite fails
+        # inside the per-row guard rather than during ORM row materialization.
+        stmt = select(AgentRow.name, cast(AgentRow.config, Text)).where(AgentRow.user_id == effective_user).order_by(AgentRow.name.asc())
         with self._Session() as session:
-            rows = list(session.execute(stmt).scalars())
+            rows = session.execute(stmt).all()
         agents: list[AgentConfig] = []
-        for row in rows:
+        for name, raw_config in rows:
             try:
-                agents.append(parse_agent_config(row.config or {}, row.name))
+                agents.append(parse_agent_config(_decode_config_document(raw_config), name))
             except Exception as e:  # noqa: BLE001 — one unreadable row must not hide the rest
-                logger.warning("Skipping agent '%s' for user %s: %s", row.name, effective_user, e)
+                logger.warning("Skipping agent '%s' for user %s: %s", name, effective_user, e)
         return agents
 
     def list_all(self) -> list[tuple[str, AgentConfig]]:
-        stmt = select(AgentRow).order_by(AgentRow.user_id.asc(), AgentRow.name.asc())
+        stmt = select(AgentRow.user_id, AgentRow.name, cast(AgentRow.config, Text)).order_by(AgentRow.user_id.asc(), AgentRow.name.asc())
         with self._Session() as session:
-            rows = list(session.execute(stmt).scalars())
+            rows = session.execute(stmt).all()
         result: list[tuple[str, AgentConfig]] = []
-        for row in rows:
+        for user_id, name, raw_config in rows:
             try:
-                result.append((row.user_id, parse_agent_config(row.config or {}, row.name)))
+                result.append((user_id, parse_agent_config(_decode_config_document(raw_config), name)))
             except Exception as e:  # noqa: BLE001 — one unreadable row must not hide the rest
-                logger.warning("list_all: skipping agent %s/%s: %s", row.user_id, row.name, e)
+                logger.warning("list_all: skipping agent %s/%s: %s", user_id, name, e)
         return result
 
     def create(self, name: str, config: dict, soul: str, *, user_id: str | None = None) -> None:
@@ -177,7 +202,7 @@ class SqlAgentStore(AgentStore):
     def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> None:
         effective_user = user_id or get_effective_user_id()
         with self._Session() as session:
-            row = self._row(session, name, effective_user)
+            row = self._row_without_config(session, name, effective_user)
             if row is not None:
                 self._apply_update(row, config, soul)
                 session.commit()
@@ -200,7 +225,7 @@ class SqlAgentStore(AgentStore):
                 session.commit()
             except IntegrityError:
                 session.rollback()
-                existing = self._row(session, name, effective_user)
+                existing = self._row_without_config(session, name, effective_user)
                 if existing is None:
                     raise
                 self._apply_update(existing, config, soul)
@@ -246,20 +271,30 @@ class SqlAgentStore(AgentStore):
                 select(
                     AgentRow.user_id,
                     AgentRow.name,
-                    AgentRow.config,
+                    cast(AgentRow.config, Text),
                     AgentRow.soul,
                 ).order_by(AgentRow.user_id, AgentRow.name)
             ).all()
 
-        payload = [
-            {
-                "user_id": user_id,
-                "name": name,
-                "config": config or {},
-                "soul": soul or "",
-            }
-            for user_id, name, config, soul in rows
-        ]
+        payload = []
+        for user_id, name, raw_config, soul in rows:
+            if raw_config is None:
+                config_value: Any = {}
+            else:
+                try:
+                    decoded = json.loads(raw_config)
+                except ValueError:
+                    config_value = {"__unreadable_json__": raw_config}
+                else:
+                    config_value = {} if decoded is None else decoded
+            payload.append(
+                {
+                    "user_id": user_id,
+                    "name": name,
+                    "config": config_value,
+                    "soul": soul or "",
+                }
+            )
         serialized = json.dumps(
             payload,
             ensure_ascii=False,

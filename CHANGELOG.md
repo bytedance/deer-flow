@@ -73,12 +73,13 @@ This section accumulates work toward the **2.3.0** milestone
 ### Fixed
 
 - **persistence:** The SQL agent and managed-subagent catalogs now skip a stored
-  row that no longer validates, instead of failing the whole listing:
-  `SqlAgentStore.list`/`list_all` and `SqlManagedSubagentStore.list` answer with
-  the rows they can read, matching what `FileAgentStore` and
+  row with invalid JSON or a payload that no longer validates, instead of
+  failing the whole listing: `SqlAgentStore.list`/`list_all` and
+  `SqlManagedSubagentStore.list` decode each document inside a per-row guard and
+  answer with the rows they can read, matching what `FileAgentStore` and
   `FileManagedSubagentStore` already do ("one bad agent must not hide the rest").
-  Reading a damaged entry by name still raises, and the row stays removable, so
-  the failure is not hidden where it matters. ([#7740])
+  Reading a damaged entry by name still raises, while the row stays inspectable
+  for existence/soul, repairable via update, and removable. ([#7740])
 
 - **agents:** A todo list revised after the last `write_todos` call (for
   example an approved plan edited on resume) is shown to the model again
