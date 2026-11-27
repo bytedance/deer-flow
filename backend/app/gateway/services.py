@@ -157,7 +157,7 @@ async def reserve_checkpoint_write(
     thread_id: str,
     *,
     user_id: str | None = None,
-) -> AsyncIterator[None]:
+) -> AsyncIterator[RunRecord]:
     """Serialize an out-of-run checkpoint writer against all thread operations."""
     run_manager = get_run_manager(request)
     async with goal_thread_lock(thread_id):
@@ -165,8 +165,8 @@ async def reserve_checkpoint_write(
             thread_id,
             kind=ThreadOperationKind.checkpoint_write,
             user_id=user_id,
-        ):
-            yield
+        ) as reservation:
+            yield reservation
 
 
 _TERMINAL_RUN_STATUSES = {

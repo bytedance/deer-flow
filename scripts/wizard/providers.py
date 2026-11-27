@@ -32,6 +32,9 @@ class LLMProvider:
     # For generic OpenAI-compatible gateways the wizard cannot infer whether the
     # user-supplied model supports thinking/reasoning, so prompt for it explicitly.
     ask_thinking_support: bool = False
+    # Optional host environment variables forwarded into sandbox.environment so
+    # multimodal skills (e.g. Seedream image & Seedance video) work with one key.
+    sandbox_env_vars: tuple[str, ...] = ()
 
     def extra_config_for(self, model_name: str) -> dict:
         """Return extra_config for a selected model, applying per-model overrides.
@@ -119,6 +122,40 @@ def with_thinking_support(provider: LLMProvider, supports_thinking: bool) -> LLM
 
 
 LLM_PROVIDERS: list[LLMProvider] = [
+    LLMProvider(
+        name="byteplus_agentplan",
+        display_name="BytePlus Agent Plan",
+        description="One key for LLM, Seedream images/slides & Seedance 2.5 video (Personal & Team)",
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        models=[
+            "dola-seed-2.1-turbo",
+            "deepseek-v4-pro",
+            "deepseek-v4.1-flash",
+            "deepseek-v4.1-flash-economy",
+            "seed-2.0-lite",
+            "seed-2.0-mini",
+        ],
+        default_model="dola-seed-2.1-turbo",
+        env_var="BYTEPLUS_AGENTPLAN_API_KEY",
+        package="langchain-deepseek",
+        extra_config={
+            "api_base": "https://ark.ap-southeast.bytepluses.com/api/plan/v3",
+            "timeout": 600.0,
+            "max_retries": 2,
+            "supports_vision": True,
+            "supports_reasoning_effort": True,
+            **OPENAI_COMPAT_THINKING_CONFIG,
+        },
+        model_vision_overrides={
+            "dola-seed-2.1-turbo": True,
+            "deepseek-v4.1-flash": True,
+            "seed-2.0-lite": True,
+            "seed-2.0-mini": True,
+            "deepseek-v4-pro": False,
+            "deepseek-v4.1-flash-economy": False,
+        },
+        sandbox_env_vars=("BYTEPLUS_AGENTPLAN_API_KEY",),
+    ),
     LLMProvider(
         name="volcengine",
         display_name="Volcengine Doubao",

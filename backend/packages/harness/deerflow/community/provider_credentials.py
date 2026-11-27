@@ -40,6 +40,7 @@ ENV_TEMPLATE_PLACEHOLDERS = frozenset(
         "your-anthropic-auth-token",
         "your-boxd-api-key",
         "your-byteplus-access-key-id",
+        "your-byteplus-agentplan-api-key",
         "your-byteplus-secret-access-key",
         "your-claude-code-oauth-token",
         "your-deepseek-api-key",

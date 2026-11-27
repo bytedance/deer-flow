@@ -452,8 +452,10 @@ class SandboxConfig(BaseModel):
         description=(
             "API key sent as X-API-Key header to the provisioner service. "
             "Must match PROVISIONER_API_KEY on the provisioner container. "
-            "Both sides must be set to the same value; "
-            "the provisioner rejects all /api/* requests when the key is unset or mismatched."
+            "Both sides must be set to the same value; surrounding whitespace is "
+            "stripped on each side before comparing, so a Secret-mounted key with "
+            "a trailing newline still authenticates. "
+            "The provisioner rejects all /api/* requests when the key is unset or mismatched."
         ),
     )
 

@@ -41,6 +41,7 @@ PROVIDERS = (
     ManagedModelProvider("qwen-cn", "Alibaba Cloud Bailian / Qwen (China)", "https://dashscope.aliyuncs.com/compatible-mode/v1", _DEEPSEEK, endpoint_parameter="api_base"),
     ManagedModelProvider("doubao", "Volcengine / Doubao (Beijing, API)", "https://ark.cn-beijing.volces.com/api/v3", _DEEPSEEK, endpoint_parameter="api_base"),
     ManagedModelProvider("doubao-coding", "Volcengine (Coding Plan)", "https://ark.cn-beijing.volces.com/api/coding/v3", _DEEPSEEK, endpoint_parameter="api_base"),
+    ManagedModelProvider("byteplus-agent-plan", "BytePlus (Agent Plan)", "https://ark.ap-southeast.bytepluses.com/api/plan/v3", _DEEPSEEK, endpoint_parameter="api_base"),
     ManagedModelProvider("moonshot-cn", "Moonshot / Kimi (China)", "https://api.moonshot.cn/v1", _DEEPSEEK, endpoint_parameter="api_base"),
     ManagedModelProvider("zhipu-cn", "Zhipu (China, API)", "https://open.bigmodel.cn/api/paas/v4", _DEEPSEEK, endpoint_parameter="api_base"),
     ManagedModelProvider("zai", "Z.AI (International, API)", "https://api.z.ai/api/paas/v4", _DEEPSEEK, endpoint_parameter="api_base"),
@@ -127,6 +128,19 @@ def _capabilities(provider: str, model: str) -> dict[str, Any]:
     elif provider == "doubao" and model == "doubao-seed-1-8-251228":
         result.update(
             supports_vision=True,
+            reasoning={"thinking": "optional", "dialect": "openai_extra_body", "history": "preserve"},
+            when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
+            when_thinking_disabled={"extra_body": {"thinking": {"type": "disabled"}}},
+        )
+    elif provider == "byteplus-agent-plan" and model in {"dola-seed-2.1-turbo", "deepseek-v4.1-flash", "seed-2.0-lite", "seed-2.0-mini"}:
+        result.update(
+            supports_vision=True,
+            reasoning={"thinking": "optional", "dialect": "openai_extra_body", "history": "preserve"},
+            when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
+            when_thinking_disabled={"extra_body": {"thinking": {"type": "disabled"}}},
+        )
+    elif provider == "byteplus-agent-plan" and model in {"deepseek-v4-pro", "deepseek-v4.1-flash-economy"}:
+        result.update(
             reasoning={"thinking": "optional", "dialect": "openai_extra_body", "history": "preserve"},
             when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
             when_thinking_disabled={"extra_body": {"thinking": {"type": "disabled"}}},

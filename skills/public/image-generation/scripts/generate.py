@@ -13,6 +13,18 @@ import requests
 MINIMAX_DEFAULT_HOST = "https://api.minimaxi.com"
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 OPENAI_DEFAULT_MODEL = "gpt-image-2.5-flare"
+BYTEPLUS_AGENTPLAN_DEFAULT_BASE_URL = "https://ark.ap-southeast.bytepluses.com/api/plan/v3"
+BYTEPLUS_AGENTPLAN_DEFAULT_IMAGE_MODEL = "dola-seedream-5.0-pro"
+BYTEPLUS_AGENTPLAN_ASPECT_SIZES = {
+    "1:1": "2048x2048",
+    "16:9": "2560x1440",
+    "9:16": "1440x2560",
+    "4:3": "2304x1728",
+    "3:4": "1728x2304",
+    "3:2": "2496x1664",
+    "2:3": "1664x2496",
+    "21:9": "3136x1344",
+}
 MAX_REDIRECTS = 5
 # MiniMax image-01 caps the prompt at 1500 characters and rejects longer requests
 # with a generic "invalid params" error, so validate before calling the API.
@@ -41,7 +53,7 @@ def _resolve_provider(
 
     1. Explicit <SKILL>_PROVIDER override wins.
     2. Otherwise prefer the existing provider when its credentials are present.
-    3. Otherwise fall back to MiniMax, then the OpenAI-compatible provider.
+    3. Otherwise fall back to MiniMax, OpenAI-compatible, then BytePlus Agent Plan.
     """
     override = os.getenv(override_env)
     if override:
@@ -52,9 +64,12 @@ def _resolve_provider(
         return "minimax"
     if os.getenv("IMAGE_GENERATION_API_KEY"):
         return "openai"
+    if os.getenv("BYTEPLUS_AGENTPLAN_API_KEY"):
+        return "byteplus_agentplan"
     raise ValueError(
         f"No credentials found. Set GEMINI_API_KEY for {existing_provider}, "
-        "MINIMAX_API_KEY for minimax, or IMAGE_GENERATION_API_KEY for openai "
+        "MINIMAX_API_KEY for minimax, IMAGE_GENERATION_API_KEY for openai, "
+        "or BYTEPLUS_AGENTPLAN_API_KEY for byteplus_agentplan "
         f"(optionally force with {override_env})."
     )
 
@@ -65,6 +80,36 @@ def _minimax_host() -> str:
 
 def _openai_base_url() -> str:
     return os.getenv("IMAGE_GENERATION_BASE_URL", OPENAI_DEFAULT_BASE_URL).rstrip("/")
+
+
+def _byteplus_agentplan_base_url() -> str:
+    return (
+        os.getenv("BYTEPLUS_AGENTPLAN_BASE_URL", BYTEPLUS_AGENTPLAN_DEFAULT_BASE_URL)
+        .strip()
+        .rstrip("/")
+    )
+
+
+def _byteplus_agentplan_size(aspect_ratio: str) -> str:
+    override = os.getenv("BYTEPLUS_AGENTPLAN_IMAGE_SIZE", "").strip()
+    if override:
+        return override
+    normalized = aspect_ratio.strip()
+    size = BYTEPLUS_AGENTPLAN_ASPECT_SIZES.get(normalized)
+    if size is None:
+        supported = ", ".join(BYTEPLUS_AGENTPLAN_ASPECT_SIZES)
+        raise ValueError(
+            f"Unsupported aspect ratio {aspect_ratio!r} for BytePlus Agent Plan Seedream "
+            f"(supported: {supported}; or set BYTEPLUS_AGENTPLAN_IMAGE_SIZE)"
+        )
+    return size
+
+
+def _byteplus_agentplan_output_format(output_file: str) -> str:
+    extension = os.path.splitext(output_file)[1].lower()
+    if extension in {".jpg", ".jpeg"}:
+        return "jpeg"
+    return "png"
 
 
 def _openai_size(aspect_ratio: str, model: str) -> str:
@@ -124,10 +169,84 @@ def _guess_mime(image_path: str) -> str:
     }.get(ext, "image/jpeg")
 
 
+def _detect_image_format(image_bytes: bytes) -> str | None:
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "PNG"
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return "JPEG"
+    if (
+        len(image_bytes) >= 12
+        and image_bytes[:4] == b"RIFF"
+        and image_bytes[8:12] == b"WEBP"
+    ):
+        return "WEBP"
+    if image_bytes.startswith((b"GIF87a", b"GIF89a")):
+        return "GIF"
+    return None
+
+
+def _validate_and_prepare_image(image_bytes: bytes, output_file: str) -> bytes:
+    """Validate decoded image bytes and convert format to match ``output_file``.
+
+    Runs both container verification (``verify``) and full pixel decoding
+    (``load``) before ``output_file`` is opened so non-image payloads and
+    truncated/corrupted responses never overwrite an existing file.
+    """
+    from io import BytesIO
+    from PIL import Image, ImageFile  # lazy import: keeps module importable without Pillow
+
+    previous_truncated = ImageFile.LOAD_TRUNCATED_IMAGES
+    ImageFile.LOAD_TRUNCATED_IMAGES = False
+    try:
+        with Image.open(BytesIO(image_bytes)) as img:
+            actual = (img.format or "").upper()
+            img.verify()
+        with Image.open(BytesIO(image_bytes)) as img:
+            img.load()
+            target_formats = {
+                ".jpg": "JPEG",
+                ".jpeg": "JPEG",
+                ".png": "PNG",
+                ".webp": "WEBP",
+            }
+            target = target_formats.get(os.path.splitext(output_file)[1].lower())
+            if not target or actual == target:
+                return image_bytes
+            if target == "JPEG":
+                if img.mode in {"RGBA", "LA"} or (
+                    img.mode == "P" and "transparency" in img.info
+                ):
+                    rgba = img.convert("RGBA")
+                    background = Image.new("RGB", rgba.size, (255, 255, 255))
+                    background.paste(rgba, mask=rgba.getchannel("A"))
+                    converted = background
+                else:
+                    converted = img.convert("RGB")
+            else:
+                converted = img
+            buffer = BytesIO()
+            converted.save(buffer, format=target)
+            return buffer.getvalue()
+    except Exception as exc:
+        raise ValueError(
+            f"Provider returned invalid or corrupted image data: {exc}"
+        ) from exc
+    finally:
+        ImageFile.LOAD_TRUNCATED_IMAGES = previous_truncated
+
+
 def _to_data_url(image_path: str) -> str:
     with open(image_path, "rb") as f:
-        b64 = base64.b64encode(f.read()).decode("utf-8")
-    return f"data:{_guess_mime(image_path)};base64,{b64}"
+        data = f.read()
+    fmt = _detect_image_format(data)
+    mime = {
+        "PNG": "image/png",
+        "JPEG": "image/jpeg",
+        "WEBP": "image/webp",
+        "GIF": "image/gif",
+    }.get(fmt or "", _guess_mime(image_path))
+    b64 = base64.b64encode(data).decode("utf-8")
+    return f"data:{mime};base64,{b64}"
 
 
 def _ensure_output_dir(output_file: str) -> None:
@@ -353,7 +472,9 @@ def _generate_image_gemini(
     raise Exception("Failed to generate image")
 
 
-def _write_openai_image(payload: dict, output_file: str) -> str:
+def _write_openai_image(
+    payload: dict, output_file: str, *, convert_to_extension: bool = False
+) -> str:
     images = payload.get("data") or []
     if not images or not isinstance(images[0], dict):
         raise Exception("OpenAI-compatible provider returned no image data")
@@ -378,6 +499,9 @@ def _write_openai_image(payload: dict, output_file: str) -> str:
     # Fail before the output is opened so an existing image is preserved.
     if not image_bytes:
         raise ValueError("Provider returned an empty image")
+
+    if convert_to_extension:
+        image_bytes = _validate_and_prepare_image(image_bytes, output_file)
 
     _ensure_output_dir(output_file)
     with open(output_file, "wb") as f:
@@ -440,6 +564,42 @@ def _generate_image_openai(
     return _write_openai_image(response.json(), output_file)
 
 
+def _generate_image_byteplus_agentplan(
+    prompt: str, reference_images: list[str], output_file: str, aspect_ratio: str
+) -> str:
+    bearer_value = os.getenv("BYTEPLUS_AGENTPLAN_API_KEY", "").strip()
+    if not bearer_value:
+        raise ValueError("BYTEPLUS_AGENTPLAN_API_KEY is not set")
+
+    url = f"{_byteplus_agentplan_base_url()}/images/generations"
+    model = (
+        os.getenv("BYTEPLUS_AGENTPLAN_IMAGE_MODEL", "").strip()
+        or BYTEPLUS_AGENTPLAN_DEFAULT_IMAGE_MODEL
+    )
+    body: dict[str, object] = {
+        "model": model,
+        "prompt": prompt,
+        "size": _byteplus_agentplan_size(aspect_ratio),
+        "response_format": "b64_json",
+        "output_format": _byteplus_agentplan_output_format(output_file),
+        "watermark": False,
+    }
+    if reference_images:
+        encoded_refs = [_to_data_url(path) for path in reference_images]
+        body["image"] = encoded_refs[0] if len(encoded_refs) == 1 else encoded_refs
+
+    response = _post_image(
+        url,
+        headers={
+            "Authorization": f"Bearer {bearer_value}",
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=180,
+    )
+    return _write_openai_image(response.json(), output_file, convert_to_extension=True)
+
+
 def generate_image(
     prompt_file: str,
     reference_images: list[str],
@@ -451,6 +611,10 @@ def generate_image(
     provider = _resolve_provider(
         "IMAGE_GENERATION_PROVIDER", "gemini", bool(os.getenv("GEMINI_API_KEY"))
     )
+    if provider in ("byteplus", "byteplus_agentplan", "byteplus-agentplan", "seedream"):
+        return _generate_image_byteplus_agentplan(
+            prompt, reference_images, output_file, aspect_ratio
+        )
     if provider in ("openai", "openai-compatible"):
         return _generate_image_openai(
             prompt, reference_images, output_file, aspect_ratio
@@ -465,7 +629,7 @@ def generate_image(
         )
     raise ValueError(
         f"Unknown image provider: {provider!r} "
-        "(use 'gemini', 'minimax', 'openai', or 'openai-compatible')"
+        "(use 'gemini', 'minimax', 'openai', 'openai-compatible', or 'byteplus_agentplan')"
     )
 
 
@@ -473,7 +637,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Generate images using Gemini, MiniMax, or an OpenAI-compatible API"
+        description="Generate images using Gemini, MiniMax, OpenAI-compatible, or BytePlus Agent Plan (Seedream) API"
     )
     parser.add_argument(
         "--prompt-file", required=True, help="Absolute path to JSON prompt file"

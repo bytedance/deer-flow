@@ -1651,8 +1651,10 @@ export function MessageList({
                 const files = new Set<string>();
                 for (const message of group.messages) {
                   if (hasPresentFiles(message)) {
-                    const presentFiles =
-                      extractPresentFilesFromMessage(message);
+                    const presentFiles = extractPresentFilesFromMessage(
+                      message,
+                      group.messages,
+                    );
                     for (const file of presentFiles) files.add(file);
                   }
                 }
