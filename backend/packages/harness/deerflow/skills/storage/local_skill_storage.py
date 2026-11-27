@@ -204,9 +204,13 @@ class LocalSkillStorage(SkillStorage):
         except (zipfile.BadZipFile, IsADirectoryError):
             raise ValueError("File is not a valid ZIP archive") from None
 
-        with zf:
-            scan_archive_preflight_or_raise(path, app_config=self._app_config)
-            safe_extract_skill_archive(zf, tmp_path)
+        try:
+            with zf:
+                scan_archive_preflight_or_raise(path, app_config=self._app_config)
+                safe_extract_skill_archive(zf, tmp_path)
+        except zipfile.BadZipFile:
+            # Member CRC/header errors can surface only when extraction reads the data.
+            raise ValueError("File is not a valid ZIP archive") from None
 
         skill_dir = resolve_skill_dir_from_archive(tmp_path)
 

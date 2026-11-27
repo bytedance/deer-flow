@@ -788,6 +788,36 @@ def test_cli_reports_non_string_frontmatter_key_without_crashing(tmp_path, capsy
     assert "Unknown frontmatter field(s): 42, unexpected-field" in output
 
 
+@pytest.mark.parametrize(
+    "updated, valid",
+    [
+        ("2026-02-30", False),
+        ("2026-11-26T25:00:00Z", False),
+        ("!!timestamp 2026-11-26T13:45:00+08:0", False),
+        ("2026-11-26", True),
+        ("!!timestamp 2026-11-26T13:45:00+08:00", True),
+        ('"2026-02-30"', True),
+    ],
+)
+def test_cli_reports_invalid_yaml_timestamp_as_frontmatter_finding(tmp_path, capsys, updated, valid):
+    from deerflow.skills.validation import validate_skill_frontmatter_text
+
+    content = _valid_skill().replace("allowed-tools: []", f"metadata:\n  updated: {updated}")
+    _write(tmp_path / "SKILL.md", content)
+
+    exit_code = review_cli_main([str(tmp_path), "--format", "json", "--fail-on", "blocker"])
+    facts = json.loads(capsys.readouterr().out)
+
+    _validate_contract("review_facts.v1.schema.json", facts)
+    assert exit_code == (0 if valid else 1)
+    invalid_frontmatter = [finding for finding in facts["findings"] if finding["rule_id"] == "structure.invalid-frontmatter"]
+    assert bool(invalid_frontmatter) is not valid
+    if not valid:
+        assert invalid_frontmatter[0]["severity"] == "blocker"
+        assert invalid_frontmatter[0]["path"] == "SKILL.md"
+    assert validate_skill_frontmatter_text(content)[0] is valid
+
+
 def test_cli_fail_on_incomplete_package(tmp_path, capsys):
     _write(tmp_path / "SKILL.md", _valid_skill())
     _write(tmp_path / "references" / "large.md", "x" * 32)

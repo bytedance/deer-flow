@@ -1,7 +1,11 @@
 import asyncio
 import errno
+import json
 import os
+import shlex
 import stat
+import subprocess
+import sys
 import threading
 import time
 from datetime import timedelta
@@ -15,11 +19,13 @@ from _router_auth_helpers import call_unwrapped, make_authed_test_app
 from fastapi import HTTPException, UploadFile
 from fastapi.testclient import TestClient
 
-from app.gateway import upload_ingestion
+from app.gateway import run_input_files, upload_ingestion
 from app.gateway.auth.models import User
 from app.gateway.deps import get_config
 from app.gateway.routers import uploads
+from deerflow.config.paths import Paths
 from deerflow.sandbox.lease import get_sandbox_lease_manager
+from deerflow.sandbox.sandbox import CommandOutput
 from deerflow.uploads.companions import resolve_companion
 from deerflow.uploads.manager import cleanup_stale_upload_staging_files
 
@@ -43,6 +49,23 @@ def _mounted_provider() -> MagicMock:
     provider = MagicMock()
     provider.uses_thread_data_mounts = True
     return provider
+
+
+def _remote_upload_sandbox(root: Path) -> MagicMock:
+    sandbox = MagicMock()
+    remote_uploads = root / "uploads"
+    remote_uploads.mkdir(parents=True)
+    sandbox.artifact_root = root.as_posix()
+    sandbox.update_file.side_effect = lambda path, content: (remote_uploads / PurePosixPath(path).name).write_bytes(content)
+
+    def execute(command, *, timeout):
+        interpreter, *args = shlex.split(command)
+        assert interpreter == "python3"
+        result = subprocess.run([sys.executable, *args], check=False, capture_output=True, text=True, timeout=timeout)
+        return CommandOutput(result.stdout + result.stderr, result.returncode)
+
+    sandbox.execute_command.side_effect = execute
+    return sandbox
 
 
 def _symlink_to_or_skip(link_path: Path, target_path: Path) -> None:
@@ -80,6 +103,179 @@ def test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync(tmp_pat
 
     sandbox.update_file.assert_not_called()
     provider.release.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("mounted", "release_error"), [(True, None), (False, None), (False, OSError("lease close failed"))])
+async def test_queued_upload_companion_stays_valid_after_staging_removal(tmp_path, monkeypatch, mounted, release_error):
+    paths = Paths(tmp_path)
+    monkeypatch.setattr("deerflow.config.paths._paths", paths)
+    provider = _mounted_provider()
+    provider.uses_thread_data_mounts = mounted
+    monkeypatch.setattr(uploads, "get_sandbox_provider", lambda: provider)
+    remote = tmp_path / "remote"
+    sandbox = MagicMock() if mounted else _remote_upload_sandbox(remote)
+    release = AsyncMock(side_effect=release_error)
+    acquire = AsyncMock(return_value=SimpleNamespace(sandbox=sandbox, denied=False, release=release))
+    monkeypatch.setattr(uploads, "try_acquire_sandbox_for_request", acquire)
+    config = SimpleNamespace(uploads={"auto_convert_documents": True})
+    thread_id, user_id = "thread-queue", "user-queue"
+    destination = paths.sandbox_uploads_dir(thread_id, user_id=user_id)
+    attachments = [
+        UploadFile(filename="report.pdf", file=BytesIO(b"%PDF queued upload")),
+        UploadFile(filename="report.md", file=BytesIO(b"# User's notes\n")),
+    ]
+    stage_id, files = await run_input_files.stage_input_files(thread_id, user_id, attachments, config)
+
+    async def convert(source, output_path):
+        assert source.suffix == ".pdf"
+        assert source.read_bytes() == b"%PDF queued upload"
+        assert not destination.exists()
+        output_path.write_text("# Converted\n", encoding="utf-8")
+        return output_path
+
+    monkeypatch.setattr(uploads, "convert_file_to_markdown", convert)
+    metadata = await run_input_files.publish_input_files(thread_id, user_id, stage_id, files, request=MagicMock(), config=config)
+    assert [item["filename"] for item in metadata] == ["report.pdf", "report.md"]
+    original = destination / metadata[0]["filename"]
+    assert (destination / "report.md").read_bytes() == b"# User's notes\n"
+    companion = resolve_companion(original)
+    assert companion is not None
+    assert companion.name == "report_1.md"
+    assert companion.read_text(encoding="utf-8") == "# Converted\n"
+    assert list((paths.thread_dir(thread_id, user_id=user_id) / ".queued-uploads").iterdir()) == []
+    if mounted:
+        acquire.assert_not_awaited()
+        sandbox.update_file.assert_not_called()
+    else:
+        acquire.assert_awaited_once()
+        assert sandbox.update_file.call_count == 3
+        assert {path.name: path.read_bytes() for path in (remote / "uploads").iterdir()} == {
+            original.name: b"%PDF queued upload",
+            "report.md": b"# User's notes\n",
+            companion.name: b"# Converted\n",
+        }
+        release.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["probe", "copy", "promotion", "lost_ack", "cleanup_unreachable"])
+async def test_failed_queued_upload_cleans_remote_copies_before_pooling(tmp_path, monkeypatch, failure):
+    paths = Paths(tmp_path)
+    monkeypatch.setattr("deerflow.config.paths._paths", paths)
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    remote = tmp_path / "remote"
+    sandbox = _remote_upload_sandbox(remote)
+    provider.get.return_value = sandbox
+    monkeypatch.setattr(uploads, "get_sandbox_provider", lambda: provider)
+    config = SimpleNamespace()
+    thread_id, user_id = "thread-queue", "user-queue"
+    destination = paths.sandbox_uploads_dir(thread_id, user_id=user_id)
+
+    async def acquire(*_args, **_kwargs):
+        # Upload-based providers can bootstrap from the host's uploads on acquire.
+        assert not destination.exists()
+        return "remote"
+
+    provider.acquire_async = AsyncMock(side_effect=acquire)
+    attachments = [
+        UploadFile(filename="first 'image'.png", file=BytesIO(b"first attachment")),
+        UploadFile(filename="second.png", file=BytesIO(b"second attachment")),
+    ]
+    stage_id, files = await run_input_files.stage_input_files(thread_id, user_id, attachments, config)
+
+    existing = {"older.png": b"earlier upload", "first 'image'.png": b"remote-only file with the same name"}
+    remote_uploads = remote / "uploads"
+    for filename, content in existing.items():
+        (remote_uploads / filename).write_bytes(content)
+    if failure == "promotion":
+        (remote_uploads / "second.png").mkdir()
+    parked = []
+
+    def copy(path, content):
+        resolved = remote_uploads / PurePosixPath(path).name
+        resolved.write_bytes(content)
+        if failure in {"copy", "cleanup_unreachable"} and content == b"second attachment":
+            resolved.write_bytes(b"partial copy")
+            raise OSError("temporary remote transfer failure")
+
+    execute = sandbox.execute_command.side_effect
+
+    def run_command(command, *, timeout):
+        action, *_ = json.loads(shlex.split(command)[-1])
+        if action == "probe":
+            return "Error: python3 not found" if failure == "probe" else execute(command, timeout=timeout)
+        if failure == "cleanup_unreachable":
+            raise OSError("remote cleanup transport unavailable")
+        output = execute(command, timeout=timeout)
+        if action == "promote":
+            if failure == "lost_ack":
+                assert output.exit_code == 0
+                assert (remote_uploads / "first 'image'.png").read_bytes() == b"first attachment"
+                assert execute(command, timeout=timeout).exit_code == 0
+                return "Error: lost remote promotion acknowledgement"
+            if failure == "promotion":
+                assert output.exit_code == 1
+                assert (remote_uploads / "first 'image'.png").read_bytes() == existing["first 'image'.png"]
+        return output
+
+    sandbox.update_file.side_effect = copy
+    sandbox.execute_command.side_effect = run_command
+    provider.release.side_effect = lambda _sandbox_id: parked.append({path.name: path.read_bytes() for path in remote_uploads.iterdir() if path.is_file()})
+    expected_error = {
+        "probe": "does not support queued upload publication with Python 3",
+        "copy": "temporary remote transfer failure",
+        "cleanup_unreachable": "temporary remote transfer failure",
+    }.get(failure, "reconciliation was not acknowledged")
+    with pytest.raises(OSError, match=expected_error):
+        await run_input_files.publish_input_files(thread_id, user_id, stage_id, files, request=None, config=config)
+
+    assert sandbox.update_file.call_count == (0 if failure == "probe" else 2)
+    (pooled_files,) = parked
+    if failure == "cleanup_unreachable":
+        assert sandbox.execute_command.call_count == 3
+        staged = {name: data for name, data in pooled_files.items() if name.startswith(".upload-") and name.endswith(".part")}
+        assert sorted(staged.values()) == [b"first attachment", b"partial copy"]
+        assert {name: data for name, data in pooled_files.items() if name not in staged} == existing
+    else:
+        assert pooled_files == existing
+    assert list(destination.iterdir()) == []
+    stage = paths.thread_dir(thread_id, user_id=user_id) / ".queued-uploads" / stage_id
+    assert [(stage / str(index)).read_bytes() for index in range(2)] == [b"first attachment", b"second attachment"]
+
+
+@pytest.mark.asyncio
+async def test_queued_upload_retry_preserves_a_file_that_claimed_its_destination(tmp_path, monkeypatch):
+    paths = Paths(tmp_path)
+    monkeypatch.setattr("deerflow.config.paths._paths", paths)
+    monkeypatch.setattr(uploads, "get_sandbox_provider", _mounted_provider)
+    config = SimpleNamespace()
+    thread_id, user_id = "thread-queue", "user-queue"
+    destination = paths.sandbox_uploads_dir(thread_id, user_id=user_id)
+    file = UploadFile(filename="chart.png", file=BytesIO(b"queued image"))
+    stage_id, files = await run_input_files.stage_input_files(thread_id, user_id, [file], config)
+
+    async def fail_during_preparation(published_paths):
+        assert published_paths == [destination / "chart.png"]
+        published_paths[0].unlink()
+        published_paths[0].write_bytes(b"another upload")
+        raise OSError("temporary file preparation failure")
+
+    monkeypatch.setattr(run_input_files, "prepare_published_uploads", fail_during_preparation)
+
+    with pytest.raises(OSError, match="temporary file preparation failure"):
+        await run_input_files.publish_input_files(thread_id, user_id, stage_id, files, request=MagicMock(), config=config)
+
+    original = destination / "chart.png"
+    assert original.read_bytes() == b"another upload"
+    monkeypatch.setattr(run_input_files, "prepare_published_uploads", upload_ingestion.prepare_published_uploads)
+
+    metadata = await run_input_files.publish_input_files(thread_id, user_id, stage_id, files, request=MagicMock(), config=config)
+
+    assert metadata[0]["filename"] == "chart_1.png"
+    assert original.read_bytes() == b"another upload"
+    assert (destination / "chart_1.png").read_bytes() == b"queued image"
 
 
 def test_upload_and_list_response_models_expose_size_as_int(tmp_path):

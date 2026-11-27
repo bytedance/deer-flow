@@ -12,10 +12,26 @@ type SubmittedInput = {
   mode: "queue" | "steer";
 };
 
-for (const mode of ["queue", "steer"] as const) {
-  test(`${mode} retries a rejected draft against the new active run`, async ({
+for (const scenario of [
+  "queue",
+  "steer",
+  "queue with an attachment",
+] as const) {
+  test(`${scenario} retries a rejected draft against the new active run`, async ({
     page,
   }) => {
+    const mode = scenario === "steer" ? "steer" : "queue";
+    const screenshot =
+      scenario === "queue with an attachment"
+        ? {
+            name: "screenshot.png",
+            mimeType: "image/png",
+            buffer: Buffer.from(
+              "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII=",
+              "base64",
+            ),
+          }
+        : undefined;
     let activeRunId = RUN_A;
     let acceptedInput: Record<string, unknown> | undefined;
     const submissions: Array<SubmittedInput & { runId: string }> = [];
@@ -81,11 +97,27 @@ for (const mode of ["queue", "steer"] as const) {
     );
     await page.route(
       `**/api/threads/${MOCK_THREAD_ID}/runs/*/inputs`,
-      (route) => {
+      async (route) => {
         const runId = new URL(route.request().url()).pathname
           .split("/")
           .at(-2)!;
-        const body = route.request().postDataJSON() as SubmittedInput;
+        const request = route.request();
+        let body: SubmittedInput;
+        if (screenshot) {
+          const form = await new Response(
+            new Uint8Array(request.postDataBuffer()!),
+            { headers: { "Content-Type": request.headers()["content-type"]! } },
+          ).formData();
+          body = JSON.parse(form.get("input") as string) as SubmittedInput;
+          const files = form.getAll("files") as File[];
+          expect(files).toHaveLength(1);
+          expect(files[0]!.name).toBe(screenshot.name);
+          expect(Buffer.from(await files[0]!.arrayBuffer())).toEqual(
+            screenshot.buffer,
+          );
+        } else {
+          body = request.postDataJSON() as SubmittedInput;
+        }
         submissions.push({ ...body, runId });
         if (runId === RUN_A) {
           return route.fulfill({
@@ -102,6 +134,13 @@ for (const mode of ["queue", "steer"] as const) {
           message_id: "human-update",
           text: body.text,
           mode: body.mode,
+          ...(screenshot
+            ? {
+                files: [
+                  { filename: screenshot.name, size: screenshot.buffer.length },
+                ],
+              }
+            : {}),
           status: "pending",
           created_at: "2026-01-01T00:00:01Z",
         };
@@ -127,6 +166,20 @@ for (const mode of ["queue", "steer"] as const) {
       const textarea = page.getByPlaceholder(/how can i assist you/i);
       const send = page.getByRole("button", { name: "Send update" });
       await textarea.fill(INPUT_TEXT);
+      if (screenshot) {
+        await page.locator('input[type="file"]').setInputFiles(screenshot);
+        await page.getByRole("button", { name: "Send while working" }).click();
+        await page.getByRole("menuitem", { name: /^Steer/ }).click();
+        await send.click();
+        await expect(
+          page.getByText(
+            "Use plain text to steer. Choose Queue to send attachments.",
+          ),
+        ).toBeVisible();
+        expect(submissions).toHaveLength(0);
+        await page.getByRole("button", { name: "Send while working" }).click();
+        await page.getByRole("menuitem", { name: /^Queue/ }).click();
+      }
       if (mode === "steer") {
         await page.getByRole("button", { name: "Send while working" }).click();
         await page.getByRole("menuitem", { name: /^Steer/ }).click();
@@ -138,6 +191,13 @@ for (const mode of ["queue", "steer"] as const) {
         ),
       ).toBeVisible();
       await expect(textarea).toHaveValue(INPUT_TEXT);
+      if (screenshot) {
+        await expect(
+          page.getByRole("button", {
+            name: `Remove attachment: ${screenshot.name}`,
+          }),
+        ).toBeVisible();
+      }
       expect(submissions).toHaveLength(1);
       expect(submissions[0]).toMatchObject({
         runId: RUN_A,
@@ -160,6 +220,11 @@ for (const mode of ["queue", "steer"] as const) {
       await expect(
         page.getByTestId("run-inputs").getByText(INPUT_TEXT),
       ).toBeVisible();
+      if (screenshot) {
+        await expect(
+          page.getByTestId("run-inputs").getByTitle(screenshot.name),
+        ).toBeVisible();
+      }
     } finally {
       await Promise.all([...streams.keys()].map(finishStream));
     }
