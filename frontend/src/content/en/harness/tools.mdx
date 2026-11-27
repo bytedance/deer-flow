@@ -377,7 +377,7 @@ tools:
     group: web
     use: deerflow.community.serpapi.tools:web_fetch_tool
 ```
-Set `SERPAPI_API_KEY` to send one public URL to [SerpApi Extract](https://serpapi.com/extract-api). Returns up to 4096 characters of Markdown. Does not render JavaScript or crawl links.
+Set `SERPAPI_API_KEY` to send one public URL to [SerpApi Extract](https://serpapi.com/extract-api). Ordinary pages return their content as Markdown; supported search-results URLs return the results as Markdown. DeerFlow caps the output at 4096 characters. The tool does not render JavaScript or crawl links.
   </Tabs.Tab>
 </Tabs>
 

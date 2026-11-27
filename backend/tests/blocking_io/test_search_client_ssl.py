@@ -29,8 +29,8 @@ async def test_serpapi_tls_initialization_off_loop_and_io_on_loop(monkeypatch, n
         setup["certificates"] = threading.get_ident()
         return load(self, *args, **kwargs)
 
-    payload = b'{"organic_results":[{"title":"coffee"}],"markdown":"coffee"}'
-    network = httpcore.AsyncMockBackend([b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(payload) + payload])
+    content_type, payload = (b"application/json", b'{"organic_results":[{"title":"coffee"}]}') if name == "web_search" else (b"text/markdown", b"# coffee")
+    network = httpcore.AsyncMockBackend([b"HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %d\r\n\r\n" % (content_type, len(payload)) + payload])
 
     async def connect_tcp(self, host, port, **kwargs):
         io.append(("request", threading.get_ident()))

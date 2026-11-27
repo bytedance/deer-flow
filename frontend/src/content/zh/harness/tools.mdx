@@ -366,7 +366,7 @@ tools:
     group: web
     use: deerflow.community.serpapi.tools:web_fetch_tool
 ```
-设置 `SERPAPI_API_KEY` 后，可将单个公开网址发送至 [SerpApi Extract](https://serpapi.com/extract-api)，返回最多 4096 个字符的 Markdown。不执行 JavaScript，也不抓取页面中的链接。
+设置 `SERPAPI_API_KEY` 后，可将单个公开网址发送至 [SerpApi Extract](https://serpapi.com/extract-api)。普通网页返回正文，受支持的搜索结果页返回搜索结果，格式均为 Markdown。DeerFlow 最多返回 4096 个字符。此工具不执行 JavaScript，也不抓取页面中的链接。
   </Tabs.Tab>
 </Tabs>
 

@@ -125,17 +125,26 @@ async def test_environment_proxy_routes_without_connecting(monkeypatch, caplog, 
         assert connections == [destination]
 
 
-@pytest.mark.parametrize("length", [24, 4096, 4500])
-async def test_extract_returns_only_bounded_markdown_from_one_url(api, length):
-    markdown = "    " + "x" * (length - 5) + "\n"
-    api.response = httpx.Response(200, json={"markdown": markdown, "inline_links": [{"link": "https://example.org/next"}]})
-    result = await tools.web_fetch_tool.ainvoke({"url": URL})
-    if length <= 4096:
+@pytest.mark.parametrize(
+    ("url", "markdown"),
+    [
+        (URL, "    indented page content\n"),
+        ("https://www.google.com/search?q=coffee", "## Organic Results\n\n" + "x" * (4096 - len("## Organic Results\n\n"))),
+        ("https://www.amazon.com/s?k=coffee", "## Products\n\n" + "x" * 4500),
+    ],
+    ids=["indented-page", "google-at-limit", "amazon-truncated"],
+)
+async def test_extract_requests_markdown_for_pages_and_routed_search_results(api, url, markdown):
+    api.response = httpx.Response(200, text=markdown, headers={"Content-Type": "text/markdown; charset=utf-8"})
+    result = await tools.web_fetch_tool.ainvoke({"url": url})
+    if len(markdown) <= 4096:
         assert result == markdown
     else:
         assert len(result) == 4096 and result.startswith(markdown[:4000]) and "truncated" in result
     assert len(api.requests) == 1
-    assert dict(api.requests[0].url.params) == {"engine": "extract", "mode": "scrape", "url": URL, "api_key": KEY}
+    request = api.requests[0]
+    assert str(request.url.copy_with(query=None)) == "https://serpapi.com/search"
+    assert dict(request.url.params) == {"engine": "extract", "mode": "scrape", "url": url, "output": "md", "api_key": KEY}
 
 
 @pytest.mark.parametrize("url", ["file:///page", "https://user:pass@example.org/", "http://127.0.0.1/", "http://metadata.google.internal/"])
@@ -144,9 +153,18 @@ async def test_extract_refuses_unsafe_url_before_request(api, url):
     assert not api.requests
 
 
-@pytest.mark.parametrize("markdown,expected", [(None, "No Markdown content found"), ("", "No Markdown content found"), ("\n \t", "No Markdown content found"), ({"text": KEY}, "unexpected response format")])
-async def test_extract_refuses_missing_or_malformed_markdown(api, markdown, expected):
-    api.response = httpx.Response(200, json={"markdown": markdown, "other_fields": KEY})
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        (httpx.Response(200, content=b"", headers={"Content-Type": "text/markdown"}), "No Markdown content found"),
+        (httpx.Response(200, text="\n \t", headers={"Content-Type": "text/markdown"}), "No Markdown content found"),
+        (httpx.Response(200, content=KEY.encode()), "instead of Markdown"),
+        (httpx.Response(200, json={"organic_results": [{"snippet": KEY}]}), "instead of Markdown"),
+        (httpx.Response(200, html=f"<html>{KEY}</html>"), "instead of Markdown"),
+    ],
+)
+async def test_extract_refuses_empty_or_unexpected_response_without_echoing_it(api, response, expected):
+    api.response = response
     result = await tools.web_fetch_tool.ainvoke({"url": URL})
     assert result.startswith("Error:") and expected in result and KEY not in result
 
@@ -158,7 +176,7 @@ async def test_extract_refuses_missing_or_malformed_markdown(api, markdown, expe
         (httpx.Response(302, headers={"Location": "https://example.org/elsewhere"}), "HTTP 302"),
         (httpx.Response(401, json={"error": KEY}), "HTTP 401"),
         (httpx.Response(200, json={"error": KEY}), "SerpApi reported"),
-        (httpx.Response(200, content=KEY.encode()), "invalid JSON"),
+        (httpx.Response(200, content=KEY.encode(), headers={"Content-Type": "application/json"}), "invalid JSON"),
         (httpx.ConnectError(KEY), "request failed"),
         (httpx.ReadTimeout(KEY), "timed out"),
     ],

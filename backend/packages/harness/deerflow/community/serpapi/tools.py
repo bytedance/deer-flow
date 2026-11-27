@@ -15,7 +15,7 @@ from deerflow.community.url_safety import safe_public_result_url, validate_hoste
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
-_ENDPOINT = "https://serpapi.com/search.json"
+_ENDPOINT = "https://serpapi.com/search"
 _FETCH_LIMIT = 4096
 _TRUNCATED = "\n\n[web_fetch: truncated]"
 
@@ -104,26 +104,30 @@ def _is_empty_google_search(data: dict) -> bool:
             return False
 
 
-async def _request(name: str, **params: str) -> tuple[dict, object]:
+async def _request(name: str, endpoint: str, **params: str) -> tuple[httpx.Response, object]:
     try:
         client, count = await asyncio.to_thread(_prepare, name, params)
         async with client:
-            response = await client.get(_ENDPOINT)
+            response = await client.get(endpoint)
     except httpx.TimeoutException:
         raise _SerpApiError("SerpApi request timed out") from None
     except (httpx.RequestError, httpx.InvalidURL, OSError):
         raise _SerpApiError("SerpApi request failed") from None
     if not response.is_success:
         raise _SerpApiError(f"SerpApi API error: HTTP {response.status_code}")
+    return response, count
+
+
+def _json_result(response: httpx.Response, *, google_search: bool = False) -> dict:
     try:
         data = response.json()
     except ValueError:
         raise _SerpApiError("SerpApi returned invalid JSON") from None
     if not isinstance(data, dict):
         raise _format_error("response", data)
-    if "error" in data and not (name == "web_search" and _is_empty_google_search(data)):
+    if "error" in data and not (google_search and _is_empty_google_search(data)):
         raise _SerpApiError("SerpApi reported an error")
-    return data, count
+    return data
 
 
 @tool("web_search", parse_docstring=True)
@@ -137,7 +141,8 @@ async def web_search_tool(query: str, max_results: int | None = None) -> str:
     if not query.strip():
         return json.dumps({"error": "Search query must not be empty"})
     try:
-        data, configured_count = await _request("web_search", engine="google", q=query)
+        response, configured_count = await _request("web_search", f"{_ENDPOINT}.json", engine="google", q=query)
+        data = _json_result(response, google_search=True)
         rows = data.get("organic_results")
         if rows is None or rows == []:
             raise _SerpApiError("No results found")
@@ -174,10 +179,13 @@ async def web_fetch_tool(url: str) -> str:
     if url_error:
         return url_error
     try:
-        data, _ = await _request("web_fetch", engine="extract", mode="scrape", url=url)
-        markdown = data.get("markdown")
-        if markdown is not None and not isinstance(markdown, str):
-            raise _format_error("markdown", markdown)
+        response, _ = await _request("web_fetch", _ENDPOINT, engine="extract", mode="scrape", url=url, output="md")
+        media_type = response.headers.get("content-type", "").partition(";")[0].strip().lower()
+        if media_type == "application/json":
+            _json_result(response)  # Provider failures can still arrive as JSON.
+        if media_type != "text/markdown":
+            raise _SerpApiError("SerpApi returned an unexpected response instead of Markdown")
+        markdown = response.text
         if not markdown or markdown.isspace():
             raise _SerpApiError("No Markdown content found")
     except _SerpApiError as exc:

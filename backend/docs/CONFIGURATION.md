@@ -1440,7 +1440,7 @@ In `config.yaml`, replace the `use` value on the corresponding tool:
 | Tool | `use` | Result |
 | --- | --- | --- |
 | `web_search` | `deerflow.community.serpapi.tools:web_search_tool` | [Google organic results](https://serpapi.com/search-api) as `title`, `url`, `snippet`. `max_results` limits the first page locally (tool argument, then config, then 5). |
-| `web_fetch` | `deerflow.community.serpapi.tools:web_fetch_tool` | [Extract](https://serpapi.com/extract-api) fetches one public HTTP(S) URL in `scrape` mode. Only the response's `markdown` field is returned, capped at 4096 characters including a truncation notice. |
+| `web_fetch` | `deerflow.community.serpapi.tools:web_fetch_tool` | [Extract](https://serpapi.com/extract-api) fetches one public HTTP(S) URL in `scrape` mode with `output=md`. Ordinary pages return their content; supported search-results URLs return the dedicated engine's results as Markdown. DeerFlow returns at most 4096 characters, including any truncation notice. |
 
 A tool's `api_key` setting takes precedence over the environment variable.
 Both tools honor `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` for requests to
