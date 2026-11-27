@@ -76,7 +76,7 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
     reported an empty sequence while iteration yielded the real constraints.
     Deferring the call instead of faking the value keeps one answer.
     """
-    from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+    from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactBlobRestoreMiddleware, ArtifactResolutionMiddleware
     from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
     from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
@@ -114,6 +114,14 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
                 outer=ArtifactResolutionMiddleware,
                 inner=policy,
                 reason="Artifact handles must resolve before argument-sensitive authorization, audit, write and progress policies inspect the call",
+            )
+            for policy in (GuardrailMiddleware, SandboxAuditMiddleware, ReadBeforeWriteMiddleware, ToolProgressMiddleware)
+        ),
+        *(
+            OrderingConstraint(
+                outer=policy,
+                inner=ArtifactBlobRestoreMiddleware,
+                reason="A policy must allow the tool call before diagnostic blobs can be read or written locally",
             )
             for policy in (GuardrailMiddleware, SandboxAuditMiddleware, ReadBeforeWriteMiddleware, ToolProgressMiddleware)
         ),

@@ -221,7 +221,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # + 1 SubagentDateContextMiddleware
     # + 1 SystemMessageCoalescingMiddleware + 1 ToolReceiptMiddleware
     # (all enabled by default).
-    # + 1 ArtifactResolutionMiddleware + 1 ArtifactCaptureMiddleware
+    # + ArtifactResolutionMiddleware, ArtifactBlobRestoreMiddleware and ArtifactCaptureMiddleware
     # (tool_artifacts enabled by default, #4676).
     # + 1 ModelContentCompatibilityMiddleware (unconditional read-time
     # sanitizer between DurableContext and the date/coalescer tail).
@@ -236,7 +236,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 
-    assert len(middlewares) == 24
+    assert len(middlewares) == 25
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], KnowledgeScopeMiddleware)
     assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
@@ -315,7 +315,7 @@ def test_artifact_middlewares_ordering_in_runtime_chain(monkeypatch: pytest.Monk
     # the assertion below only pins its assembly slot, not a behavioral
     # dependency. — issue #4676.
     from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
-    from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+    from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactBlobRestoreMiddleware, ArtifactResolutionMiddleware
     from deerflow.config.tool_artifact_config import ToolArtifactConfig
     from deerflow.config.tool_progress_config import ToolProgressConfig
 
@@ -342,12 +342,13 @@ def test_artifact_middlewares_ordering_in_runtime_chain(monkeypatch: pytest.Monk
     names = [type(m).__name__ for m in middlewares]
 
     resolution_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ArtifactResolutionMiddleware))
+    restore_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ArtifactBlobRestoreMiddleware))
     capture_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ArtifactCaptureMiddleware))
     error_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware))
-    assert resolution_idx < error_idx < capture_idx, f"expected resolution < error < capture, got: {names}"
+    assert resolution_idx < error_idx < restore_idx < capture_idx, names
     for name in ("FakeSandboxAuditMiddleware", "ReadBeforeWriteMiddleware", "ToolProgressMiddleware"):
         gate_idx = next(i for i, m in enumerate(middlewares) if type(m).__name__ == name)
-        assert resolution_idx < gate_idx, names
+        assert resolution_idx < gate_idx < restore_idx, names
 
 
 def test_artifact_capture_absent_when_disabled(monkeypatch: pytest.MonkeyPatch):

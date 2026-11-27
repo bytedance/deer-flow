@@ -1,8 +1,10 @@
 """Safety and bounded-context regressions from PR #4929's remaining reviews."""
 
+import asyncio
 import hashlib
 import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import httpx
 import pytest
@@ -16,18 +18,20 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Overwrite
 
 from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
-from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactBlobRestoreMiddleware, ArtifactResolutionMiddleware
 from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
 from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
 from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware, build_lead_runtime_middlewares
 from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+from deerflow.agents.middlewares.tool_transform_meta import TOOL_OUTPUT_BLOB_KEY
 from deerflow.agents.thread_state import ThreadState, merge_artifacts, merge_tool_artifacts
 from deerflow.config.app_config import AppConfig
 from deerflow.config.guardrails_config import GuardrailProviderConfig, GuardrailsConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.guardrails.middleware import GuardrailMiddleware
 from deerflow.guardrails.provider import GuardrailDecision
+from deerflow.storage.backends.local_fs.local_fs_store import LocalFsBlobStore
 from deerflow.tools.artifact_registry import extract_artifacts_from_result, render_artifact_registry
 
 
@@ -80,7 +84,7 @@ def request(args, entries=()):
 
 def safety_chain(config=None):
     middlewares = build_lead_runtime_middlewares(app_config=config or AppConfig(sandbox=SandboxConfig(use="test")))
-    return [m for m in middlewares if isinstance(m, (ArtifactResolutionMiddleware, ReadBeforeWriteMiddleware, SandboxAuditMiddleware, GuardrailMiddleware, ToolReceiptMiddleware, ToolErrorHandlingMiddleware))]
+    return [m for m in middlewares if isinstance(m, (ArtifactBlobRestoreMiddleware, ArtifactResolutionMiddleware, ReadBeforeWriteMiddleware, SandboxAuditMiddleware, GuardrailMiddleware, ToolReceiptMiddleware, ToolErrorHandlingMiddleware))]
 
 
 @pytest.mark.parametrize("prior_read", [None, "stale", "current"])
@@ -159,6 +163,55 @@ def test_policy_and_audit_receive_resolved_arguments():
     audit_request.tool_call["name"] = "bash"
     blocked = handler(audit_request)
     assert blocked.status == "error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_call", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("allow", [False, True], ids=["denied", "allowed"])
+async def test_diagnostic_blob_io_follows_tool_authorization(tmp_path, monkeypatch, async_call, allow):
+    store = LocalFsBlobStore(tmp_path / "blobs")
+    blob = store.put_bytes(b"diagnostic", kind="tool-output", content_type="text/plain; charset=utf-8")
+    get_bytes = Mock(wraps=store.get_bytes)
+    monkeypatch.setattr(store, "get_bytes", get_bytes)
+    monkeypatch.setattr("deerflow.agents.middlewares.tool_output_budget_middleware.get_blob_store_if_enabled", lambda: store)
+    outputs = tmp_path / "outputs"
+    path = "/mnt/user-data/outputs/.tool-results/diagnostic.log"
+    artifact = entry(path)
+    artifact[TOOL_OUTPUT_BLOB_KEY] = {"version": 1, "ref": blob.model_dump(mode="json"), "virtual_path": path, "storage_subdir": ".tool-results", "encoding": "utf-8"}
+    calls = []
+
+    @tool
+    def read_file(path: str) -> str:
+        """Read a diagnostic file."""
+        calls.append(path)
+        return (outputs / ".tool-results" / "diagnostic.log").read_text(encoding="utf-8")
+
+    config = AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        guardrails=GuardrailsConfig(enabled=True, provider=GuardrailProviderConfig(use="deerflow.guardrails.builtin:AllowlistProvider", config={"allowed_tools": ["read_file"] if allow else []})),
+    )
+    model = FakeToolCallingModel(
+        responses=[
+            AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"path": artifact["handle"]}, "id": "read", "type": "tool_call"}]),
+            AIMessage(content="done"),
+        ]
+    )
+    graph = create_agent(model=model, tools=[read_file], middleware=safety_chain(config), state_schema=ThreadState)
+    inputs = {"messages": [HumanMessage(content="Read the diagnostic.")], "thread_data": {"outputs_path": str(outputs)}, "tool_artifacts": [artifact]}
+    if async_call:
+        result = await graph.ainvoke(inputs, context={"thread_id": "t"})
+    else:
+        result = await asyncio.to_thread(graph.invoke, inputs, context={"thread_id": "t"})
+    reply = next(message for message in result["messages"] if isinstance(message, ToolMessage))
+    if allow:
+        assert reply.status == "success" and reply.content == "diagnostic"
+        assert calls == [path]
+        assert get_bytes.call_count == 1
+    else:
+        assert reply.status == "error"
+        assert not calls
+        assert not outputs.exists()
+        get_bytes.assert_not_called()
 
 
 @pytest.mark.parametrize("entries", [[], [entry()]])

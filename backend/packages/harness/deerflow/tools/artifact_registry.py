@@ -15,15 +15,17 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from langchain_core.messages import ToolMessage
 
-from deerflow.agents.middlewares.tool_transform_meta import TOOL_OUTPUT_BLOB_KEY, read_tool_transforms
-from deerflow.agents.thread_state import ArtifactEntry
 from deerflow.utils.messages import get_tool_message_status
+
+if TYPE_CHECKING:
+    from deerflow.agents.thread_state import ArtifactEntry
 
 _HANDLE_PREFIX = "art_"
 _HANDLE_LENGTH = 8
@@ -271,6 +273,23 @@ def _collect_structured_refs(value: Any, found: list[tuple[str, str]]) -> bool:
     return True
 
 
+def _iter_resource_links(artifact: dict) -> Iterator[tuple[str, dict]]:
+    links = artifact.get("resource_links")
+    if isinstance(links, list):
+        for link in links:
+            if isinstance(link, dict) and isinstance(uri := link.get("uri"), str) and _is_referenceable_url(uri):
+                yield uri, link
+
+
+def has_structured_file_reference(artifact: dict) -> bool:
+    """Check whether a tool artifact explicitly supplies a registerable file reference."""
+    found: list[tuple[str, str]] = []
+    if _collect_structured_refs(artifact.get("structured_content"), found):
+        if any(key in _STRUCTURED_REF_KEYS and _is_referenceable_url(value) for key, value in found):
+            return True
+    return next(_iter_resource_links(artifact), None) is not None
+
+
 def _serialize_bounded_data(value: Any) -> str | None:
     """Keep complete JSON only when its shape and UTF-8 size fit the budget.
 
@@ -324,6 +343,8 @@ def _display_name_for_ref(ref: str) -> str:
 
 
 def _externalized_output_path(result: ToolMessage) -> str | None:
+    from deerflow.agents.middlewares.tool_transform_meta import read_tool_transforms
+
     prefix = f"{_SANDBOX_PATH_PREFIX}outputs/"
     for transform in reversed(read_tool_transforms(result)):
         if transform["kind"] != "externalized" or transform.get("by") != "ToolOutputBudgetMiddleware":
@@ -413,6 +434,8 @@ def extract_artifacts_from_result(
     tool_call_id = result.tool_call_id or ""
     sink = _EntrySink(thread_id=thread_id, tool_call_id=tool_call_id, call_index=call_index, created_at=now, tool_name=tool_name, occurrence_id=result.id)
     if diagnostic_path is not None:
+        from deerflow.agents.middlewares.tool_transform_meta import TOOL_OUTPUT_BLOB_KEY
+
         entry = sink.add(artifact_type="file", display_name=_display_name_for_ref(diagnostic_path), real_ref=diagnostic_path)
         blob = (result.additional_kwargs or {}).get(TOOL_OUTPUT_BLOB_KEY)
         if isinstance(blob, dict) and blob.get("virtual_path") == diagnostic_path:
@@ -448,22 +471,15 @@ def extract_artifacts_from_result(
                     if encoded is not None:
                         _add_unique(artifact_type="data", display_name=f"{tool_name} structured result", real_ref=encoded)
 
-        resource_links = artifact.get("resource_links")
-        if isinstance(resource_links, list):
-            for link in resource_links:
-                if not isinstance(link, dict):
-                    continue
-                uri = link.get("uri")
-                if not isinstance(uri, str) or not _is_referenceable_url(uri):
-                    continue
-                name = link.get("name")
-                mime = link.get("mime_type")
-                _add_unique(
-                    artifact_type="file",
-                    display_name=name if isinstance(name, str) and name else _display_name_for_ref(uri),
-                    real_ref=uri,
-                    mime_type=mime if isinstance(mime, str) and mime else None,
-                )
+        for uri, link in _iter_resource_links(artifact):
+            name = link.get("name")
+            mime = link.get("mime_type")
+            _add_unique(
+                artifact_type="file",
+                display_name=name if isinstance(name, str) and name else _display_name_for_ref(uri),
+                real_ref=uri,
+                mime_type=mime if isinstance(mime, str) and mime else None,
+            )
 
     content = result.content
     if isinstance(content, str):

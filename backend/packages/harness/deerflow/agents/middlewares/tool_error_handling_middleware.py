@@ -497,8 +497,9 @@ def _build_runtime_middlewares(
 
     # Resolve handles before any policy inspects arguments. Receipts enclose
     # this layer too, so unknown-handle errors remain part of the ledger.
-    if app_config.tool_artifacts.enabled and app_config.tool_artifacts.resolve_handles_in_args:
-        from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+    resolve_artifacts = app_config.tool_artifacts.enabled and app_config.tool_artifacts.resolve_handles_in_args
+    if resolve_artifacts:
+        from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactBlobRestoreMiddleware, ArtifactResolutionMiddleware
 
         tail.append(ArtifactResolutionMiddleware(config=app_config.tool_artifacts))
 
@@ -590,6 +591,8 @@ def _build_runtime_middlewares(
             skill_storage=skill_storage,
         )
     )
+    if resolve_artifacts:
+        tail.append(ArtifactBlobRestoreMiddleware())
     # Artifact capture is a `before_model` hook that reads state messages, so
     # its position in the tool-execution wrap chain is functionally irrelevant:
     # it sees the normalized, budgeted result stored in state. For errors, the

@@ -12,7 +12,7 @@ from langchain_core.tools import tool
 from langgraph.prebuilt.tool_node import ToolCallRequest
 
 from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
-from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactBlobRestoreMiddleware, ArtifactResolutionMiddleware
 from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_OUTPUT_BLOB_KEY
 from deerflow.agents.thread_state import ThreadState
@@ -94,7 +94,12 @@ async def test_async_diagnostic_handle_restores_blob_without_blocking(tmp_path, 
         content = await asyncio.to_thread((outputs / ".tool-results" / "diagnostic.log").read_text, encoding="utf-8")
         return ToolMessage(content=content, tool_call_id="read")
 
-    reply = await ArtifactResolutionMiddleware().awrap_tool_call(req, read)
+    restore = ArtifactBlobRestoreMiddleware()
+
+    async def after_policy(request):
+        return await restore.awrap_tool_call(request, read)
+
+    reply = await ArtifactResolutionMiddleware().awrap_tool_call(req, after_policy)
     assert reply.content == "diagnostic"
 
 

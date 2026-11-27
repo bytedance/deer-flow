@@ -103,8 +103,9 @@ Set `status="error"` to report a business failure, for example
 `PluginToolResult("No report is available for this account.", status="error")`.
 The model receives the error status with the original text. Set
 `status="success"` when successful text may resemble an error. If status is
-omitted, legacy recognition of `Error:` text and JSON error objects applies
-even when the result carries an artifact.
+omitted, JSON error objects still report failure. Text beginning with `Error:`
+reports failure unless the artifact explicitly supplies a valid structured file
+reference, as some older report plugins do.
 A structured HTTP 4xx or 5xx response in the artifact still takes precedence
 over success. The status field requires a matching host and extension-api
 0.2.14 or newer.

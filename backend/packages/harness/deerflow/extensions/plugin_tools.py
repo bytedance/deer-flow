@@ -21,6 +21,7 @@ from langchain_core.tools import StructuredTool, ToolException
 
 from deerflow.config.plugin_settings import defaults
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.tools.artifact_registry import has_structured_file_reference
 from deerflow.tools.tool_provenance import tag_plugin_tool
 from deerflow.utils.messages import TOOL_META_KEY, make_tool_result_meta
 
@@ -112,16 +113,18 @@ def _build_tool(source, plugin, declaration):
                     raise ToolException("Plugin result exceeds 64 KiB.")
                 if runtime.tool_call_id is None:
                     return result.content
-                # An artifact can carry diagnostics for a legacy error result.
-                # Only an explicit success overrides content-based error recognition.
                 # A JSON roundtrip detaches nested values retained by the handler.
+                artifact = json.loads(encoded)["artifact"]
+                # Older plugins sometimes put an error heading on a completed report.
+                # Use the explicit file reference to disambiguate that legacy prose.
+                legacy_report = status is None and result.content.startswith("Error:") and artifact is not None and has_structured_file_reference(artifact)
                 return ToolMessage(
                     content=result.content,
-                    artifact=json.loads(encoded)["artifact"],
+                    artifact=artifact,
                     name=name,
                     tool_call_id=runtime.tool_call_id,
                     status=status or "success",
-                    additional_kwargs={TOOL_META_KEY: make_tool_result_meta(status="success")} if status == "success" else {},
+                    additional_kwargs={TOOL_META_KEY: make_tool_result_meta(status="success")} if status == "success" or legacy_report else {},
                 )
             encoded = json.dumps(result, ensure_ascii=False, allow_nan=False)
             if len(encoded.encode()) > 64 * 1024:

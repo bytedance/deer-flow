@@ -42,9 +42,10 @@ checkpointed that content. Remove published files only as part of inactive
 thread-data maintenance.
 
 The artifact registry retains the blob reference for saved failure diagnostics.
-After compaction removes the tool message, resolving its diagnostic handle
-restores the file under the current Gateway's thread outputs directory using the
-same digest and path checks as message-based recovery.
+After compaction removes the tool message, the resolver passes the concrete path
+to tool policies. Once those policies allow the call, the restore middleware
+materializes the diagnostic under the current Gateway's thread outputs directory
+using the same digest and path checks as message-based recovery.
 
 ## Structured tool results
 

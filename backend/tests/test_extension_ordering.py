@@ -99,7 +99,7 @@ def test_core_constraints_are_declared():
     pairs = {(c.outer, c.inner) for c in core_ordering_constraints()}
     assert (ToolProgressMiddleware, ToolErrorHandlingMiddleware) in pairs
 
-    from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+    from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactBlobRestoreMiddleware, ArtifactResolutionMiddleware
     from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
@@ -107,6 +107,7 @@ def test_core_constraints_are_declared():
 
     for policy in (GuardrailMiddleware, SandboxAuditMiddleware, ReadBeforeWriteMiddleware, ToolProgressMiddleware):
         assert (ArtifactResolutionMiddleware, policy) in pairs
+        assert (policy, ArtifactBlobRestoreMiddleware) in pairs
     assert (ToolReceiptMiddleware, ArtifactResolutionMiddleware) in pairs
     core_ordering_constraints.cache_clear()
 

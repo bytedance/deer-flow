@@ -26,7 +26,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.prebuilt.tool_node import ToolCallRequest
 
 from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
-from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactBlobRestoreMiddleware, ArtifactResolutionMiddleware
 from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
@@ -82,6 +82,7 @@ def _compacting_agent(model, *tools, checkpointer=None, output_budget=None):
             output_budget or ToolOutputBudgetMiddleware(),
             ArtifactResolutionMiddleware(),
             ToolErrorHandlingMiddleware(),
+            ArtifactBlobRestoreMiddleware(),
             ArtifactCaptureMiddleware(),
             DurableContextMiddleware(),
             DeerFlowSummarizationMiddleware(
@@ -257,6 +258,8 @@ def _report_plugin_tool(handler):
     "outcome,expected_error",
     [
         pytest.param(PluginToolResult("The report is ready.", _PLUGIN_REPORT_ARTIFACT), None, id="legacy-report"),
+        pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT), None, id="legacy-report-error-prefix"),
+        pytest.param(PluginToolResult(_PLUGIN_REPORT, {"resource_links": [{"uri": _PLUGIN_REPORT_URL}]}), None, id="legacy-resource-link-error-prefix"),
         pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT, status="success"), None, id="explicit-report"),
         pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT | {"deerflow_http_response": {"status_code": 200}}, status="success"), None, id="http-200"),
         pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT | {"deerflow_http_response": {"status_code": 404}}, status="success"), "not_found", id="http-404"),
@@ -266,6 +269,8 @@ def _report_plugin_tool(handler):
         pytest.param(PluginToolResult(json.dumps({"error": f"Could not generate {_PLUGIN_REPORT_URL}"})), "unknown", id="legacy-json-error"),
         pytest.param(PluginToolResult(json.dumps({"error": f"Could not generate {_PLUGIN_REPORT_URL}"}), {}), "unknown", id="legacy-json-error-empty-artifact"),
         pytest.param(PluginToolResult(json.dumps({"error": f"Could not generate {_PLUGIN_REPORT_URL}"}), {"request_id": "req-1"}), "unknown", id="legacy-json-error-diagnostic"),
+        pytest.param(PluginToolResult(json.dumps({"error": "Report generation failed."}), _PLUGIN_REPORT_ARTIFACT), "unknown", id="legacy-json-error-with-file-reference"),
+        pytest.param(PluginToolResult("Error: Report generation failed.", {"structured_content": {"request_id": "req-1"}}), "unknown", id="legacy-text-error-with-diagnostic"),
         pytest.param(ToolException(f"Error: Could not generate {_PLUGIN_REPORT_URL}"), "unknown", id="tool-exception"),
     ],
 )
@@ -437,22 +442,32 @@ async def test_crawl4ai_artifacts_follow_fetch_status_through_compaction(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_opensandbox_success_keeps_report_artifact_through_compaction(tmp_path, monkeypatch):
+@pytest.mark.parametrize("provider_name", ["opensandbox", "e2b"])
+async def test_sandbox_success_keeps_report_artifact_through_compaction(tmp_path, monkeypatch, provider_name):
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     stdout = f"Error: the report lists historical failures. Saved to {REAL_REF}"
 
-    def run(command, *, opts):
+    def run(command, **kwargs):
         (outputs / "report.md").write_text("Historical failures", encoding="utf-8")
+        if provider_name == "e2b":
+            return e2b.CommandResult(stdout=stdout, stderr="", exit_code=0, error=None)
         return SimpleNamespace(exit_code=0, logs=SimpleNamespace(stdout=[SimpleNamespace(text=stdout)], stderr=[]))
 
     def read_mounted_report(path):
-        assert path == REAL_REF
+        assert path == ("/home/user/outputs/report.md" if provider_name == "e2b" else REAL_REF)
         return (outputs / "report.md").read_text(encoding="utf-8")
 
-    sdk = SimpleNamespace(commands=SimpleNamespace(run=run), files=SimpleNamespace(read_file=read_mounted_report))
-    sandbox = OpenSandboxSandbox("opensandbox:report", sdk, run_command_opts_cls=SimpleNamespace)
-    provider = Mock(spec=sandbox_provider.SandboxProvider, uses_thread_data_mounts=True)
+    commands = SimpleNamespace(run=run)
+    if provider_name == "e2b":
+        e2b = pytest.importorskip("e2b")
+        from deerflow.community.e2b_sandbox.e2b_sandbox import E2BSandbox
+
+        sandbox = E2BSandbox("e2b:report", SimpleNamespace(commands=commands, files=SimpleNamespace(read=read_mounted_report)))
+    else:
+        sdk = SimpleNamespace(commands=commands, files=SimpleNamespace(read_file=read_mounted_report))
+        sandbox = OpenSandboxSandbox("opensandbox:report", sdk, run_command_opts_cls=SimpleNamespace)
+    provider = Mock(spec=sandbox_provider.SandboxProvider, uses_thread_data_mounts=provider_name == "opensandbox")
     provider.get.return_value = sandbox
     provider.get_scoped.return_value = sandbox
     monkeypatch.setattr(sandbox_provider, "_default_sandbox_provider", provider)

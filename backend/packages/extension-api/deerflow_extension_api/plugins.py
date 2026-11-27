@@ -49,8 +49,9 @@ class PluginToolResult:
     """Model-visible text, an optional JSON artifact and an optional invocation status.
 
     Set status to report a business failure or to mark successful text that
-    resembles an error. When omitted, the host recognizes legacy error content
-    even if the result carries an artifact.
+    resembles an error. With status omitted, the host recognizes JSON errors
+    and treats an `Error:` heading as a failure unless the artifact carries
+    a valid structured file reference.
     """
 
     content: str

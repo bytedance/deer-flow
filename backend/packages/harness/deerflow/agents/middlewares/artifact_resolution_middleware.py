@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, override
 
 from langchain.agents import AgentState
@@ -29,6 +29,12 @@ from deerflow.config.tool_artifact_config import ToolArtifactConfig
 from deerflow.sandbox.lease import run_sync_lifecycle_operation
 
 _HANDLE_PATTERN = r"(?:`(art_[0-9a-f]{8})`|(?<!\w)(art_[0-9a-f]{8})(?!\w))"
+_PENDING_DIAGNOSTIC_BLOBS = "__deerflow_pending_diagnostic_blobs"
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingDiagnosticBlobs:
+    payloads: list[Mapping[str, Any]]
 
 
 class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
@@ -47,12 +53,8 @@ class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
     ) -> ToolMessage | Command:
         if not (self._config.enabled and self._config.resolve_handles_in_args):
             return handler(request)
-        resolved, blobs = self._resolve_request(request)
-        if isinstance(resolved, ToolMessage):
-            return resolved
-        if blobs:
-            restore_tool_artifact_blobs(resolved, blobs)
-        return handler(resolved)
+        resolved = self._resolve_request(request)
+        return resolved if isinstance(resolved, ToolMessage) else handler(resolved)
 
     @override
     async def awrap_tool_call(
@@ -62,17 +64,13 @@ class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
     ) -> ToolMessage | Command:
         if not (self._config.enabled and self._config.resolve_handles_in_args):
             return await handler(request)
-        resolved, blobs = self._resolve_request(request)
-        if isinstance(resolved, ToolMessage):
-            return resolved
-        if blobs:
-            await run_sync_lifecycle_operation(restore_tool_artifact_blobs, resolved, blobs)
-        return await handler(resolved)
+        resolved = self._resolve_request(request)
+        return resolved if isinstance(resolved, ToolMessage) else await handler(resolved)
 
-    def _resolve_request(self, request: ToolCallRequest) -> tuple[ToolCallRequest | ToolMessage, list[Mapping[str, Any]]]:
+    def _resolve_request(self, request: ToolCallRequest) -> ToolCallRequest | ToolMessage:
         args = request.tool_call.get("args")
         if not isinstance(args, dict):
-            return request, []
+            return request
 
         state = request.state or {}
         entries = {str(entry["handle"]): entry for entry in state.get("tool_artifacts") or [] if isinstance(entry, dict) and entry.get("handle") and isinstance(entry.get("real_ref"), str) and entry["real_ref"]}
@@ -94,7 +92,7 @@ class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
                 tool_call_id=str(request.tool_call.get("id") or "missing_tool_call_id"),
                 status="error",
             )
-            return normalize_tool_result(message, tool_call_id=message.tool_call_id), []
+            return normalize_tool_result(message, tool_call_id=message.tool_call_id)
 
         # Share resolved batch arguments for note admission only in this runtime; preserve message history.
         if request.tool_call.get("name") == "task_note" and request.runtime is not None:
@@ -106,9 +104,13 @@ class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
 
         resolved_args = self._resolve_value(args, handle_map)
         if resolved_args == args:
-            return request, []
+            return request
         blobs = [blob for handle in referenced if isinstance(blob := entries[handle].get(TOOL_OUTPUT_BLOB_KEY), Mapping) and blob.get("virtual_path") == handle_map[handle]]
-        return request.override(tool_call={**request.tool_call, "args": resolved_args}), blobs
+        if blobs:
+            # Keep the restore plan on this request copy. Policies see the
+            # resolved arguments and the checkpoint retains the original state.
+            request = request.override(state={**state, _PENDING_DIAGNOSTIC_BLOBS: _PendingDiagnosticBlobs(blobs)})
+        return request.override(tool_call={**request.tool_call, "args": resolved_args})
 
     def _referenced_handles(self, value) -> set[str]:
         if isinstance(value, str):
@@ -137,3 +139,33 @@ class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
             return match.group(0)
 
         return self._handle_re.sub(replace_handle, text)
+
+
+class ArtifactBlobRestoreMiddleware(AgentMiddleware[AgentState]):
+    """Materialize diagnostics only for tool calls that passed the policy gates."""
+
+    @staticmethod
+    def _pending(request: ToolCallRequest) -> _PendingDiagnosticBlobs | None:
+        state = request.state
+        pending = state.get(_PENDING_DIAGNOSTIC_BLOBS) if isinstance(state, Mapping) else None
+        return pending if isinstance(pending, _PendingDiagnosticBlobs) else None
+
+    @override
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], ToolMessage | Command],
+    ) -> ToolMessage | Command:
+        if pending := self._pending(request):
+            restore_tool_artifact_blobs(request, pending.payloads)
+        return handler(request)
+
+    @override
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
+    ) -> ToolMessage | Command:
+        if pending := self._pending(request):
+            await run_sync_lifecycle_operation(restore_tool_artifact_blobs, request, pending.payloads)
+        return await handler(request)
