@@ -1433,7 +1433,7 @@ DEER_FLOW_RUN_LIVE_TESTS=1 uv run pytest tests/test_deepseek_search_live.py -q
 ```
 
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, DeepSeek, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, DeepSeek, Firecrawl, fastCRW, GroundRoute, NestDaddy, Sofya, SpecStream, You.com)
 - `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Tavily, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
@@ -2362,6 +2362,7 @@ models:
 - `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`
+- `NESTDADDY_API_KEY` - [NestDaddy](https://nestdaddy.com/serp-api) key for `web_search`
 - `SPECSTREAM_API_KEY` - [SpecStream](https://specstream.ai) key for `web_search` and `web_fetch`
 - `UNBROWSE_API_KEY` - [Unbrowse](https://unbrowse.ai) key for `web_fetch`
 - `YDC_API_KEY` - You.com Search API key for `web_search` (optional: without it the provider uses You.com's keyless free-tier endpoint)

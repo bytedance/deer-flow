@@ -11,6 +11,10 @@ This section accumulates work toward the **2.3.0** milestone
 ([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
 
 ### Added
+
+- **community:** New NestDaddy `web_search` provider. Results come from NestDaddy's
+  own search index, with fresh news articles blended in for current topics, and
+  carry a snippet, a source URL and a publish date when one is known.
 - **crawl4ai:** `web_fetch` accepts an optional `max_chars` output cap (default
   4096). A page cut at the cap ends with a note giving the kept and total
   length. ([#8553](https://github.com/bytedance/deer-flow/pull/8553))
