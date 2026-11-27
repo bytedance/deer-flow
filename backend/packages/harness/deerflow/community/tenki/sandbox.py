@@ -34,7 +34,7 @@ from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
-from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
+from deerflow.sandbox.sandbox import CommandOutput, Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
 
 if TYPE_CHECKING:
@@ -283,12 +283,14 @@ class TenkiSandbox(Sandbox):
             output = stdout or stderr
         if result.timed_out:
             message = "Error: command timed out\nExit Code: 124"
-            return f"{output}\n{message}" if output else message
-        if result.exit_code not in (0, None):
+            return CommandOutput(f"{output}\n{message}" if output else message, 124)
+        exit_code = result.exit_code
+        if exit_code not in (0, None):
             # Mirror LocalSandbox: preserve a nonzero exit in the output text
             # even when the command produced output (see e2b_sandbox).
-            output = f"{output}\nExit Code: {result.exit_code}" if output else f"Command exited with code {result.exit_code}"
-        return output if output else "(no output)"
+            output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
+        output = output or "(no output)"
+        return CommandOutput(output, exit_code) if type(exit_code) is int else output
 
     # ── file operations ─────────────────────────────────────────────────
 

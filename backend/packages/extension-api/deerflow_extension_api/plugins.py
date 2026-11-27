@@ -50,8 +50,9 @@ class PluginToolResult:
 
     Set status to report a business failure or to mark successful text that
     resembles an error. With status omitted, the host recognizes JSON errors
-    and `Error:` headings as failures. Valid explicit file references in the
-    artifact remain available independently of the inferred status.
+    and `Error:` headings as failures. When failure is inferred from this
+    legacy content, valid explicit file references in the artifact can still
+    be registered. Structured HTTP failures do not register these references.
     """
 
     content: str

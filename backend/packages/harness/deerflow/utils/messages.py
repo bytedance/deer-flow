@@ -11,6 +11,7 @@ SUMMARY_MESSAGE_NAME = "summary"
 SUBAGENT_RESULT_MESSAGE_NAME = "subagent-result"
 TOOL_META_KEY = "deerflow_tool_meta"
 LEGACY_PLUGIN_FILE_REFS_KEY = "deerflow_legacy_plugin_file_refs"
+INFERRED_PLUGIN_ERROR_FILE_REFS = "inferred_error"
 
 ToolResultStatus = Literal["success", "error", "partial_success"]
 KNOWN_TOOL_RESULT_STATUSES = get_args(ToolResultStatus)

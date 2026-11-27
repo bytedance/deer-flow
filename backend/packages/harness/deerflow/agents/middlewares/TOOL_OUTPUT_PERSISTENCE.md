@@ -43,10 +43,15 @@ thread-data maintenance.
 
 The artifact registry retains the blob reference for saved failure diagnostics.
 After compaction removes the tool message, the resolver passes the concrete path
-to tool policies. The restore middleware checks the final approved arguments and
-materializes the diagnostics they still reference under the current Gateway's
-thread outputs directory. It uses the same digest and path checks as
-message-based recovery.
+to tool policies. The restore middleware checks the final approved field that
+referenced each handle. A retained file can move within that field's file list.
+Display descriptions do not request restoration. The middleware materializes
+retained diagnostics under the current Gateway's thread outputs directory using
+the same digest and path checks as message-based recovery. For Bash,
+restoration recognizes literal file operands in common file commands and
+redirections. For `sed`, `grep` and `rg`, input files and files supplied with
+`-f` request restoration when they reference a diagnostic. Inline scripts,
+search patterns, comments and printed path strings are treated as text.
 
 ## Structured tool results
 

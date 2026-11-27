@@ -24,7 +24,7 @@ from langchain_core.messages import ToolMessage
 
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_OUTPUT_BLOB_KEY, read_tool_transforms
 from deerflow.agents.thread_state import ArtifactEntry
-from deerflow.utils.messages import LEGACY_PLUGIN_FILE_REFS_KEY, get_tool_message_status
+from deerflow.utils.messages import INFERRED_PLUGIN_ERROR_FILE_REFS, LEGACY_PLUGIN_FILE_REFS_KEY, get_tool_message_status
 
 _HANDLE_PREFIX = "art_"
 _HANDLE_LENGTH = 8
@@ -414,7 +414,7 @@ def extract_artifacts_from_result(
     """
     failed = get_tool_message_status(result) == "error"
     kwargs = result.additional_kwargs or {}
-    legacy_files = failed and result.status != "error" and kwargs.get(LEGACY_PLUGIN_FILE_REFS_KEY) is True
+    legacy_files = failed and result.status != "error" and kwargs.get(LEGACY_PLUGIN_FILE_REFS_KEY) == INFERRED_PLUGIN_ERROR_FILE_REFS
     diagnostic_path = _externalized_output_path(result) if failed else None
     if failed and diagnostic_path is None and not legacy_files:
         return []

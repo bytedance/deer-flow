@@ -264,6 +264,8 @@ def _report_plugin_tool(handler):
         pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT, status="success"), None, [_PLUGIN_REPORT_URL], id="explicit-report"),
         pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT | {"deerflow_http_response": {"status_code": 200}}, status="success"), None, [_PLUGIN_REPORT_URL], id="http-200"),
         pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT | {"deerflow_http_response": {"status_code": 404}}, status="success"), "not_found", [], id="http-404"),
+        pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT | {"deerflow_http_response": {"status_code": 404}}), "not_found", [], id="legacy-http-404"),
+        pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT | {"deerflow_http_response": {"status_code": 400}}), "unknown", [], id="legacy-http-400"),
         pytest.param(PluginToolResult(_PLUGIN_REPORT, status="success"), None, [], id="text-only-success"),
         pytest.param(PluginToolResult("Could not generate the report.", _PLUGIN_REPORT_ARTIFACT, status="error"), "unknown", [], id="explicit-error"),
         pytest.param(PluginToolResult(f"Error: Could not generate {_PLUGIN_REPORT_URL}"), "unknown", [], id="legacy-text-error"),
@@ -443,7 +445,7 @@ async def test_crawl4ai_artifacts_follow_fetch_status_through_compaction(monkeyp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider_name", ["opensandbox", "e2b", "aio"])
+@pytest.mark.parametrize("provider_name", ["opensandbox", "e2b", "aio", "tenki", "boxlite", "boxd"])
 async def test_sandbox_success_keeps_report_artifact_through_compaction(tmp_path, monkeypatch, provider_name):
     outputs = tmp_path / "outputs"
     outputs.mkdir()
@@ -455,10 +457,15 @@ async def test_sandbox_success_keeps_report_artifact_through_compaction(tmp_path
             return e2b.CommandResult(stdout=stdout, stderr="", exit_code=0, error=None)
         if provider_name == "aio":
             return SimpleNamespace(data=SimpleNamespace(output=stdout, exit_code=0, status="completed"))
+        if provider_name == "tenki":
+            return SimpleNamespace(stdout_text=stdout, stderr_text="", exit_code=0, timed_out=False)
+        if provider_name in {"boxlite", "boxd"}:
+            return SimpleNamespace(stdout=stdout, stderr="", exit_code=0)
         return SimpleNamespace(exit_code=0, logs=SimpleNamespace(stdout=[SimpleNamespace(text=stdout)], stderr=[]))
 
     def read_mounted_report(path):
-        assert path == ("/home/user/outputs/report.md" if provider_name == "e2b" else REAL_REF)
+        sdk_paths = {"e2b": "/home/user/outputs/report.md", "tenki": "/home/tenki/outputs/report.md"}
+        assert path == sdk_paths.get(provider_name, REAL_REF)
         return (outputs / "report.md").read_text(encoding="utf-8")
 
     commands = SimpleNamespace(run=run)
@@ -476,10 +483,41 @@ async def test_sandbox_success_keeps_report_artifact_through_compaction(tmp_path
         sdk = SimpleNamespace(shell=SimpleNamespace(exec_command=run), file=SimpleNamespace(read_file=read_aio_report))
         monkeypatch.setattr(aio_sandbox, "AioSandboxClient", lambda **kwargs: sdk)
         sandbox = aio_sandbox.AioSandbox("aio:report", "http://localhost:8080", home_dir="/home/user")
+    elif provider_name == "tenki":
+        from deerflow.community.tenki.sandbox import TenkiSandbox
+
+        def tenki_exec(*argv, **kwargs):
+            assert argv[:2] == ("sh", "-lc")
+            return run(argv[-1], **kwargs)
+
+        sdk = SimpleNamespace(exec=tenki_exec, fs=SimpleNamespace(read_text=read_mounted_report))
+        sandbox = TenkiSandbox("tenki:report", sdk)
+    elif provider_name == "boxlite":
+        from deerflow.community.boxlite.box import BoxliteBox
+
+        def boxlite_exec(*argv, **kwargs):
+            if argv[0] == "cat":
+                return SimpleNamespace(stdout=read_mounted_report(argv[-1]), stderr="", exit_code=0)
+            assert argv[:2] == ("sh", "-lc")
+            return run(argv[-1], **kwargs)
+
+        sandbox = BoxliteBox("boxlite:report", SimpleNamespace(exec=boxlite_exec), run=lambda result, **kwargs: result)
+    elif provider_name == "boxd":
+        from deerflow.community.boxd_sandbox.boxd_sandbox import BoxdSandbox
+
+        def boxd_exec(machine_id, argv, **kwargs):
+            assert machine_id == "report-machine"
+            if argv[0] == "head":
+                assert kwargs["encoding"] == "buffer"
+                return SimpleNamespace(stdout=read_mounted_report(argv[-1]).encode("utf-8"), stderr=b"", exit_code=0)
+            assert argv[0] == "timeout"
+            return run(argv[-1], **kwargs)
+
+        sandbox = BoxdSandbox("boxd:report", SimpleNamespace(machines=SimpleNamespace(exec=boxd_exec)), "report-machine")
     else:
         sdk = SimpleNamespace(commands=commands, files=SimpleNamespace(read_file=read_mounted_report))
         sandbox = OpenSandboxSandbox("opensandbox:report", sdk, run_command_opts_cls=SimpleNamespace)
-    provider = Mock(spec=sandbox_provider.SandboxProvider, uses_thread_data_mounts=provider_name != "e2b")
+    provider = Mock(spec=sandbox_provider.SandboxProvider, uses_thread_data_mounts=provider_name in {"aio", "opensandbox"})
     provider.get.return_value = sandbox
     provider.get_scoped.return_value = sandbox
     monkeypatch.setattr(sandbox_provider, "_default_sandbox_provider", provider)

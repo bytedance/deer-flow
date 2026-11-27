@@ -16,7 +16,7 @@ from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_transform_meta import append_tool_transform, read_tool_transforms
 from deerflow.utils.bash_exit import BASH_TOOL_NAMES, bash_exit_status
-from deerflow.utils.messages import KNOWN_TOOL_RESULT_STATUSES, TOOL_META_KEY, ToolResultStatus, make_tool_result_meta
+from deerflow.utils.messages import INFERRED_PLUGIN_ERROR_FILE_REFS, KNOWN_TOOL_RESULT_STATUSES, LEGACY_PLUGIN_FILE_REFS_KEY, TOOL_META_KEY, ToolResultStatus, make_tool_result_meta
 
 PROGRESS_GUARD_ERROR_TYPE = "blocked_by_progress_guard"
 
@@ -175,6 +175,8 @@ def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
         if category is None and not (failed_bash and existing.get("source") == "content_analysis"):
             return msg
 
+    updated_kwargs = dict(kwargs)
+    legacy_plugin = updated_kwargs.pop(LEGACY_PLUGIN_FILE_REFS_KEY, None) is True
     subagent_status = kwargs.get("subagent_status")
     # Producer status and native exit markers describe execution. Documents do not.
     if isinstance(subagent_status, str) and subagent_status in _SUBAGENT_FAILURE_STATUSES:
@@ -186,18 +188,17 @@ def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
         meta = make_tool_result_meta(status="error", **{**_UNKNOWN_ERROR, "error_type": category})
     elif msg.status == "error":
         meta = make_tool_result_meta(status="error", **_UNKNOWN_ERROR)
-    elif content.startswith(_ERROR_PREFIX):
+    elif content.startswith(_ERROR_PREFIX) or (msg.name != "read_file" and _extract_json_error_text(content) is not None):
         # Legacy tool envelopes, including unstamped read_file checkpoints, use
-        # this prefix. Producer-stamped successful file contents return above.
+        # the error prefix. Producer-stamped successful file contents return above.
         meta = make_tool_result_meta(status="error", **_UNKNOWN_ERROR)
-    elif msg.name != "read_file" and _extract_json_error_text(content) is not None:
-        meta = make_tool_result_meta(status="error", **_UNKNOWN_ERROR)
+        if legacy_plugin:
+            updated_kwargs[LEGACY_PLUGIN_FILE_REFS_KEY] = INFERRED_PLUGIN_ERROR_FILE_REFS
     elif failed_bash:
         meta = make_tool_result_meta(status="error", source="content_analysis", **_UNKNOWN_ERROR)
     else:
         meta = make_tool_result_meta(status="success")
 
-    updated_kwargs = dict(msg.additional_kwargs or {})
     updated_kwargs[TOOL_META_KEY] = meta
     msg.additional_kwargs = updated_kwargs
     return msg

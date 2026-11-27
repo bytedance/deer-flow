@@ -104,8 +104,10 @@ Set `status="error"` to report a business failure, for example
 The model receives the error status with the original text. Set
 `status="success"` when successful text may resemble an error. If status is
 omitted, JSON error objects and text beginning with `Error:` still report
-failure. The host can register valid file references explicitly supplied in the
-artifact of a legacy result. Failure text contributes no inferred references.
+failure. When failure is inferred from legacy content, the host can register
+valid file references explicitly supplied in the artifact. Failure text
+contributes no inferred references. Structured HTTP failures skip these file
+references.
 A structured HTTP 4xx or 5xx response in the artifact still takes precedence
 over success. The status field requires a matching host and extension-api
 0.2.14 or newer.
