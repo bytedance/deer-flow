@@ -166,6 +166,10 @@ def _score_fact(
     )
 
 
+def _fact_category(fact: dict[str, Any]) -> str:
+    return str(fact.get("category") or "").strip().lower()
+
+
 def select_facts_for_capacity(
     facts: list[dict[str, Any]],
     *,
@@ -186,9 +190,11 @@ def select_facts_for_capacity(
     """Select facts under the configured cap without mutating the snapshot.
 
     ``confidence`` exactly preserves the historical ranking. ``hybrid-v1``
-    combines three bounded signals and reserves only the minimum number of
-    capacity slots for configured reserved categories (defaulting to correction);
-    corrections take priority when included. Unused slots return to ordinary competition.
+    combines three bounded signals and reserves up to ``reserved_slots`` seats
+    from the ranking tail (``max_facts - reserved_slots`` and below) for
+    ``reserved_categories`` (defaulting to ``correction``), so high-scoring
+    winners already well inside the cap do not starve at-risk facts below it
+    while total protection stays bounded across repeated writes.
     """
     if isinstance(reserved_categories, str):
         raise TypeError("reserved_categories must be an iterable of strings, not a bare str")
@@ -240,12 +246,16 @@ def select_facts_for_capacity(
             correction_reserved_max,
             math.ceil(max_facts * correction_reserved_fraction),
         )
-        reserved_candidates = [item for item in ranked if str(item[1].get("category") or "").strip().lower() in target_categories]
-        reserved_candidates.sort(key=lambda item: str(item[1].get("category") or "").strip().lower() != "correction")
+        # Draw the reserve from the tail that actually contends for the bottom
+        # ``reserved_slots`` seats, so high-scoring winners inside ``[:tail_start]``
+        # never consume slots needed by at-risk facts while total reserve stays bounded.
+        tail_start = max(0, max_facts - reserved_slots)
+        reserved_candidates = [item for item in ranked[tail_start:] if _fact_category(item[1]) in target_categories]
+        reserved_candidates.sort(key=lambda item: _fact_category(item[1]) != "correction")
         reserved_count = min(reserved_slots, len(reserved_candidates), max_facts)
         reserved_candidates = reserved_candidates[:reserved_count]
         selected_indexes.update(index for index, _fact in reserved_candidates)
-        reserved_correction_count = sum(str(fact.get("category") or "").strip().lower() == "correction" for _index, fact in reserved_candidates)
+        reserved_correction_count = sum(_fact_category(fact) == "correction" for _index, fact in reserved_candidates)
 
     for index, _fact in ranked:
         if len(selected_indexes) >= max(0, max_facts):

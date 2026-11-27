@@ -189,6 +189,7 @@ def build_minimal_config(
     web_fetch_tool_name: str = "web_fetch",
     web_fetch_extra_config: dict | None = None,
     sandbox_use: str = "deerflow.sandbox.local:LocalSandboxProvider",
+    sandbox_env_vars: list[str] | tuple[str, ...] | None = None,
     include_bash_tool: bool = False,
     include_write_tools: bool = True,
     channel_connection_providers: list[str] | None = None,
@@ -237,6 +238,12 @@ def build_minimal_config(
     sandbox_config = deepcopy(data.get("sandbox") if isinstance(data.get("sandbox"), dict) else {})
     sandbox_config["use"] = sandbox_use
     sandbox_config.pop("allow_host_bash", None)
+    if sandbox_env_vars:
+        existing_env = sandbox_config.get("environment")
+        sandbox_env = dict(existing_env) if isinstance(existing_env, dict) else {}
+        for var_name in sandbox_env_vars:
+            sandbox_env[var_name] = f"${var_name}"
+        sandbox_config["environment"] = sandbox_env
     data["sandbox"] = sandbox_config
     if channel_connection_providers is not None:
         data["channel_connections"] = _build_channel_connections_config(channel_connection_providers)
@@ -268,6 +275,7 @@ def write_config_yaml(
     web_fetch_tool_name: str = "web_fetch",
     web_fetch_extra_config: dict | None = None,
     sandbox_use: str = "deerflow.sandbox.local:LocalSandboxProvider",
+    sandbox_env_vars: list[str] | tuple[str, ...] | None = None,
     include_bash_tool: bool = False,
     include_write_tools: bool = True,
     channel_connection_providers: list[str] | None = None,
@@ -302,6 +310,7 @@ def write_config_yaml(
         web_fetch_tool_name=web_fetch_tool_name,
         web_fetch_extra_config=web_fetch_extra_config,
         sandbox_use=sandbox_use,
+        sandbox_env_vars=sandbox_env_vars,
         include_bash_tool=include_bash_tool,
         include_write_tools=include_write_tools,
         channel_connection_providers=channel_connection_providers,

@@ -16,16 +16,33 @@ def _mock_provider(monkeypatch, provider):
     monkeypatch.setenv("VIDEO_GENERATION_PROVIDER", provider)
     monkeypatch.setenv("GEMINI_API_KEY", "offline-test-key")
     monkeypatch.setenv("MINIMAX_API_KEY", "offline-test-key")
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "offline-test-key")
     monkeypatch.setenv("MINIMAX_API_HOST", "https://api.example.test")
-    download_url = "https://filecdn.minimax.chat/video.mp4" if provider == "minimax" else "https://generativelanguage.googleapis.com/video.mp4"
-    monkeypatch.delenv("MINIMAX_VIDEO_RESOLUTION", raising=False)
-    monkeypatch.delenv("MINIMAX_VIDEO_DURATION", raising=False)
+    download_urls = {
+        "minimax": "https://filecdn.minimax.chat/video.mp4",
+        "gemini": "https://generativelanguage.googleapis.com/video.mp4",
+        "byteplus_agentplan": "https://bucket.tos-ap-southeast-1.volces.com/video.mp4",
+    }
+    download_url = download_urls[provider]
+    for env_name in (
+        "MINIMAX_VIDEO_RESOLUTION",
+        "MINIMAX_VIDEO_DURATION",
+        "BYTEPLUS_AGENTPLAN_BASE_URL",
+        "BYTEPLUS_AGENTPLAN_VIDEO_MODEL",
+        "BYTEPLUS_AGENTPLAN_VIDEO_RESOLUTION",
+        "BYTEPLUS_AGENTPLAN_VIDEO_DURATION",
+        "BYTEPLUS_AGENTPLAN_GENERATE_AUDIO",
+        "BYTEPLUS_AGENTPLAN_VIDEO_DOWNLOAD_HOSTS",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
     captured = {"posts": [], "gets": []}
 
     def fake_post(url, *, json, **kwargs):
         captured["posts"].append(json)
         if provider == "gemini":
             return FakeResp({"name": "operations/offline-test"})
+        if provider == "byteplus_agentplan":
+            return FakeResp({"id": "cgt-offline-task"})
         return FakeResp({"task_id": "offline-task", "base_resp": {"status_code": 0}})
 
     def fake_get(url, **kwargs):
@@ -36,6 +53,8 @@ def _mock_provider(monkeypatch, provider):
             return FakeResp({"status": "Success", "file_id": "offline-file", "base_resp": {"status_code": 0}})
         if url.endswith("/v1/files/retrieve"):
             return FakeResp({"file": {"download_url": download_url}, "base_resp": {"status_code": 0}})
+        if url.endswith("/contents/generations/tasks/cgt-offline-task"):
+            return FakeResp({"id": "cgt-offline-task", "status": "succeeded", "content": {"video_url": download_url}})
         assert url == download_url
         return FakeResp(content=b"offline-video-bytes")
 
@@ -44,7 +63,7 @@ def _mock_provider(monkeypatch, provider):
     return captured
 
 
-@pytest.mark.parametrize("provider", ["gemini", "minimax"])
+@pytest.mark.parametrize("provider", ["gemini", "minimax", "byteplus_agentplan"])
 @pytest.mark.parametrize(
     "images",
     [
@@ -88,6 +107,14 @@ def test_provider_preserves_reference_image_mime(monkeypatch, tmp_path, provider
             assert reference["referenceType"] == "asset"
             assert reference["image"]["mimeType"] == expected_mime
             assert base64.b64decode(reference["image"]["bytesBase64Encoded"]) == image_bytes
+    elif provider == "byteplus_agentplan":
+        references = [item for item in request["content"] if item.get("type") == "image_url"]
+        assert len(references) == len(images)
+        for reference, (_, image_bytes, expected_mime) in zip(references, images, strict=True):
+            assert reference["role"] == "reference_image"
+            prefix, encoded = reference["image_url"]["url"].split(",", 1)
+            assert prefix == f"data:{expected_mime};base64"
+            assert base64.b64decode(encoded) == image_bytes
     else:
         # MiniMax uses only the first reference, as documented by the skill.
         prefix, encoded = request["first_frame_image"].split(",", 1)
@@ -97,7 +124,7 @@ def test_provider_preserves_reference_image_mime(monkeypatch, tmp_path, provider
     assert "successfully" in result
 
 
-@pytest.mark.parametrize("provider", ["gemini", "minimax"])
+@pytest.mark.parametrize("provider", ["gemini", "minimax", "byteplus_agentplan"])
 @pytest.mark.parametrize("filename", ["reference", "reference.bmp", "reference.BMP", "reference.avif"])
 def test_unsupported_reference_extension_rejected_before_submission(monkeypatch, tmp_path, provider, filename):
     captured = _mock_provider(monkeypatch, provider)

@@ -354,6 +354,7 @@ are:
 | `qwen-cn` | Alibaba Cloud Bailian / Qwen, China | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Chat Completions / Bearer |
 | `doubao` | Volcengine Beijing, ordinary API | `https://ark.cn-beijing.volces.com/api/v3` | Chat Completions / Bearer |
 | `doubao-coding` | Volcengine Coding Plan, separate key/plan | `https://ark.cn-beijing.volces.com/api/coding/v3` | Chat Completions / Bearer |
+| `byteplus-agent-plan` | BytePlus Agent Plan (Personal & Enterprise), separate key/plan | `https://ark.ap-southeast.bytepluses.com/api/plan/v3` | Chat Completions / Bearer |
 | `moonshot-cn` | Moonshot / Kimi, China API | `https://api.moonshot.cn/v1` | Chat Completions / Bearer |
 | `zhipu-cn` | Zhipu, China ordinary API | `https://open.bigmodel.cn/api/paas/v4` | Chat Completions / Bearer |
 | `zai` | Z.AI, international ordinary API | `https://api.z.ai/api/paas/v4` | Chat Completions / Bearer |
