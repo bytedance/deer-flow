@@ -518,6 +518,56 @@ async def test_graph_applies_input_before_long_tool_finishes_and_confirms_durabl
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("execution", ["continuous", "resumed", "edit-todos", "resave-todos", "edit-title"])
+@pytest.mark.parametrize("calls", [("replace",), ("replace", "write"), ("write", "replace"), ("replace", "invalid_write")], ids=["replace-only", "replace-then-write", "write-then-replace", "failed-write"])
+async def test_replacing_work_discards_only_the_abandoned_todos(calls, execution):
+    from unittest.mock import AsyncMock
+
+    from _agent_e2e_helpers import FakeToolCallingModel
+
+    from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+
+    inputs, saver, control = await _run_controller()
+    control.agent_runs.authorize_control = AsyncMock()
+    await inputs.submit("steer", "Replace the old task.", "steer")
+    new_plan = [{"content": "Replacement task", "status": "completed"}]
+    tool_calls = {
+        "replace": {"name": "manage_current_work", "args": {"action": "replace"}, "id": "replace"},
+        "write": {"name": "write_todos", "args": {"todos": new_plan}, "id": "write"},
+        "invalid_write": {"name": "write_todos", "args": {"todos": [{}]}, "id": "invalid_write"},
+    }
+    dispatch = AIMessage(content="", tool_calls=[tool_calls[key] for key in calls])
+    model = FakeToolCallingModel(responses=[dispatch, *(AIMessage(content="OK") for _ in range(3))])
+    graph = create_agent(model, middleware=[RunInputAdmissionMiddleware(), TodoMiddleware(), RunInputMiddleware()], state_schema=ThreadState, context_schema=dict, checkpointer=saver)
+    config = {"configurable": {"thread_id": "thread"}}
+    try:
+        old_state = {"messages": [HumanMessage(content="Original task")], "todos": [{"content": "Old task", "status": "in_progress"}]}
+        expected = new_plan if "write" in calls else []
+        result = await graph.ainvoke(old_state, config, context={INPUT_CONTEXT_KEY: control}, interrupt_after=["tools"] if execution != "continuous" else None)
+        assert control.abandoned
+        if execution != "continuous":
+            paused = await graph.aget_state(config)
+            assert paused.next
+            assert any(isinstance(m, ToolMessage) and m.tool_call_id == "replace" and m.status == "success" for m in paused.values["messages"])
+            await control.close()
+            if execution in {"edit-todos", "resave-todos"}:
+                expected = old_state["todos"] if execution == "resave-todos" else [{"content": "New approved task", "status": "pending"}]
+                edited = await graph.aupdate_state(config, {"todos": expected})
+                assert (await graph.aget_state(edited)).values["todos"] == expected
+            elif execution == "edit-title":
+                await graph.aupdate_state(config, {"title": "Renamed thread"})
+            control = RunInputControl(inputs, agent_runs=control.agent_runs, thread_id="thread", checkpointer=saver)
+            result = await graph.ainvoke(None, config, context={INPUT_CONTEXT_KEY: control})
+        assert (await graph.aget_state(config)).values["todos"] == expected
+        if execution not in {"edit-todos", "resave-todos"}:
+            assert [m.content for m in result["messages"] if isinstance(m, AIMessage) and not m.tool_calls] == ["OK"]
+        if "invalid_write" in calls:
+            assert any(isinstance(m, ToolMessage) and m.tool_call_id == "invalid_write" and m.status == "error" for m in result["messages"])
+    finally:
+        await control.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("steered", [False, True])
 async def test_control_tool_cannot_cancel_without_an_authorized_direct_input(steered):
     from unittest.mock import AsyncMock

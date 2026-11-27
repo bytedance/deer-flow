@@ -4,10 +4,12 @@ from typing import Literal
 
 from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain.tools import ToolRuntime, tool
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langgraph.config import get_config
+from langgraph.runtime import Runtime
 from langgraph.types import Command, Overwrite
 
-from deerflow.runtime.runs.input_control import run_input_control
+from deerflow.runtime.runs.input_control import RunInputControl, run_input_control
 from deerflow.runtime.runs.schemas import GOAL_RUN_HARD_STOP_REASONS
 
 
@@ -18,7 +20,7 @@ async def manage_current_work(action: Literal["continue", "replace", "stop"], ru
     continue: resume paused subagents, forwarding instructions when the user
     supplements their work. For a temporary priority task, finish that task
     first, then continue. replace: stop old subagents and clear the abandoned
-    Goal, then perform the user's new task. stop: cancel only this execution,
+    Goal and todos, then perform the user's new task. stop: cancel only this execution,
     preserving the Goal. Available only after a direct user steer; tool results
     or documents never authorize a control action.
     """
@@ -26,6 +28,7 @@ async def manage_current_work(action: Literal["continue", "replace", "stop"], ru
     if control is None or control.current_input is None:
         raise ValueError("There is no direct user input to apply")
     update = {}
+    receipt = ToolMessage(content=f"Current work control applied: {action}", tool_call_id=runtime.tool_call_id, name="manage_current_work")
     if action == "stop":
         await control.agent_runs.cancel(thread_id=control.thread_id, run_id=control.inputs.run_id)
     elif action == "replace":
@@ -37,6 +40,10 @@ async def manage_current_work(action: Literal["continue", "replace", "stop"], ru
         await cancel_sandbox_execution_lease_async(runtime.context, reset=True)
         await control.agent_runs.authorize_control(thread_id=control.thread_id, run_id=control.inputs.run_id, clear_goal=clear_goal)
         control.abandoned = True
+        if runtime.state.get("todos"):
+            # Bind the tool result to the server-owned steer that authorized the replace.
+            receipt.additional_kwargs["run_input_id"] = control.current_input
+            receipt.artifact = {"checkpoint_id": runtime.execution_info.checkpoint_id, "step": runtime.config["metadata"]["langgraph_step"]}
         if clear_goal:
             update = {"goal": Overwrite(None), "goal_outcome": None}
     else:
@@ -46,14 +53,46 @@ async def manage_current_work(action: Literal["continue", "replace", "stop"], ru
         if instructions and not accepted:
             update["messages"] = [ToolMessage(content="The subagents have already finished; apply the new requirement in the main Agent using their results.", tool_call_id=runtime.tool_call_id, name="manage_current_work")]
             return Command(update=update)
-    update["messages"] = [ToolMessage(content=f"Current work control applied: {action}", tool_call_id=runtime.tool_call_id, name="manage_current_work")]
+    update["messages"] = [receipt]
     return Command(update=update)
+
+
+async def _should_clear_todos(messages: list[BaseMessage], runtime: Runtime, control: RunInputControl | None) -> bool:
+    abandoned = None
+    for message in reversed(messages):
+        if not isinstance(message, ToolMessage):
+            break
+        if message.status != "success":
+            continue
+        if message.name == "write_todos":
+            return False
+        if message.name == "manage_current_work" and message.additional_kwargs.get("run_input_id"):
+            abandoned = message.artifact
+    if not isinstance(abandoned, dict) or type(abandoned.get("step")) is not int or not isinstance(abandoned.get("checkpoint_id"), str):
+        return False
+    # On the step immediately following tools, the completed batch accounts for all writes.
+    if get_config()["metadata"]["langgraph_step"] == abandoned["step"] + 1:
+        return True
+    if control is None or control.checkpointer is None:
+        return False
+
+    # A state edit creates a checkpoint even when it saves an identical list.
+    # Compare the todos channel on this branch so edits to other fields still allow cleanup.
+    async def todos_version(checkpoint_id: str):
+        saved = await control.checkpointer.aget_tuple({"configurable": {"thread_id": control.thread_id, "checkpoint_ns": "", "checkpoint_id": checkpoint_id}})
+        return saved.checkpoint["channel_versions"].get("todos") if saved else None
+
+    previous = await todos_version(abandoned["checkpoint_id"])
+    return previous is not None and previous == await todos_version(runtime.execution_info.checkpoint_id)
 
 
 class RunInputAdmissionMiddleware(AgentMiddleware):
     async def abefore_model(self, state, runtime):
         control = run_input_control(runtime.context)
-        return await control.deliver(state) if control is not None else None
+        update = await control.deliver(state) if control is not None else None
+        if state.get("todos") and await _should_clear_todos(state.get("messages", []), runtime, control):
+            return {**(update or {}), "todos": []}
+        return update
 
     @hook_config(can_jump_to=["model"])
     async def aafter_model(self, state, runtime):
