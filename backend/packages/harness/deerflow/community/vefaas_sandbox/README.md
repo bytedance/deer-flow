@@ -1,6 +1,6 @@
 # BytePlus veFaaS Cloud Sandbox Provider (`deerflow/community/vefaas_sandbox/`)
 
-Runs each DeerFlow thread sandbox on **BytePlus Function Service (veFaaS) Cloud Sandbox** using the All-in-One Sandbox (`all-in-one-sandbox`) image.
+Runs each DeerFlow thread sandbox on **[BytePlus Function Service (veFaaS) Cloud Sandbox](https://www.byteplus.com/en/product/vefaas)** using the All-in-One Sandbox (`all-in-one-sandbox`) image (see the [veFaaS documentation](https://docs.byteplus.com/en/docs/vefaas/what-is-vefaas)).
 
 - **Control plane**: BytePlus veFaaS OpenAPI (`Version=2024-06-06`, SigV4 HMAC-SHA256) over `httpx` — no extra cloud SDK dependency required.
 - **Data plane**: Reuses DeerFlow's `AioSandbox` HTTP client via the Sandbox App's unified access domain (`X-Faas-Instance-Name: <SandboxId>`) or a `{sandbox_id}` URL template.

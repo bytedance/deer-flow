@@ -414,7 +414,7 @@ export function buildRunContext({
   const explicitEffort =
     typeof extraContext?.reasoning_effort === "string"
       ? extraContext.reasoning_effort
-      : getThreadEffortOverride(threadId, settings.reasoning_effort);
+      : getThreadEffortOverride(threadId);
   // Older Gateways read the flat values. New ones can distinguish mode
   // presets from a separate choice, even when both say "high".
   const modeDefaultFields: string[] = [];

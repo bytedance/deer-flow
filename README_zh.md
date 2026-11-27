@@ -419,6 +419,7 @@ DeerFlow 支持多种沙箱模式。
 - **本地工作区**（通过工作区文件工具访问已配置的挂载）
 - **Docker 执行**（在隔离的 Docker 容器里运行 sandbox 代码）
 - **Docker + Kubernetes 执行**（通过 provisioner 服务在 Kubernetes Pod 中运行 sandbox 代码）
+- **BytePlus veFaaS 云端沙箱**（基于 [BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas) Serverless AIO 沙箱，支持推测预热、空闲暂停/自动唤醒、线程级快照、镜像预热与可选 TOS 挂载，详见 [veFaaS Sandbox Provider](backend/packages/harness/deerflow/community/vefaas_sandbox/README.md)）
 
 Docker 开发时，服务启动行为会遵循 `config.yaml` 里的 sandbox 模式。在 Local / Docker 模式下，不会启动 `provisioner`。
 

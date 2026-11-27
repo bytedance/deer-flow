@@ -1,3 +1,4 @@
+import type { Message } from "@langchain/langgraph-sdk";
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
@@ -50,6 +51,7 @@ import { ArtifactFileList } from "@/components/workspace/artifacts/artifact-file
 import { ArtifactRequestError } from "@/core/artifacts/api";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
+import { extractPresentFilesFromMessage } from "@/core/messages/utils";
 
 const files = [
   "/mnt/user-data/outputs/report.md",
@@ -86,6 +88,83 @@ function renderList(
 afterEach(cleanup);
 afterEach(() => {
   rs.restoreAllMocks();
+});
+
+// `present_files` args are the model's output, and the same extraction runs
+// when a thread is reopened, so one bad entry must not hide the valid files.
+it("renders the valid presented files next to malformed entries", () => {
+  const presented = [
+    {
+      type: "ai",
+      content: "",
+      tool_calls: [
+        {
+          id: "present-1",
+          name: "present_files",
+          args: {
+            filepaths: [{ path: "/mnt/user-data/outputs/bad.md" }, files[0], 7],
+          },
+        },
+        { id: "present-2", name: "present_files", args: null },
+      ],
+    },
+  ] as unknown as Message[];
+
+  renderList({
+    files: presented.flatMap((message) =>
+      extractPresentFilesFromMessage(message, presented),
+    ),
+  });
+
+  expect(
+    screen.getByRole("button", { name: "report.md Markdown" }),
+  ).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /bad\.md/ })).toBeNull();
+});
+
+// The backend rejects the whole call when a path is outside the outputs
+// directory, and the card must not offer files it never presented.
+it("omits the files of a present_files call the backend rejected", () => {
+  const group = [
+    {
+      type: "ai",
+      content: "",
+      tool_calls: [
+        {
+          id: "present-rejected",
+          name: "present_files",
+          args: {
+            filepaths: [files[1], "/mnt/user-data/uploads/secret.md"],
+          },
+        },
+        {
+          id: "present-accepted",
+          name: "present_files",
+          args: { filepaths: [files[0]] },
+        },
+      ],
+    },
+    {
+      type: "tool",
+      tool_call_id: "present-rejected",
+      content:
+        "Error: Only files in /mnt/user-data/outputs can be presented: /mnt/user-data/uploads/secret.md",
+      additional_kwargs: { deerflow_tool_meta: { status: "error" } },
+    },
+    {
+      type: "tool",
+      tool_call_id: "present-accepted",
+      content: "Successfully presented files",
+    },
+  ] as unknown as Message[];
+
+  renderList({ files: extractPresentFilesFromMessage(group[0]!, group) });
+
+  expect(
+    screen.getByRole("button", { name: "report.md Markdown" }),
+  ).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /data\.csv/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /secret\.md/ })).toBeNull();
 });
 
 describe("ArtifactFileList archive download", () => {

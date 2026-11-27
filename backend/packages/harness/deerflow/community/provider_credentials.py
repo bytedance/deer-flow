@@ -39,7 +39,9 @@ ENV_TEMPLATE_PLACEHOLDERS = frozenset(
     {
         "your-anthropic-auth-token",
         "your-boxd-api-key",
+        "your-byteplus-access-key-id",
         "your-byteplus-agentplan-api-key",
+        "your-byteplus-secret-access-key",
         "your-claude-code-oauth-token",
         "your-deepseek-api-key",
         "your-dingtalk-client-id",
@@ -75,6 +77,7 @@ ENV_TEMPLATE_PLACEHOLDERS = frozenset(
         "your-tavily-api-key",
         "your-telegram-bot-token",
         "your-unbrowse-api-key",
+        "your-vefaas-sandbox-app-id",
         "your-vllm-api-key",
         "your-volcengine-api-key",
         "your-webz-api-key",
