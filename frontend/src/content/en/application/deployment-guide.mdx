@@ -101,14 +101,12 @@ The `docker-compose*.yaml` files include an `env_file: ../.env` directive that l
 
 ### Data persistence
 
-Thread data is stored in `backend/.deer-flow/threads/`. In Docker deployments, this directory is bind-mounted into the gateway container.
+Both bundled Compose stacks use `/app/backend/.deer-flow` as the Gateway's runtime directory. The host path depends on how you start the stack.
 
-To avoid data loss when containers are recreated:
+- With development Compose (`make docker-start`), the checkout's `backend/` directory is bind-mounted at `/app/backend/`, so runtime files are under `backend/.deer-flow/` on the host.
+- With production Compose (`make up`), the host directory selected by `DEER_FLOW_HOME` is bind-mounted at `/app/backend/.deer-flow`. The launcher defaults to the checkout's `backend/.deer-flow/`. To use a different location, pass an absolute, writable host path in the shell, for example `DEER_FLOW_HOME=/srv/deer-flow-data make up`.
 
-1. Set `DEER_FLOW_ROOT` to the absolute repo root path (or a stable host path).
-2. Verify the `threads/` and `skills/` directories are mounted correctly.
-
-For production, use a named volume or a Persistent Volume Claim (PVC) instead of a host bind-mount.
+Keep and back up the entire host runtime directory. It contains user-scoped thread files under `users/<user-id>/threads/` and legacy thread files under `threads/`.
 
 ## Production deployment considerations
 
