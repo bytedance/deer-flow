@@ -122,6 +122,7 @@ export type MockAgent = {
   system_prompt?: string;
   tool_groups?: string[] | null;
   skills?: string[] | null;
+  reasoning_effort?: string | null;
 };
 
 export type MockSkill = {

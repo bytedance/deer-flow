@@ -519,6 +519,8 @@ triggers a rolling restart.
 `nginx.resources`, `provisioner.resources`, `postgresql.primary.resources`,
 `redis.primary.resources`). The gateway's init containers have their own
 `gateway.initContainers.resources` and `gateway.initContainers.image`.
+Set `provisioner.sandboxResources` for each new sandbox Pod. See
+[Kubernetes sandbox Pod resources](../../../docs/guide/sandbox.md#kubernetes-sandbox-pod-resources).
 
 ### Not yet enforced (deferred hardening)
 

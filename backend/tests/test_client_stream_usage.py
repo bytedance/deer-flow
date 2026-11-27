@@ -26,8 +26,7 @@ def test_stream_accounts_native_gemini_usage(client, last_text, initial_input):
         # Only replace the SDK transport; retain the real adapter and graph.
         with (
             patch.object(model.client.models, "generate_content_stream", return_value=iter(responses)) as transport,
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", create_agent(model, tools=[])),
+            patch.object(client, "_ensure_agent", return_value=(create_agent(model, tools=[]), None)),
         ):
             events = list(client.stream("Say hello", thread_id="gemini-usage"))
         transport.assert_called_once()
@@ -81,8 +80,7 @@ def test_stream_accounts_openai_compatible_usage(client, provider):
     try:
         with (
             patch.object(model.client, "create", return_value=response_stream) as transport,
-            patch.object(client, "_ensure_agent"),
-            patch.object(client, "_agent", create_agent(model, tools=[])),
+            patch.object(client, "_ensure_agent", return_value=(create_agent(model, tools=[]), None)),
         ):
             events = list(client.stream("Say hello", thread_id=f"{provider}-usage"))
         transport.assert_called_once()
@@ -115,7 +113,7 @@ def test_stream_sums_usage_deltas_per_message(client, include_snapshots):
         items.extend([("values", {"messages": messages}), ("values", {"messages": [message.model_copy() for message in messages]})])
     agent = MagicMock()
     agent.stream.return_value = iter(items)
-    with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+    with patch.object(client, "_ensure_agent", return_value=(agent, None)):
         events = list(client.stream("hi"))
 
     assert events[-1].data["usage"] == {"input_tokens": 30, "output_tokens": 10, "total_tokens": 40}
@@ -135,7 +133,7 @@ def test_stream_reconciles_full_usage_without_double_counting(client, snapshot_m
     items.append(snapshot)
     agent = MagicMock()
     agent.stream.return_value = iter(items)
-    with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+    with patch.object(client, "_ensure_agent", return_value=(agent, None)):
         events = list(client.stream("hi"))
 
     assert events[-1].data["usage"] == full.usage_metadata
@@ -158,7 +156,7 @@ def test_resumed_stream_sums_only_current_usage_deltas(client):
 
     agent = MagicMock()
     agent.stream.side_effect = stream
-    with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+    with patch.object(client, "_ensure_agent", return_value=(agent, None)):
         events = list(client.stream("hi", thread_id="existing-thread"))
 
     assert events[-1].data["usage"] == full.usage_metadata
@@ -173,7 +171,7 @@ def test_stream_keeps_no_id_usage_deltas(client):
             ("messages", (AIMessageChunk(content="", usage_metadata={"input_tokens": 0, "output_tokens": 3, "total_tokens": 3}), {})),
         ]
     )
-    with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+    with patch.object(client, "_ensure_agent", return_value=(agent, None)):
         events = list(client.stream("hi"))
 
     assert events[-1].data["usage"] == {"input_tokens": 10, "output_tokens": 4, "total_tokens": 14}
@@ -208,7 +206,7 @@ def test_stream_snapshot_cannot_subtract_already_accounted_usage(client, snapsho
             ("messages", (other, {})),
         ]
     )
-    with patch.object(client, "_ensure_agent"), patch.object(client, "_agent", agent):
+    with patch.object(client, "_ensure_agent", return_value=(agent, None)):
         events = list(client.stream("hi"))
 
     assert events[-1].data["usage"] == {key: value + other.usage_metadata[key] for key, value in expected.items()}

@@ -14,9 +14,11 @@ from typing import Annotated, Any, cast
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.messages import ToolMessage
+from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.types import Command
-from pydantic import BaseModel, Field, StrictInt
+from pydantic import BaseModel, Field, StrictInt, create_model
 
+from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
@@ -118,6 +120,13 @@ def bind_batch_tools(
     provider = submitter_provider if submitter_provider is not None else lambda: submitter
 
     return tuple(_bind_batch_tool(tool, provider, app_config) for tool in (batch_task, batch_status, cancel_batch, read_batch_result))
+
+
+def restrict_batch_continuation(tools: list[BaseTool], *, available: bool) -> list[BaseTool]:
+    """Hide the follow-up argument from the model when authority is absent."""
+    if available:
+        return tools
+    return [_BatchTaskWithoutAdvertisedContinuation(**dict(tool)) if tool.name == batch_task.name and tool.args_schema is batch_task.args_schema else tool for tool in tools]
 
 
 def _result(tool_call_id: str, *, content: str, batch: dict[str, Any] | None = None, error: bool = False) -> Command:
@@ -229,6 +238,9 @@ async def batch_task(
             error=True,
         )
 
+    interaction_policy = resolve_run_interaction_policy({"configurable": runtime.config.get("configurable", {}) if runtime is not None else {}, "context": context})
+    config = interaction_policy.apply_to_subagent(config)
+
     parent_skills = metadata.get("available_skills")
     if parent_skills is not None:
         config = replace(config, skills=_merge_skill_allowlists(list(parent_skills), config.skills))
@@ -301,6 +313,17 @@ async def batch_task(
             + "Do not launch ordinary task calls for these items."
         ),
     )
+
+
+_BATCH_MODEL_SCHEMA = cast(type[BaseModel], batch_task.tool_call_schema)
+_BATCH_MODEL_FIELDS: dict[str, Any] = {name: (field.annotation, field) for name, field in _BATCH_MODEL_SCHEMA.model_fields.items() if name != "continuation"}
+_BATCH_MODEL_SCHEMA_WITHOUT_CONTINUATION = create_model(batch_task.name, __doc__=batch_task.description, **_BATCH_MODEL_FIELDS)
+
+
+class _BatchTaskWithoutAdvertisedContinuation(StructuredTool):
+    @property
+    def tool_call_schema(self) -> type[BaseModel]:
+        return _BATCH_MODEL_SCHEMA_WITHOUT_CONTINUATION
 
 
 @tool("batch_status", parse_docstring=True)

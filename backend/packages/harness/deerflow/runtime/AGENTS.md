@@ -55,23 +55,27 @@ make test-blocking-io
 
 ## Run events and journal
 
-- Mutate `RunJournal` only on its owning event loop. Recorder failure fails open;
-  slow recording must not delay tool state.
-- Retry a sub-agent event batch only on `RunEventStoreNotCommittedError`. Drain
-  writes before propagating cancellation. Retry only transient, definitely
-  uncommitted writes; uncertain outcomes stop history writes to avoid duplicate
-  steps. Close the SQL producer only after final flush confirms all writes.
-- Usage replay may enrich a message, never add/remove one; providers may report
-  the same model call twice.
-- Per-thread event-store mutations share an asyncio and PostgreSQL fence. It
-  serializes writers but does not distinguish old/new run incarnations.
-- JSONL is single-process and splits only on LF. Started mutations drain through
-  cancellation; save sequence watermark before deleting a run; corrupt
-  watermark fails closed.
-- In-memory store copies caller data at admission. Event reads use trusted user
-  identity, matching the owner on durable RunRecord.
-- Evidence receipts require the worker's own final acknowledgement; unknown or
-  cancelled outcomes produce no receipt.
+- **`RunJournal` is changed on its owning event loop only.** A recorder failure
+  fails open, and a slow recorder must not delay tool state.
+- **Retry a sub-agent event batch only on `RunEventStoreNotCommittedError`.**
+  Drain writes before propagating caller cancellation. Signal retry only for
+  transient failures that committed no events. An uncertain outcome stops
+  history writes to prevent duplicate steps. Close the SQL producer only when
+  the final flush confirms all writes.
+- **Usage replay may enrich a message, never add or remove one.** A provider can
+  report the end of the same model call twice.
+- **Event-store mutations of one thread share one fence** (an asyncio lock plus a
+  PostgreSQL lock). The fence serializes writers. It does not tell an old run
+  incarnation from a new one.
+- **The JSONL store is single-process.** It splits on LF only, because Unicode
+  line separators inside a field are data. A started mutation drains through
+  cancellation. The sequence watermark is saved before a run is deleted, and a
+  corrupt watermark fails closed.
+- **The in-memory store copies caller-owned content at admission.**
+- **Event reads pass the trusted user identity**, and the owner on a `RunRecord`
+  matches the durable row.
+- **An evidence receipt needs the worker's own final acknowledgement.** An
+  unknown or cancelled write outcome yields no receipt.
 
 ## Goals
 

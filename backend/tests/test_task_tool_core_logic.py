@@ -675,13 +675,17 @@ def test_bound_task_tool_sync_path_uses_the_explicit_capacity(monkeypatch):
     assert captured["executor_kwargs"]["app_config"] is app_config
 
 
-def test_task_tool_forwards_channel_user_id_to_executor(monkeypatch):
-    """The IM-channel sender identity must survive delegation: in group chats
-    one thread serves many senders, so a subagent's bash commands need the
-    dispatching turn's channel_user_id (same propagation rule as user_role /
-    oauth attribution)."""
+@pytest.mark.parametrize(
+    "parent_context",
+    [
+        {"user_id": "channel-owner", "channel_user_id": "ou_group_sender_1"},
+        {"user_id": "schedule-owner", "non_interactive": True},
+    ],
+    ids=["channel", "scheduled"],
+)
+def test_task_tool_forwards_parent_identity_to_executor(monkeypatch, parent_context):
     runtime = _make_runtime()
-    runtime.context["channel_user_id"] = "ou_group_sender_1"
+    runtime.context.update(parent_context)
     captured = {}
 
     class DummyExecutor:
@@ -713,7 +717,9 @@ def test_task_tool_forwards_channel_user_id_to_executor(monkeypatch):
 
     message = _task_tool_message(output)
     assert message.content == "Task Succeeded. Result: done"
-    assert captured["executor_kwargs"]["channel_user_id"] == "ou_group_sender_1"
+    assert captured["executor_kwargs"]["user_id"] == parent_context["user_id"]
+    assert captured["executor_kwargs"]["channel_user_id"] == parent_context.get("channel_user_id")
+    assert ("ask_clarification" in captured["executor_kwargs"]["config"].disallowed_tools) is ("non_interactive" in parent_context)
 
 
 def test_task_tool_forwards_is_internal_true_to_executor(monkeypatch):
@@ -3710,10 +3716,10 @@ def test_task_tool_completed_without_criteria_stamps_no_acceptance_verdict(monke
 
 
 def test_task_tool_acceptance_check_failure_is_isolated(monkeypatch):
-    def exploding_check(*_args, **_kwargs):
+    async def exploding_check(*_args, **_kwargs):
         raise RuntimeError("checker blew up")
 
-    monkeypatch.setattr(task_tool_module, "check_acceptance_criteria", exploding_check)
+    monkeypatch.setattr(task_tool_module, "check_acceptance_criteria_async", exploding_check)
 
     class DummyExecutor:
         def __init__(self, **kwargs):

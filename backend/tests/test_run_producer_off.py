@@ -14,6 +14,7 @@ from test_run_producer_cutover import cutover_db as cutover_db
 
 from deerflow.persistence.run.producer import activate_producer_fencing
 from deerflow.persistence.run.sql import RunRepository
+from deerflow.runtime.events.store.base import RunEventStoreNotCommittedError
 from deerflow.runtime.events.store.db import DbRunEventStore
 
 INSERT = text("INSERT INTO run_events(thread_id,run_id,user_id,event_type,category,content,event_metadata,seq,created_at) VALUES ('thread','run','alice','middleware:off','trace','','{}',:seq,clock_timestamp())")
@@ -30,6 +31,31 @@ async def off_db(cutover_db, request):
 
 def peer_engine(schema, **kwargs):
     return create_async_engine(asyncpg_test_url(os.environ["TEST_POSTGRES_URI"]), pool_size=2, max_overflow=0, connect_args={"server_settings": {"search_path": schema, "statement_timeout": "6000"}}, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_store_retries_batch_after_postgres_lock_timeout(cutover_db):
+    engine, sf, schema = cutover_db
+    thread_id = schema  # Advisory locks are shared across test schemas.
+    await RunRepository(sf).put("run", thread_id=thread_id, user_id="alice", status="running")
+    batch = [dict(thread_id=thread_id, run_id="run", user_id="alice", event_type="subagent.step", category="trace", content=step) for step in ("first", "second")]
+    peer = peer_engine(schema)
+    try:
+        async with peer.connect() as writer:
+            await writer.execute(text("SET lock_timeout = '100ms'"))
+            await writer.commit()
+            store = DbRunEventStore(async_sessionmaker(writer, expire_on_commit=False))
+            async with engine.begin() as holder:
+                await holder.execute(text("SELECT pg_advisory_xact_lock(hashtext(:thread_id)::bigint)"), {"thread_id": thread_id})
+                with pytest.raises(RunEventStoreNotCommittedError) as caught:
+                    await store.put_batch(batch)
+                assert caught.value.__cause__.orig.sqlstate == "55P03"
+            assert await store.list_events(thread_id, "run", user_id="alice") == []
+            await store.put_batch(batch)
+            saved = await store.list_events(thread_id, "run", user_id="alice")
+            assert [(row["seq"], row["content"]) for row in saved] == [(1, "first"), (2, "second")]
+    finally:
+        await peer.dispose()
 
 
 @pytest.mark.asyncio

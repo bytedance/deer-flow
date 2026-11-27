@@ -180,7 +180,7 @@ models:
 
 Choose the execution environment for agent file and command operations:
 
-<Tabs items={["Local (default)", "Docker container", "K8s Provisioner"]}>
+<Tabs items={["Local (default)", "Docker container", "BytePlus veFaaS", "K8s Provisioner"]}>
   <Tabs.Tab>
 ```yaml
 sandbox:
@@ -197,6 +197,24 @@ sandbox:
 ```
 
 Install: `agent-sandbox` is already a core dependency of `deerflow-harness`, so no extra install step is needed.
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+sandbox:
+  use: deerflow.community.vefaas_sandbox:VeFaaSSandboxProvider
+  vefaas:
+    region: ap-southeast-1
+    endpoint: https://vefaas.ap-southeast-1.byteplusapi.com
+    function_id: $BYTEPLUS_VEFAAS_SANDBOX_APP_ID
+    sandbox_base_url: $BYTEPLUS_VEFAAS_SANDBOX_BASE_URL
+    access_key_env: BYTEPLUS_ACCESS_KEY_ID
+    secret_key_env: BYTEPLUS_SECRET_ACCESS_KEY
+  replicas: 3
+  idle_timeout: 600
+```
+
+Serverless cloud sandboxes on [BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas) with optional speculative prewarm, pause/resume, snapshots, image precaching, and TOS mounts. See the [Sandbox guide](/docs/harness/sandbox) for all options.
 
   </Tabs.Tab>
   <Tabs.Tab>

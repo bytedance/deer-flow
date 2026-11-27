@@ -654,6 +654,7 @@ export interface Translations {
         }
     )[];
     pleaseWaitStreaming: string;
+    send: string;
     runInputMode: string;
     queueMode: string;
     steerMode: string;
@@ -661,6 +662,7 @@ export interface Translations {
     steerModeHelp: string;
     runInputSend: string;
     runInputTextOnly: string;
+    runInputUnsupported: string;
     runInputUnavailable: string;
     stopRun: string;
     runInputQueued: string;

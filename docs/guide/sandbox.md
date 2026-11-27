@@ -6,6 +6,7 @@ DeerFlow supports multiple sandbox execution modes:
 - **Local Workspace** (files through workspace tools and configured mounts)
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
+- **Cloud Sandboxes** (serverless remote providers including [BytePlus veFaaS](../../backend/packages/harness/deerflow/community/vefaas_sandbox/README.md), E2B, OpenSandbox, boxd, and Tenki)
 
 When a provider returns a structured exit code, Bash tool status follows that
 code, including timeout failures. Providers that return plain text, including
@@ -113,6 +114,18 @@ the thread's files and skills before it is handed out, and release copies
 generated outputs back to thread storage with the same alias and path checks.
 See its [configuration](../../backend/docs/CONFIGURATION.md#sandbox).
 
+The optional [BytePlus veFaaS Cloud Sandbox provider](../../backend/packages/harness/deerflow/community/vefaas_sandbox/README.md)
+runs each user/thread scope in a serverless [BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas)
+AIO sandbox over the veFaaS OpenAPI (`Version=2024-06-06`, SigV4) with no extra
+cloud SDK dependency. It supports per-agent skill isolation, optional
+thread-scoped TOS mounts or automatic output mirroring on release, speculative
+`sandbox.prewarm`, opt-in idle pause/resume, thread-scoped snapshots with
+retention pruning, and asynchronous image precaching. Multi-worker gateways
+sharing one veFaaS sandbox application should enable `sandbox.ownership.type: redis`.
+See the [veFaaS documentation](https://docs.byteplus.com/en/docs/vefaas/what-is-vefaas)
+and [provider README](../../backend/packages/harness/deerflow/community/vefaas_sandbox/README.md)
+for setup and snapshot retention guidance.
+
 The [sandbox benchmark](../../backend/scripts/benchmark/sandbox/README.md#opensandbox)
 also supports OpenSandbox cold acquisition, warm reuse and concurrent scopes,
 using the configured service connection and reporting unconfirmed cleanup as a
@@ -130,6 +143,34 @@ not a failure of the read tool. This keeps receipts accurate when inspecting
 saved API error responses and avoids blocking later reads when the optional
 `tool_progress` guard is enabled. Actual read failures and output truncation
 still retain their error or partial-result status.
+
+## Kubernetes sandbox Pod resources
+
+With the AIO Kubernetes provisioner, set `provisioner.sandboxResources` in
+your Helm values to size the sandbox container in each new Pod. For example,
+to raise the memory limit to 4 GiB and the ephemeral storage limit to 2 GiB:
+
+```yaml
+provisioner:
+  sandboxResources:
+    limits:
+      memory: 4Gi
+      ephemeral-storage: 2Gi
+```
+
+Each field can be overridden independently. Helm rejects unknown resource names
+in `requests` and `limits` when rendering the chart. For a standalone provisioner,
+set the corresponding environment variables on the provisioner container.
+
+| Resource | Request variable | Default request | Limit variable | Default limit |
+| --- | --- | --- | --- | --- |
+| `cpu` | `SANDBOX_CPU_REQUEST` | `100m` | `SANDBOX_CPU_LIMIT` | `1000m` |
+| `memory` | `SANDBOX_MEMORY_REQUEST` | `256Mi` | `SANDBOX_MEMORY_LIMIT` | `1Gi` |
+| `ephemeral-storage` | `SANDBOX_EPHEMERAL_STORAGE_REQUEST` | `500Mi` | `SANDBOX_EPHEMERAL_STORAGE_LIMIT` | `500Mi` |
+
+The provisioner checks at startup that each value is a nonnegative Kubernetes
+quantity and each request is at most its limit. The separate Helm value
+`provisioner.resources` sizes the provisioner container itself.
 
 ## Redis Cluster for shared sandbox ownership
 
@@ -265,6 +306,16 @@ instead of an output-verification verdict. This distinguishes an incomplete scan
 from a complete scan with no produced outputs; it does not prove that no outputs
 were produced. Outputs modified and observed in both snapshots still participate
 in that check.
+
+`OpenSandboxProvider` preserves its legacy soft cap by default. Set
+`overflow_policy: reject` to make `replicas` a process-local hard cap covering
+active sandboxes, the warm pool and in-flight create reservations. A full pool
+with no warm sandbox to evict raises `SandboxCapacityExceededError` before an
+SDK create, with a 30 second retry hint. Failed creates release their
+reservations. `burst` is E2B-only: OpenSandbox logs a warning and keeps the
+soft cap. This is not a
+multi-process quota: use it only when one Gateway process owns the provider and
+`replicas` fits the Kubernetes ResourceQuota.
 
 `E2BSandboxProvider` uses `wait` as its default overflow policy. It waits for
 `acquire_timeout`, then fails the agent turn. DeerFlow does not retry the turn

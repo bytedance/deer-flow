@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 import pytest
 
+from deerflow.runtime.events.store.base import RunEventStoreNotCommittedError
 from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 
 TAILS = {
@@ -88,7 +91,7 @@ async def test_batch_failure_restores_original_tail_bytes_before_retry(tmp_path,
             raise OSError("second group failed after writing")
 
     monkeypatch.setattr(store, "_append_records", fail_second_group)
-    with pytest.raises(OSError, match="second group failed"):
+    with pytest.raises(RunEventStoreNotCommittedError, match="second group failed"):
         await store.put_batch([_event(), _event("r2")])
 
     assert path.read_bytes() == original_bytes
@@ -100,3 +103,64 @@ async def test_batch_failure_restores_original_tail_bytes_before_retry(tmp_path,
     assert await store.list_messages("t1") == [old, *saved]
     assert saved[0]["seq"] > old["seq"]
     assert saved[1]["seq"] == saved[0]["seq"] + 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("existing_file", [True, False], ids=["stat-before-append", "stat-during-rollback"])
+async def test_batch_stat_failure_preserves_original_file(tmp_path, monkeypatch, existing_file):
+    store = JsonlRunEventStore(tmp_path)
+    path = store._run_file("t1", "r1")
+    if existing_file:
+        await store.put(**_event())
+    original = path.read_bytes() if existing_file else None
+    fail_stat = existing_file
+    stat = os.stat
+    append = store._append_records
+
+    def unavailable_stat(target, *args, **kwargs):
+        if fail_stat and target == path:
+            raise OSError("cannot stat the run file")
+        return stat(target, *args, **kwargs)
+
+    def fail_after_append(path, records):
+        nonlocal fail_stat
+        append(path, records)
+        fail_stat = True
+        raise OSError("append failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "stat", unavailable_stat)
+        # Match Python 3.14, where Path.exists() returns False for any OS error.
+        patch.setattr(Path, "exists", os.path.exists)
+        patch.setattr(store, "_append_records", fail_after_append)
+        with pytest.raises(RunEventStoreNotCommittedError, match="cannot stat" if existing_file else "append failed"):
+            await store.put_batch([_event()])
+
+    assert (path.read_bytes() if path.exists() else None) == original
+
+
+@pytest.mark.anyio
+async def test_batch_rollback_restores_run_file_shared_by_two_groups(tmp_path, monkeypatch):
+    path, old = _seed(tmp_path, TAILS["lf"])
+    original = path.read_bytes()
+    store = JsonlRunEventStore(tmp_path)
+    run_file = store._run_file
+    append = store._append_records
+
+    # Both spellings address the same file on a case-insensitive filesystem.
+    monkeypatch.setattr(store, "_run_file", lambda thread_id, run_id: run_file(thread_id, run_id.lower()))
+
+    def fail_second_group(path, records):
+        append(path, records)
+        if records[0]["run_id"] == "R1":
+            raise OSError("second append failed")
+
+    events = [_event("r1"), _event("R1")]
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_append_records", fail_second_group)
+        with pytest.raises(RunEventStoreNotCommittedError, match="second append failed"):
+            await store.put_batch(events)
+
+    assert path.read_bytes() == original
+    saved = await store.put_batch(events)
+    assert await store.list_messages("t1") == [old, *saved]

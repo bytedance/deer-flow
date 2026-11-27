@@ -28,7 +28,8 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import create_async_engine
+from alembic import command
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from support.postgres import asyncpg_test_url
 
 # Pre-import models so Base.metadata is populated before bootstrap reads it.
@@ -46,6 +47,7 @@ from deerflow.persistence.bootstrap import (
 )
 from deerflow.persistence.migrations._helpers import _normalize_default
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
+from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 
 # Mark only async tests via the decorator below; module-level pytestmark would
 # spuriously warn for the sync ``TestDecideState`` cases.
@@ -384,6 +386,56 @@ async def _drift_engine(tmp_path: Path, backend: str):
     async with engine.begin() as conn:
         await conn.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
     return engine, schema
+
+
+@asyncio_test
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+async def test_scheduled_task_delegation_upgrade_retry_and_downgrade(tmp_path, backend):
+    previous = "0062_mcp_agent_grants"
+    revision = "0063_scheduled_task_subagents"
+    engine, schema = await _drift_engine(tmp_path, backend)
+    try:
+        cfg = _get_alembic_config(engine, postgres_schema=schema or None)
+        await asyncio.to_thread(command.upgrade, cfg, previous)
+        insert = sa.text(
+            "INSERT INTO scheduled_tasks "
+            "(id, user_id, context_mode, title, prompt, schedule_type, schedule_spec, timezone, status, "
+            "overlap_policy, run_count, last_occurrence_seq, created_at, updated_at) "
+            "VALUES ('existing', 'owner', 'fresh_thread_per_run', 'Report', 'Write report', 'cron', "
+            "'{}', 'UTC', 'paused', 'enqueue', 4, 4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        async with engine.begin() as conn:
+            await conn.execute(insert)
+
+        await asyncio.to_thread(command.upgrade, cfg, revision)
+        repo = ScheduledTaskRepository(async_sessionmaker(engine, expire_on_commit=False))
+        task = await repo.get("existing", user_id="owner")
+        assert task["subagent_enabled"] is False
+        assert task["run_count"] == 4
+
+        await repo.update("existing", user_id="owner", updates={"subagent_enabled": True})
+        await asyncio.to_thread(command.stamp, cfg, previous)
+        await asyncio.to_thread(command.upgrade, cfg, revision)
+        assert (await repo.get("existing", user_id="owner"))["subagent_enabled"] is True
+
+        await asyncio.to_thread(command.downgrade, cfg, previous)
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(lambda sync: sa.inspect(sync).get_columns("scheduled_tasks"))
+            assert "subagent_enabled" not in {column["name"] for column in columns}
+            row = (await conn.execute(sa.text("SELECT title, run_count FROM scheduled_tasks WHERE id = 'existing'"))).one()
+            assert row == ("Report", 4)
+
+        await asyncio.to_thread(command.upgrade, cfg, revision)
+        task = await repo.get("existing", user_id="owner")
+        assert task["subagent_enabled"] is False
+        assert task["run_count"] == 4
+    finally:
+        try:
+            if schema:
+                async with engine.begin() as conn:
+                    await conn.execute(sa.text(f'DROP SCHEMA "{schema}" CASCADE'))
+        finally:
+            await engine.dispose()
 
 
 def _seed_at_revision(revision: str, *, drop_version_row: bool):

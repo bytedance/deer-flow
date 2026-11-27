@@ -791,3 +791,48 @@ async def test_execution_cleanup_revokes_prewarm_admission(setup):
     await release_sandbox_execution_lease_async(rt.context)
 
     assert not sandbox_prewarm_cleanup_registered(rt.context)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "provider_use",
+    [
+        "deerflow.community.vefaas_sandbox:VeFaaSSandboxProvider",
+        "deerflow.community.vefaas_sandbox.provider:VeFaaSSandboxProvider",
+    ],
+)
+async def test_vefaas_provider_is_admitted_for_prewarm_and_claimed_once(setup, provider_use):
+    provider, config = setup
+    config.sandbox.use = provider_use
+    rt = runtime()
+    handle = start(rt)
+    assert await handle.task == "alice/thread"
+
+    client = await ensure_sandbox_initialized_async(rt)
+    assert client.id == "alice/thread"
+    assert handle.claimed
+    assert provider.calls == [("alice", "thread")]
+
+    await release_sandbox_execution_lease_async(rt.context)
+    assert provider.released == ["alice/thread"]
+    assert not prewarm._permits
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "provider_use",
+    [
+        "deerflow.sandbox.local:LocalSandboxProvider",
+        "deerflow.community.e2b_sandbox:E2BSandboxProvider",
+        None,
+    ],
+)
+async def test_non_opted_in_providers_skip_prewarm(setup, provider_use):
+    provider, config = setup
+    config.sandbox.use = provider_use
+    rt = runtime()
+    handle = start(rt)
+    assert await handle.task is None
+    assert provider.calls == []
+    await release_sandbox_execution_lease_async(rt.context)
+    assert not prewarm._permits
