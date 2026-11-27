@@ -655,12 +655,38 @@ def _clean_human_message_for_regenerate(message: Any) -> dict[str, Any]:
     return clean_message
 
 
+def _still_mentioned(label: str, text: str) -> bool:
+    return bool(label) and re.search(rf"@{re.escape(label)}(?![\w-])", text) is not None
+
+
+def _edited_mention_metadata(source_kwargs: dict[str, Any], replacement_text: str) -> dict[str, Any]:
+    """Keep the @ selections whose "@label" text survived the edit.
+
+    The composer sends each @ selection as metadata and replaces its token
+    with readable "@label" text, which is what the edit box shows. Deleting
+    that text is how a user drops the selection.
+    """
+    kept: dict[str, Any] = {}
+    skills = source_kwargs.get("skill_references")
+    if isinstance(skills, list):
+        names = [name for name in skills if isinstance(name, str) and _still_mentioned(name, replacement_text)]
+        if names:
+            kept["skill_references"] = names
+    mentions = source_kwargs.get("extension_mentions")
+    if isinstance(mentions, list):
+        items = [deepcopy(item) for item in mentions if isinstance(item, Mapping) and isinstance(item.get("label"), str) and _still_mentioned(item["label"], replacement_text)]
+        if items:
+            kept["extension_mentions"] = items
+    return kept
+
+
 def _clean_human_message_for_edit(message: Any, *, replacement_id: str, replacement_text: str) -> dict[str, Any]:
     source_kwargs = _message_additional_kwargs(message)
     additional_kwargs: dict[str, Any] = {}
     for key in ("files", "referenced_message_contexts"):
         if key in source_kwargs:
             additional_kwargs[key] = deepcopy(source_kwargs[key])
+    additional_kwargs.update(_edited_mention_metadata(source_kwargs, replacement_text))
 
     clean_message: dict[str, Any] = {
         "type": "human",

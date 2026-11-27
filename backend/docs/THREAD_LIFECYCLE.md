@@ -37,6 +37,12 @@ An edit replay that pauses for tool approval stays the current attempt: the edit
 remains in thread state and replaces the source turn in history. Only a failed,
 timed-out or cancelled attempt restores the pre-edit checkpoint; once the pause is
 answered, the resume run is an ordinary run and its failure keeps the edit.
+The edited message copies its uploaded files and quoted-message context from the
+source message. Its @ selections, `skill_references` and `extension_mentions`, are
+copied only while their "@label" text is still in the replacement text: the
+composer sends each selection as metadata and shows it as that text, so the edit
+box shows the selection as text and deleting the text drops it. Other metadata is
+not copied.
 
 A branch reserves the child thread and creates its ownership record before
 writing its replay base and head. The gateway checks the child reservation
