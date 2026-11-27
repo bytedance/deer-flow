@@ -594,8 +594,9 @@ was actually exercised.
 
 ### Start a coordination task in Feishu
 
-After binding a Feishu bot in a private chat, send
-`/task start <objective>`. For example, `/task start Write a short release
+On a deployment with coordination and the notification outbox available, bind
+a Feishu bot in a private chat and send `/task start <objective>`. For example,
+`/task start Write a short release
 summary and save it as a Markdown file`. DeerFlow replies with a Task ID.
 The Coordinator dispatches the work in the background, so you can keep
 chatting with the bot while it runs. Keep the Task ID to look up the task

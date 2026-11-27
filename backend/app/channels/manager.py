@@ -30,7 +30,7 @@ from langgraph_sdk.errors import APIStatusError, ConflictError
 from app.channels import buzz_run_policy as _buzz_run_policy  # noqa: F401
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.capabilities import CHANNEL_CAPABILITIES
-from app.channels.commands import FEISHU_TASK_COMMAND, KNOWN_CHANNEL_COMMANDS
+from app.channels.commands import FEISHU_TASK_START_SUBCOMMAND, KNOWN_CHANNEL_COMMANDS, is_feishu_task_command
 from app.channels.connection_identity import fallback_store_channel, lookup_thread_id
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
 from app.channels.goal_status import goal_reply_text, goal_status_text, is_active_goal_state
@@ -1766,6 +1766,7 @@ class ChannelManager:
         # Adapters claim the same key through the bus before platform side
         # effects a duplicate must not repeat (Discord thread creation).
         self.bus.set_inbound_claim(self._claim_inbound, self._release_inbound_claim)
+        self.bus.coordination_tasks_enabled = dispatch_coordination_task is not None
         # Per-thread follow-up buffers for busy fire_and_forget channels that
         # opted into ChannelRunPolicy.buffer_followups_on_busy (issue #4121
         # Slice 2). Keyed by thread_id -> OrderedDict[dedupe_key -> entry],
@@ -3878,7 +3879,7 @@ class ChannelManager:
             reply = await self._handle_goal_command(msg, parts[1] if len(parts) > 1 else "")
             if reply is None:
                 return
-        elif reply is None and command == FEISHU_TASK_COMMAND[1:] and msg.channel_name == "feishu":
+        elif reply is None and msg.channel_name == "feishu" and self._dispatch_coordination_task is not None and is_feishu_task_command(text):
             reply = await self._handle_task_command(msg, parts[1] if len(parts) > 1 else "")
         elif reply is None and command == "help":
             reply = (
@@ -3937,7 +3938,7 @@ class ChannelManager:
         if self._dispatch_coordination_task is None:
             return "Tasks are unavailable on this DeerFlow deployment."
         parts = args.split(maxsplit=1)
-        if len(parts) != 2 or parts[0].lower() != "start" or not 0 < len(parts[1]) <= 16384:
+        if len(parts) != 2 or parts[0].lower() != FEISHU_TASK_START_SUBCOMMAND or not 0 < len(parts[1]) <= 16384:
             return "Usage: /task start <objective> (up to 16,384 characters)"
         request_id = self._run_idempotency_key(msg)
         if request_id is None:

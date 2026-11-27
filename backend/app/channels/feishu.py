@@ -19,7 +19,7 @@ from pathlib import PurePosixPath
 from typing import Any, Literal, TypeVar
 
 from app.channels.base import Channel, ChannelStopTimeout, ChannelUnavailable, abort_connection_transport, shutdown_private_loop
-from app.channels.commands import FEISHU_TASK_COMMAND, is_known_channel_command, strip_leading_mentions
+from app.channels.commands import is_feishu_task_command, is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity, fallback_store_channel, lookup_thread_id
 from app.channels.feishu_card_interaction import (
     ClarificationCardRequest,
@@ -303,8 +303,8 @@ def _split_card_text(text: str) -> list[str]:
     return cards
 
 
-def _is_feishu_command(text: str) -> bool:
-    return is_known_channel_command(text) or (text.startswith("/") and text.split(maxsplit=1)[0].lower() == FEISHU_TASK_COMMAND)
+def _is_feishu_command(text: str, *, coordination_tasks_enabled: bool = False) -> bool:
+    return is_known_channel_command(text) or (coordination_tasks_enabled and is_feishu_task_command(text))
 
 
 def _append_post_file_placeholders(text: str, count: int) -> str:
@@ -2364,7 +2364,7 @@ class FeishuChannel(Channel):
             # @mentions intact for the agent; the stripped form also flows into the
             # inbound so ChannelManager._handle_command parses the bare command.
             command_text = strip_leading_mentions(text)
-            if _is_feishu_command(command_text):
+            if _is_feishu_command(command_text, coordination_tasks_enabled=getattr(self.bus, "coordination_tasks_enabled", False) is True):
                 parsed.msg_type = InboundMessageType.COMMAND
                 parsed.text = command_text
             elif parsed.post_file_count:
