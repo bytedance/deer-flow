@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 _NESTDADDY_SEARCH_ENDPOINT = "https://nestdaddy.com/api/v1/search"
 # The API caps a single call at 50 results.
 _NESTDADDY_MAX_RESULTS = 50
+_NESTDADDY_MIN_QUERY_CHARS = 2
 _NESTDADDY_MAX_QUERY_CHARS = 500
 _NESTDADDY_TIMEOUT = 30
 _api_key_warned: set[str] = set()
@@ -111,11 +112,18 @@ def web_search_tool(query: str, max_results: int | None = None) -> str:
         max_results = config_extra.get("max_results")
     max_results = min(coerce_max_results(max_results, provider="NestDaddy", logger=logger), _NESTDADDY_MAX_RESULTS)
 
+    normalized_query = query.strip()[:_NESTDADDY_MAX_QUERY_CHARS]
+    if len(normalized_query) < _NESTDADDY_MIN_QUERY_CHARS:
+        return json.dumps(
+            {"error": f"Query must contain at least {_NESTDADDY_MIN_QUERY_CHARS} characters after trimming whitespace", "query": query},
+            ensure_ascii=False,
+        )
+
     api_key = _get_api_key("web_search")
     if not api_key:
         return json.dumps({"error": _missing_key_message("web_search"), "query": query}, ensure_ascii=False)
 
-    data, error = _nestdaddy_search(query.strip()[:_NESTDADDY_MAX_QUERY_CHARS], max_results, api_key)
+    data, error = _nestdaddy_search(normalized_query, max_results, api_key)
     if error is not None:
         return json.dumps({"error": error, "query": query}, ensure_ascii=False)
 

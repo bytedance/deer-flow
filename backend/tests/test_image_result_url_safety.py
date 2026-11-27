@@ -90,7 +90,7 @@ def _stub_tencent_wsa(module, url):
 
 def _stub_nestdaddy(module, url):
     data = {"success": True, "results": [{"title": "t", "url": url, "snippet": "c"}]}
-    return [patch.object(module, "_get_api_key", return_value="k"), patch.object(module, "_nestdaddy_search", return_value=(data, None))], _sync(module.web_search_tool)
+    return [patch.object(module, "_get_api_key", return_value="k"), patch.object(module, "_nestdaddy_search", return_value=(data, None))], lambda: module.web_search_tool.invoke({"query": "url safety"})
 
 
 def _stub_specstream(module, url):

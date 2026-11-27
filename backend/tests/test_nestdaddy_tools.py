@@ -118,7 +118,7 @@ class TestWebSearchTool:
 
         ctx, client = _patch_client(_make_response(_body([_result(i) for i in range(8)])))
         with ctx:
-            output = json.loads(web_search_tool.invoke({"query": "q"}))
+            output = json.loads(web_search_tool.invoke({"query": "ai agents"}))
         assert client.get.call_args.kwargs["params"]["limit"] == 5
         assert output["total_results"] == 5
 
@@ -127,7 +127,7 @@ class TestWebSearchTool:
 
         ctx, client = _patch_client(_make_response(_body([_result(1)])))
         with ctx:
-            web_search_tool.invoke({"query": "q", "max_results": 500})
+            web_search_tool.invoke({"query": "ai agents", "max_results": 500})
         assert client.get.call_args.kwargs["params"]["limit"] <= 50
 
     def test_truncates_long_query(self, mock_config_with_key):
@@ -138,14 +138,33 @@ class TestWebSearchTool:
             web_search_tool.invoke({"query": "x" * 900})
         assert len(client.get.call_args.kwargs["params"]["q"]) == 500
 
+    @pytest.mark.parametrize("query", ["", "   ", "a", " \u5b57 "])
+    def test_short_query_is_rejected_without_http_call(self, mock_config_with_key, query):
+        from deerflow.community.nestdaddy.tools import web_search_tool
+
+        ctx, client = _patch_client(_make_response(_body([_result(1)])))
+        with ctx:
+            output = json.loads(web_search_tool.invoke({"query": query}))
+        client.get.assert_not_called()
+        assert output == {"error": "Query must contain at least 2 characters after trimming whitespace", "query": query}
+
+    def test_two_character_query_is_sent_trimmed(self, mock_config_with_key):
+        from deerflow.community.nestdaddy.tools import web_search_tool
+
+        ctx, client = _patch_client(_make_response(_body([_result(1)])))
+        with ctx:
+            output = json.loads(web_search_tool.invoke({"query": " \u5b57\u8282 "}))
+        assert client.get.call_args.kwargs["params"]["q"] == "\u5b57\u8282"
+        assert output["total_results"] == 1
+
     def test_normalizes_results(self, mock_config_with_key):
         from deerflow.community.nestdaddy.tools import web_search_tool
 
         news = {"title": "News", "url": "https://news.example.com/a", "description": "From description", "published_timestamp": "2026-11-26T13:00:00+08:00"}
         ctx, _ = _patch_client(_make_response(_body([_result(1, published_date=""), news])))
         with ctx:
-            output = json.loads(web_search_tool.invoke({"query": "q"}))
-        assert output["query"] == "q"
+            output = json.loads(web_search_tool.invoke({"query": "ai agents"}))
+        assert output["query"] == "ai agents"
         assert output["total_results"] == 2
         assert output["results"][0] == {"title": "Result 1", "url": "https://example.com/1", "snippet": "Snippet 1"}
         assert output["results"][1]["snippet"] == "From description"
@@ -156,7 +175,7 @@ class TestWebSearchTool:
 
         ctx, _ = _patch_client(_make_response(_body([_result(1, url="http://127.0.0.1/admin")])))
         with ctx:
-            output = json.loads(web_search_tool.invoke({"query": "q"}))
+            output = json.loads(web_search_tool.invoke({"query": "ai agents"}))
         assert output["results"][0]["url"] != "http://127.0.0.1/admin"
 
     @pytest.mark.parametrize("results", [[], None])
@@ -165,7 +184,7 @@ class TestWebSearchTool:
 
         ctx, _ = _patch_client(_make_response(_body(results)))
         with ctx:
-            output = json.loads(web_search_tool.invoke({"query": "q"}))
+            output = json.loads(web_search_tool.invoke({"query": "ai agents"}))
         assert output["error"] == "No results found"
 
     @pytest.mark.parametrize("results", ["oops", {"a": 1}, ["x", 1]])
@@ -174,7 +193,7 @@ class TestWebSearchTool:
 
         ctx, _ = _patch_client(_make_response(_body(results)))
         with ctx:
-            output = json.loads(web_search_tool.invoke({"query": "q"}))
+            output = json.loads(web_search_tool.invoke({"query": "ai agents"}))
         assert output["error"] == "NestDaddy returned an unexpected response format"
 
     def test_non_object_body_reports_format_error(self, mock_config_with_key):
@@ -182,7 +201,7 @@ class TestWebSearchTool:
 
         ctx, _ = _patch_client(_make_response(["not", "an", "object"]))
         with ctx:
-            output = json.loads(web_search_tool.invoke({"query": "q"}))
+            output = json.loads(web_search_tool.invoke({"query": "ai agents"}))
         assert output["error"] == "NestDaddy returned an unexpected response format"
 
     def test_success_false_reports_stable_error_without_upstream_detail(self, mock_config_with_key, caplog):
@@ -190,7 +209,7 @@ class TestWebSearchTool:
 
         ctx, _ = _patch_client(_make_response({"success": False, "error": "secret-detail-from-upstream"}))
         with ctx, caplog.at_level(logging.ERROR):
-            output = json.loads(web_search_tool.invoke({"query": "q"}))
+            output = json.loads(web_search_tool.invoke({"query": "ai agents"}))
         assert output["error"] == "NestDaddy API error: the request was not successful"
         assert "secret-detail-from-upstream" not in caplog.text
 
@@ -203,7 +222,7 @@ class TestWebSearchTool:
         failing.raise_for_status.side_effect = httpx.HTTPStatusError("503", request=request, response=response)
         ctx, _ = _patch_client(failing)
         with ctx, caplog.at_level(logging.ERROR):
-            output = json.loads(web_search_tool.invoke({"query": "q"}))
+            output = json.loads(web_search_tool.invoke({"query": "ai agents"}))
         assert output["error"] == "NestDaddy API error: HTTP 503"
         assert "HTTP 503" in caplog.text
         assert "upstream body" not in caplog.text
@@ -213,7 +232,7 @@ class TestWebSearchTool:
 
         ctx, _ = _patch_client(side_effect=httpx.ConnectError("connect to 10.0.0.5 failed: private detail"))
         with ctx, caplog.at_level(logging.ERROR):
-            output = json.loads(web_search_tool.invoke({"query": "q"}))
+            output = json.loads(web_search_tool.invoke({"query": "ai agents"}))
         assert output["error"] == "NestDaddy request failed: ConnectError"
-        assert output["query"] == "q"
+        assert output["query"] == "ai agents"
         assert "private detail" not in caplog.text
