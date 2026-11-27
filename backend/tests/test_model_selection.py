@@ -254,6 +254,61 @@ def test_generic_use_suffix_wrapper_keeps_literal_determiner_name_in_collisions(
     assert text[chosen["task_offset"] :] == "summarize this report"
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        'Use "claude-sonnet" to summarize this report',
+        "Use `claude-sonnet` to summarize this report",
+        "Use 'claude-sonnet' to summarize this report",
+        "Use “claude-sonnet” to summarize this report",
+        "Use ‘claude-sonnet’ to summarize this report",
+        'Use " claude-sonnet " to summarize this report',
+        'Use the "claude-sonnet" model to summarize this report',
+        "Use the `claude-sonnet` model to summarize this report",
+        'Use "claude-sonnet" model to summarize this report',
+        'Use "the claude-sonnet model" to summarize this report',
+    ],
+)
+def test_generic_use_accepts_quoted_and_backticked_exact_names(text):
+    claude = model("claude-sonnet", "Claude Sonnet")
+    initial = resolve_model_control(text, [claude])
+    assert initial["status"] == "ambiguous"
+    assert initial["scope"] is None
+    assert initial["candidates"] == [{"name": "claude-sonnet", "label": "Claude Sonnet"}]
+    chosen = resolve_model_control(text, [claude], scope="turn")
+    assert chosen["status"] == "resolved"
+    assert chosen["model_name"] == "claude-sonnet"
+    assert text[chosen["task_offset"] :] == "summarize this report"
+
+
+def test_generic_use_keeps_quoted_names_inside_determiner_and_literal_collisions():
+    research = model("host-config", "Research Model")
+    assert resolve_model_control('Use the "Research Model" to summarize this report', [research], scope="turn")["model_name"] == "host-config"
+
+    literal_and_plain = [model('"claude-sonnet"', "Quoted Claude"), model("claude-sonnet", "Claude Sonnet")]
+    collision = resolve_model_control('Use "claude-sonnet" to summarize this report', literal_and_plain, scope="turn")
+    assert collision["status"] == "ambiguous"
+    assert {candidate["name"] for candidate in collision["candidates"]} == {'"claude-sonnet"', "claude-sonnet"}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'Use "a regression model" to analyze these sales figures',
+        "Use `data model` to design the database schema",
+        'Use "claude" to summarize this report',
+        'Use "claude-sonnet" and "gpt-4" to compare results',
+        'Use "claude-sonnet to summarize this report',
+        'Use ""claude-sonnet"" to summarize this report',
+        'Use "" to summarize this report',
+        'Use "   " to summarize this report',
+    ],
+)
+def test_generic_use_rejects_unmatched_or_unbalanced_quoted_phrases(text):
+    catalog = [model("claude-sonnet", "Claude Sonnet"), model("data-chat", "Data Chat")]
+    assert resolve_model_control(text, catalog)["status"] == "none"
+
+
 def test_generic_use_allows_case_and_whitespace_but_not_version_or_token_prefixes():
     configured = model("host-config", "Research 4.10", ["Research 4.1"])
     result = resolve_model_control("  USE THE Research   4.1 MODEL TO summarize this report", [configured], scope="turn")
@@ -441,6 +496,24 @@ def test_generic_model_control_waits_for_scope_and_then_resolves(resolve_client)
     initial = resolve_client.post("/api/models/resolve", json={"text": text}).json()
     assert initial["status"] == "ambiguous"
     assert initial["scope"] is None
+    chosen = resolve_client.post("/api/models/resolve", json={"text": text, "scope": "turn"}).json()
+    assert chosen["status"] == "resolved"
+    assert chosen["model_name"] == "legacy"
+    assert text[chosen["task_offset"] :] == "summarize this report"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'Use "legacy" to summarize this report',
+        "Use `legacy` to summarize this report",
+    ],
+)
+def test_generic_model_control_accepts_quoted_names_through_gateway(resolve_client, text):
+    initial = resolve_client.post("/api/models/resolve", json={"text": text}).json()
+    assert initial["status"] == "ambiguous"
+    assert initial["scope"] is None
+    assert initial["candidates"] == [{"name": "legacy", "label": "legacy"}]
     chosen = resolve_client.post("/api/models/resolve", json={"text": text, "scope": "turn"}).json()
     assert chosen["status"] == "resolved"
     assert chosen["model_name"] == "legacy"

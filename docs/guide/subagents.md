@@ -109,7 +109,7 @@ Web chats accept direct model choices such as “ask MODEL to handle this”, �
 
 The broader English “use … to …” form requires a complete configured name,
 display name, provider model ID or alias (ignoring case and repeated whitespace),
-optionally wrapped as “the NAME model” or “my NAME model”. Otherwise the full
+optionally quoted or wrapped as “the NAME model” or “my NAME model”. Otherwise the full
 message remains task text: “use a regression model to analyze sales” does not
 open the model picker or remove the requested method. This form does not infer
 brands or partial names; use a configured alias or an explicit scoped control

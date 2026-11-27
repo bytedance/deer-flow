@@ -33,8 +33,7 @@ transport, so they check the payload that DeerFlow sends.
   are built. An explicit user model choice is authorized as given and is not
   replaced by the default when it is denied.
 - **Broad English `use ... to ...` requires a complete catalog spelling**
-  (case/whitespace-normalized, optional wrappers); unmatched phrases stay task
-  text, while explicit `scope`/`model_name` answers stay controls.
+  (case/whitespace, quotes, or wrappers); unmatched text stays task text.
 - **A missing provider module raises an install hint**, not a bare import error.
 
 ## Request admission and retries
