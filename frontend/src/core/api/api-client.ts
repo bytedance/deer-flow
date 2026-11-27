@@ -18,27 +18,32 @@ import { isStateChangingMethod, readCsrfCookie } from "./fetcher";
 import { forceChatRunStreamOptions } from "./stream-mode";
 
 /**
- * SDK ``onRequest`` hook that mints the ``X-CSRF-Token`` header from the
- * live ``csrf_token`` cookie just before each outbound fetch.
+ * SDK ``onRequest`` hook that sends the Gateway session with every LangGraph
+ * request, the way ``fetcher.ts:fetch`` does for the REST endpoints.
  *
- * Reading the cookie per-request (rather than baking it into the SDK's
- * ``defaultHeaders`` at construction) handles login / logout / password
- * change cookie rotation transparently. Both the ``/api/langgraph/*`` SDK
- * path and the direct REST endpoints in ``fetcher.ts:fetchWithAuth``
- * share :func:`readCsrfCookie` and :const:`STATE_CHANGING_METHODS` so
- * the contract stays in lockstep.
+ * - ``credentials: "include"``: the SDK leaves fetch at the browser default
+ *   (``same-origin``). A directly configured Gateway URL such as
+ *   ``http://localhost:8001/api`` is a different origin from the frontend, so
+ *   without this the session cookie stays behind and every chat request 401s.
+ * - ``X-CSRF-Token``: minted from the live ``csrf_token`` cookie for
+ *   state-changing methods. Reading the cookie per request (rather than
+ *   baking it into the SDK's ``defaultHeaders`` at construction) handles
+ *   login / logout / password change cookie rotation transparently. The SDK
+ *   path and ``fetcher.ts`` share :func:`readCsrfCookie` and
+ *   :const:`STATE_CHANGING_METHODS` so the contract stays in lockstep.
  */
-function injectCsrfHeader(_url: URL, init: RequestInit): RequestInit {
+function withGatewaySession(_url: URL, init: RequestInit): RequestInit {
+  const prepared: RequestInit = { ...init, credentials: "include" };
   if (!isStateChangingMethod(init.method ?? "GET")) {
-    return init;
+    return prepared;
   }
   const token = readCsrfCookie();
-  if (!token) return init;
+  if (!token) return prepared;
   const headers = new Headers(init.headers);
   if (!headers.has("X-CSRF-Token")) {
     headers.set("X-CSRF-Token", token);
   }
-  return { ...init, headers };
+  return { ...prepared, headers };
 }
 
 // Run statuses that have reached a terminal state where no further streaming
@@ -475,13 +480,15 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
   const apiUrl = getLangGraphBaseURL(isMock);
   const client = new LangGraphClient({
     apiUrl,
-    onRequest: injectCsrfHeader,
+    onRequest: withGatewaySession,
   });
 
   // Creating a run is not idempotent. Retrying an ambiguous gateway failure
   // can create the same run more than once after the backend accepted the
   // original request. The SDK also uses this client's transport for recovery
   // GETs, which must retain normal HTTP retries (including transient 5xx).
+  // Those GETs arrive already prepared by ``withGatewaySession`` below, so the
+  // recovery client needs no hook of its own.
   const streamRecoveryClient = new StreamRecoveryClient({ apiUrl });
   const runCreationClient = new RunsClient({
     apiUrl,
@@ -492,7 +499,7 @@ function createCompatibleClient(isMock?: boolean): LangGraphClient {
           ? streamRecoveryClient.fetchWithRetries(...args)
           : fetch(...args),
     },
-    onRequest: injectCsrfHeader,
+    onRequest: withGatewaySession,
   });
   const originalRunStream = runCreationClient.stream.bind(runCreationClient);
   const originalJoinStream = client.runs.joinStream.bind(client.runs);
