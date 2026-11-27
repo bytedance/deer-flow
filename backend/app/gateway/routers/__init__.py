@@ -12,6 +12,7 @@ from . import (
     thread_runs,
     threads,
     uploads,
+    voice_input,
 )
 
 __all__ = [
@@ -19,6 +20,7 @@ __all__ = [
     "assistants_compat",
     "browser",
     "input_polish",
+    "voice_input",
     "mcp",
     "models",
     "scheduled_tasks",

@@ -103,6 +103,144 @@ def test_provisioner_threads_shell_capacity_into_sandbox_pod(
     assert env["MAX_SHELL_SESSIONS"] == "13"
 
 
+def test_sandbox_pod_default_resources(provisioner_module):
+    resources = provisioner_module._build_pod("sandbox-1", "thread-1").spec.containers[0].resources
+    assert resources.requests == {"cpu": "100m", "memory": "256Mi", "ephemeral-storage": "500Mi"}
+    assert resources.limits == {"cpu": "1000m", "memory": "1Gi", "ephemeral-storage": "500Mi"}
+
+
+def test_sandbox_pod_resource_overrides(monkeypatch, request):
+    monkeypatch.setenv("SANDBOX_CPU_REQUEST", "500m")
+    monkeypatch.setenv("SANDBOX_CPU_LIMIT", ".5")
+    monkeypatch.setenv("SANDBOX_MEMORY_REQUEST", "1024Mi")
+    monkeypatch.setenv("SANDBOX_EPHEMERAL_STORAGE_REQUEST", "1e9")
+    monkeypatch.setenv("SANDBOX_EPHEMERAL_STORAGE_LIMIT", "1Gi")
+    module = request.getfixturevalue("provisioner_module")
+    resources = module._build_pod("sandbox-1", "thread-1").spec.containers[0].resources
+    assert resources.requests == {"cpu": "500m", "memory": "1024Mi", "ephemeral-storage": "1e9"}
+    assert resources.limits == {"cpu": ".5", "memory": "1Gi", "ephemeral-storage": "1Gi"}
+
+
+@pytest.mark.parametrize(
+    "variable,value",
+    [
+        ("SANDBOX_CPU_REQUEST", "1001m"),
+        ("SANDBOX_MEMORY_LIMIT", "250M"),
+        ("SANDBOX_EPHEMERAL_STORAGE_REQUEST", "501Mi"),
+        ("SANDBOX_CPU_LIMIT", "NaN"),
+        ("SANDBOX_MEMORY_LIMIT", "1e3Mi"),
+        ("SANDBOX_MEMORY_REQUEST", "-1"),
+        ("SANDBOX_EPHEMERAL_STORAGE_LIMIT", ""),
+    ],
+)
+def test_invalid_sandbox_resources_fail_at_startup(monkeypatch, request, variable, value):
+    monkeypatch.setenv(variable, value)
+    with pytest.raises(RuntimeError, match=variable):
+        request.getfixturevalue("provisioner_module")
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["DISABLE JUPYTER", "1DISABLE", "DISABLE-YUP", "D" * 65, "DISABLE_JUPYTER\n"],
+)
+def test_provisioner_rejects_malformed_environment_keys(provisioner_module, name: str) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-env", environment={name: "true"})
+
+
+def test_provisioner_rejects_unusable_environment_entries(provisioner_module) -> None:
+    from pydantic import ValidationError
+
+    requests = [
+        {f"KEY_{index}": "true" for index in range(33)},
+        {"DISABLE_VNC": "x" * 1025},
+        {"DISABLE_VNC": "true\x00"},
+    ]
+    for environment in requests:
+        with pytest.raises(ValidationError):
+            provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-env", environment=environment)
+
+
+@pytest.mark.parametrize(
+    ("written", "expected"),
+    [
+        ("example$$suffix", "example$$$$suffix"),
+        ("$(POD_NAME)", "$$(POD_NAME)"),
+        ("plain", "plain"),
+    ],
+)
+def test_provisioner_keeps_pod_environment_values_literal(monkeypatch, provisioner_module, written, expected) -> None:
+    """Kubelet expands $(NAME) and collapses $$, so every value is escaped before it is written."""
+    core = _RecordingCoreV1(event_loop_thread_id=-1, ready_after_service_reads={"sandbox-escape": 1})
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+
+    provisioner_module.create_sandbox(
+        provisioner_module.CreateSandboxRequest(
+            sandbox_id="sandbox-escape",
+            thread_id="thread-1",
+            environment={"DISABLE_VNC": written},
+        )
+    )
+
+    pod = core.created_pod_specs["sandbox-escape"]
+    env = {item.name: item.value for item in (pod.spec.containers[0].env or [])}
+    assert env["DISABLE_VNC"] == expected
+
+
+def test_provisioner_threads_operator_environment_into_sandbox_pod(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(
+        event_loop_thread_id=-1,
+        ready_after_service_reads={"sandbox-env": 1},
+    )
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    response = provisioner_module.create_sandbox(
+        provisioner_module.CreateSandboxRequest(
+            sandbox_id="sandbox-env",
+            thread_id="thread-1",
+            environment={"DISABLE_JUPYTER": "true", "DISABLE_CODE_SERVER": "true"},
+        )
+    )
+
+    assert response.status == "Running"
+    pod = fake_core_v1.created_pod_specs["sandbox-env"]
+    env = {item.name: item.value for item in (pod.spec.containers[0].env or [])}
+    assert env["DISABLE_JUPYTER"] == "true"
+    assert env["DISABLE_CODE_SERVER"] == "true"
+
+
+def test_provisioner_keeps_its_own_environment_keys(monkeypatch, provisioner_module) -> None:
+    core = _RecordingCoreV1(event_loop_thread_id=-1, ready_after_service_reads={"sandbox-owned": 1})
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    reserved = {
+        "AIO_BASH_MAX_SESSIONS": "9999",
+        "MAX_SHELL_SESSIONS": "13",
+        "DEERFLOW_LARK_BROKER_URL": "http://spoofed",
+    }
+
+    provisioner_module.create_sandbox(
+        provisioner_module.CreateSandboxRequest(
+            sandbox_id="sandbox-owned",
+            thread_id="thread-1",
+            max_bash_sessions=10,
+            environment={**reserved, "DISABLE_VNC": "true"},
+        )
+    )
+
+    pod = core.created_pod_specs["sandbox-owned"]
+    env = {item.name: item.value for item in (pod.spec.containers[0].env or [])}
+    assert env["AIO_BASH_MAX_SESSIONS"] == "10"
+    # The provisioner only sets the shell limit when the request carries one.
+    assert "MAX_SHELL_SESSIONS" not in env
+    assert "DEERFLOW_LARK_BROKER_URL" not in env
+    assert env["DISABLE_VNC"] == "true"
+
+
 @pytest.mark.parametrize("capacity", [1, 50, 72])
 def test_provisioner_attests_bash_capacity_from_created_and_reused_pod(monkeypatch, provisioner_module, capacity):
     core = _RecordingCoreV1(event_loop_thread_id=-1)
@@ -786,6 +924,44 @@ async def test_auth_middleware_unset_key(monkeypatch: pytest.MonkeyPatch, provis
         assert r.status_code == 200
 
         # /api/* is always 401 when key is unset — even with a header
+        r = await client.get("/api/sandboxes")
+        assert r.status_code == 401
+
+        r = await client.get("/api/sandboxes", headers={"X-API-Key": "anything"})
+        assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_strips_configured_key(monkeypatch: pytest.MonkeyPatch, provisioner_module) -> None:
+    """A Secret mounted through envFrom keeps its trailing newline; the clean key must still authenticate."""
+    monkeypatch.setattr(provisioner_module, "PROVISIONER_API_KEY", "test-secret\r\n")
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    transport = httpx.ASGITransport(app=provisioner_module.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        r = await client.get("/api/sandboxes", headers={"X-API-Key": "test-secret"})
+        assert r.status_code != 401
+
+        # Stripping must not turn the comparison into a prefix or substring match.
+        r = await client.get("/api/sandboxes", headers={"X-API-Key": "test-secret\r\n"})
+        assert r.status_code == 401
+        r = await client.get("/api/sandboxes", headers={"X-API-Key": "wrong-key"})
+        assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_whitespace_only_key_stays_unset(monkeypatch: pytest.MonkeyPatch, provisioner_module) -> None:
+    """A whitespace-only PROVISIONER_API_KEY reads as unset: every /api/* route stays 401."""
+    monkeypatch.setattr(provisioner_module, "PROVISIONER_API_KEY", " \r\n")
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    transport = httpx.ASGITransport(app=provisioner_module.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        r = await client.get("/health")
+        assert r.status_code == 200
+
         r = await client.get("/api/sandboxes")
         assert r.status_code == 401
 

@@ -120,6 +120,13 @@ class TestValidateSkillFrontmatter:
         assert "not found" in msg
         assert name is None
 
+    def test_skill_md_directory_is_rejected(self, tmp_path):
+        (tmp_path / "SKILL.md").mkdir()
+        valid, msg, name = _validate_skill_frontmatter(tmp_path)
+        assert valid is False
+        assert msg == "SKILL.md must be a file"
+        assert name is None
+
     def test_no_frontmatter(self, tmp_path):
         skill_dir = _write_skill(tmp_path, "# Just markdown\n\nNo front matter.\n")
         valid, msg, _ = _validate_skill_frontmatter(skill_dir)

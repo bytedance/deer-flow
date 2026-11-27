@@ -53,9 +53,15 @@ class RunRepository(RunStore):
         from deerflow.runtime.runs.inputs import InputConflict, empty_input_state
 
         async with self._sf() as session:
-            # Preserve the existing global-clock -> row lock order (SQLite's
-            # first write serializes peer connections as well).
-            await self._next_change_seq(session)
+            # An input append rewrites ``run_inputs_json`` only, so it publishes
+            # no change position and no changed-run cursor observes it -- like a
+            # progress snapshot, it is not a lifecycle-discovery signal, and
+            # ``delete``/``delete_by_thread`` likewise stay off the clock
+            # (#5516). It does read before it writes, though, so SQLite still
+            # needs its write lock up front; ``BEGIN IMMEDIATE`` takes it
+            # directly instead of borrowing it from a discarded clock bump.
+            if session.bind.dialect.name == "sqlite":
+                await session.execute(text("BEGIN IMMEDIATE"))
             row = (await session.execute(select(RunRow).where(RunRow.run_id == run_id).with_for_update())).scalar_one_or_none()
             if row is None or (user_id is not None and row.user_id != user_id):
                 raise InputConflict("Run not found")
@@ -69,11 +75,21 @@ class RunRepository(RunStore):
             await session.commit()
             return copy.deepcopy(state)
 
-    async def list_input_runs(self, thread_id, *, user_id=None, limit=10):
+    async def list_input_runs(self, thread_id, *, user_id=None, limit=10, ignore_scope_case=False):
         async with self._sf() as session:
-            query = select(RunRow).where(RunRow.thread_id == thread_id, RunRow.run_inputs_json["items"][0]["id"].as_string().is_not(None))
+
+            def scope_filter(column, value):
+                if not ignore_scope_case:
+                    return column == value
+                # Filesystem IDs are ASCII. PostgreSQL's configured locale
+                # can lowercase ASCII I differently from the filesystem.
+                if session.get_bind().dialect.name == "postgresql":
+                    column = column.collate("C")
+                return func.lower(column) == value.lower()
+
+            query = select(RunRow).where(scope_filter(RunRow.thread_id, thread_id), RunRow.run_inputs_json["items"][0]["id"].as_string().is_not(None))
             if user_id is not None:
-                query = query.where(RunRow.user_id == user_id)
+                query = query.where(scope_filter(RunRow.user_id, user_id))
             rows = await session.execute(query.order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(limit))
             return [self._row_to_dict(row) for row in rows.scalars()]
 
@@ -1199,6 +1215,11 @@ class RunRepository(RunStore):
                 existing = (await session.execute(select(RunRow).where(RunRow.idempotency_key == idempotency_key).with_for_update())).scalar_one_or_none()
                 if existing is not None:
                     raise RunIdempotencyConflict(self._row_to_dict(existing))
+
+            from deerflow.persistence.coordination.workers import RUN_GRANT_METADATA, THREAD_PREFIX, bind_admitted_worker
+
+            if thread_id.startswith(THREAD_PREFIX) and values["operation_kind"] == "run":
+                await bind_admitted_worker(session, thread_id, resolved_user_id, idempotency_key, run_id, grant_id=(metadata or {}).get(RUN_GRANT_METADATA))
 
             if multitask_strategy in ("interrupt", "rollback"):
                 stmt = (

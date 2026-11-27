@@ -24,15 +24,33 @@ Content-Type: application/json
 {}
 ```
 
-Each token runs with its owning user's identity (owner filtering and per-user
-memory keep working), carries a scope set that can only narrow that user's
-permissions, and is admitted only to the thread/run lifecycle routes — every
-other route answers `403` to PAT callers, and a PAT never carries admin
-capability. Tokens can be listed and revoked at any time; revocation is
-immediate. PATs require a database backend (SQLite/PostgreSQL). Full
-reference: [API Reference — Personal Access Tokens](../../backend/docs/API.md#personal-access-tokens).
+Each token uses its owner's identity, and its scopes can narrow the owner's
+permissions. The Gateway admits PATs only to allowlisted routes, including
+thread, run, and project operations. A valid PAT can call
+`GET /api/v1/auth/me` to confirm its identity. PATs require SQLite or
+PostgreSQL. Revocation takes effect on the next request.
+[PAT API reference](../../backend/docs/API.md#personal-access-tokens)
+
+A CI pipeline can deploy agents, schedules, and managed subagents with their
+respective scopes. Set `agents_api.enabled` to `true` in `config.yaml` to use
+the agent management API. The PAT exception for admin operations applies only to
+managed-subagent writes and requires `subagents:write` from an admin token owner.
+[Deployment routes and required scopes](../../backend/docs/API.md#agent-configuration-by-pat)
 
 ## Embedded Python Client
+
+For a named agent, `DeerFlowClient` uses the saved `model` before the global
+default. An explicit constructor or per-call `model_name` takes precedence.
+An empty or removed saved model falls back to the global default, matching the Gateway.
+The agent's `model_settings` sampling overrides apply to the selected model,
+as they do through the Gateway. Call `client.reset_agent()` after editing the
+saved model configuration.
+The saved `reasoning_effort` is also honored. Pass `reasoning_effort="low"`,
+`"medium"`, or `"high"` to `chat()` or `stream()` to override it for one call;
+an explicit `None` uses the model profile's default effort instead. Concurrent
+calls on different threads keep their own effective reasoning effort.
+The [`write_file` budget hint](sandbox.md#sandbox--file-system) reflects the
+effective model's output token limit after agent and thinking-mode overrides.
 
 User messages are framed as untrusted input. Reserved XML-like tags are escaped
 for model context only when present; tag-free URLs and shell commands retain
@@ -51,6 +69,12 @@ selection applies to both the lead agent and its `task` / `batch_task`
 delegations: `null` inherits all enabled MCP plugins, `[]` selects none, and
 installation IDs select only those plugins. Call `client.reset_agent()` after
 editing the saved agent configuration to refresh the selection.
+
+The named agent's `tool_groups` also selects configured and extension tools for
+the embedded lead agent and its delegations. `null` inherits all groups, `[]`
+selects no groups, and a list selects those groups. Built-in tools and MCP plugin
+selection retain their own policies. Call `client.reset_agent()` after changing
+the saved group selection.
 
 `DeerFlowClient.stream()` includes `summary_text` in each `values` event. This is the current compacted context summary, or `None` when absent. Consumers can record changes without reading checkpoint internals; repeated snapshots may carry the same summary, and an initial snapshot may already contain one from an earlier turn.
 

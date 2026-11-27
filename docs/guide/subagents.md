@@ -1,5 +1,110 @@
 # Sub-Agents
 
+## Optional checkpoint history
+
+The Gateway can save checkpoint history for ordinary subagent executions. This
+is disabled by default.
+
+The default configuration already sets `database.backend` to `sqlite`.
+Keep the `database:` settings unchanged. In `config.yaml`, set
+`subagent_runtime.checkpoint_enabled` to `true`:
+
+```yaml
+subagent_runtime:
+  checkpoint_enabled: true
+```
+
+Restart the Gateway for the change to take effect. Parent and child checkpoints are saved in the same SQLite database selected by the host. When the host uses the default `database:` configuration, this is `deerflow.db` under `database.sqlite_dir`.
+
+This option currently supports SQLite; PostgreSQL and memory storage are not
+supported. Both `full` and `delta` checkpoint channel modes are supported. Keep
+the database on persistent storage to retain history across Gateway or
+container restarts. This option is independent of `run_events.backend`, which
+can remain `memory`.
+
+The Gateway owns a second saver on the persistent subagent event loop. Subagents
+using this checkpoint runtime share it, while the parent keeps its own saver and
+both connect to the same checkpoint database. Each child execution gets a
+distinct non-root namespace under its parent node. Child messages remain outside
+the parent transcript and its root message stream.
+
+The normal `task` delegation flow supplies the required parent graph context.
+Calling the executor directly from a parent graph node can also save history
+when it inherits that context and uses the installed checkpoint runtime.
+This option covers direct delegation from the parent graph. If a subagent
+dispatches another subagent, the nested execution runs with checkpoint history
+disabled. Tool calls and results within a recorded subagent can still be
+retained in its checkpoint history. Checkpoint history for items executed through `batch_task` is not included.
+
+Child checkpoint metadata includes `deerflow_subagent_execution_id` and
+`deerflow_subagent_name`, plus `deerflow_parent_run_id` and
+`deerflow_subagent_tool_call_id` when those identities are available. Use the
+server execution ID to distinguish attempts; provider tool-call IDs can repeat.
+The inherited checkpoint parent map retains the parent checkpoint reference.
+Readers can use these fields to attribute retained history without inferring
+ownership from timestamps. Concurrent children do not have a single global
+execution order.
+
+This option stores historical evidence and adds checkpoint writes and storage
+usage. It does not add a history UI or automatic subagent recovery. Standalone
+embedded clients and direct factories retain their existing checkpoint-disabled
+behavior unless they explicitly install the matching checkpoint resource
+lifetime around a persistent parent graph.
+
+Child checkpoint history is not automatically pruned by the existing checkpoint
+retention policies. Each child execution has its own namespace, whose latest
+checkpoint and ancestor chain are protected. Deleting the entire thread is
+currently the only supported way to reclaim this history. Storage usage grows
+with retained child executions.
+
+The Gateway closes admission and drains child execution, stream cleanup and
+checkpoint writes before closing the child saver. The parent saver remains open
+through that drain.
+
+### Inspect one thread's child history
+
+To see how much history has accumulated for ordinary `task` delegations, run
+the following command from the repository root. Supply the path to the
+Gateway's SQLite checkpoint database and the thread ID.
+
+```bash
+uv run --no-sync --project backend python backend/scripts/subagent_history_inventory.py \
+  --db /path/to/deerflow.db --thread-id YOUR_THREAD_ID
+```
+
+The command opens the database in read-only mode. For a database in WAL mode,
+SQLite may create `-wal` and `-shm` sidecar files in the database directory.
+If the directory is read-only, both sidecar files must already exist and be
+readable. See the [SQLite WAL documentation](https://sqlite.org/wal.html#read_only_databases).
+
+The JSON report lists each child namespace in the thread with the available
+execution and parent run IDs.
+A namespace with only writes or conflicting execution metadata still appears
+with its counts and a null execution ID. Both counts measure logical rows at
+the same instant, even if another delegation commits during the read.
+
+`unknown / retained` means the database has no conclusive record that the
+execution's checkpoint writer has finished. A completed or timed-out task can
+therefore still have this status. The inventory leaves the history in place.
+
+### Checkpoint resource ownership
+
+All native subagents share one persistent event loop. The Gateway installs the
+optional child saver inside the parent saver's lifetime. Capture that runtime
+before dispatch and replace the inherited saver in a copied runnable config;
+LangGraph's inherited reference takes precedence over a compile-time saver.
+Identify strict-msgpack serializer clones by their underlying connection,
+because a clone can share its original saver's connection and lock.
+
+Extend the ambient checkpoint namespace with the server execution ID and retain
+its parent map. Keep checkpoint coordinates out of the explicit child invocation
+config, which can reset the namespace on newer LangGraph versions. Drain complete
+child execution and cleanup before closing the saver or stopping its owner loop.
+Delta schema normalization can copy middleware; audit both global authorization
+and subagent tool restrictions on the final instances before creating the graph.
+
+## Delegation behavior
+
 Web chats accept direct model choices such as “ask MODEL to handle this”, “use MODEL for this turn”, and “from now on use MODEL”; Chinese equivalents are supported too. A child choice leaves the main model unchanged, a one-turn choice leaves defaults unchanged, and a conversation choice uses the existing browser-local thread override without changing account preferences. Choices resolve against available configurations and optional `models[].aliases`; ambiguous names or scopes show a selection card before execution, while delegation still requires enabled subagents (Ultra mode).
 
 When a sub-agent ends with `return_direct=True` tools, including tools contributed by extension middleware, their outputs are returned in tool-call order. A failed tool marks the task as failed while preserving the batch outputs.
@@ -9,6 +114,16 @@ sandbox cleanup and extension task-stop notifications finish under their existin
 error and timeout policies. Repeated cancellation does not abandon this cleanup.
 Task-stop reports an interrupted execution as aborted, preserving any completed,
 failed or timed-out outcome already published before cancellation.
+
+The worker saves sub-agent step history separately from the live stream. It
+retries a batch only when the store confirms that no event was committed, such
+as after a transient database error before commit or a successful JSONL rollback.
+After three consecutive failed attempts, an uncertain write, or cancellation by
+the store, the worker releases the buffer and stops saving sub-agent events for
+that run. Live events and task results still reach the caller, but reloading
+the run can show an incomplete history. The `subagent history incomplete` log
+lists the unconfirmed and skipped event counts and a sample of affected task IDs.
+Unconfirmed events may already be in the store.
 
 Ordinary `task` calls accept `context_mode="isolated"` (default) or
 `context_mode="snapshot"`. Isolated tasks receive their delegated prompt as
@@ -63,6 +178,16 @@ a different known model clears defaults that the new model cannot support.
 Saving a model switch waits until the selected model is available; unrelated
 edits remain saveable without the catalog. Incompatible saved reasoning values
 are shown explicitly so they can be replaced with Inherit or a supported value.
+
+In web chats, an Agent's thinking and effort settings take precedence over the
+mode preset. A dispatch-only Agent can turn thinking off and still delegate in
+Ultra. If you switch to a model that requires thinking, it runs with thinking
+enabled. A model configured with `on_disable_request: reject` still rejects
+an explicit API request to disable it. An effort you pick in one chat stays
+with that chat when you change the effort in another. Choosing a mode or
+model in the same chat resets its effort choice. So does switching to a
+fallback when its model disappears from the catalog. Explicit API settings
+take precedence over Agent defaults.
 
 Custom Agents migrated to `agent_storage.backend: db` remain editable through
 Agent settings and `update_agent` while the importer retains their old files
@@ -134,6 +259,14 @@ provider reuses a tool-call id in a later response. Each run stays a separate
 entry in execution order, so a later failing run is decisive and an earlier
 run's output is never credited to another command.
 
+When the sandbox supplies a numeric process exit code, `tests_passed` evidence
+uses it before interpreting output such as `Exit Code: 7`. A passing process
+that prints this text therefore retains its successful execution status. Older
+checkpoints and providers that return plain strings keep the existing trailing
+exit-marker fallback. A zero exit code still requires a passing test summary;
+failed summaries are rejected, and missing or zero-test summaries remain
+`UNVERIFIED`.
+
 For Maven and Gradle test acceptance, a `BUILD SUCCESS` / `BUILD SUCCESSFUL`
 banner alone remains `UNVERIFIED`: builds can succeed without running tests.
 Complete `Tests run: N, Failures: F, Errors: E, Skipped: S` or `N tests completed`
@@ -141,7 +274,7 @@ summaries establish a hold only when at least one test ran without a reported
 failure. Zero-test or all-skipped modules do not supply positive evidence;
 failures in any module take precedence over passing counts.
 
-For file acceptance criteria, an empty regular file in the shared workspace can satisfy `file:<path> exists` and `file_written:<path>`, including on remote sandboxes. It fails `file:<path> non-empty` with a deterministic empty-file result.
+For file acceptance criteria, an empty regular file in the shared workspace can satisfy `file:<path> exists` and `file_written:<path>`, including on remote sandboxes. It fails `file:<path> non-empty` with a deterministic empty-file result. On the local sandbox, every file criterion that reaches path resolution authorizes `sandbox:execute` before resolving the path or probing metadata; a revoked permission returns `UNVERIFIED` without revealing whether the file exists or how large it is. The `task` and `batch_task` entry points make this admission decision on the event loop that owns the run, so authorization providers that must be constructed on a running loop keep working; the offloaded checklist carries the decision instead of reconstructing the provider in its worker.
 
 To require CSV header columns, set a `task` or `batch_task` item's criterion to
 `file:../outputs/report.csv csv-columns:["id","name"]`. The JSON array must contain
@@ -173,12 +306,12 @@ Reads are capped at 50,001 bytes to detect oversize content. Remote results are 
 for a completion marker, the read exit code, and the probed size. Remote providers lacking
 the required probe tools leave the result unverified rather than falling back to full-content
 reads. Concurrent writes of the same size do not yield an atomic snapshot.
-Local checks authorize sandbox access before resolving paths or probing metadata, and recheck
-before reading content; revoked permissions return `UNVERIFIED` without revealing existence.
+Local checks recheck sandbox authorization before reading content; revoked permissions return
+`UNVERIFIED` without revealing existence.
 Remote probes report missing files only with a searchable ancestor and in-scope canonical path;
 inaccessible directories remain `UNVERIFIED`. UTF-8 BOMs are rejected. Top-level scalars,
 duplicate keys, and syntactically valid large numbers can pass, without validating schemas,
-fields, or business semantics. Other file criteria are unchanged, and `.json` files are not
+fields, or business semantics. Other file criteria keep their syntax and scope, and `.json` files are not
 checked automatically. This criterion standardizes verdicts, path boundaries, and read limits
 instead of requiring ad hoc bash/Python checks, and makes insufficient evidence explicit.
 Execution completion status and automatic retry policy are unchanged.
@@ -253,7 +386,7 @@ async with runtime:
 
 Gateway run finalization also retains ownership through caller cancellation: it finishes terminal persistence, stream completion, and resource cleanup before propagating the interruption. Backend I/O must terminate or enforce its own timeout. Gateway shutdown includes workers still finalizing after their terminal status commits; an expired shutdown drain budget is logged and does not cancel their outstanding writes.
 
-Cancelled, replaced, failed or hard-stopped executions stop their owned bash processes before releasing the sandbox lease on AIO and POSIX LocalSandbox, including ordinary `nohup` children. Background services from successful earlier turns remain running. Cleanup tracks inherited execution markers and process groups; it is not a security boundary against scripts deliberately escaping that ownership. Windows LocalSandbox and third-party providers retain their existing behavior.
+Cancelled, replaced, failed or hard-stopped executions stop their owned bash processes before releasing the sandbox lease on AIO and POSIX LocalSandbox, including ordinary `nohup` children. On AIO, cleanup first interrupts the cancelled command's process groups the way Ctrl-C does, so the shell skips the rest of a `;`, newline, loop, pipeline or subshell command; the persistent shell keeps its working directory and exports. If the running program ignores or handles that interrupt, the shell runs the next statement once cleanup has stopped the program. Background services from successful earlier turns remain running. Cleanup tracks inherited execution markers and process groups; it is not a security boundary against scripts deliberately escaping that ownership. Windows LocalSandbox and third-party providers retain their existing behavior.
 
 Terminal cleanup releases the run journal and its message-sequence callback even when diagnostic logs retain a checkpoint-inspection traceback.
 

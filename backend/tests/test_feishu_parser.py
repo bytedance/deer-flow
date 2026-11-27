@@ -7,6 +7,7 @@ import time
 from collections import deque
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -857,6 +858,29 @@ async def _on_message_from_sdk_loop(channel: FeishuChannel, event) -> float:
     return await asyncio.to_thread(sdk_thread)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bound", [True, False], ids=["connected", "unbound"])
+@pytest.mark.parametrize("with_store", [True, False], ids=["channel-store", "connection-repo-only"])
+async def test_topic_routing_passes_the_resolved_sender_to_the_bus(tmp_path, bound, with_store):
+    store = JsonChannelStore(path=tmp_path / "routing.json")
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test", "channel_store": store if with_store else None})
+    connection = {"id": "conn-1", "owner_user_id": "owner-1", "workspace_id": "chat_1"} if bound else None
+    lookup = AsyncMock(return_value=connection)
+    channel._connection_repo = SimpleNamespace(find_connection_by_external_identity=lookup, get_thread_id=AsyncMock(return_value="thread-a"))
+    await store.set_thread_id("feishu-unbound", "chat_1", "thread-a", topic_id="root", user_id="user_1")
+
+    try:
+        await _on_message_from_sdk_loop(channel, _make_text_event("hello", message_id="reply", root_id="root"))
+        inbound = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+        bus.inbound_task_done()
+        lookup.assert_awaited_once_with(provider="feishu", external_account_id="user_1", workspace_id="chat_1")
+        assert inbound.topic_id == "root"
+        assert (inbound.connection_id, inbound.owner_user_id, inbound.workspace_id) == (("conn-1", "owner-1", "chat_1") if bound else (None, None, None))
+    finally:
+        await channel._close_and_drain_threadsafe_futures()
+
+
 class _GatedStore:
     """A channel store whose database only answers once ``gate`` is set (slow or hung DB)."""
 
@@ -1259,27 +1283,114 @@ def test_feishu_post_with_text_and_top_level_files_extracts_attachments():
         assert mock_make_inbound.call_args[1]["files"] == [{"file_key": "file_inv_a"}, {"file_key": "file_inv_b"}, {"file_key": "file_po"}]
 
 
+def test_feishu_post_keeps_links_and_code_blocks():
+    """Feishu sends a message with a hyperlink or a code block as a post with ``a`` and ``code_block`` elements."""
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    url = "https://docs.python.org/3/library/functions.html#sum"
+    event = _make_post_event(
+        {
+            "title": "",
+            "content": [
+                [{"tag": "text", "text": "Why does this raise TypeError?", "style": []}],
+                [{"tag": "code_block", "language": "PYTHON", "text": 'print(sum(["3"]))\n'}],
+                [{"tag": "text", "text": "See", "style": []}, {"tag": "a", "href": url, "text": url, "style": []}],
+                [
+                    {"tag": "text", "text": "Compare", "style": ["bold"]},
+                    {"tag": "a", "href": "https://example.com/a", "text": "plan A", "style": []},
+                    {"tag": "text", "text": "and", "style": []},
+                    {"tag": "a", "href": "https://example.com/b", "text": "plan B", "style": []},
+                ],
+            ],
+        }
+    )
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+    mock_make_inbound.assert_called_once()
+    assert mock_make_inbound.call_args[1]["text"] == "\n\n".join(
+        [
+            "Why does this raise TypeError?",
+            '```python\nprint(sum(["3"]))\n```',
+            f"See {url}",
+            "Compare [plan A](https://example.com/a) and [plan B](https://example.com/b)",
+        ]
+    )
+    assert mock_make_inbound.call_args[1]["files"] == []
+
+
+@pytest.mark.parametrize(
+    ("element", "expected"),
+    [
+        ({"tag": "a", "href": "https://example.com"}, "https://example.com"),
+        ({"tag": "a", "text": "label only"}, "label only"),
+        ({"tag": "a", "text": "", "href": None}, ""),
+        ({"tag": "a", "text": "[bug] a]b \\", "href": "https://example.com"}, "[\\[bug\\] a\\]b \\\\](https://example.com)"),
+        ({"tag": "a", "text": "Python", "href": "https://en.wikipedia.org/wiki/Python_(language"}, "[Python](<https://en.wikipedia.org/wiki/Python_(language>)"),
+        ({"tag": "code_block", "text": "x = 1"}, "```\nx = 1\n```"),
+        ({"tag": "code_block", "language": "GO", "text": "``` and ````"}, "`````go\n``` and ````\n`````"),
+        ({"tag": "code_block", "language": "bad\nlanguage", "text": "x = 1"}, "```\nx = 1\n```"),
+        ({"tag": "code_block", "language": "PYTHON", "text": " \n"}, ""),
+    ],
+)
+def test_feishu_post_link_and_code_block_edge_cases(element, expected):
+    """A code fence outlasts the code's own backticks; elements without content add nothing."""
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    event = _make_post_event({"content": [[{"tag": "text", "text": "Before"}], [element]]})
+
+    parsed = channel._parse_message_event(event)
+
+    assert parsed is not None
+    assert parsed.text == ("Before\n\n" + expected if expected else "Before")
+
+
+def test_feishu_post_code_block_inside_a_paragraph_starts_on_its_own_line():
+    """A fence only opens a block at the start of a line, so text around the code becomes separate paragraphs."""
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    event = _make_post_event(
+        {
+            "content": [
+                [
+                    {"tag": "text", "text": "Run"},
+                    {"tag": "code_block", "language": "BASH", "text": "make test"},
+                    {"tag": "text", "text": "and see"},
+                    {"tag": "a", "href": "https://example.com/log", "text": "the log"},
+                ]
+            ]
+        }
+    )
+
+    parsed = channel._parse_message_event(event)
+
+    assert parsed is not None
+    assert parsed.text == "Run\n\n```bash\nmake test\n```\n\nand see [the log](https://example.com/log)"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("code", ["bind-code", None])
-def test_feishu_post_connect_reads_only_the_caption(monkeypatch, code):
-    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test", "connection_repo": object()})
-    channel._main_loop = MagicMock()
-    bind = MagicMock()
-    submit = MagicMock(return_value=True)
+async def test_feishu_post_connect_reads_only_the_caption(monkeypatch, code):
+    repo = SimpleNamespace(find_connection_by_external_identity=AsyncMock(return_value=None))
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test", "connection_repo": repo})
+    bind = AsyncMock()
     monkeypatch.setattr(channel, "_bind_connection_from_connect_code", bind)
-    monkeypatch.setattr(channel, "_submit_threadsafe_coroutine", submit)
-    monkeypatch.setattr(channel, "_schedule_prepare_inbound", MagicMock())
     caption = f"@_user_1 /connect {code}" if code else "@_user_1 /connect"
     event = _make_post_event({"content": [[{"tag": "text", "text": caption}]], "files": [{"file_key": "file_a"}]})
 
-    channel._on_message(event)
-
-    if code:
-        bind.assert_called_once()
-        assert bind.call_args.kwargs["code"] == code
-        submit.assert_called_once()
-    else:
-        bind.assert_not_called()
-        submit.assert_not_called()
+    try:
+        await _on_message_from_sdk_loop(channel, event)
+        if code:
+            await _eventually(lambda: bind.await_count == 1)
+            assert bind.await_args.kwargs["code"] == code
+            assert channel.bus.inbound_queue.empty()
+        else:
+            inbound = await asyncio.wait_for(channel.bus.get_inbound(), timeout=2)
+            channel.bus.inbound_task_done()
+            assert inbound.files == [{"file_key": "file_a"}]
+            bind.assert_not_awaited()
+    finally:
+        await channel._close_and_drain_threadsafe_futures()
 
 
 @pytest.mark.asyncio
@@ -1679,7 +1790,8 @@ def test_feishu_explicit_file_reply_does_not_enter_batch(monkeypatch):
     _run(go())
 
 
-def test_feishu_expired_file_batch_does_not_get_overwritten(monkeypatch):
+@pytest.mark.parametrize(("elapsed", "connection_id"), [(1.0, None), (0.1, "new-connection")], ids=["expired", "rebound"])
+def test_feishu_file_batch_flushes_before_a_new_window_or_connection(monkeypatch, elapsed, connection_id):
     monkeypatch.setattr("app.channels.feishu.FEISHU_INBOUND_BATCH_WINDOW_SECONDS", 0.5)
     now = 0.0
     monkeypatch.setattr("app.channels.feishu.time.time", lambda: now)
@@ -1703,11 +1815,13 @@ def test_feishu_expired_file_batch_does_not_get_overwritten(monkeypatch):
         user_id="user_1",
         text="[file]",
         thread_ts="msg_file_2",
+        connection_id=connection_id,
+        owner_user_id="owner" if connection_id else None,
         files=[{"file_key": "file_b"}],
     )
 
     channel._queue_file_inbound_batch("msg_file_1", first)
-    now = 1.0
+    now = elapsed
     channel._queue_file_inbound_batch("msg_file_2", second)
 
     channel._schedule_prepare_inbound.assert_called_once_with(

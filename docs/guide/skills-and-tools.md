@@ -1,6 +1,8 @@
 # Skills & Tools
 
-**Runtime tool approvals**: Enable `hitl_approval.enabled` to offer Ask and Auto
+**Runtime tool approvals.** HITL approval is **disabled by default**. When it is
+disabled, tool calls can execute without runtime human review, and the Gateway
+logs a warning at startup. Enable `hitl_approval.enabled` to offer Ask and Auto
 independently of reasoning mode. Operators can also enable Full access in
 `hitl_approval.allowed_modes`. Ask presents the complete operation before
 execution. Auto makes a separate, tool-free review call using
@@ -17,6 +19,10 @@ Missing, empty or duplicate tool-call IDs are rejected before execution so an
 unanswerable approval cannot block the chat.
 See [HITL Tool Approval](../../backend/docs/CONFIGURATION.md#hitl-tool-approval) for
 configuration and safety semantics.
+
+When a sandbox provider rejects a tool call because capacity is unavailable,
+the tool tells the agent how long to wait before retrying. If capacity remains
+unavailable, the result asks the agent to tell the user to try again later.
 
 Agents can call the read-only `inspect_run_status` tool to inspect visible run
 token usage, message and tool-call counts, an approximate context-window fill,
@@ -50,6 +56,8 @@ and leading-zero identifiers while importing cell values into DuckDB. See the
 [data-analysis setup instructions](../../skills/public/data-analysis/SKILL.md)
 for the additional dependencies. Legacy `.xls` and CSV input do not require
 DuckDB extensions and can be analyzed offline with an empty extension cache.
+CSV paths passed to `--files` select individual files. For example, quote
+`'orders[1].csv'` in the shell to import that file even beside `orders1.csv`.
 The `.xlsx` reader continues to use the spatial extension. Legacy workbooks that
 cannot be opened are reported and skipped while other input files continue;
 analysis fails if no tables can be loaded.
@@ -155,16 +163,53 @@ Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
 
+For BytePlus Agent Plan, the [video-generation skill](../../skills/public/video-generation/SKILL.md)
+accepts `BYTEPLUS_AGENTPLAN_API_KEY` (auto-selected when neither Gemini nor
+MiniMax keys are set, or forced with `VIDEO_GENERATION_PROVIDER=byteplus_agentplan`)
+and submits Seedance 2.5 tasks to `https://ark.ap-southeast.bytepluses.com/api/plan/v3/contents/generations/tasks`
+(default model `dreamina-seedance-2.5`; override with `BYTEPLUS_AGENTPLAN_VIDEO_MODEL`,
+`BYTEPLUS_AGENTPLAN_VIDEO_RESOLUTION`, `BYTEPLUS_AGENTPLAN_VIDEO_DURATION` in
+`4..30` or `-1`, and `BYTEPLUS_AGENTPLAN_GENERATE_AUDIO`). All `--reference-images`
+are forwarded as `role: "reference_image"` data URLs. Video downloads trust
+BytePlus Ark TOS storage endpoints by default (`tos-ap-southeast-1.volces.com`,
+`tos-ap-southeast-1.bytepluses.com`, `tos-cn-beijing.volces.com`) and honor
+exact extra hostnames listed in `BYTEPLUS_AGENTPLAN_VIDEO_DOWNLOAD_HOSTS`.
+Seedance 2.5 video generation requires BytePlus Agent Plan Large, Max, or
+Enterprise Shared Package; HTTP 403 tier rejections surface an upgrade hint.
+
 For MiniMax, the [video-generation skill](../../skills/public/video-generation/SKILL.md)
 accepts `MINIMAX_VIDEO_RESOLUTION` and `MINIMAX_VIDEO_DURATION` (integer seconds).
 Unset overrides use the provider defaults. Invalid duration strings fail before
 the script submits a request.
+
+MiniMax submission, status polling, and file lookup each follow up to five
+HTTP 307 or 308 redirects within the configured API origin (scheme, hostname,
+and effective port). Each redirect preserves the request method and body.
+
+Generated videos download over HTTPS on port 443. The skill checks the
+provider's download-host allowlist before the first request and after each
+redirect, up to five redirects. Gemini sends its API key only to its API host
+and drops it when a download moves to storage. For a MiniMax deployment using
+another CDN, set `MINIMAX_VIDEO_DOWNLOAD_HOSTS` in the runtime environment to
+the comma-separated, exact DNS names of trusted file hosts. Each entry grants
+download access to that entire host. If the custom API endpoint set in
+`MINIMAX_API_HOST` also serves video files, include its hostname in
+`MINIMAX_VIDEO_DOWNLOAD_HOSTS` as well.
 
 The video-generation skill derives reference-image MIME metadata from `.png`,
 `.jpg`, `.jpeg`, `.webp`, and `.gif` filename extensions (case-insensitive). A
 submitted reference with a missing or unrecognized extension raises a clear error
 before API submission. Filenames must match their contents; image bytes are not
 validated or converted, and provider-specific format restrictions still apply.
+
+The [image-generation skill](../../skills/public/image-generation/SKILL.md#output-handling)
+decodes Gemini base64 image data before opening the output file,
+preserving an existing image when decoding fails. For OpenAI-compatible providers,
+the CLI rejects an empty download or empty data URL before creating the output
+directory or opening the file. If a MiniMax prompt exceeds 1500 characters, the CLI
+reports the limit on stderr and exits with status 1 before contacting the provider.
+With the legacy MiniMax `/v1/image_generation` endpoint, a decode failure can still
+erase an existing output image. Use a fresh `--output-file` path to keep the previous image.
 
 The [music-generation skill](../../skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
 
@@ -175,7 +220,8 @@ Skills are loaded progressively — only when the task needs them, not all at on
 
 The bundled video-generation command reports failures on stderr and exits with
 status 1, including when the selected provider has no API key. Callers can check
-the exit status before presenting an output file.
+the exit status before presenting an output file. A zero-byte video download
+fails before the command opens the output file, preserving any previous video.
 
 The bundled podcast-generation command returns a nonzero exit status and writes
 diagnostics to stderr when generation fails. Callers can check the status before
@@ -194,7 +240,9 @@ Discovery follows operator-managed directory symlinks, but skips links back to a
 
 Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and review utilities read and write text explicitly as UTF-8 so localized skills behave consistently across operating systems.
 
-For standalone skill exports, the bundled skill creator's `scripts/package_skill.py` can be run by file path from any directory, or as `python -m scripts.package_skill` from the skill-creator directory. Both entry points validate the skill before writing a `.skill` archive.
+For standalone skill creation, `scripts/init_skill.py <skill-name> --path <directory>` creates a new direct child of the chosen directory. Names can be up to 40 characters long and consist of lowercase ASCII letters and digits, optionally grouped with single hyphens (for example, `data-analyzer`). The initializer rejects Windows reserved device names, such as `nul` and `com1`, on every platform before creating files. The creator and packager write progress to stdout and report errors on stderr.
+
+For standalone skill exports, the bundled skill creator's `scripts/package_skill.py` can be run by file path from any directory, or as `python -m scripts.package_skill` from the skill-creator directory. Both entry points validate the skill before writing a `.skill` archive. The packager requires a regular `SKILL.md` file and skips symbolic links to files and directories in the skill. Copy any linked resources the skill needs into its directory before packaging.
 
 Custom-skill writes and security-scan staging preserve submitted line endings
 on every platform, so the scanner checks the bytes that will be stored.
@@ -210,7 +258,7 @@ and other runs.
 
 `SKILL.md` YAML frontmatter must open and close with `---` on its own line (trailing spaces or tabs are allowed). A line such as `---suffix` is not a closing delimiter.
 
-Custom skill history preserves Unicode line separators inside saved content and metadata, keeping those revisions readable for history inspection and rollback. Malformed JSON history records are still rejected.
+Custom skill history preserves Unicode line separators inside saved content and metadata, keeping those revisions readable for history inspection and rollback. Malformed JSON history records are still rejected. Each record is appended whole under the history file's lock, so concurrent edits from the agent, the skill API or several Gateway workers cannot join two records on one line. History reads take the same lock, so they never see a record that is still being written.
 
 The bundled `github-deep-research` API client also works without `requests`, using
 Python's standard-library HTTP client. Its fallback preserves spaces, Unicode, and
@@ -272,27 +320,23 @@ Skill projection manifest saves preserve the original error or interruption even
 └── lark-cli/lark-doc/SKILL.md      ← managed, read-only
 ```
 
-The built-in `image-generation` skill supports Gemini, MiniMax, and
-OpenAI-compatible Images APIs. Select the latter with
-`IMAGE_GENERATION_PROVIDER=openai`, then configure
+The built-in `image-generation` skill supports Gemini, MiniMax,
+OpenAI-compatible Images APIs, and BytePlus Agent Plan (Seedream). Select
+OpenAI-compatible with `IMAGE_GENERATION_PROVIDER=openai`, then configure
 `IMAGE_GENERATION_API_KEY`, `IMAGE_GENERATION_BASE_URL`, and
-`IMAGE_GENERATION_MODEL`. For a containerized sandbox or an explicitly enabled
-local host shell, expose these variables through `sandbox.environment`; sandbox
-commands intentionally do not inherit API keys from the Gateway process.
-The local provider uses the resolved configuration values unchanged, and
-request-scoped secrets override operator values. Local bash output and command
-errors redact credential values while leaving benign settings such as model
-names and base URLs readable.
+`IMAGE_GENERATION_MODEL`. For BytePlus Agent Plan, set
+`BYTEPLUS_AGENTPLAN_API_KEY` (and optionally `IMAGE_GENERATION_PROVIDER=byteplus_agentplan`,
+`BYTEPLUS_AGENTPLAN_IMAGE_MODEL` defaulting to `dola-seedream-5.0-pro`, and
+`BYTEPLUS_AGENTPLAN_IMAGE_SIZE`) — the same key also powers `ppt-generation`
+slide rendering. If the explicitly selected provider's API key is missing,
+the CLI reports the missing key on stderr and exits with status 1.
+Run the skill's script in an isolated sandbox such as
+Docker/AIO, the Kubernetes provisioner, E2B, or veFaaS, and pass the variables
+through `sandbox.environment`. Sandbox commands do not inherit API keys from
+the Gateway process.
 
-For `LocalSandboxProvider`, this is a managed tool-path boundary rather than host filesystem isolation. Explicit per-Agent skill policies are accepted only while host bash is disabled (the default), because a host subprocess can address canonical paths without using the provider's virtual-path mappings. Use Docker/AIO, the Kubernetes provisioner, or E2B when the filesystem boundary must remain enforceable alongside shell access.
-
-When the local sandbox uses PowerShell, mapped host-path spaces and shell metacharacters are escaped for the caller's quoting context; wildcard expansion is preserved. The public `bash` tool's existing workspace prefix uses `&&` and POSIX path quoting: it requires PowerShell 7 for that separator and does not support workspace paths containing apostrophes. These workspace-prefix limitations are separate from virtual-path mapping.
-
-On Windows, the local sandbox's `cmd.exe` fallback decodes builtin output using
-the console output code page, including UTF-8 after `chcp 65001`, independently
-of Python's UTF-8 mode. If no console page is available, it uses the system OEM
-page, with ANSI as a last resort. Native programs can choose a different output
-encoding; configure those programs to match the console page when needed.
+The local provider applies the skill view through its workspace file tools.
+Script-based skills require an isolated sandbox provider on Windows as well.
 
 Managed integrations install shared read-only skill packs without mixing them
 into custom skills. The Lark/Feishu CLI integration is available under
@@ -402,6 +446,16 @@ If a trusted operator manages the configured skills directory through an externa
 Skill installs and agent-managed skill edits run through **SkillScan**, a native deterministic safety scanner before the LLM-based skill scanner. Phase 1 runs offline with no Semgrep/OpenGrep dependency, blocks high-confidence `CRITICAL` findings such as private keys or shell execution, and passes warning findings to the LLM scanner for contextual review. Code files (anything under `scripts/`, a script suffix such as `.py`, `.sh`, or `.js`, or an extensionless file starting with `#!`) that are not NUL-free UTF-8 text raise a warning and are still analyzed over a lossy decode, so a single stray byte cannot hide them from `CRITICAL` checks. The moderation adapter normalizes both plain-text model responses and LangChain Responses API text blocks before parsing the required JSON decision. Python instance-client exfiltration checks follow a minimal same-scope evidence chain: a simple name bound to a known client constructor, optional name-to-name aliases, and an actual outbound method or context-manager use supported by that constructor. Constructor roots must be proven imports; bare canonical-looking names are not inferred as modules. Nested scopes do not inherit client handles and inherit only constructor import aliases that are never rebound in the enclosing scope. Comprehensions, walrus-bearing statements, annotations, complex binding targets, unsupported operations, and ambiguous branch flows produce no finding from this signal; skipped constructs conservatively invalidate every name they may bind so stale client state cannot create a finding. A deterministic work budget or recursion limit reached by this best-effort analysis does not discard findings already collected for the file. Set `skill_scan.enabled: false` in `config.yaml` to disable only the deterministic analyzers; safe archive extraction and the LLM scanner still run.
 
 Windows scripts (`.bat`, `.cmd`, `.ps1`, `.psm1`, `.js`, `.jse`, `.vbs`, `.vbe`, `.wsf`), HTML applications (`.hta`), and scriptlets (`.sct`) count as code even outside `scripts/`, regardless of filename case. They receive both SkillScan analysis and the installer's executable-code policy.
+
+SkillScan also inspects text for Python and shell code when the file has an unfamiliar name or no shebang.
+Shell terminology in a reference document can go to the model for contextual review. A critical shell finding in inferred code needs command evidence.
+For inferred Python, the sensitive-read and network rule requires evidence of a file read and an outbound network operation. Configuration values can contain a path and a help URL without triggering this rule.
+For text over 131,072 characters without a Python filename or shebang, it reports a Python analysis limit and continues the other checks.
+During archive installation, NUL-free UTF-8 files outside the usual script and prompt paths go to the configured review model and require an explicit `allow`.
+The installer rejects additional files containing recognized credentials or sensitive configuration before sending their contents to the model.
+Before the first model call, the installer checks that each additional text file is at most 128 KiB and that the package contains at most 32 of these files totaling at most 1 MiB. Exceeding any limit stops installation.
+These model-review safeguards also apply when `skill_scan.enabled` is false.
+
 SkillScan warns about remote downloads piped into common shells, including `env` launchers, sudo, interpreter paths, and shell line continuations. It distinguishes environment dumps from `env` commands, including assignments and GNU split-string escapes. Shell parsing and split expansion are bounded; reaching a limit preserves critical findings already detected. Pipes to non-shell tools such as `jq` and `tee` do not trigger this warning.
 
 SkillScan treats HTTP/HTTPS scheme spellings and HTTP hostnames case-insensitively and recognizes bracketed IPv6
@@ -421,6 +475,8 @@ DeerFlow also ships with **skill-reviewer**, a public skill for read-only skill 
 cd backend
 uv run python -m deerflow.skills.review.cli ../skills/public/data-analysis --format text --fail-on error --fail-on-incomplete
 ```
+
+Invalid YAML dates or timestamps in frontmatter produce a `structure.invalid-frontmatter` blocker in the review report. Quote a date-like metadata value if it is intended as literal text.
 
 Public-skill CI waivers are exact, expiring exceptions in `.github/skill-review-waivers.v1.json`. Because only the trusted base manifest can suppress a finding, a file-changing pull request can be preauthorized safely by first merging a manifest-only change that lists the reviewed future full-file SHA-256 in `preapproved_file_sha256s`; the file change can then land in a later pull request.
 
@@ -481,6 +537,12 @@ repeatedly starting a missing toolchain. A non-zero extraction exit falls back
 only for that document, because malformed or oversized input can fail while
 the toolchain remains healthy. The fallback keeps resolved article links in
 the returned Markdown.
+When extraction returns a whole document, the fallback parses the source HTML
+and uses its body with or without a source URL. Calls without a source URL
+retain relative link destinations and do not repeat the document title.
+Only explicit document-level wrappers trigger that fallback. An inline SVG
+chart's title or a document-tag example in a comment or script leaves the
+successfully extracted article intact.
 Chat tool-step titles accept leading blank lines and up to three spaces before
 a page's first H1 heading. Indented code, including mixed spaces and tabs, is
 not used as a title; the tool step falls back to the URL.

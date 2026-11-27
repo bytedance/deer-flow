@@ -92,8 +92,11 @@ Content-Type: application/json
 ```
 
 - `scopes` — subset of the route permissions: `threads:read`, `threads:write`,
-  `threads:delete`, `runs:create`, `runs:read`, `runs:cancel`. A PAT can only
-  *narrow* its owning user's permissions, never widen them.
+  `threads:delete`, `runs:create`, `runs:read`, `runs:cancel`, `projects:read`,
+  `projects:write`, `projects:delete`, `agents:read`, `agents:write`; plus the
+  PAT-only scopes `schedules:read`, `schedules:write`, `subagents:read`,
+  `subagents:write` (see [Agent configuration](#agent-configuration-by-pat)).
+  A PAT can only *narrow* its owning user's permissions, never widen them.
 - `expires_in_days` — optional (`1`–`365`); omitted means the token never expires.
 
 **Response (`201`):**
@@ -149,16 +152,43 @@ Revocation is immediate.
   `GET|POST .../runs/{run_id}/stream`), plus `POST /api/runs/stream|wait` and
   `GET /api/runs/{run_id}/messages|feedback`. A route added under `/runs` is
   denied until explicitly added to the policy.
-  Every other authenticated route — memory, agents, models, MCP/skills
+  Besides those, only the routes under [Agent configuration by
+  PAT](#agent-configuration-by-pat) are admitted, each behind its scope.
+  Every other authenticated route — memory, models, MCP/skills
   config, integrations, channels, uploads — answers `403` to PAT callers
   regardless of scopes. Scope enforcement alone only constrains
   permission-decorated routes, so the allowlist is the outer boundary;
   session-cookie callers are unaffected.
 - PAT credentials never carry admin capability, even when the owning user is
   an admin. This includes extension-contributed admin routes: the extension
-  principal projection suppresses every admin signal for PAT callers.
+  principal projection suppresses every admin signal for PAT callers. The one
+  opt-in exception is the managed-subagent writes below.
 - Revoking or deleting the owning user invalidates their PATs on the next
   request.
+
+### Agent configuration by PAT
+
+A pipeline that deploys agents, their managed subagents and schedules can use a
+PAT instead of a password session. Set `agents_api.enabled` to `true` in
+`config.yaml` to use the agent management API. The deployment routes require
+the scopes and permissions below.
+
+| Routes | Scope | Also required |
+|---|---|---|
+| `GET /api/v1/auth/me` | any | — |
+| `GET /api/agents`, `GET /api/agents/check`, `GET /api/agents/{name}` | `agents:read` | — |
+| `POST /api/agents`, `PUT`/`DELETE /api/agents/{name}` | `agents:write` | — |
+| `GET /api/scheduled-tasks`, `GET /api/scheduled-tasks/{task_id}`, `GET .../{task_id}/runs`, `POST /api/scheduled-tasks/preview-cron` | `schedules:read` | `threads:read` |
+| `POST /api/scheduled-tasks`, `PATCH /api/scheduled-tasks/{task_id}`, `POST .../{task_id}/resume`, `POST .../{task_id}/trigger` | `schedules:write` | `threads:write`, `runs:create` |
+| `DELETE /api/scheduled-tasks/{task_id}`, `POST .../{task_id}/pause` | `schedules:write` | `threads:write` |
+| `GET /api/subagents` | `subagents:read` | — (prompts stay hidden, as for non-admins) |
+| `POST /api/subagents`, `PUT`/`DELETE /api/subagents/{name}` | `subagents:write` | the token's owner is an admin |
+
+A denied scope answers `403` with `Permission denied: <scope>`. The user
+profile (`/api/user-profile`), agent import and export stay session-only.
+`subagents:write` is the only scope that carries admin capability, and only on
+the three managed-subagent write routes: an admin's token holding it still
+gets `403` on every other admin route.
 
 ## LangGraph-compatible API
 
@@ -229,6 +259,12 @@ GET /api/langgraph/threads/{thread_id}/state
 POST /api/langgraph/threads/{thread_id}/history
 ```
 
+Set `before` to the last checkpoint ID from the previous page. The next page
+includes that checkpoint if it still exists, followed by older checkpoints,
+up to `limit` entries total. If checkpoint retention removed the cursor, the
+page starts with the first surviving older checkpoint, if any. Skip the first
+entry only when its `checkpoint_id` equals `before`.
+
 Only the newest entry carries `messages`, the `goal` while it is active, and
 `goal_outcome` (the latest met goal, kept until the next goal change). Older
 entries carry only `title` and `thread_data`. `goal_outcome` is server-owned:
@@ -248,13 +284,49 @@ external boundaries. Ordinary `type`/`value` fields remain compatible.
 `goal: null` retains its existing semantics: it clears a state update's goal,
 but does not replace a goal through run input.
 
+A state update's optional `as_node` names the graph node recorded as the
+writer, and defaults to `manual_state_update`. It must be a name LangGraph can
+register as a node: `__start__`, `__end__`, LangGraph's other reserved names and
+names containing `:` or `|` are rejected with 422 before anything is written.
+
 Replaying messages from an earlier root checkpoint, including response regeneration, preserves
 the thread's current goal and continuation budget. A cleared or achieved goal
 is not restored from history. A valid goal explicitly supplied in run input
 still replaces it. Historical replay clears the old `goal_outcome`, because
 the previous answer's verdict does not certify the replacement answer.
 
+#### Branch and Replay Lookup
+
+`POST /api/threads/{thread_id}/branches`,
+`POST /api/threads/{thread_id}/runs/regenerate/prepare`, and
+`POST /api/threads/{thread_id}/runs/edit-regenerate/prepare` share a deadline
+for finding the replay base on the checkpoint lineage. If that lookup expires,
+the response is HTTP 504 with detail
+`Timed out resolving the checkpoint before the target user message`.
+
 ### Runs
+
+#### Submit an input while a Web run is active
+
+`POST /api/threads/{thread_id}/runs/{run_id}/inputs` accepts JSON with
+`request_id`, `text`, `mode` (`queue` or `steer`), and optional `context`.
+To queue attachments, send multipart form data with the JSON in `input`
+and one `files` part per file. Set `mode` to `queue`. The text may be empty
+when the message includes files. Upload limits and thread write permission
+apply.
+
+The input receipt and `GET /api/threads/{thread_id}/inputs` show attachment
+names and sizes. Files become readable by the Agent when the queued message's
+run starts. An available filename is preserved. If a name is taken, the
+Gateway picks an available name and remembers it for publication retries.
+An attachment input stays dispatching until the files are published. If its
+run stops before publication starts, or publication fails before the Agent
+receives the message, the same input can be removed or retried without another
+upload. An uncertain dispatch or publication outcome reuses the accepted run.
+On startup, the Gateway
+cleans up abandoned staging directories older than 24 hours.
+Remote sandboxes without thread-data mounts need Python 3 to publish queued
+attachments and reconcile partial transfers.
 
 #### Create Run
 
@@ -356,7 +428,7 @@ does not accept this header and keeps the existing missing-stream close of
 **Run Option Compatibility:**
 - Supported concurrency strategies: `reject`, `rollback`, and `interrupt`
 - Compatibility default: `if_not_exists="create"`; this matches DeerFlow's current behavior
-- Artifact delivery is enforced automatically when a run creates or modifies regular files under `/mnt/user-data/outputs`. `present_files` or `present_shared_artifact` must present at least one path produced by the current run (or a directory containing it), and the terminal receipt must be persisted; presenting only an unrelated file does not satisfy delivery. Runs without changed outputs retain ordinary conversational behavior. `artifact_delivery` is not a client-settable run option.
+- Artifact delivery is enforced automatically when a run creates or modifies regular files under `/mnt/user-data/outputs`. `present_files` or `present_shared_artifact` must present at least one path produced by the current run (or a directory containing it), and the terminal receipt must be persisted; presenting only an unrelated file does not satisfy delivery. Runs without changed outputs retain ordinary conversational behavior. `artifact_delivery` is not a client-settable run option. A run failed this way is stored as `error`, and its stream carries an `error` event (name `RunError`) with the delivery message before `end`, matching the `/wait` error envelope and the step-limit event described under `recursion_limit`. Any other terminal `error` the worker commits after the graph ends — an unpersisted delivery receipt, or a scheduled-goal cleanup that failed — publishes the same event with that error message.
 - Unsupported options return `422`: `webhook`, `stream_resumable=true`, `after_seconds`, `feedback_keys`, any non-null `on_completion` value (including the SDK values `"complete"` and `"continue"`), `if_not_exists="reject"`, and `multitask_strategy="enqueue"`
 - `stream_resumable=false` is accepted: it is the LangGraph SDK's default and requests the non-resumable stream DeerFlow already serves
 - Undeclared SDK options, including `checkpoint_during` and `durability`, also return `422` instead of being silently discarded
@@ -390,9 +462,11 @@ the next request without restarting the Gateway. IM channel runs get the same
 default unless a channel `session.config` sets `recursion_limit` (GitHub channel
 runs have their own floor; see
 [CONFIGURATION.md](CONFIGURATION.md#recursion-limits)); embedded
-`DeerFlowClient` runs retain their own defaults and override paths. A run that
-reaches the limit ends with status `error` and `stop_reason: "recursion_capped"`;
-its stream `error` event and the `/wait` error envelope use the name
+`DeerFlowClient` runs retain their own defaults and override paths. When the current graph
+invocation has a terminal checkpoint at the limit, the Gateway finalizes the run
+normally. A run with work remaining at the limit ends with status `error` and
+`stop_reason: "recursion_capped"`. Its stream `error` event and the `/wait`
+error envelope use the name
 `GraphRecursionError`, and the message lists up to five outputs the run created
 but did not present.
 
@@ -1015,6 +1089,38 @@ write, the Gateway resolves environment variables in a copy and validates the
 same expanded document the runtime will load while persisting the original raw
 placeholders.
 
+#### Runtime MCP Agent Grants
+
+Owners and approved definition digests of `mcp_agent_auth` bindings declared
+with `grants: runtime` (admin only; PATs are not accepted). Changes apply to
+the next run and call without a restart. See
+[Per-agent credentials](MCP_SERVER.md#runtime-grants).
+
+```http
+GET    /api/mcp/agent-auth
+GET    /api/mcp/agent-auth/{binding}
+GET    /api/mcp/agent-auth/{binding}/definition-digest?owner={user_id}
+PUT    /api/mcp/agent-auth/{binding}/grants
+DELETE /api/mcp/agent-auth/{binding}/grants
+```
+
+```json
+{"owners": ["<user id>"], "definition_digests": ["<64-character SHA-256 digest>"]}
+```
+
+A grant covers the agent, server, destination and OAuth client the binding had
+when it was written; after `config.yaml` changes one of them, responses show
+`"approval": "stale"` and the grant admits nobody until it is written again.
+A grant whose binding was removed from `config.yaml` is listed with
+`"approval": "retired"` and can still be read and deleted by its binding ID.
+Stale and retired grants, and grants of disabled bindings, keep their owners
+reserved for the agent and server they were approved for until they are
+replaced or deleted; owners listed by a disabled `grants: config` binding stay
+reserved too. A binding moved to `grants: config` whose runtime grant is
+still stored returns it as `stored_grant`, so the owners it reserves are visible
+until the grant is deleted. A write to a disabled binding is checked for overlaps like any
+other, so enabling it again cannot make admission reject both bindings.
+
 #### Reset MCP Tools Cache
 
 Publish a shared cache generation, then clear cached MCP tools and persistent
@@ -1156,6 +1262,11 @@ Content-Type: application/json
 }
 ```
 
+An archive that is not a valid skill returns `400`, for example one with unsafe
+or conflicting member paths, invalid frontmatter, a member CRC-32 mismatch found
+during extraction, or a `SKILL.md` that is missing or is not a file. A skill name
+that already exists returns `409`.
+
 #### Upload and Install Skill
 
 Upload a local `.skill` archive and install it for the current user. Requires an
@@ -1278,6 +1389,12 @@ GET /api/skills/custom/{skill_name}/history
 
 An invalid skill name returns `400`; a skill with neither a `SKILL.md` nor
 recorded history returns `404`.
+
+Each entry's `prev_content` is the content that change replaced. Edits,
+rollbacks and deletions through these routes and the agent's `skill_manage` tool
+take one lock per user, also across Gateway processes that share the home
+volume, so they cannot interleave. An agent patch is refused, and nothing is
+written, when `SKILL.md` changed while the patch was being scanned.
 
 #### Rollback Custom Skill
 
@@ -1756,6 +1873,7 @@ POST   /api/scheduled-tasks/preview-cron
 
 | Field | Type | Notes |
 |---|---|---|
+| `subagent_enabled` | boolean | Opt in to delegation for automatic and manual runs. Defaults to false on create. PATCH omission or null preserves the setting. Agent allowlists and runtime capacity limits still apply. |
 | `goal_objective` | string \| null | What one run must achieve (at most 4000 characters after whitespace normalization); requires `fresh_thread_per_run`. |
 | `max_runs` | integer \| null | Safety cap: automatic runs over the task's lifetime (trial runs excluded); at least 1. |
 | `end_at` | date-time \| null | Safety cap: no automatic run after this time. Without a UTC offset it is wall-clock time in the task's timezone. |
@@ -1771,6 +1889,8 @@ specified instant. Unchanged live once definitions keep their previously
 accepted execution time; a changed definition or a PATCH that rearms a terminal
 task is validated again. Ordinary Resume retains the admitted stored schedule
 without revalidating its wall time; a renewed `end_at` is still checked.
+Values outside the supported date-time range after UTC conversion return the
+same 422 codes, with the offending field named in the message.
 
 In a PATCH, sending `null` clears `goal_objective`, `max_runs`, `end_at` or
 `stop_condition` or `notification_group_connection_id`; for every other field `null` means unchanged (`assistant_id:
@@ -1981,7 +2101,7 @@ DeerFlow enforces authentication for all non-public HTTP routes. Public routes a
 The authenticated auth endpoints are:
 
 - `GET /api/v1/auth/me` returns the current user.
-- `POST /api/v1/auth/change-password` changes password, optionally changes email during setup, increments `token_version`, and reissues the cookie.
+- `POST /api/v1/auth/change-password` changes password, optionally changes email during setup, increments `token_version`, and reissues the cookie. A `new_email` that another account already uses returns `400` `email_already_exists`, including an address registered while the request runs, and changes nothing.
 
 Protected state-changing requests also require the CSRF double-submit token: send the `csrf_token` cookie value as the `X-CSRF-Token` header. Login/register/initialize/logout are bootstrap auth endpoints: they are exempt from the double-submit token but still reject hostile browser `Origin` headers.
 
@@ -2063,6 +2183,24 @@ X-Accel-Buffering: no
 when the frontend runs with `pnpm start` and no nginx) from gzipping and therefore
 buffering the stream; `X-Accel-Buffering: no` does the same for nginx. A reverse
 proxy you put in front of the Gateway should not compress `text/event-stream`.
+
+### SSE run errors
+
+An `error` event from the run worker carries a JSON object with `message` and
+`name`. If the error supplies a string `code`, the event also includes that code
+and any of these fields that have the expected type.
+
+| Field | When included |
+|---|---|
+| `retryable` | The error supplies a boolean indicating whether retrying may help. |
+| `retry_after_seconds` | The error supplies a finite number of seconds to wait before retrying. Missing values, booleans, `NaN`, and infinities are omitted. |
+
+Errors without a string `code` carry only `message` and `name`. Sandbox capacity
+errors use `SANDBOX_CAPACITY_EXCEEDED`.
+
+The JavaScript LangGraph SDK's `StreamError` exposes `message` and `name` from
+the payload. To use the optional fields, read the JSON `data` from the raw SSE
+`error` event.
 
 ### SSE replay retention and gaps
 

@@ -53,6 +53,10 @@ durable or distributed cost budget. Callers without a thread ID keep only the
 per-pass limit. Other generation failures retain their existing retry behavior.
 Configured/run-model fallback may make two candidate attempts per chunk, and SDK
 retries are separate. This bounds middleware steps, not a monetary bill or deadline.
+If the provider reports an output token limit, including native Ollama's
+`done_reason: length`, the chunk's partial response is discarded and the run-model
+fallback is tried when available. If no candidate produces a complete summary,
+compaction preserves the active history.
 For legitimate histories beyond this limit, increase the existing per-call budget
 within the model's capacity or compact earlier. There is no new configuration.
 Impossibly small budgets that cannot fit a nonempty marked carry or source fail
@@ -245,6 +249,7 @@ keep:
 - **Type**: String or null
 - **Default**: `null` (uses DeerFlow's built-in prompt)
 - **Description**: Custom prompt template for generating summaries. The prompt should guide the model to extract the most important context.
+- **Template syntax**: The value is a Python `str.format` template with one slot, `{messages}`, which receives the history selected for summarization. Literal braces must be doubled, so a JSON-shaped prompt is written `{{"summary": "..."}}`. Formatting and field-lookup errors skip automatic compaction without changing history or the previous summary. The warning includes `summary_prompt_hash`, matching the middleware's release-policy fingerprint, without logging the template or history. Manual `/compact` reports the existing summary-generation failure instead of treating the attempt as unnecessary compaction; its HTTP error status is unchanged.
 
 #### `skill_file_read_tool_names`
 - **Type**: List of strings

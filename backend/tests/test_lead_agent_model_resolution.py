@@ -177,7 +177,7 @@ def test_make_lead_agent_uses_server_auth_identity_for_all_user_scoped_inputs(mo
         captured["agent_config_user_id"] = user_id
         return AgentConfig(name=name)
 
-    def _load_skills(available_skills, *, app_config, user_id=None):
+    def _load_skills(available_skills, *, app_config, user_id=None, skill_storage=None):
         captured["skills_user_id"] = user_id
         return []
 
@@ -232,7 +232,7 @@ def test_make_lead_agent_applies_custom_agent_memory_opt_out(monkeypatch):
         "load_agent_config",
         lambda name, *, user_id=None: AgentConfig(name=name, memory_enabled=False),
     )
-    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [])
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None, skill_storage=None: [])
 
     def _build_middlewares(*args, **kwargs):
         captured["middleware_memory_enabled"] = kwargs.get("memory_enabled")
@@ -491,9 +491,10 @@ def test_public_make_lead_agent_does_not_take_mode_from_runtime_context(monkeypa
 
     monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
 
-    def _capture(config, *, app_config):
+    def _capture(config, *, app_config, skill_storage=None):
         captured["config"] = config
         captured["app_config"] = app_config
+        captured["skill_storage"] = skill_storage
         return lead_agent_module.LeadAgentAssembly(graph=object(), descriptor=object())
 
     monkeypatch.setattr(lead_agent_module, "_assemble_lead_agent", _capture)
@@ -509,6 +510,60 @@ def test_public_make_lead_agent_does_not_take_mode_from_runtime_context(monkeypa
 
     assert config["configurable"][INTERNAL_CHECKPOINT_MODE_KEY] == "full"
     assert captured["app_config"] is app_config
+
+
+def test_assemble_lead_agent_threads_skill_storage_to_build_middlewares(model_control_assembly, monkeypatch, tmp_path):
+    """The public embedding entrypoint must preserve the injected storage through
+    both assembly hops, not only in `build_middlewares`."""
+    from deerflow.runtime import checkpoint_mode
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+    app_config, *_ = model_control_assembly
+    captured: dict[str, object] = {}
+
+    def _capture(*args, **kwargs):
+        captured["skill_storage"] = kwargs.get("skill_storage")
+        return []
+
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", _capture)
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
+
+    app_config.skills.container_path = "/mnt/request-skills"
+    app_config.skills.deferred_discovery = True
+    skill_file = tmp_path / "public" / "request-only" / "SKILL.md"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text("---\nname: request-only\ndescription: Request-only skill\n---\n\nSkill body.\n", encoding="utf-8")
+    monkeypatch.setattr(ExtensionsConfig, "from_file", lambda: ExtensionsConfig())
+    injected = LocalSkillStorage(host_path=str(tmp_path), container_path=app_config.skills.container_path)
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda *args, **kwargs: kwargs["skill_storage"].load_skills(enabled_only=True))
+    result = lead_agent_module.assemble_lead_agent(
+        {"context": {"model_name": "default"}},
+        app_config=app_config,
+        skill_storage=injected,
+    )
+
+    assert captured["skill_storage"] is injected
+    describe = next(tool for tool in result.graph["tools"] if tool.name == "describe_skill")
+    result = describe.invoke({"args": {"name": "select:request-only"}, "name": "describe_skill", "type": "tool_call", "id": "describe-request"})
+    assert "/mnt/request-skills/public/request-only/SKILL.md" in result.update["messages"][0].content
+
+
+def test_assemble_lead_agent_rejects_mismatched_skill_mount(model_control_assembly, monkeypatch, tmp_path):
+    from deerflow.runtime import checkpoint_mode
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+    app_config, *_ = model_control_assembly
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_channel_mode", None)
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", None)
+    storage = LocalSkillStorage(host_path=str(tmp_path), container_path="/mnt/request-skills")
+
+    with pytest.raises(ValueError, match=r"skills\.container_path"):
+        lead_agent_module.assemble_lead_agent(
+            {"context": {"model_name": "default"}},
+            app_config=app_config,
+            skill_storage=storage,
+        )
 
 
 def test_make_lead_agent_uses_runtime_app_config_from_context_without_global_read(monkeypatch):
@@ -1426,6 +1481,61 @@ def test_resolve_runtime_option_precedence():
     assert lead_agent_module._resolve_runtime_option({}, "thinking_enabled", None, False) is False
 
 
+@pytest.mark.parametrize("explicit_effort", [False, True])
+def test_ultra_mode_defaults_respect_the_custom_lead(explicit_effort):
+    from app.gateway.services import merge_run_context_overrides
+
+    config = {}
+    fields = ["thinking_enabled"] if explicit_effort else ["thinking_enabled", "reasoning_effort"]
+    merge_run_context_overrides(config, {"mode": "ultra", "mode_default_fields": fields, "thinking_enabled": True, "reasoning_effort": "high", "is_plan_mode": True, "subagent_enabled": True})
+    cfg = lead_agent_module._get_runtime_config(config)
+    resolve = lead_agent_module._resolve_runtime_option
+    assert cfg["subagent_enabled"] is cfg["is_plan_mode"] is True
+    assert resolve(cfg, "thinking_enabled", False, True) is False
+    assert resolve(cfg, "reasoning_effort", "low", None) == ("high" if explicit_effort else "low")
+    assert resolve(cfg, "thinking_enabled", None, False) is True
+    assert resolve(cfg, "reasoning_effort", None, None) == "high"
+    merge_run_context_overrides(config, {"thinking_enabled": False, "reasoning_effort": "high"})
+    explicit = lead_agent_module._get_runtime_config(config)
+    assert resolve(explicit, "thinking_enabled", True, True) is False
+    assert resolve(explicit, "reasoning_effort", "low", None) == "high"
+
+
+def test_web_mode_defaults_cannot_downgrade_an_explicit_configurable_value():
+    from app.gateway.services import merge_run_context_overrides
+
+    config = {"configurable": {"thinking_enabled": False}}
+    merge_run_context_overrides(config, {"mode_default_fields": ["thinking_enabled"], "thinking_enabled": True})
+    assert lead_agent_module._resolve_runtime_option(lead_agent_module._get_runtime_config(config), "thinking_enabled", True, True) is False
+
+
+def test_switching_to_required_thinking_only_rejects_explicit_off(model_control_assembly, monkeypatch):
+    from app.gateway.services import merge_run_context_overrides
+    from deerflow.models.reasoning import ReasoningPolicyError
+
+    _, _, _, model_factory = model_control_assembly
+    optional = _make_model("optional", supports_thinking=True)
+    required = ModelConfig(name="required", model="required", use="langchain_openai:ChatOpenAI", reasoning={"thinking": "required", "on_disable_request": "reject"})
+    app_config = _make_app_config([optional, required])
+    agent = AgentConfig(name="dispatcher", model="optional", thinking_enabled=False)
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda *args, **kwargs: agent)
+
+    def assemble(name, **reasoning):
+        config = {}
+        merge_run_context_overrides(config, {"agent_name": "dispatcher", "mode": "ultra", "subagent_enabled": True, "model_name": name, "model_selection_requested": name, **reasoning})
+        lead_agent_module._make_lead_agent(config, app_config=app_config)
+        return config["metadata"]["thinking_enabled"]
+
+    preset = {"thinking_enabled": True, "mode_default_fields": ["thinking_enabled"]}
+    assert assemble("optional", **preset) is False
+    assert assemble("required", **preset) is True
+    assert model_factory.call_args.kwargs["thinking_enabled"] is True
+    model_factory.reset_mock()
+    with pytest.raises(ReasoningPolicyError):
+        assemble("required", thinking_enabled=False)
+    model_factory.assert_not_called()
+
+
 def _make_agent_config(**kwargs):
     from deerflow.config.agents_config import AgentConfig
 
@@ -1497,10 +1607,11 @@ def test_request_thinking_overrides_agent_default(monkeypatch):
 
 
 @pytest.mark.parametrize("mcp_plugins", [None, [], ["installed-plugin"]])
-def test_empty_allowed_subagents_disables_requested_delegation(monkeypatch, mcp_plugins):
+@pytest.mark.parametrize("allowed, enabled", [([], False), (["planner"], True)])
+def test_scheduled_delegation_respects_agent_allowlist(monkeypatch, mcp_plugins, allowed, enabled):
     """A request switch cannot widen an explicit Custom Agent hard deny."""
     app_config = _make_app_config([_make_model("agent-model", supports_thinking=False)])
-    agent_config = _make_agent_config(model="agent-model", allowed_subagents=[])
+    agent_config = _make_agent_config(model="agent-model", allowed_subagents=allowed)
     agent_config.mcp_plugins = mcp_plugins
 
     import deerflow.tools as tools_module
@@ -1516,6 +1627,8 @@ def test_empty_allowed_subagents_disables_requested_delegation(monkeypatch, mcp_
         "context": {
             "agent_name": "researcher",
             "subagent_enabled": True,
+            "non_interactive": True,
+            "user_id": "owner",
         }
     }
     lead_agent_module._make_lead_agent(config, app_config=app_config)
@@ -1524,14 +1637,14 @@ def test_empty_allowed_subagents_disables_requested_delegation(monkeypatch, mcp_
         model_name="agent-model",
         groups=None,
         mcp_plugins=mcp_plugins,
-        subagent_enabled=False,
+        subagent_enabled=enabled,
         include_conversation_reader=False,
         app_config=app_config,
         chat_model=ANY,
     )
-    assert config["context"]["subagent_enabled"] is False
-    assert config["configurable"]["subagent_enabled"] is False
-    assert config["metadata"]["allowed_subagents"] == []
+    assert config["context"]["subagent_enabled"] is enabled
+    assert config["configurable"]["subagent_enabled"] is enabled
+    assert config["metadata"]["allowed_subagents"] == allowed
     assert config["metadata"]["mcp_plugins"] == mcp_plugins
 
 

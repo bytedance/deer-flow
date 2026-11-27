@@ -29,6 +29,7 @@ make docker-logs    # View logs
 ```
 
 `make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`). Direct Compose users can add `--profile provisioner` to the dev command for the same mode; the default stack does not require Kubernetes.
+The Gateway and the provisioner compare `PROVISIONER_API_KEY` after stripping surrounding whitespace from the configured value on each side, so a key that arrives with a trailing newline (for example from a Kubernetes Secret created with `kubectl create secret --from-file`) still authenticates; see the [Helm architecture notes](../../deploy/helm/deer-flow/README.md#architecture-notes).
 With `USERDATA_PVC_NAME`, sandbox data, extra mounts and Lark broker credentials share one `user-data` volume with separate `subPath` mounts, avoiding duplicate references to the same claim on NFS CSI drivers.
 
 Docker builds use the upstream `uv` registry by default. The gateway image installs with `uv sync --locked`, and `uv.lock` pins `https://pypi.org/simple`, so `UV_INDEX_URL` has to keep that value: exporting a mirror such as `https://pypi.tuna.tsinghua.edu.cn/simple` fails the build with ``The lockfile at `uv.lock` needs to be updated, but `--locked` was provided`` (reproduce in an already-synced environment with `cd backend && UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple uv sync --locked --check`; if the environment itself is stale, `--check` reports that instead for either index, so use `uv lock --check` to see it without syncing). Installing from a mirror requires regenerating the lock or dropping `--locked`, and both change what the image installs, so keep the default index for a checkout you intend to contribute back. `NPM_REGISTRY=https://registry.npmmirror.com` is independent of this: it applies to the frontend image's `pnpm` install and to the gateway image's Lark CLI install (`@larksuite/cli`, which `backend/Dockerfile` installs with npm).
@@ -306,11 +307,37 @@ rolling upgrade, route keyed runs with ID-less input and their retries to
 upgraded workers until all Gateway workers are upgraded; older workers may
 reject those retries with 409. See the [run API contract](../../backend/docs/API.md#create-run).
 
+During a rolling upgrade, route multipart Queue submissions and their retry
+and remove requests to upgraded Gateways. Only a run owned by a worker that
+supports queued attachments can accept them. Older Gateways handle queue items
+as plain text, so finish or remove items with attachments before rolling back.
+See [queued input](../../backend/docs/API.md#submit-an-input-while-a-web-run-is-active).
+
+### Redis checkpoint history cache upgrade
+
+The v2 cache rebuilds histories under a new default prefix. Deleting or pruning
+a thread also purges its v1 entries for the same database, including entries
+without expiry. If `database.checkpoint_cache.key_prefix` is set, stop all
+workers using that prefix, clear this deployment's Redis checkpoint history
+keys, and then start the upgraded workers. Custom prefixes keep the same name
+across cache versions.
+
 ## Option 2: Local Development
 
 If you prefer running services locally:
 
-Prerequisite: complete the "Configuration" steps above first (`make setup`). `make dev` requires a valid `config.yaml` in the project root. Set `DEER_FLOW_PROJECT_ROOT` to define that root explicitly, or `DEER_FLOW_CONFIG_PATH` to point at a specific config file. Runtime state defaults to `.deer-flow` under the project root and can be moved with `DEER_FLOW_HOME`; skills default to `skills/` under the project root and can be moved with `DEER_FLOW_SKILLS_PATH`. Run `make doctor` to verify your setup before starting.
+Before starting local development, follow the [configuration guide](configuration.md)
+to run `make setup` from the repository root or prepare `config.yaml` manually.
+
+`make dev` needs a valid configuration file. Set `DEER_FLOW_CONFIG_PATH` to
+point at a specific file. Otherwise, DeerFlow looks for `config.yaml` under
+`DEER_FLOW_PROJECT_ROOT`, which defaults to the checkout root. It then falls back
+to the checkout's `backend/config.yaml` and `config.yaml` in that order.
+
+When started with `make dev`, DeerFlow stores runtime state in `backend/.deer-flow`
+in the checkout by default. Set `DEER_FLOW_HOME` to choose a different location.
+Skills default to `skills/` under the project root and can be moved with
+`DEER_FLOW_SKILLS_PATH`. Run `make doctor` to verify your setup before starting.
 
 Configuration checks and agent-storage migrations use the installed backend environment through `uv run --no-sync --project backend` from the repository root. This preserves relative runtime paths and installed optional dependencies; see the [setup checks](../../backend/docs/SETUP.md#steps) and [agent-storage migration](../../backend/docs/CONFIGURATION.md#agent-storage).
 
@@ -407,19 +434,28 @@ every run. To reuse the last build instead, pass `SKIP_FRONTEND_BUILD=1` (or add
 `--skip-frontend-build` when calling `./scripts/serve.sh --prod` directly). This
 is opt-in: it fails fast when `frontend/.next` has no completed build.
 
-Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
+With the bundled nginx configuration, nginx rewrites public LangGraph-compatible
+requests from `/api/langgraph/*` to `/api/*` before proxying them to the Gateway.
+For example, `POST /api/langgraph/threads` reaches the Gateway as
+`POST /api/threads`.
 
 Cold agent imports during run creation use a dedicated worker pool, keeping
 unrelated Gateway requests responsive while the agent stack loads. A failed
 factory import prevents the run from being admitted.
 
-For a read-only demo without the Gateway, run `make build-static` from `frontend/`,
-then `HOSTNAME=127.0.0.1 PORT=3000 node --env-file=.env .next/standalone/server.js`
-from the same directory. The build includes public demo assets and resolves
-supported demo API reads locally; writes are unavailable. To display the homepage
-GitHub star count, set `GITHUB_OAUTH_TOKEN` in `frontend/.env` before starting Node.
-The token stays on the server; missing credentials or GitHub failures hide the
-count. Restart Node after changing the token; no rebuild is needed.
+For a read-only demo without the Gateway, run these commands from `frontend/`:
+
+```bash
+make build-static
+HOSTNAME=127.0.0.1 PORT=3000 node .next/standalone/server.js
+```
+
+The build includes public demo assets and resolves supported demo API reads
+locally. Writes are unavailable. To display the homepage GitHub star count, set
+`GITHUB_OAUTH_TOKEN` in `frontend/.env` and add `--env-file=.env` before
+`.next/standalone/server.js` in the launch command. The token stays on the server.
+Missing credentials or GitHub failures hide the count. Restart Node after
+changing the token to load the new value.
 
 ## LangGraph Studio (Optional)
 

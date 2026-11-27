@@ -186,7 +186,7 @@ async function expectSidecarModelPinnedToSubmit(page: Page) {
       const model = buttons.find(
         (button) => button.label === "DeepSeek V4 Pro",
       );
-      const submit = buttons.find((button) => button.label === "Submit");
+      const submit = buttons.find((button) => button.label === "Send");
 
       return {
         formLeft: Math.round(formBox.left),
@@ -281,7 +281,7 @@ async function expectSidecarModelHiddenWhenCompact(page: Page) {
 
   expect(metrics).not.toBeNull();
   expect(metrics!.labels).toContain("Pro");
-  expect(metrics!.labels).toContain("Submit");
+  expect(metrics!.labels).toContain("Send");
   expect(metrics!.labels).not.toContain("DeepSeek V4 Pro");
   expect(metrics!.overflows).toBe(false);
 }

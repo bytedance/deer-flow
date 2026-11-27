@@ -350,7 +350,7 @@ before review.
 python -m pip install -r tests/skills/requirements.txt
 python -m pytest tests/skills -q
 
-# Default backend tests (four parallel shards; excludes live, blocking-I/O and bundled-extension tests)
+# Default backend tests (six parallel shards matching CI; excludes live, blocking-I/O, bundled-extension and benchmark tests)
 cd backend
 make test
 
@@ -388,12 +388,21 @@ must also set `DEER_FLOW_RUN_LIVE_TESTS=1`.
 
 ### PR Regression Checks
 
-Every pull request triggers the following CI workflows:
+Pull requests trigger the following CI workflows:
 
-- **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml)
+- **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml) (skipped only when every changed file is one the backend suite never reads)
 - **Bundled extension tests** — [.github/workflows/bundled-extension-tests.yml](.github/workflows/bundled-extension-tests.yml) (triggered by example packages, `backend/packages/**`, `backend/app/gateway/**` and the marked test modules)
-- **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml)
+- **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml) (run when `frontend/` or a file it reads changes)
 - **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered only when `frontend/` files change)
+
+[scripts/ci_changed_scopes.py](scripts/ci_changed_scopes.py) holds the path rules
+for the unit test and lint workflows. Pushes to `main` and changes under
+`.github/` run every scope. When a test starts reading a file outside its own
+tree, add that path to the script. On every pull request, the
+`frontend-scope-reads` lint job flags literal references outside the frontend
+scope, including paths based on `import.meta.url`. The backend guard in
+`backend/tests/test_ci_changed_scopes.py` flags frontend paths that would skip
+the backend suite, including paths built from module-level Python constants.
 
 The browser E2E and full-stack replay jobs use the official Playwright image,
 which includes Chromium and its system libraries. When upgrading the locked
@@ -406,7 +415,7 @@ setup also verifies SSL and SQLite imports before launching fixture gateways.
 
 ### Test and diagnostics notes
 
-Backend `make test` runs four duration-balanced shards concurrently and reports
+Backend `make test` runs six duration-balanced shards concurrently (matching CI) and reports
 failure if any shard fails. Use `make test TEST_JOBS=1` to run the shards sequentially.
 It excludes live external-API, blocking-I/O and bundled-extension coverage.
 Run `cd backend && make test-blocking-io` for strict blocking-I/O checks.

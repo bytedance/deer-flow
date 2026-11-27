@@ -8,7 +8,10 @@ cd backend && python -m pytest tests -q -k "opensandbox"
 
 Validate `use_server_proxy` and `secure_access` at provider startup. Accept
 booleans, default missing or null values to `false`, and reject strings and
-other types before creating an SDK connection.
+other types before creating an SDK connection. Validate `resource` and
+`resource_requests` the same way: a mapping of non-blank string names to
+non-blank string or finite positive numeric quantities, or missing/null/empty
+for the SDK default.
 
 ## Command deadlines
 
@@ -17,6 +20,12 @@ other types before creating an SDK connection.
   numeric exits stay unchanged, and a signal-only `-1` does not prove a deadline.
 - **Deadline tests use execution results.** A `TimeoutError` that only a fake
   raises does not test the contract.
+
+## Agent skill views
+
+Keep eager skill synchronization when the thread's remote is active or its
+acquire is in flight. Read the registry and scope serializer together so the
+remote cannot be published between the two checks.
 
 ## Output synchronization
 

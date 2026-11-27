@@ -17,12 +17,19 @@ from deerflow.persistence.scheduled_task_runs.projection import account_launch, 
 from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, LIVE_TASK_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES, TERMINAL_TASK_STATUSES, ScheduledTaskRow
 from deerflow.runtime.events.terminal import RecoveryTerminalPublisher, RecoveryTerminalTarget
 from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED, RUN_ERROR_INTERRUPTED
+from deerflow.scheduler.schedules import canonical_once_run_at
 from deerflow.utils.goal_objective import normalize_goal_objective
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
 
 _TERMINAL_DURABLE_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
+
+
+def _canonical_schedule_spec(schedule_type: str, spec: dict[str, Any]) -> dict[str, Any]:
+    if schedule_type == "once" and isinstance(spec, dict) and "run_at" in spec:
+        return {**spec, "run_at": canonical_once_run_at(spec["run_at"])}
+    return spec
 
 
 class ScheduledTaskQuotaExceeded(ValueError):
@@ -105,6 +112,8 @@ class ScheduledTaskRepository:
     @staticmethod
     def _row_to_dict(row: ScheduledTaskRow) -> dict[str, Any]:
         data = row.to_dict(exclude={"last_occurrence_seq", "unmet_streak_after_seq"})
+        data["subagent_enabled"] = row.subagent_enabled is True
+        data["schedule_spec"] = _canonical_schedule_spec(row.schedule_type, row.schedule_spec)
         for key in _TIMESTAMP_KEYS:
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
@@ -155,6 +164,7 @@ class ScheduledTaskRepository:
         standing_notes: list[str] | None = None,
         stop_condition: str | None = None,
         notification_group_connection_id: str | None = None,
+        subagent_enabled: bool = False,
     ) -> dict[str, Any]:
         if goal_objective is not None:
             normalize_goal_objective(goal_objective)
@@ -178,10 +188,11 @@ class ScheduledTaskRepository:
             standing_notes=list(standing_notes) if standing_notes is not None else None,
             context_mode=context_mode,
             assistant_id=assistant_id,
+            subagent_enabled=subagent_enabled,
             title=title,
             prompt=prompt,
             schedule_type=schedule_type,
-            schedule_spec=schedule_spec,
+            schedule_spec=_canonical_schedule_spec(schedule_type, schedule_spec),
             timezone=timezone,
             next_run_at=next_run_at,
             created_at=now,
@@ -316,7 +327,12 @@ class ScheduledTaskRepository:
         error: str,
         now: datetime,
     ) -> str:
-        """Delete a task only before queue execution begins."""
+        """Delete a task only before queue execution begins.
+
+        This is the repository's only delete. Occurrences carry no foreign key
+        to their task, so a plain row delete would also remove a task whose
+        occurrence is already launching or running.
+        """
         async with self._sf() as session:
             task = await self._lock_task(session, task_id)
             if task is None or task.user_id != user_id:
@@ -403,6 +419,8 @@ class ScheduledTaskRepository:
                     raise ActiveScheduledTaskMutationConflict(active_status)
             for key, value in updates.items():
                 if hasattr(row, key):
+                    if key == "schedule_spec":
+                        value = _canonical_schedule_spec(updates.get("schedule_type", row.schedule_type), value)
                     # Callers pass timestamps back in the serialized form
                     # ``_row_to_dict`` returned (the PATCH route reuses an
                     # interval task's ``next_run_at`` unchanged); bind datetimes.
@@ -430,15 +448,6 @@ class ScheduledTaskRepository:
             await session.commit()
             await session.refresh(row)
             return self._row_to_dict(row)
-
-    async def delete(self, task_id: str, *, user_id: str) -> bool:
-        async with self._sf() as session:
-            row = await session.get(ScheduledTaskRow, task_id)
-            if row is None or row.user_id != user_id:
-                return False
-            await session.delete(row)
-            await session.commit()
-            return True
 
     async def claim_due_tasks(
         self,

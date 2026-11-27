@@ -70,19 +70,23 @@ restore obsolete progress hints, including same-run goal continuations.
 | 8 | **ViewImageMiddleware** | Injects image data for vision-capable models (conditional) |
 | 9 | **ClarificationMiddleware** | Intercepts clarification requests and interrupts execution (must be last) |
 
-When `loop_detection.enabled` is set, loop detection checks both repeated
-tool-call sets and per-tool frequency. Warnings do not skip the rest of a
-tool-call batch: any hard limit reached takes precedence and stops the entire
-batch before tool execution. Warning-only batches remain fully counted and
-receive a transient hint on the next model request.
+When `loop_detection.enabled` is set, loop detection checks repeated tool-call
+sets whose results show no progress. Warnings do not skip the rest of a
+tool-call batch: a hash-based hard limit stops the entire batch before tool
+execution. Tool-name frequency is retained as an INFO observability metric for
+workload and cost analysis; its thresholds never warn or stop a run. Warning-
+only batches remain fully counted and receive a transient hint on the next
+model request.
 
 ### Sandbox System
 
-With lazy initialization, a fresh AIO run prepares its authorized Agent skill
-view without acquiring a container until a sandbox-backed tool needs one.
-Existing sandbox state still requires eager policy rebinding; upload-based
-providers still acquire and synchronize skills eagerly. Explicit sandbox
-prewarming remains a separate opt-in behavior.
+With lazy initialization, a fresh AIO or OpenSandbox run prepares its
+authorized Agent skill view without acquiring a sandbox until a sandbox-backed
+tool needs one. OpenSandbox installs that view when the tool acquires the
+remote. A run with existing sandbox state still rebinds eagerly. OpenSandbox
+also synchronizes eagerly when another operation holds or is initializing the
+thread's remote. Other upload-based providers acquire and synchronize skills
+eagerly. Explicit sandbox prewarming remains a separate opt-in behavior.
 
 Per-thread isolated execution with virtual path translation:
 
@@ -551,7 +555,8 @@ the only execution path, which keeps operational mistakes off the table. See
 ### Testing
 
 ```bash
-# Default offline backend suite (four parallel shards; excludes live and blocking-I/O tests)
+# Default offline backend suite (six parallel shards matching CI; excludes live,
+# blocking-I/O, bundled-extension and benchmark tests)
 make test
 
 # Run the same shards sequentially

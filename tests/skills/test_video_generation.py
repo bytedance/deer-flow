@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -8,6 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from skill_loader import FakeResp, load  # noqa: E402
 
 vid = load("video-generation")
+GEMINI_VIDEO = "https://generativelanguage.googleapis.com/download/v1beta/files/video"
+MINIMAX_VIDEO = "https://filecdn.minimax.chat/v.mp4"
+BYTEPLUS_VIDEO = "https://bucket.tos-ap-southeast-1.volces.com/generated/v.mp4"
 
 
 @pytest.fixture(autouse=True)
@@ -15,11 +19,19 @@ def clean_env(monkeypatch):
     for key in (
         "GEMINI_API_KEY",
         "MINIMAX_API_KEY",
+        "BYTEPLUS_AGENTPLAN_API_KEY",
         "VIDEO_GENERATION_PROVIDER",
         "MINIMAX_API_HOST",
+        "MINIMAX_VIDEO_DOWNLOAD_HOSTS",
         "MINIMAX_VIDEO_MODEL",
         "MINIMAX_VIDEO_RESOLUTION",
         "MINIMAX_VIDEO_DURATION",
+        "BYTEPLUS_AGENTPLAN_BASE_URL",
+        "BYTEPLUS_AGENTPLAN_VIDEO_MODEL",
+        "BYTEPLUS_AGENTPLAN_VIDEO_RESOLUTION",
+        "BYTEPLUS_AGENTPLAN_VIDEO_DURATION",
+        "BYTEPLUS_AGENTPLAN_GENERATE_AUDIO",
+        "BYTEPLUS_AGENTPLAN_VIDEO_DOWNLOAD_HOSTS",
     ):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(vid.time, "sleep", lambda *_: None)
@@ -62,10 +74,12 @@ def test_minimax_full_flow(monkeypatch, tmp_path, video_settings):
     def fake_post(url, headers=None, json=None, **kw):
         posts["url"] = url
         posts["json"] = json
+        assert kw["allow_redirects"] is False
         assert headers["Authorization"] == "Bearer m"
         return FakeResp({"task_id": "T1", "base_resp": {"status_code": 0}})
 
     def fake_get(url, headers=None, params=None, **kw):
+        assert kw["allow_redirects"] is False
         if url.endswith("/v1/query/video_generation"):
             assert headers["Authorization"] == "Bearer m"
             assert params["task_id"] == "T1"
@@ -74,9 +88,11 @@ def test_minimax_full_flow(monkeypatch, tmp_path, video_settings):
         if url.endswith("/v1/files/retrieve"):
             assert headers["Authorization"] == "Bearer m"
             assert params["file_id"] == "F1"
-            return FakeResp({"file": {"download_url": "https://dl/v.mp4"},
+            return FakeResp({"file": {"download_url": MINIMAX_VIDEO},
                              "base_resp": {"status_code": 0}})
-        return FakeResp(content=b"MP4DATA")  # the actual download
+        assert url == MINIMAX_VIDEO
+        assert not headers
+        return FakeResp(content=b"MP4DATA")
 
     monkeypatch.setattr(vid.requests, "post", fake_post)
     monkeypatch.setattr(vid.requests, "get", fake_get)
@@ -92,6 +108,129 @@ def test_minimax_full_flow(monkeypatch, tmp_path, video_settings):
     if "duration" in video_settings:
         assert type(posts["json"]["duration"]) is int
     assert "successfully" in msg.lower()
+
+
+def mock_http_transport(monkeypatch, responses):
+    """Record the prepared requests and return the scripted responses in order."""
+    sent = []
+
+    def send(adapter, request, **kwargs):
+        assert len(sent) < len(responses), f"Unexpected {request.method} {request.url}"
+        status, payload = responses[len(sent)]
+        sent.append(request)
+        response = requests.Response()
+        response.request = request
+        response.url = request.url
+        response.status_code = status
+        if isinstance(payload, str):
+            response.headers["Location"] = payload
+            payload = b""
+        elif isinstance(payload, dict):
+            payload = json.dumps(payload).encode()
+        response._content = payload
+        return response
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", send)
+    return sent
+
+
+def test_minimax_api_follows_same_origin_redirects_through_generation(monkeypatch, tmp_path):
+    host = "https://minimax.example:8443"
+    monkeypatch.setenv("MINIMAX_API_HOST", host)
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
+    sent = mock_http_transport(monkeypatch, [
+        (307, "submit/next"),
+        (308, f"{host}/submit/final"),
+        (200, {"task_id": "T1"}),
+        (307, "?task_id=T1&step=2"),
+        (308, f"{host}/poll/final?cursor=next"),
+        (200, {"status": "Success", "file_id": "F1"}),
+        (308, "/retrieve?file_id=F1"),
+        (307, f"{host}/retrieve/final"),
+        (200, {"file": {"download_url": MINIMAX_VIDEO}}),
+        (200, b"video"),
+    ])
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("a cat runs", encoding="utf-8")
+    output = tmp_path / "video.mp4"
+
+    vid.generate_video(str(prompt), [], str(output))
+
+    assert [(request.method, request.url) for request in sent] == [
+        ("POST", f"{host}/v1/video_generation"),
+        ("POST", f"{host}/v1/submit/next"),
+        ("POST", f"{host}/submit/final"),
+        ("GET", f"{host}/v1/query/video_generation?task_id=T1"),
+        ("GET", f"{host}/v1/query/video_generation?task_id=T1&step=2"),
+        ("GET", f"{host}/poll/final?cursor=next"),
+        ("GET", f"{host}/v1/files/retrieve?file_id=F1"),
+        ("GET", f"{host}/retrieve?file_id=F1"),
+        ("GET", f"{host}/retrieve/final"),
+        ("GET", MINIMAX_VIDEO),
+    ]
+    assert json.loads(sent[0].body) == {"model": "MiniMax-Hailuo-2.3", "prompt": "a cat runs"}
+    for request in sent[:3]:
+        assert request.body == sent[0].body
+        assert request.headers["Content-Type"] == "application/json"
+    assert all(request.body is None for request in sent[3:])
+    assert all(request.headers["Authorization"] == "Bearer test-key" for request in sent[:-1])
+    assert "Authorization" not in sent[-1].headers
+    assert output.read_bytes() == b"video"
+
+
+@pytest.mark.parametrize("destination", [
+    "http://minimax.example/submit",
+    "https://minimax.example:8443/submit",
+    "https://filecdn.minimax.chat/submit",
+    "https://user@minimax.example/submit",
+    "https://minimax.example:/submit",
+])
+def test_minimax_api_rejects_untrusted_redirect_before_sending(monkeypatch, tmp_path, destination):
+    host = "https://minimax.example"
+    monkeypatch.setenv("MINIMAX_API_HOST", host)
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-key")
+    sent = mock_http_transport(monkeypatch, [(307, "/submit/next"), (308, destination)])
+    output = tmp_path / "video.mp4"
+    output.write_bytes(b"existing video")
+
+    with pytest.raises(ValueError):
+        vid._generate_video_minimax("a cat runs", [], str(output))
+
+    assert [request.url for request in sent] == [f"{host}/v1/video_generation", f"{host}/submit/next"]
+    assert output.read_bytes() == b"existing video"
+
+
+@pytest.mark.parametrize("count", [5, 6])
+def test_minimax_api_limits_same_origin_redirects(monkeypatch, count):
+    host = "https://minimax.example:443"
+    responses = [(307, f"https://minimax.example/step/{i + 1}") for i in range(count)]
+    responses.append((200, {"file": {"download_url": MINIMAX_VIDEO}}))
+    sent = mock_http_transport(monkeypatch, responses)
+
+    if count == 5:
+        assert vid._retrieve_file_url(host, "Bearer test-key", "F1") == MINIMAX_VIDEO
+    else:
+        with pytest.raises(ValueError):
+            vid._retrieve_file_url(host, "Bearer test-key", "F1")
+    assert len(sent) == 6
+
+
+@pytest.mark.parametrize("status", [300, 301, 302, 303, 304, 305, 306])
+def test_minimax_api_rejects_other_3xx(monkeypatch, status):
+    host = "https://minimax.example"
+    sent = mock_http_transport(monkeypatch, [(status, "/next")])
+    with pytest.raises(ValueError, match=str(status)):
+        vid._poll_video_task(host, "Bearer test-key", "T1", max_attempts=1)
+    assert [request.url for request in sent] == [f"{host}/v1/query/video_generation?task_id=T1"]
+
+
+@pytest.mark.parametrize("status", [307, 308])
+def test_minimax_api_rejects_redirect_without_location(monkeypatch, status):
+    host = "https://minimax.example"
+    sent = mock_http_transport(monkeypatch, [(status, b"")])
+    with pytest.raises(ValueError, match="no destination"):
+        vid._retrieve_file_url(host, "Bearer test-key", "F1")
+    assert [request.url for request in sent] == [f"{host}/v1/files/retrieve?file_id=F1"]
 
 
 @pytest.mark.parametrize("duration", ["abc", "2.5", "²"])
@@ -124,7 +263,7 @@ def test_minimax_reference_first_frame(monkeypatch, tmp_path):
         if url.endswith("/v1/query/video_generation"):
             return FakeResp({"status": "Success", "file_id": "F1", "base_resp": {"status_code": 0}})
         if url.endswith("/v1/files/retrieve"):
-            return FakeResp({"file": {"download_url": "https://dl/v.mp4"}, "base_resp": {"status_code": 0}})
+            return FakeResp({"file": {"download_url": MINIMAX_VIDEO}, "base_resp": {"status_code": 0}})
         return FakeResp(content=b"X")
 
     monkeypatch.setattr(vid.requests, "post", fake_post)
@@ -194,22 +333,195 @@ def test_gemini_download_raises_on_http_error(monkeypatch, tmp_path):
     monkeypatch.setattr(vid.requests, "get", fake_get)
     out = tmp_path / "sub" / "v.mp4"
     with pytest.raises(requests.HTTPError):
-        vid.download("https://dl/v.mp4", str(out))
+        vid.download(GEMINI_VIDEO, str(out))
     assert calls["timeout"]  # a timeout is now passed
     assert not out.exists()
 
 
-def test_gemini_download_writes_nested_dir(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("url", "expected_headers"),
+    [(GEMINI_VIDEO, {"x-goog-api-key": "g"}), ("https://storage.googleapis.com:443/example/video.mp4", {})],
+)
+def test_gemini_download_writes_nested_dir(monkeypatch, tmp_path, url, expected_headers):
     monkeypatch.setenv("GEMINI_API_KEY", "g")
 
     def fake_get(url, headers=None, **kw):
-        assert headers["x-goog-api-key"] == "g"
+        assert (headers or {}) == expected_headers
         return FakeResp(content=b"VIDEO")
 
     monkeypatch.setattr(vid.requests, "get", fake_get)
     out = tmp_path / "nested" / "dir" / "v.mp4"
-    vid.download("https://dl/v.mp4", str(out))
+    vid.download(url, str(out))
     assert out.read_bytes() == b"VIDEO"
+
+
+@pytest.mark.parametrize("status", [200, 204])
+@pytest.mark.parametrize("existing", [False, True], ids=["new-output", "existing-output"])
+def test_empty_video_download_preserves_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: int, existing: bool) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    mock_http_transport(monkeypatch, [(status, b"")])
+    output = tmp_path / "video.mp4"
+    if existing:
+        output.write_bytes(b"previous video")
+
+    with pytest.raises(ValueError, match="empty video"):
+        vid.download(GEMINI_VIDEO, str(output))
+
+    if existing:
+        assert output.read_bytes() == b"previous video"
+    else:
+        assert not output.exists()
+
+
+def redirect(location):
+    response = requests.Response()
+    response.status_code = 302
+    response.headers["Location"] = location
+    return response
+
+
+@pytest.mark.parametrize("provider", ["gemini", "minimax"])
+@pytest.mark.parametrize("via_redirect", [False, True], ids=["initial-url", "redirect"])
+def test_generation_rejects_untrusted_download(monkeypatch, tmp_path, provider, via_redirect):
+    monkeypatch.setenv("VIDEO_GENERATION_PROVIDER", provider)
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    monkeypatch.setenv("MINIMAX_API_KEY", "m")
+    untrusted = "https://untrusted.example/video"
+    allowed = GEMINI_VIDEO if provider == "gemini" else MINIMAX_VIDEO
+    resource_url = allowed if via_redirect else untrusted
+    downloads = []
+
+    def post(url, **kwargs):
+        assert kwargs["allow_redirects"] is False
+        return FakeResp({"name": "operations/test"} if provider == "gemini" else {"task_id": "T1"})
+
+    def get(url, **kwargs):
+        assert kwargs["allow_redirects"] is False
+        if url.endswith("/operations/test"):
+            samples = [{"video": {"uri": resource_url}}]
+            return FakeResp({"done": True, "response": {"generateVideoResponse": {"generatedSamples": samples}}})
+        if url.endswith("/query/video_generation"):
+            return FakeResp({"status": "Success", "file_id": "F1"})
+        if url.endswith("/files/retrieve"):
+            return FakeResp({"file": {"download_url": resource_url}})
+        assert url == allowed
+        downloads.append(url)
+        return redirect(untrusted)
+
+    monkeypatch.setattr(vid.requests, "post", post)
+    monkeypatch.setattr(vid.requests, "get", get)
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("a cat runs")
+    output = tmp_path / "video.mp4"
+    output.write_bytes(b"existing video")
+
+    with pytest.raises(ValueError):
+        vid.generate_video(str(prompt), [], str(output))
+    assert downloads == ([allowed] if via_redirect else [])
+    assert output.read_bytes() == b"existing video"
+
+
+@pytest.mark.parametrize(
+    ("download", "url"),
+    [
+        (vid.download, "http://generativelanguage.googleapis.com/video"),
+        (vid.download, "https://user@storage.googleapis.com/video"),
+        (vid.download, "https://generativelanguage.googleapis.com:8443/video"),
+        (vid._download, "https://127.0.0.1/video"),
+        (vid._download, "https://filecdn.minimax.chat.example/video"),
+        (vid._download, "https://bucket.oss-cn-wulanchabu-internal.aliyuncs.com/video"),
+    ],
+)
+def test_download_rejects_invalid_destination_before_transport(monkeypatch, tmp_path, download, url):
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    monkeypatch.setattr(vid.requests, "get", lambda *a, **kw: pytest.fail("unexpected network request"))
+    output = tmp_path / "video.mp4"
+    with pytest.raises(ValueError):
+        download(url, str(output))
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("download", "start", "signed_url", "initial_headers"),
+    [
+        (vid.download, GEMINI_VIDEO, "https://storage.googleapis.com/example/v.mp4?signature=test", {"x-goog-api-key": "g"}),
+        (vid._download, MINIMAX_VIDEO, "https://bucket.oss-cn-wulanchabu.aliyuncs.com/v.mp4?signature=test", {}),
+    ],
+)
+def test_download_checks_redirects_and_scopes_credentials(monkeypatch, tmp_path, download, start, signed_url, initial_headers):
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    relative_target = start + "?step=1"
+    calls = []
+    responses = {start: redirect("?step=1"), relative_target: redirect(signed_url), signed_url: FakeResp(content=b"video")}
+
+    def get(url, *, headers=None, allow_redirects, **kwargs):
+        assert allow_redirects is False
+        calls.append((url, headers or {}))
+        return responses[url]
+
+    monkeypatch.setattr(vid.requests, "get", get)
+    output = tmp_path / "video.mp4"
+    download(start, str(output))
+    assert calls == [(start, initial_headers), (relative_target, initial_headers), (signed_url, {})]
+    assert output.read_bytes() == b"video"
+
+
+def test_gemini_storage_redirect_cannot_reauthorize_download(monkeypatch, tmp_path):
+    monkeypatch.setenv("GEMINI_API_KEY", "g")
+    storage = "https://storage.googleapis.com/example/video"
+    calls = []
+
+    def get(url, *, headers, **kwargs):
+        calls.append((url, headers))
+        return redirect(GEMINI_VIDEO) if url == storage else FakeResp(content=b"video")
+
+    monkeypatch.setattr(vid.requests, "get", get)
+    vid.download(storage, str(tmp_path / "video.mp4"))
+    assert calls == [(storage, {}), (GEMINI_VIDEO, {})]
+
+
+def test_minimax_custom_download_host_requires_exact_approval(monkeypatch, tmp_path):
+    monkeypatch.setenv("MINIMAX_API_HOST", "https://files.example.test")
+    monkeypatch.setenv("MINIMAX_VIDEO_DOWNLOAD_HOSTS", "*.example.test")
+    url = "https://files.example.test/video"
+    calls = []
+
+    def get(url, *, headers, **kwargs):
+        calls.append((url, headers))
+        return FakeResp(content=b"video")
+
+    monkeypatch.setattr(vid.requests, "get", get)
+    out = tmp_path / "video.mp4"
+    with pytest.raises(ValueError, match="outside the provider allowlist"):
+        vid._download(url, str(out))
+    assert calls == []
+    monkeypatch.setenv("MINIMAX_VIDEO_DOWNLOAD_HOSTS", "cdn.example.test, Files.Example.Test")
+    vid._download(url, str(out))
+    assert calls == [(url, {})]
+    assert out.read_bytes() == b"video"
+
+
+@pytest.mark.parametrize("count", [5, 6])
+def test_download_limits_redirects(monkeypatch, tmp_path, count):
+    calls = []
+
+    def get(url, **kwargs):
+        assert kwargs["allow_redirects"] is False
+        calls.append(url)
+        if len(calls) <= count:
+            return redirect(f"?hop={len(calls)}")
+        return FakeResp(content=b"video")
+
+    monkeypatch.setattr(vid.requests, "get", get)
+    output = tmp_path / "video.mp4"
+    if count == 5:
+        vid._download(MINIMAX_VIDEO, str(output))
+        assert output.read_bytes() == b"video"
+    else:
+        with pytest.raises(ValueError):
+            vid._download(MINIMAX_VIDEO, str(output))
+        assert not output.exists()
+    assert len(calls) == 6
 
 
 def test_gemini_post_raises_on_http_error(monkeypatch, tmp_path):
@@ -223,6 +535,20 @@ def test_gemini_post_raises_on_http_error(monkeypatch, tmp_path):
     pf.write_text("a cat", encoding="utf-8")
     with pytest.raises(requests.HTTPError):
         vid.generate_video(str(pf), [], str(tmp_path / "v.mp4"), "16:9")
+
+
+def test_gemini_poll_rejects_redirect_even_with_a_valid_response_body(monkeypatch):
+    def get(url, **kwargs):
+        assert url.endswith("/operations/test")
+        assert kwargs["allow_redirects"] is False
+        samples = [{"video": {"uri": GEMINI_VIDEO}}]
+        result = FakeResp({"done": True, "response": {"generateVideoResponse": {"generatedSamples": samples}}}, status_code=302)
+        result.headers = {"Location": "/operations/other"}
+        return result
+
+    monkeypatch.setattr(vid.requests, "get", get)
+    with pytest.raises(ValueError):
+        vid._poll_gemini_operation("g", "operations/test", max_attempts=1)
 
 
 def test_gemini_poll_is_bounded(monkeypatch):
@@ -322,26 +648,23 @@ def test_gemini_forwards_aspect_ratio_to_predict_request(monkeypatch, tmp_path):
 
     def fake_get(url, headers=None, **kw):
         assert headers["x-goog-api-key"] == "g"
+        if url == GEMINI_VIDEO:
+            return FakeResp(content=b"video")
         return FakeResp(
             json_data={
                 "done": True,
                 "response": {
                     "generateVideoResponse": {
                         "generatedSamples": [
-                            {"video": {"uri": "https://example.test/v.mp4"}}
+                            {"video": {"uri": GEMINI_VIDEO}}
                         ]
                     }
                 },
             },
         )
 
-    def fake_download(uri, output_file):
-        with open(output_file, "wb") as f:
-            f.write(b"video")
-
     monkeypatch.setattr(vid.requests, "post", fake_post)
     monkeypatch.setattr(vid.requests, "get", fake_get)
-    monkeypatch.setattr(vid, "download", fake_download)
     pf = tmp_path / "p.json"
     pf.write_text("a tall cat", encoding="utf-8")
 
@@ -349,3 +672,196 @@ def test_gemini_forwards_aspect_ratio_to_predict_request(monkeypatch, tmp_path):
 
     assert "predictLongRunning" in captured["url"]
     assert captured["json"]["parameters"]["aspectRatio"] == "9:16"
+
+
+def test_resolve_falls_back_to_byteplus_agentplan(monkeypatch):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    assert vid._resolve_provider("VIDEO_GENERATION_PROVIDER", "gemini", False) == "byteplus_agentplan"
+
+
+def test_resolve_prefers_minimax_before_byteplus_agentplan(monkeypatch):
+    monkeypatch.setenv("MINIMAX_API_KEY", "m")
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    assert vid._resolve_provider("VIDEO_GENERATION_PROVIDER", "gemini", False) == "minimax"
+
+
+@pytest.mark.parametrize("alias", ["byteplus", "byteplus_agentplan", "byteplus-agentplan", "seedance"])
+def test_byteplus_agentplan_full_flow_and_aliases(monkeypatch, tmp_path, alias):
+    monkeypatch.setenv("VIDEO_GENERATION_PROVIDER", alias)
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, **kw):
+        captured["post_url"] = url
+        captured["post_headers"] = headers
+        captured["post_json"] = json
+        assert kw["allow_redirects"] is False
+        return FakeResp({"id": "cgt-123"})
+
+    def fake_get(url, headers=None, **kw):
+        assert kw["allow_redirects"] is False
+        if url.endswith("/contents/generations/tasks/cgt-123"):
+            assert headers["Authorization"] == "Bearer bp-key"
+            return FakeResp({"id": "cgt-123", "status": "succeeded", "content": {"video_url": BYTEPLUS_VIDEO}})
+        assert url == BYTEPLUS_VIDEO
+        assert not headers
+        return FakeResp(content=b"SEEDANCE_MP4")
+
+    monkeypatch.setattr(vid.requests, "post", fake_post)
+    monkeypatch.setattr(vid.requests, "get", fake_get)
+
+    out = tmp_path / "seedance.mp4"
+    pf = tmp_path / "prompt.json"
+    pf.write_text("cinematic sunset over mountains", encoding="utf-8")
+    msg = vid.generate_video(str(pf), [], str(out), "9:16")
+
+    assert out.read_bytes() == b"SEEDANCE_MP4"
+    assert captured["post_url"] == "https://ark.ap-southeast.bytepluses.com/api/plan/v3/contents/generations/tasks"
+    assert captured["post_headers"]["Authorization"] == "Bearer bp-key"
+    assert captured["post_json"] == {
+        "model": "dreamina-seedance-2.5",
+        "content": [{"type": "text", "text": "cinematic sunset over mountains"}],
+        "ratio": "9:16",
+        "generate_audio": True,
+        "watermark": False,
+    }
+    assert "successfully" in msg.lower()
+
+
+def test_byteplus_agentplan_env_overrides_and_multiple_references(monkeypatch, tmp_path):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_BASE_URL", "https://plan.example/api/plan/v3/")
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_VIDEO_MODEL", "dreamina-seedance-2.5-flash")
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_VIDEO_RESOLUTION", "480p")
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_VIDEO_DURATION", "15")
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_GENERATE_AUDIO", "false")
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, **kw):
+        captured["url"] = url
+        captured["json"] = json
+        return FakeResp({"id": "cgt-456"})
+
+    def fake_get(url, headers=None, **kw):
+        if url.endswith("/contents/generations/tasks/cgt-456"):
+            return FakeResp({"status": "succeeded", "content": {"video_url": BYTEPLUS_VIDEO}})
+        return FakeResp(content=b"FLASH_MP4")
+
+    monkeypatch.setattr(vid.requests, "post", fake_post)
+    monkeypatch.setattr(vid.requests, "get", fake_get)
+
+    ref1 = tmp_path / "a.jpg"
+    ref1.write_bytes(b"\xff\xd8first")
+    ref2 = tmp_path / "b.png"
+    ref2.write_bytes(b"\x89PNGsecond")
+    pf = tmp_path / "prompt.json"
+    pf.write_text("product showcase", encoding="utf-8")
+    out = tmp_path / "out.mp4"
+
+    vid.generate_video(str(pf), [str(ref1), str(ref2)], str(out), "16:9")
+
+    assert captured["url"] == "https://plan.example/api/plan/v3/contents/generations/tasks"
+    payload = captured["json"]
+    assert payload["model"] == "dreamina-seedance-2.5-flash"
+    assert payload["resolution"] == "480p"
+    assert payload["duration"] == 15
+    assert payload["generate_audio"] is False
+    assert payload["ratio"] == "16:9"
+    assert len(payload["content"]) == 3
+    assert payload["content"][1]["role"] == "reference_image"
+    assert payload["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert payload["content"][2]["role"] == "reference_image"
+    assert payload["content"][2]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+@pytest.mark.parametrize("duration", ["abc", "0", "3", "31", "-2", "6.5"])
+def test_byteplus_agentplan_rejects_invalid_duration_before_submission(monkeypatch, tmp_path, duration):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_VIDEO_DURATION", duration)
+    monkeypatch.setattr(vid.requests, "post", lambda *a, **kw: pytest.fail("must not submit invalid duration"))
+    pf = tmp_path / "prompt.json"
+    pf.write_text("a cat", encoding="utf-8")
+    with pytest.raises(ValueError, match="BYTEPLUS_AGENTPLAN_VIDEO_DURATION"):
+        vid.generate_video(str(pf), [], str(tmp_path / "v.mp4"), "16:9")
+
+
+def test_byteplus_agentplan_rejects_unsupported_aspect_ratio_before_submission(monkeypatch, tmp_path):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    monkeypatch.setattr(vid.requests, "post", lambda *a, **kw: pytest.fail("must not submit invalid ratio"))
+    pf = tmp_path / "prompt.json"
+    pf.write_text("a cat", encoding="utf-8")
+    with pytest.raises(ValueError, match="Unsupported aspect ratio"):
+        vid.generate_video(str(pf), [], str(tmp_path / "v.mp4"), "5:4")
+
+
+def test_byteplus_agentplan_403_reports_plan_tier_upgrade_hint(monkeypatch, tmp_path):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-small-key")
+    monkeypatch.setattr(
+        vid.requests,
+        "post",
+        lambda *a, **kw: FakeResp({"error": {"message": "model not available in plan"}}, status_code=403),
+    )
+    pf = tmp_path / "prompt.json"
+    pf.write_text("a cat", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="Large, Max, or Enterprise Shared Package"):
+        vid.generate_video(str(pf), [], str(tmp_path / "v.mp4"), "16:9")
+
+
+def test_byteplus_agentplan_task_failure_and_timeout(monkeypatch, tmp_path):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    monkeypatch.setattr(vid.requests, "post", lambda *a, **kw: FakeResp({"id": "cgt-fail"}))
+    monkeypatch.setattr(
+        vid.requests,
+        "get",
+        lambda *a, **kw: FakeResp({"id": "cgt-fail", "status": "failed", "error": {"message": "safety filtered"}}),
+    )
+    pf = tmp_path / "prompt.json"
+    pf.write_text("x", encoding="utf-8")
+    with pytest.raises(Exception, match="safety filtered"):
+        vid.generate_video(str(pf), [], str(tmp_path / "v.mp4"), "16:9")
+
+    monkeypatch.setattr(vid.requests, "get", lambda *a, **kw: FakeResp({"id": "cgt-slow", "status": "running"}))
+    with pytest.raises(Exception, match="timed out"):
+        vid._poll_byteplus_agentplan_task("https://ark.ap-southeast.bytepluses.com/api/plan/v3", "Bearer bp-key", "cgt-slow", max_attempts=2, interval=0)
+
+
+def test_byteplus_agentplan_download_allowlist_and_custom_hosts(monkeypatch, tmp_path):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    untrusted = "https://evil.example/video.mp4"
+    monkeypatch.setattr(vid.requests, "post", lambda *a, **kw: FakeResp({"id": "cgt-1"}))
+
+    def fake_get(url, **kw):
+        if url.endswith("/contents/generations/tasks/cgt-1"):
+            return FakeResp({"status": "succeeded", "content": {"video_url": untrusted}})
+        raise AssertionError("untrusted download URL must not be fetched")
+
+    monkeypatch.setattr(vid.requests, "get", fake_get)
+    pf = tmp_path / "prompt.json"
+    pf.write_text("x", encoding="utf-8")
+    out = tmp_path / "v.mp4"
+    out.write_bytes(b"existing")
+    with pytest.raises(ValueError, match="outside the provider allowlist"):
+        vid.generate_video(str(pf), [], str(out), "16:9")
+    assert out.read_bytes() == b"existing"
+
+    # Explicit operator approval allows custom HTTPS host.
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_VIDEO_DOWNLOAD_HOSTS", "cdn.partner.test")
+    custom_url = "https://cdn.partner.test/v.mp4"
+    monkeypatch.setattr(
+        vid.requests,
+        "get",
+        lambda url, **kw: FakeResp({"status": "succeeded", "content": {"video_url": custom_url}})
+        if url.endswith("/contents/generations/tasks/cgt-1")
+        else FakeResp(content=b"approved-bytes"),
+    )
+    vid.generate_video(str(pf), [], str(out), "16:9")
+    assert out.read_bytes() == b"approved-bytes"
+
+
+def test_byteplus_agentplan_rejects_cross_origin_api_redirect(monkeypatch, tmp_path):
+    host = "https://ark.ap-southeast.bytepluses.com/api/plan/v3"
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    sent = mock_http_transport(monkeypatch, [(307, "https://other.example/tasks")])
+    with pytest.raises(ValueError, match="changes origin"):
+        vid._generate_video_byteplus_agentplan("a cat", [], str(tmp_path / "v.mp4"), "16:9")
+    assert [request.url for request in sent] == [f"{host}/contents/generations/tasks"]

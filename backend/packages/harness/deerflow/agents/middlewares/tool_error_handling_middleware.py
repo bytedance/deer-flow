@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import secrets
 from collections.abc import Awaitable, Callable, Iterable
 from typing import TYPE_CHECKING, override
@@ -32,6 +33,7 @@ from deerflow.agents.middlewares.tool_result_meta import (
 from deerflow.config.app_config import AppConfig
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.subagents.status_contract import (
     format_subagent_result_message,
     make_subagent_additional_kwargs,
@@ -54,6 +56,26 @@ _TOOL_RESULT_CONTRACT = (
     "These fields describe tool execution, not the truth of the data or completion of the task."
 )
 
+# langchain-mcp-adapters stringifies non-text error blocks for sse/http
+# transports, so an MCP error's ToolException can carry an inline base64 or
+# base64url payload: an image/file block's ``'base64': '...'`` field or a
+# ``data:`` URI.
+# Redact the payload before truncation, because the 500-character cap alone
+# would leave a base64 prefix in the model-visible message and the checkpoint.
+# Values below the threshold (a short diagnostic token) stay readable.
+_INLINE_BASE64_MIN_CHARS = 64
+# Bound the params window: without it, a comma-free run with many `data:` starts rescans
+# from every position and backtracks quadratically. MIME params sit far below 200.
+_INLINE_BASE64_RE = re.compile(
+    rf"(?P<prefix>(?:['\"]base64['\"]\s*:\s*['\"]|data:[^,\s]{{0,200}};base64,))[A-Za-z0-9+/=_-]{{{_INLINE_BASE64_MIN_CHARS},}}",
+    re.IGNORECASE,
+)
+
+
+def _redact_inline_base64(text: str) -> str:
+    """Replace inline base64 payloads in an exception string with ``<omitted>``."""
+    return _INLINE_BASE64_RE.sub(r"\g<prefix><omitted>", text)
+
 
 def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error: str) -> ToolMessage:
     """Stamp failed metadata on task exception wrappers produced here."""
@@ -72,11 +94,19 @@ def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error:
 class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     """Convert tool exceptions into error ToolMessages so the run can continue."""
 
-    def __init__(self, *, app_config: AppConfig | None = None, skill_authorization=None, user_id: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        app_config: AppConfig | None = None,
+        skill_authorization=None,
+        user_id: str | None = None,
+        skill_storage: SkillStorage | None = None,
+    ) -> None:
         super().__init__()
         self._app_config = app_config
         self._skill_authorization = skill_authorization
         self._user_id = user_id
+        self._skill_storage = skill_storage
         if app_config is None:
             self._skill_read_tool_names = frozenset(DEFAULT_SKILL_FILE_READ_TOOL_NAMES)
             self._skills_root = DEFAULT_SKILLS_CONTAINER_PATH
@@ -112,6 +142,8 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         # or per-user custom skills would never resolve to their Skill.name.
         from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 
+        if self._skill_storage is not None:
+            return self._skill_storage
         if self._user_id is not None:
             return get_or_new_user_skill_storage(self._user_id, app_config=self._app_config)
         if self._app_config is not None:
@@ -143,7 +175,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     def _build_error_message(self, request: ToolCallRequest, exc: Exception) -> ToolMessage:
         tool_name = str(request.tool_call.get("name") or "unknown_tool")
         tool_call_id = str(request.tool_call.get("id") or _MISSING_TOOL_CALL_ID)
-        detail = str(exc).strip() or exc.__class__.__name__
+        detail = _redact_inline_base64(str(exc).strip() or exc.__class__.__name__)
         if len(detail) > 500:
             detail = detail[:497] + "..."
 
@@ -388,6 +420,7 @@ def _build_runtime_middlewares(
     owns_agent_skill_projection: bool = True,
     skill_authorization=None,
     user_id: str | None = None,
+    skill_storage: SkillStorage | None = None,
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
@@ -436,6 +469,7 @@ def _build_runtime_middlewares(
             lazy_init=lazy_init,
             available_skills=available_skills,
             owns_agent_skill_projection=owns_agent_skill_projection,
+            skill_storage=skill_storage,
         )
     )
 
@@ -548,7 +582,14 @@ def _build_runtime_middlewares(
 
         tail.append(ToolProgressMiddleware.from_config(tool_progress_config))
 
-    tail.append(ToolErrorHandlingMiddleware(app_config=app_config, skill_authorization=skill_authorization, user_id=user_id))
+    tail.append(
+        ToolErrorHandlingMiddleware(
+            app_config=app_config,
+            skill_authorization=skill_authorization,
+            user_id=user_id,
+            skill_storage=skill_storage,
+        )
+    )
     # Artifact capture is a `before_model` hook that reads state messages, so
     # its position in the tool-execution wrap chain is functionally irrelevant:
     # it always sees the normalized results stored in state, and error results
@@ -581,6 +622,7 @@ def build_lead_runtime_middlewares(
     owns_agent_skill_projection: bool = True,
     skill_authorization=None,
     user_id: str | None = None,
+    skill_storage: SkillStorage | None = None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by lead agent runtime before lead-only middlewares."""
     return _build_runtime_middlewares(
@@ -597,6 +639,7 @@ def build_lead_runtime_middlewares(
         authorization_infrastructure_tools=((deferred_setup.tool_search_tool,) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else ()),
         skill_authorization=skill_authorization,
         user_id=user_id,
+        skill_storage=skill_storage,
     )
 
 
@@ -613,12 +656,23 @@ def build_subagent_runtime_middlewares(
     authorization_provider=None,
     skill_authorization=None,
     extensions=None,
+    skill_storage: SkillStorage | None = None,
 ) -> list[AgentMiddleware]:
-    """Middlewares shared by subagent runtime before subagent-only middlewares."""
+    """Middlewares shared by subagent runtime before subagent-only middlewares.
+
+    ``skill_storage`` is available to callers that build a subagent chain
+    directly. The built-in ``task`` tool does not forward the lead's injected
+    storage yet, so its subagent activation keeps the user-scoped default.
+    """
     if app_config is None:
         from deerflow.config import get_app_config
 
         app_config = get_app_config()
+
+    if skill_storage is not None:
+        from deerflow.skills.storage.skill_storage import validate_injected_skill_storage
+
+        validate_injected_skill_storage(skill_storage, container_root=app_config.skills.container_path, user_id=user_id)
 
     from deerflow.extensions import get_agent_build_extensions
 
@@ -637,6 +691,7 @@ def build_subagent_runtime_middlewares(
         owns_agent_skill_projection=False,
         skill_authorization=skill_authorization,
         user_id=user_id,
+        skill_storage=skill_storage,
     )
 
     # Enabled/configured skills are discoverable metadata, not authority over
@@ -653,6 +708,7 @@ def build_subagent_runtime_middlewares(
             user_id=user_id,
             slash_source_owner_token=slash_source_owner_token,
             skill_authorization=skill_authorization,
+            skill_storage=skill_storage,
         )
     )
     if deferred_setup is not None and deferred_setup.deferred_names:
@@ -839,7 +895,7 @@ def build_subagent_runtime_middlewares(
     # checkpoints are never written.
     from deerflow.agents.middlewares.model_content_compatibility_middleware import ModelContentCompatibilityMiddleware
 
-    middlewares.append(ModelContentCompatibilityMiddleware())
+    middlewares.append(ModelContentCompatibilityMiddleware(supports_vision=model_config.supports_vision if model_config is not None else True))
 
     # SubagentDateContextMiddleware (#4781) — inject framework-owned temporal
     # context before the first model call without registering the lead agent's

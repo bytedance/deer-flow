@@ -401,6 +401,8 @@ def test_browser_stream_acquires_the_session_with_pinned_egress():
     session = MagicMock()
     for method in ("current_url", "start_screencast", "stop_screencast", "tabs"):
         setattr(session, method, AsyncMock())
+    session.current_url.return_value = None
+    session.tabs.return_value = []
     manager = MagicMock()
     manager.acquire_session.return_value.__enter__.return_value = session
 
@@ -412,8 +414,10 @@ def test_browser_stream_acquires_the_session_with_pinned_egress():
         patch("deerflow.config.get_app_config", return_value=SimpleNamespace(get_tool_config=lambda _name: None)),
         patch("deerflow.community.browser_automation.get_browser_session_manager", return_value=manager),
         TestClient(app) as client,
-        client.websocket_connect("/api/threads/thread-1/browser/stream"),
+        client.websocket_connect("/api/threads/thread-1/browser/stream") as ws,
     ):
-        pass
+        # The upgrade is accepted before the route reads config and acquires the session.
+        assert ws.receive_json() == {"type": "tabs", "tabs": []}
 
+    manager.acquire_session.assert_called_once()
     assert manager.acquire_session.call_args.kwargs["egress_resolver"] is resolve_browser_egress

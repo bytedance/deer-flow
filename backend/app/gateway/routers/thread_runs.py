@@ -31,16 +31,24 @@ from app.gateway.artifact_archive import ArtifactArchiveError, ArtifactArchiveRe
 from app.gateway.authz import require_cancel_permission_if, require_permission
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
+    CheckpointLineageTimeoutError,
     CheckpointParentMissingError,
     checkpoint_configurable,
     checkpoint_messages,
-    find_checkpoint_before_message,
     find_checkpoint_before_message_chronologically,
+    find_replay_checkpoint_before_message,
     history_parent_index,
     is_duration_only_checkpoint,
     parent_from_history_index,
+    replay_lineage_timeout_http_error,
     resolve_history_versions,
     resolve_stamp_candidate_versions,
+)
+from app.gateway.checkpoint_mode_errors import (
+    CHECKPOINT_MODE_ERRORS as _CHECKPOINT_MODE_ERRORS,
+)
+from app.gateway.checkpoint_mode_errors import (
+    checkpoint_mode_http_error as _checkpoint_mode_http_error,
 )
 from app.gateway.context_usage import build_context_usage
 from app.gateway.conversation_reader import (
@@ -55,7 +63,7 @@ from app.gateway.conversation_reader import (
 from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.pagination import trim_run_message_page
-from app.gateway.run_inputs import RunInputRequest, change_run_input, list_thread_inputs, submit_run_input
+from app.gateway.run_inputs import RunInputRequest, change_run_input, list_thread_inputs, submit_http_run_input
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import (
     abuild_checkpoint_state_accessor,
@@ -106,10 +114,30 @@ async def revoke_tool_approval_grants(thread_id: ThreadId, request: Request):
     return await revoke_approval_grants(thread_id, request)
 
 
-@router.post("/{thread_id}/runs/{run_id}/inputs")
+@router.post(
+    "/{thread_id}/runs/{run_id}/inputs",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {"schema": RunInputRequest.model_json_schema()},
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["input", "files"],
+                        "properties": {
+                            "input": {"type": "string", "description": "JSON input with mode set to queue"},
+                            "files": {"type": "array", "items": {"type": "string", "format": "binary"}},
+                        },
+                    },
+                },
+            },
+        },
+    },
+)
 @require_permission("runs", "create", owner_check=True, require_existing=True)
-async def create_run_input(thread_id: ThreadId, run_id: str, body: RunInputRequest, request: Request):
-    return await submit_run_input(thread_id, run_id, body, request)
+async def create_run_input(thread_id: ThreadId, run_id: str, request: Request):
+    return await submit_http_run_input(thread_id, run_id, request)
 
 
 @router.get("/{thread_id}/inputs")
@@ -732,8 +760,8 @@ async def _find_target_run_id(
     if len(rows) >= REGENERATE_HISTORY_SCAN_LIMIT:
         logger.warning(
             "Could not find source run for regenerate message %s in recent run events for thread %s (limit=%s)",
-            message_id,
-            thread_id,
+            sanitize_log_param(message_id),
+            sanitize_log_param(thread_id),
             REGENERATE_HISTORY_SCAN_LIMIT,
         )
     raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
@@ -746,18 +774,18 @@ async def _find_base_checkpoint_before_human(
     *,
     head_checkpoint: Any | None = None,
 ) -> Any:
-    accessor, base_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
+    try:
+        accessor, base_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
     if head_checkpoint is not None:
         try:
-            return await find_checkpoint_before_message(
-                accessor,
-                head_checkpoint,
-                human_message_id,
-                max_depth=REGENERATE_HISTORY_RAW_SCAN_LIMIT,
-            )
+            return await find_replay_checkpoint_before_message(accessor, head_checkpoint, human_message_id)
+        except CheckpointLineageTimeoutError as exc:
+            raise replay_lineage_timeout_http_error(thread_id, exc) from exc
         except CheckpointParentMissingError:
-            # Old checkpoints and imported histories may not have parent links.
-            # Preserve the bounded chronological fallback for those records.
+            # Some legacy or imported heads have no recorded parent link.
+            # Only those heads can use the chronological compatibility scan.
             logger.debug(
                 "Could not resolve parent lineage for regenerate thread %s; falling back to history scan",
                 sanitize_log_param(thread_id),
@@ -780,6 +808,8 @@ async def _find_base_checkpoint_before_human(
             versions, parent_versions = await resolve_stamp_candidate_versions(accessor, item, parent, version_cache)
             if not _is_duration_only_checkpoint(item, history_index, versions=versions, parent_versions=parent_versions):
                 checkpoints.append(item)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
     except Exception as exc:
         logger.exception("Failed to list checkpoints for regenerate thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
@@ -796,8 +826,8 @@ async def _find_base_checkpoint_before_human(
     if len(checkpoints) >= REGENERATE_HISTORY_SCAN_LIMIT:
         logger.warning(
             "Could not locate target user message %s in recent checkpoint history for thread %s (limit=%s)",
-            human_message_id,
-            thread_id,
+            sanitize_log_param(human_message_id),
+            sanitize_log_param(thread_id),
             REGENERATE_HISTORY_SCAN_LIMIT,
         )
     raise HTTPException(
@@ -870,9 +900,14 @@ async def _find_interrupted_target_run_id(
 
 
 async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: Request) -> RegeneratePrepareResponse:
-    accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
     try:
+        accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
         latest_checkpoint = await accessor.aget(latest_config)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    except HTTPException:
+        # Config-loading and other route-level errors keep their status/detail.
+        raise
     except Exception as exc:
         logger.exception("Failed to read latest checkpoint for regenerate thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to read latest checkpoint") from exc
@@ -962,9 +997,14 @@ async def _prepare_edit_regenerate_payload(
     if not normalized_text:
         raise HTTPException(status_code=409, detail="Edited message cannot be empty")
 
-    accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
     try:
+        accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
         latest_checkpoint = await accessor.aget(latest_config)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    except HTTPException:
+        # Config-loading and other route-level errors keep their status/detail.
+        raise
     except Exception as exc:
         logger.exception("Failed to read latest checkpoint for edit replay thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to read latest checkpoint") from exc

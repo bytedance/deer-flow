@@ -1,4 +1,5 @@
 import base64
+import runpy
 import sys
 from pathlib import Path
 
@@ -15,6 +16,7 @@ def clean_env(monkeypatch):
     for k in [
         "GEMINI_API_KEY",
         "MINIMAX_API_KEY",
+        "BYTEPLUS_AGENTPLAN_API_KEY",
         "IMAGE_GENERATION_PROVIDER",
         "MINIMAX_API_HOST",
         "MINIMAX_IMAGE_MODEL",
@@ -22,6 +24,9 @@ def clean_env(monkeypatch):
         "IMAGE_GENERATION_BASE_URL",
         "IMAGE_GENERATION_MODEL",
         "IMAGE_GENERATION_SIZE",
+        "BYTEPLUS_AGENTPLAN_BASE_URL",
+        "BYTEPLUS_AGENTPLAN_IMAGE_MODEL",
+        "BYTEPLUS_AGENTPLAN_IMAGE_SIZE",
     ]:
         monkeypatch.delenv(k, raising=False)
 
@@ -68,6 +73,56 @@ def test_resolve_override_wins(monkeypatch):
 def test_resolve_errors_when_none(monkeypatch):
     with pytest.raises(ValueError, match="IMAGE_GENERATION_API_KEY"):
         img._resolve_provider("IMAGE_GENERATION_PROVIDER", "gemini", False)
+
+
+@pytest.mark.parametrize(
+    ("provider", "missing_key"),
+    [
+        ("minimax", "MINIMAX_API_KEY"),
+        ("gemini", "GEMINI_API_KEY"),
+        ("google", "GEMINI_API_KEY"),
+        ("openai", "IMAGE_GENERATION_API_KEY"),
+        ("openai-compatible", "IMAGE_GENERATION_API_KEY"),
+    ],
+)
+def test_cli_forced_provider_requires_its_key(
+    monkeypatch, tmp_path, capsys, provider, missing_key
+):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", provider)
+    for key in ("GEMINI_API_KEY", "MINIMAX_API_KEY", "IMAGE_GENERATION_API_KEY"):
+        monkeypatch.setenv(key, "test-key")
+    monkeypatch.delenv(missing_key)
+
+    def unexpected_post(*args, **kwargs):
+        pytest.fail("A missing provider key must stop the request")
+
+    monkeypatch.setattr(img.requests, "post", unexpected_post)
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("a red deer", encoding="utf-8")
+    output = tmp_path / "slide-03.jpg"
+    output.write_bytes(b"previous slide")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            img.__file__,
+            "--prompt-file",
+            str(prompt),
+            "--reference-images",
+            str(tmp_path / "missing-reference.jpg"),
+            "--output-file",
+            str(output),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        runpy.run_path(img.__file__, run_name="__main__")
+
+    assert error.value.code == 1
+    captured = capsys.readouterr()
+    assert f"{missing_key} is not set" in captured.err
+    assert not captured.out
+    assert output.read_bytes() == b"previous slide"
 
 
 def test_minimax_builds_payload_and_writes(monkeypatch, tmp_path):
@@ -175,7 +230,10 @@ def test_minimax_extracts_json_prompt_field(monkeypatch, tmp_path):
     assert captured["json"]["prompt_optimizer"] is True
 
 
-def test_minimax_plaintext_prompt_passes_through(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "prompt", ["a red apple on a table", "x" * 1500], ids=["short", "at-limit"]
+)
+def test_minimax_plaintext_prompt_passes_through(monkeypatch, tmp_path, prompt):
     monkeypatch.setenv("MINIMAX_API_KEY", "m")
     captured = {}
 
@@ -190,27 +248,46 @@ def test_minimax_plaintext_prompt_passes_through(monkeypatch, tmp_path):
 
     monkeypatch.setattr(img.requests, "post", fake_post)
     prompt_file = tmp_path / "p.txt"
-    prompt_file.write_text("a red apple on a table", encoding="utf-8")
+    prompt_file.write_text(prompt, encoding="utf-8")
     img.generate_image(str(prompt_file), [], str(tmp_path / "o.jpg"), "1:1")
 
-    assert captured["json"]["prompt"] == "a red apple on a table"
+    assert captured["json"]["prompt"] == prompt
 
 
-def test_minimax_rejects_overlong_prompt_without_calling_api(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "existing", [False, True], ids=["new-output", "existing-output"]
+)
+def test_cli_minimax_rejects_overlong_prompt(monkeypatch, tmp_path, capsys, existing):
     monkeypatch.setenv("MINIMAX_API_KEY", "m")
 
-    def fake_post(url, headers=None, json=None, **kw):  # pragma: no cover
-        raise AssertionError("must not call the API when the prompt is over the limit")
+    def fake_post(*args, **kwargs):
+        pytest.fail("Overlong prompts must be rejected before calling MiniMax")
 
     monkeypatch.setattr(img.requests, "post", fake_post)
     prompt_file = tmp_path / "p.json"
-    prompt_file.write_text('{"prompt": "' + "x" * 1600 + '"}', encoding="utf-8")
+    prompt_file.write_text('{"prompt": "' + "x" * 1501 + '"}', encoding="utf-8")
     out = tmp_path / "o.jpg"
-    msg = img.generate_image(str(prompt_file), [], str(out), "16:9")
+    if existing:
+        out.write_bytes(b"previous image")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [img.__file__, "--prompt-file", str(prompt_file), "--output-file", str(out)],
+    )
 
-    assert "1500" in msg
-    assert "character" in msg.lower()
-    assert not out.exists()
+    with pytest.raises(SystemExit) as error:
+        runpy.run_path(img.__file__, run_name="__main__")
+
+    assert error.value.code == 1
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert "1501 characters" in captured.err
+    assert "at most 1500" in captured.err
+    assert "Shorten the prompt" in captured.err
+    if existing:
+        assert out.read_bytes() == b"previous image"
+    else:
+        assert not out.exists()
 
 
 def test_minimax_creates_nested_output_dir(monkeypatch, tmp_path):
@@ -269,7 +346,10 @@ def test_openai_compatible_generation_writes_base64(monkeypatch, tmp_path):
     assert "Successfully generated image" in result
 
 
-def test_openai_compatible_generation_downloads_url(monkeypatch, tmp_path):
+@pytest.mark.parametrize("download_host", ["cdn.example", "8.8.8.8"])
+def test_openai_compatible_generation_downloads_url(
+    monkeypatch, tmp_path, download_host
+):
     monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai-compatible")
     monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
 
@@ -277,7 +357,7 @@ def test_openai_compatible_generation_downloads_url(monkeypatch, tmp_path):
         img.requests,
         "post",
         lambda *args, **kwargs: FakeResp(
-            {"data": [{"url": "https://cdn.example/image.png"}]}
+            {"data": [{"url": f"https://{download_host}/image.png"}]}
         ),
     )
     monkeypatch.setattr(
@@ -292,6 +372,368 @@ def test_openai_compatible_generation_downloads_url(monkeypatch, tmp_path):
     img.generate_image(str(prompt_file), [], str(output_file), "1:1")
 
     assert output_file.read_bytes() == b"downloaded-image"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://cdn.example/image.png",
+        "https://user@cdn.example/image.png",
+        "https://cdn.example:8443/image.png",
+        "https://127.0.0.1/image.png",
+        "https://169.254.169.254/latest/meta-data",
+        "https://10.0.0.1/image.png",
+        "https://localhost/image.png",
+        "https://224.0.0.1/image.png",
+        "https://[2606:4700::1111]/image.png",
+        "https://cdn.example\\@evil.example/image.png",
+    ],
+    ids=[
+        "plain-http",
+        "userinfo",
+        "non-443-port",
+        "loopback-ip",
+        "link-local-ip",
+        "private-ip",
+        "localhost-name",
+        "multicast-ip",
+        "ipv6-literal",
+        "backslash-host",
+    ],
+)
+def test_openai_compatible_download_rejects_unsafe_urls(monkeypatch, tmp_path, url):
+    """A provider-supplied URL is untrusted: unsafe targets must not be fetched."""
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp({"data": [{"url": url}]}),
+    )
+
+    def fail_get(*args, **kwargs):
+        raise AssertionError("an unsafe download URL must not be fetched")
+
+    monkeypatch.setattr(img.requests, "get", fail_get)
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("a red deer", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        img.generate_image(str(prompt_file), [], str(tmp_path / "image.png"), "1:1")
+
+
+def test_openai_compatible_download_revalidates_each_redirect(monkeypatch, tmp_path):
+    """A public host must not be able to redirect the fetch to an internal one."""
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp(
+            {"data": [{"url": "https://cdn.example/image.png"}]}
+        ),
+    )
+    monkeypatch.setattr(
+        img.requests,
+        "get",
+        lambda *args, **kwargs: FakeResp(
+            status_code=302,
+            headers={"Location": "https://169.254.169.254/latest/meta-data"},
+        ),
+    )
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("a red deer", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not a public address"):
+        img.generate_image(str(prompt_file), [], str(tmp_path / "image.png"), "1:1")
+
+
+def test_openai_compatible_download_follows_a_valid_redirect(monkeypatch, tmp_path):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp(
+            {"data": [{"url": "https://cdn.example/image.png"}]}
+        ),
+    )
+    responses = iter(
+        [
+            FakeResp(
+                status_code=302, headers={"Location": "https://cdn2.example/image.png"}
+            ),
+            FakeResp(content=b"redirected-image"),
+        ]
+    )
+    monkeypatch.setattr(img.requests, "get", lambda *args, **kwargs: next(responses))
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("a red deer", encoding="utf-8")
+    output_file = tmp_path / "image.png"
+
+    img.generate_image(str(prompt_file), [], str(output_file), "1:1")
+
+    assert output_file.read_bytes() == b"redirected-image"
+
+
+def test_openai_compatible_download_rejects_a_redirect_without_location(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai-compatible")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp(
+            {"data": [{"url": "https://cdn.example/image.png"}]}
+        ),
+    )
+    monkeypatch.setattr(
+        img.requests,
+        "get",
+        lambda *args, **kwargs: FakeResp(status_code=302),
+    )
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("a red deer", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="redirect has no destination"):
+        img.generate_image(str(prompt_file), [], str(tmp_path / "image.png"), "1:1")
+
+
+@pytest.mark.parametrize("status", [300, 304])
+@pytest.mark.parametrize("existing", [False, True])
+def test_openai_compatible_download_requires_2xx(
+    monkeypatch, tmp_path, status, existing
+):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp(
+            {"data": [{"url": "https://cdn.example/image.png"}]}
+        ),
+    )
+    monkeypatch.setattr(
+        img.requests,
+        "get",
+        lambda *args, **kwargs: FakeResp(status_code=status),
+    )
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("a red deer", encoding="utf-8")
+    output = tmp_path / "image.png"
+    if existing:
+        output.write_bytes(b"previous image")
+
+    with pytest.raises(ValueError, match=f"Unexpected HTTP status {status}"):
+        img.generate_image(str(prompt), [], str(output))
+    if existing:
+        assert output.read_bytes() == b"previous image"
+    else:
+        assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "existing", [False, True], ids=["new-output", "existing-output"]
+)
+def test_openai_compatible_empty_download_preserves_output(
+    monkeypatch, tmp_path, existing
+):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp(
+            {"data": [{"url": "https://cdn.example/image.png"}]}
+        ),
+    )
+    monkeypatch.setattr(
+        img.requests,
+        "get",
+        lambda *args, **kwargs: FakeResp(content=b""),
+    )
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("a red deer", encoding="utf-8")
+    output = tmp_path / "outputs" / "image.png"
+    if existing:
+        output.parent.mkdir()
+        output.write_bytes(b"previous image")
+
+    with pytest.raises(ValueError, match="empty image"):
+        img.generate_image(str(prompt), [], str(output))
+    if existing:
+        assert output.read_bytes() == b"previous image"
+    else:
+        assert not output.parent.exists()
+
+
+@pytest.mark.parametrize(
+    "existing", [False, True], ids=["new-output", "existing-output"]
+)
+def test_openai_compatible_empty_data_url_preserves_output(
+    monkeypatch, tmp_path, existing
+):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp({"data": [{"url": "data:image/png;base64,"}]}),
+    )
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("a red deer", encoding="utf-8")
+    output = tmp_path / "outputs" / "image.png"
+    if existing:
+        output.parent.mkdir()
+        output.write_bytes(b"previous image")
+
+    with pytest.raises(ValueError, match="empty image"):
+        img.generate_image(str(prompt), [], str(output))
+    if existing:
+        assert output.read_bytes() == b"previous image"
+    else:
+        assert not output.parent.exists()
+
+
+@pytest.mark.parametrize(
+    ("provider", "key", "edit"),
+    [
+        ("gemini", "GEMINI_API_KEY", False),
+        ("minimax", "MINIMAX_API_KEY", False),
+        ("openai", "IMAGE_GENERATION_API_KEY", False),
+        ("openai", "IMAGE_GENERATION_API_KEY", True),
+    ],
+)
+def test_generation_rejects_cross_origin_post_redirect(
+    monkeypatch, tmp_path, provider, key, edit
+):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", provider)
+    monkeypatch.setenv(key, "offline-key")
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(url)
+        assert kwargs.get("allow_redirects") is False
+        return FakeResp(
+            status_code=307, headers={"Location": "https://other.example/generate"}
+        )
+
+    monkeypatch.setattr(img.requests, "post", fake_post)
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("a red deer", encoding="utf-8")
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(b"reference image")
+    output = tmp_path / "image.png"
+
+    with pytest.raises(ValueError, match="different origin"):
+        img.generate_image(str(prompt), [str(reference)] if edit else [], str(output))
+    assert len(calls) == 1
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(("status", "edit"), [(307, False), (308, True)])
+def test_openai_replays_same_origin_post_with_the_full_body(
+    monkeypatch, tmp_path, status, edit
+):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setenv("IMAGE_GENERATION_BASE_URL", "https://models.example/v1")
+    sent = []
+
+    def fake_post(url, **kwargs):
+        assert kwargs.get("allow_redirects") is False
+        if edit:
+            fields = kwargs["data"]
+            content = kwargs["files"][0][1][1].read()
+        else:
+            fields = kwargs["json"]
+            content = None
+        sent.append((url, dict(kwargs["headers"]), dict(fields), content))
+        if len(sent) == 1:
+            return FakeResp(status_code=status, headers={"Location": url + "/"})
+        return FakeResp({"data": [{"b64_json": "aW1hZ2U="}]})
+
+    monkeypatch.setattr(img.requests, "post", fake_post)
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("a red deer", encoding="utf-8")
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(b"reference image")
+    output = tmp_path / "image.png"
+
+    img.generate_image(str(prompt), [str(reference)] if edit else [], str(output))
+
+    assert len(sent) == 2
+    assert sent[1][0] == sent[0][0] + "/"
+    assert sent[1][1:] == sent[0][1:]
+    assert sent[0][1]["Authorization"] == "Bearer image-key"
+    assert sent[0][3] == (b"reference image" if edit else None)
+    assert output.read_bytes() == b"image"
+
+
+@pytest.mark.parametrize(
+    ("status", "location", "message"),
+    [
+        (302, "/generate", "Unexpected HTTP status 302"),
+        (307, None, "redirect has no destination"),
+        (307, "http://models.example/generate", "different origin"),
+        (308, "https://models.example:8443/generate", "different origin"),
+        (308, "/generate", "Too many image generation redirects"),
+    ],
+)
+def test_generation_post_redirects_are_limited(
+    monkeypatch, tmp_path, status, location, message
+):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setenv("IMAGE_GENERATION_BASE_URL", "https://models.example/v1")
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(url)
+        return FakeResp(
+            status_code=status, headers={"Location": location} if location else {}
+        )
+
+    monkeypatch.setattr(img.requests, "post", fake_post)
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("a red deer", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        img.generate_image(str(prompt), [], str(tmp_path / "image.png"))
+    assert len(calls) == (6 if location == "/generate" and status == 308 else 1)
+
+
+def test_cli_failed_download_exits_nonzero(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp(
+            {"data": [{"url": "https://cdn.example/image.png"}]}
+        ),
+    )
+    monkeypatch.setattr(
+        img.requests, "get", lambda *args, **kwargs: FakeResp(status_code=304)
+    )
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("a red deer", encoding="utf-8")
+    output = tmp_path / "image.png"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [img.__file__, "--prompt-file", str(prompt), "--output-file", str(output)],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        runpy.run_path(img.__file__, run_name="__main__")
+
+    assert error.value.code == 1
+    captured = capsys.readouterr()
+    assert "Unexpected HTTP status 304" in captured.err
+    assert not captured.out
+    assert not output.exists()
 
 
 def test_openai_compatible_dall_e_uses_response_format(monkeypatch, tmp_path):
@@ -424,3 +866,186 @@ def test_guess_mime_by_extension():
     assert img._guess_mime("/a/b.webp") == "image/webp"
     assert img._guess_mime("/a/b.jpg") == "image/jpeg"
     assert img._guess_mime("/a/b.unknown") == "image/jpeg"
+
+
+def test_resolve_falls_back_to_byteplus_agentplan(monkeypatch):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    assert (
+        img._resolve_provider("IMAGE_GENERATION_PROVIDER", "gemini", False)
+        == "byteplus_agentplan"
+    )
+
+
+def _make_test_image(fmt: str = "PNG", size: tuple[int, int] = (8, 6)) -> bytes:
+    from io import BytesIO
+    from PIL import Image
+
+    buf = BytesIO()
+    mode = "RGBA" if fmt == "PNG" else "RGB"
+    color = (20, 120, 220, 255) if mode == "RGBA" else (20, 120, 220)
+    Image.new(mode, size, color).save(buf, format=fmt)
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    "alias", ["byteplus", "byteplus_agentplan", "byteplus-agentplan", "seedream"]
+)
+def test_byteplus_agentplan_generation_writes_base64(monkeypatch, tmp_path, alias):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", alias)
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    jpeg_bytes = _make_test_image("JPEG")
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, **kwargs):
+        captured.update(url=url, headers=headers, json=json, kwargs=kwargs)
+        return FakeResp({"data": [{"b64_json": base64.b64encode(jpeg_bytes).decode()}]})
+
+    monkeypatch.setattr(img.requests, "post", fake_post)
+    structured_prompt = (
+        '{"prompt": "glassmorphism slide", "style": "keynote", '
+        '"composition": "wide hero", "negative_prompt": "cluttered"}'
+    )
+    prompt_file = tmp_path / "prompt.json"
+    prompt_file.write_text(structured_prompt, encoding="utf-8")
+    output_file = tmp_path / "nested" / "slide.jpg"
+
+    result = img.generate_image(str(prompt_file), [], str(output_file), "16:9")
+
+    assert captured["url"] == "https://ark.ap-southeast.bytepluses.com/api/plan/v3/images/generations"
+    assert captured["headers"]["Authorization"] == "Bearer bp-key"
+    assert captured["json"] == {
+        "model": "dola-seedream-5.0-pro",
+        "prompt": structured_prompt,
+        "size": "2560x1440",
+        "response_format": "b64_json",
+        "output_format": "jpeg",
+        "watermark": False,
+    }
+    assert output_file.read_bytes() == jpeg_bytes
+    assert "Successfully generated image" in result
+
+
+def test_byteplus_agentplan_aspect_ratio_21_9_and_unmapped_rejected(monkeypatch, tmp_path):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    png_bytes = _make_test_image("PNG")
+    captured = []
+
+    def fake_post(url, headers=None, json=None, **kwargs):
+        captured.append(json)
+        return FakeResp({"data": [{"b64_json": base64.b64encode(png_bytes).decode()}]})
+
+    monkeypatch.setattr(img.requests, "post", fake_post)
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("cinematic panorama", encoding="utf-8")
+
+    img.generate_image(str(prompt_file), [], str(tmp_path / "wide.png"), "21:9")
+    assert captured[0]["size"] == "3136x1344"
+    assert captured[0]["output_format"] == "png"
+
+    with pytest.raises(ValueError, match="Unsupported aspect ratio '5:4'"):
+        img.generate_image(str(prompt_file), [], str(tmp_path / "bad.png"), "5:4")
+    assert len(captured) == 1
+
+
+def test_byteplus_agentplan_converts_mismatched_png_for_jpg_slide_chain(monkeypatch, tmp_path):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    png_bytes = _make_test_image("PNG")
+    assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+
+    posts = []
+
+    def fake_post(url, headers=None, json=None, **kwargs):
+        posts.append(json)
+        return FakeResp({"data": [{"b64_json": base64.b64encode(png_bytes).decode()}]})
+
+    monkeypatch.setattr(img.requests, "post", fake_post)
+    prompt_file = tmp_path / "prompt.json"
+    prompt_file.write_text('{"prompt": "title slide", "style": "clean"}', encoding="utf-8")
+
+    slide1 = tmp_path / "slide-01.jpg"
+    slide2 = tmp_path / "slide-02.jpg"
+    img.generate_image(str(prompt_file), [], str(slide1), "16:9")
+    img.generate_image(str(prompt_file), [str(slide1)], str(slide2), "16:9")
+
+    assert posts[0]["output_format"] == "jpeg"
+    assert slide1.read_bytes().startswith(b"\xff\xd8\xff")
+    assert slide2.read_bytes().startswith(b"\xff\xd8\xff")
+    ref_data_url = posts[1]["image"]
+    assert isinstance(ref_data_url, str)
+    assert ref_data_url.startswith("data:image/jpeg;base64,")
+    assert base64.b64decode(ref_data_url.split(",", 1)[1]).startswith(b"\xff\xd8\xff")
+
+
+@pytest.mark.parametrize(
+    "bad_bytes",
+    [
+        b"<html>not an image</html>",
+        _make_test_image("JPEG", size=(64, 64))[:120],
+    ],
+    ids=["non-image-payload", "truncated-jpeg"],
+)
+def test_byteplus_agentplan_rejects_corrupt_or_truncated_image_and_preserves_slide(
+    monkeypatch, tmp_path, bad_bytes
+):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp(
+            {"data": [{"b64_json": base64.b64encode(bad_bytes).decode()}]}
+        ),
+    )
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("slide update", encoding="utf-8")
+    existing_slide = _make_test_image("JPEG")
+    slide_path = tmp_path / "slide-01.jpg"
+    slide_path.write_bytes(existing_slide)
+
+    with pytest.raises(ValueError, match="invalid or corrupted image data"):
+        img.generate_image(str(prompt_file), [], str(slide_path), "16:9")
+
+    assert slide_path.read_bytes() == existing_slide
+
+
+def test_byteplus_agentplan_single_and_multi_reference_images_and_overrides(monkeypatch, tmp_path):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_BASE_URL", "https://plan.example/api/plan/v3/")
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_IMAGE_MODEL", "dola-seedream-5.5")
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_IMAGE_SIZE", "2K")
+    png_bytes = _make_test_image("PNG")
+    posts = []
+
+    def fake_post(url, headers=None, json=None, **kwargs):
+        posts.append((url, json))
+        return FakeResp({"data": [{"b64_json": base64.b64encode(png_bytes).decode()}]})
+
+    monkeypatch.setattr(img.requests, "post", fake_post)
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("matching next slide", encoding="utf-8")
+    ref1 = tmp_path / "slide1.png"
+    ref1.write_bytes(b"\x89PNGone")
+    ref2 = tmp_path / "slide2.jpg"
+    ref2.write_bytes(b"\xff\xd8two")
+
+    img.generate_image(str(prompt_file), [str(ref1)], str(tmp_path / "out1.png"), "16:9")
+    img.generate_image(str(prompt_file), [str(ref1), str(ref2)], str(tmp_path / "out2.png"), "9:16")
+
+    assert posts[0][0] == "https://plan.example/api/plan/v3/images/generations"
+    assert posts[0][1]["model"] == "dola-seedream-5.5"
+    assert posts[0][1]["size"] == "2K"
+    assert posts[0][1]["output_format"] == "png"
+    assert isinstance(posts[0][1]["image"], str)
+    assert posts[0][1]["image"].startswith("data:image/png;base64,")
+
+    assert isinstance(posts[1][1]["image"], list)
+    assert len(posts[1][1]["image"]) == 2
+    assert posts[1][1]["image"][0].startswith("data:image/png;base64,")
+    assert posts[1][1]["image"][1].startswith("data:image/jpeg;base64,")
+
+
+def test_byteplus_agentplan_missing_key_raises(monkeypatch, tmp_path):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "byteplus_agentplan")
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("a deer", encoding="utf-8")
+    with pytest.raises(ValueError, match="BYTEPLUS_AGENTPLAN_API_KEY is not set"):
+        img.generate_image(str(prompt_file), [], str(tmp_path / "o.png"), "1:1")

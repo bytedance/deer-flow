@@ -153,6 +153,8 @@ export interface Translations {
       | "knowledgeManagement"
       | "knowledgePlatform"
       | "knowledgeCenter"
+      | "skillEvolution"
+      | "runPostmortem"
       | "weknora"
       | "lightrag"
       | "example",
@@ -174,6 +176,21 @@ export interface Translations {
 
   capabilities: {
     toolsAndIntegrations: string;
+    mcpConnections: {
+      title: string;
+      action: (action: string, name: string) => string;
+      disconnect: string;
+      reconnect: string;
+      actionFailed: string;
+      loadFailed: string;
+      status: {
+        disconnected: string;
+        connected: string;
+        reconnect_required: string;
+        removed: string;
+        unavailable: string;
+      };
+    };
     icon: {
       title: string;
       upload: string;
@@ -359,6 +376,19 @@ export interface Translations {
     linkCopied: string;
   };
 
+  artifactSelection: {
+    rewrite: string;
+    instructions: string;
+    exactRequired: string;
+    review: string;
+    original: string;
+    replacement: string;
+    apply: string;
+    applied: string;
+    changed: string;
+    limit: string;
+  };
+
   artifactEditing: {
     unsaved: string;
     saving: string;
@@ -510,11 +540,14 @@ export interface Translations {
     voiceInputStart: string;
     voiceInputStop: string;
     voiceInputListening: string;
+    voiceInputStarting: string;
+    voiceInputFinishing: string;
+    voiceInputCancel: string;
     voiceInputUnsupported: string;
     voiceInputPermissionDenied: string;
     voiceInputMicrophoneUnavailable: string;
-    voiceInputUnsupportedLanguage: string;
-    voiceInputNetworkError: string;
+    voiceInputTooLarge: string;
+    voiceInputUnavailable: string;
     voiceInputNoSpeech: string;
     voiceInputFailed: string;
     mode: string;
@@ -621,6 +654,7 @@ export interface Translations {
         }
     )[];
     pleaseWaitStreaming: string;
+    send: string;
     runInputMode: string;
     queueMode: string;
     steerMode: string;
@@ -628,6 +662,7 @@ export interface Translations {
     steerModeHelp: string;
     runInputSend: string;
     runInputTextOnly: string;
+    runInputUnsupported: string;
     runInputUnavailable: string;
     stopRun: string;
     runInputQueued: string;
@@ -1412,6 +1447,7 @@ export interface Translations {
     branchCreated: string;
     branchFailed: string;
     streamReplayGap: string;
+    sandboxBusy: string;
     streamServerError: (status: number) => string;
     outlineLabel: string;
     outlineAttachmentFallback: string;

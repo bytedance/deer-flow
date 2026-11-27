@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager, suppress
+from contextlib import ExitStack, asynccontextmanager, suppress
 from typing import Any
 
 from deerflow_extension_api import (
@@ -31,6 +31,7 @@ from app.gateway.routers import (
     channel_connections,
     channels,
     console,
+    coordination,
     features,
     feedback,
     github_webhooks,
@@ -39,7 +40,9 @@ from app.gateway.routers import (
     integrations,
     knowledge,
     mcp,
+    mcp_agent_auth,
     mcp_tasks,
+    mcp_user_oauth,
     memory,
     models,
     personal_mcp,
@@ -62,11 +65,12 @@ from app.gateway.routers import (
     trash,
     uploads,
     user_preferences,
+    voice_input,
 )
 from app.gateway.trace_middleware import TraceMiddleware
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
-from deerflow.sandbox.sandbox_provider import hold_sandbox_shutdown_ownership
+from deerflow.sandbox.sandbox_provider import get_sandbox_provider, hold_sandbox_shutdown_ownership
 from deerflow.tracing.monocle import setup_monocle_tracing_if_enabled
 from deerflow.uploads.manager import cleanup_stale_upload_staging_files
 from deerflow.utils.file_io import await_drained
@@ -360,6 +364,24 @@ async def _run_startup_trash_sweep(app: FastAPI, startup_config) -> None:
         logger.warning("Trash retention sweep skipped", exc_info=True)
 
 
+async def _run_startup_queued_upload_sweep(app: FastAPI) -> None:
+    try:
+        from app.gateway.run_input_cleanup import cleanup_abandoned_queued_uploads
+        from deerflow.config.paths import get_paths
+
+        store = getattr(app.state, "run_store", None)
+        if store is not None:
+            removed = await cleanup_abandoned_queued_uploads(store, get_paths())
+            if removed:
+                logger.info("Removed %d abandoned queued upload stage(s)", removed)
+    except Exception:
+        logger.warning("Queued upload stage cleanup skipped", exc_info=True)
+
+
+async def _run_startup_storage_sweeps(app: FastAPI, startup_config) -> None:
+    await asyncio.gather(_run_startup_trash_sweep(app, startup_config), _run_startup_queued_upload_sweep(app))
+
+
 async def _shutdown_startup_trash_sweep(app: FastAPI) -> None:
     """Grace-budgeted shutdown for the background startup sweep (§8.3).
 
@@ -588,7 +610,13 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
 @asynccontextmanager
 async def _runtime_with_mcp_pool_shutdown(app: FastAPI, startup_config: AppConfig) -> AsyncGenerator[None, None]:
     """Close MCP transports and initialized sandboxes after runtime shutdown."""
+    signal_handlers = ExitStack()
     try:
+        ownership = getattr(getattr(startup_config, "sandbox", None), "ownership", None)
+        if ownership is not None and ownership.redis_mode == "cluster":
+            # Discover Redis slots before async request handlers can cold-start the provider.
+            provider = await await_drained(asyncio.to_thread(get_sandbox_provider))
+            signal_handlers.enter_context(provider.gateway_signal_handlers())
         async with langgraph_runtime(app, startup_config):
             yield
     finally:
@@ -621,6 +649,8 @@ async def _runtime_with_mcp_pool_shutdown(app: FastAPI, startup_config: AppConfi
                 await await_drained(asyncio.to_thread(shutdown_sandbox_provider))
             except Exception:
                 logger.exception("Failed to shut down sandbox provider")
+            finally:
+                signal_handlers.close()
 
 
 @asynccontextmanager
@@ -661,6 +691,9 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         ensure_browser_runtime_available(startup_config)
         logger.info("Configuration loaded successfully")
         warn_if_auth_disabled_enabled()
+        hitl_approval = getattr(startup_config, "hitl_approval", None)
+        if getattr(hitl_approval, "enabled", False) is not True:
+            logger.warning("hitl_approval is not enabled. Tool calls can execute without runtime human review. Set hitl_approval.enabled to true in config.yaml to enable tool approvals. See docs/guide/skills-and-tools.md.")
     except Exception as e:
         error_msg = f"Failed to load configuration during gateway startup: {e}"
         logger.exception(error_msg)
@@ -750,15 +783,10 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Must run AFTER langgraph_runtime so app.state.store is available for thread migration
         await _ensure_admin_user(app)
 
-        # Phase-2 trash tier (§8.3): one retention sweep at startup, beside
-        # the lazy trigger on the trash listing — no daemon, no scheduler.
-        # Runs after langgraph_runtime so app.state.project_document_repo is
-        # available. The per-user reconciliation walks every row and file, so
-        # it is scheduled as a background task: gateway readiness never waits
-        # on it, a failure is logged by the task itself, and shutdown gives the
-        # in-flight sweep a bounded graceful budget before cancelling it; any
-        # already-started file worker drains before the runtime is torn down.
-        app.state.startup_trash_sweep_task = asyncio.create_task(_run_startup_trash_sweep(app, startup_config))
+        # Run both storage sweeps after their repositories are ready, without
+        # delaying gateway readiness. Shutdown drains in-flight writes before
+        # tearing the runtime down.
+        app.state.startup_trash_sweep_task = asyncio.create_task(_run_startup_storage_sweeps(app, startup_config))
 
         # Best-effort per-document summary generation.
         # Workers start only when projects.summaries_enabled is true; the
@@ -926,6 +954,7 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             raise RuntimeError("subagent_batches.enabled requires database.backend sqlite or postgres")
         if batch_repo is not None:
             from app.subagent_batches.continuation import BatchContinuations
+            from app.subagent_batches.identity import resolve_batch_principal
 
             continuations = BatchContinuations(app)
             app.state.batch_continuations = continuations
@@ -937,6 +966,7 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 prepare_continuation=continuations.prepare,
                 dispatch_continuation=continuations.dispatch,
                 cancel_continuation=continuations.cancel,
+                resolve_principal=lambda batch: resolve_batch_principal(batch, load_user=app.state.agent_runs_host.load_user),
             )
             app.state.subagent_batch_service = batch_service
             if subagent_batches_config.enabled:
@@ -944,7 +974,14 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 set_subagent_batch_submitter(batch_service)
                 app.state.subagent_batches_available = True
 
-        yield
+        workers = getattr(app.state, "coordination_workers", None)
+        try:
+            if workers is not None:
+                workers.start_recovery()
+            yield
+        finally:
+            if workers is not None:
+                await workers.close()
 
         await _shutdown_startup_trash_sweep(app)
         try:
@@ -1351,11 +1388,15 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # MCP API is mounted at /api/mcp
     app.include_router(capabilities.router)
+    # Runtime MCP agent credential grants (admin) at /api/mcp/agent-auth
+    app.include_router(mcp_agent_auth.router)
     app.include_router(mcp.router)
     app.include_router(personal_mcp.router)
+    app.include_router(mcp_user_oauth.router)
 
     # Durable MCP tasks are scoped to their owning thread.
     app.include_router(mcp_tasks.router)
+    app.include_router(coordination.router)
     app.include_router(subagent_batches.router)
 
     # Memory API is mounted at /api/memory
@@ -1410,6 +1451,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Input polishing API is mounted at /api/input-polish
     app.include_router(input_polish.router)
+    app.include_router(voice_input.router)
 
     # User-facing IM channel connection API is mounted at /api/channels
     app.include_router(channel_connections.router)

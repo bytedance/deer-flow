@@ -756,6 +756,62 @@ async def test_pause_atomically_cancels_waiting_run_but_rejects_launching_run(tm
         await close_engine()
 
 
+async def test_delete_atomically_cancels_waiting_run_but_rejects_launching_run(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
+        now = datetime.now(UTC)
+        await _seed_reuse_task(task_repo, task_id="task-delete-queued", now=now)
+        await run_repo.create(
+            run_record_id="task-run-delete-queued",
+            task_id="task-delete-queued",
+            thread_id="thread-1",
+            scheduled_for=now,
+            trigger="scheduled",
+            status="queued",
+        )
+
+        # Another user's delete finds nothing and leaves the queue alone.
+        assert await task_repo.delete_with_queue_cancellation("task-delete-queued", user_id="user-2", error="deleted while queued", now=now) == "not_found"
+        assert await task_repo.get("task-delete-queued", user_id="user-1") is not None
+        assert (await run_repo.list_by_task("task-delete-queued"))[0]["status"] == "queued"
+
+        result = await task_repo.delete_with_queue_cancellation("task-delete-queued", user_id="user-1", error="deleted while queued", now=now)
+
+        assert result == "deleted"
+        assert await task_repo.get("task-delete-queued", user_id="user-1") is None
+        (cancelled,) = await run_repo.list_by_task("task-delete-queued")
+        assert (cancelled["status"], cancelled["error"]) == ("interrupted", "deleted while queued")
+
+        await _seed_reuse_task(task_repo, task_id="task-delete-launching", now=now)
+        await run_repo.create(
+            run_record_id="task-run-delete-launching",
+            task_id="task-delete-launching",
+            thread_id="thread-1",
+            scheduled_for=now,
+            trigger="scheduled",
+            status="queued",
+        )
+        await run_repo.claim_queued_run(
+            "task-run-delete-launching",
+            lease_owner="worker-a",
+            now=now,
+            lease_seconds=120,
+            global_max_concurrent_runs=3,
+        )
+
+        result = await task_repo.delete_with_queue_cancellation("task-delete-launching", user_id="user-1", error="deleted while queued", now=now)
+
+        assert result == "executing"
+        assert await task_repo.get("task-delete-launching", user_id="user-1") is not None
+        assert (await run_repo.list_by_task("task-delete-launching"))[0]["status"] == "launching"
+    finally:
+        await close_engine()
+
+
 async def test_manual_enqueue_cannot_unpause_a_task_that_cancels_its_waiting_run(tmp_path):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:
@@ -1364,6 +1420,52 @@ async def test_fair_batch_keeps_same_thread_fifo(sqlite_repos, cap):
     batch = [row["id"] for row in await run_repo.list_queued_runs(limit=16, per_user_max_concurrent_runs=cap)]
 
     assert batch == ["a-older"]
+
+
+@pytest.mark.parametrize("status", ["running", "launching"])
+async def test_queue_age_cutoff_keeps_active_same_thread_fifo_blocker(sqlite_repos, status):
+    sf, task_repo, run_repo = sqlite_repos
+    now = datetime.now(UTC)
+    await _owned_occurrence(
+        task_repo,
+        run_repo,
+        "a-old-active",
+        user_id=OWNER_A,
+        status=status,
+        thread_id="reuse-thread",
+    )
+    await _owned_occurrence(
+        task_repo,
+        run_repo,
+        "a-blocked-queued",
+        user_id=OWNER_A,
+        thread_id="reuse-thread",
+    )
+    await _owned_occurrence(
+        task_repo,
+        run_repo,
+        "a-healthy-queued",
+        user_id=OWNER_A,
+        thread_id="other-thread",
+    )
+
+    # The timeout applies to waiting rows, not to an older active execution.
+    async with sf() as session:
+        blocker = await session.get(ScheduledTaskRunRow, "a-old-active")
+        assert blocker is not None
+        blocker.created_at = now - timedelta(hours=1)
+        await session.commit()
+
+    cutoff = now - timedelta(minutes=5)
+    batch = await run_repo.list_queued_runs(
+        limit=16,
+        per_user_max_concurrent_runs=2,
+        created_after=cutoff,
+    )
+
+    # The active run still blocks its thread. Its newer queued row must not
+    # consume the owner's one remaining slot ahead of unrelated healthy work.
+    assert [row["id"] for row in batch] == ["a-healthy-queued"]
 
 
 async def test_orphan_queued_row_is_still_drained(sqlite_repos):

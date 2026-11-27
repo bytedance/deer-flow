@@ -119,6 +119,8 @@ fences, including unclosed fences, in complete and streamed replies.
 
    The wizard also lets you configure an optional web search provider, or skip it for now.
 
+   [DeepSeek web search](../../backend/docs/CONFIGURATION.md#deepseek-web-search) uses `deerflow.community.deepseek.tools:web_search_tool`. Configure `DEEPSEEK_API_KEY` in the Gateway environment and replace the active `web_search` entry with the example in `config.example.yaml`. Set `thinking: true` for multi-step thinking search, independently of the main DeerFlow model. The default is `false`. Results include a generated answer and screened, deduplicated source links.
+
    Brave web search preserves valid entries in mixed result lists. Malformed response containers or lists containing no usable entries return a structured format error; missing, null, or empty results keep the existing "No results found" response. Format errors also log the malformed container's path and type, or the absence of usable result objects, without including search queries, credentials, or payload values.
 
    Several providers, including You.com, GroundRoute, Webz, InfoQuest and Jsonify, initialize HTTPX clients in a worker thread so synchronous TLS trust loading does not block the agent event loop; requests and session cleanup remain asynchronous.
@@ -153,6 +155,8 @@ fences, including unclosed fences, in complete and streamed replies.
 
    Self-hosted Browserless, Crawl4AI, Firecrawl, and fastCRW fetch backends require outbound isolation from private, loopback, link-local, and cloud-metadata networks before setting `network_isolation_confirmed: true` on each tool. DeerFlow rejects private or unverifiable backends by default because those services handle redirects, DNS resolution, and subresources themselves. `allow_private_addresses` permits intentional internal target URLs and does not bypass the backend check. See [delegated fetch deployment](../../backend/docs/CONFIGURATION.md#delegated-fetch-backend-isolation); `make doctor` reports backend configurations that would be refused.
 
+   Crawl4AI `web_fetch` accepts an optional `max_chars` tool setting (positive integer, default 4096) for its output cap. A page cut at the cap ends with a note giving the kept and total length, so the agent knows the page goes on. Outputs above `tool_output.externalize_min_chars` are still externalized to a file.
+
    Jina fetches support opt-in bounded retries via `max_retries` (default `0`) and `retry_budget_seconds` (default `30`) in the tool configuration. Valid `Retry-After` hints set a minimum wait for HTTP 429/503; 429 without a valid hint stays terminal. Hints that cannot fit the remaining budget stop retries. Local backoff remains randomized. Retries may increase upstream requests and cost; see [Jina fetch retries](../../backend/docs/CONFIGURATION.md#jina-fetch-retries).
 
    At DEBUG level, Jina emits one bounded crawl completion summary with attempts, elapsed/backoff seconds, outcome and stop reason. See [diagnostics](../../backend/docs/CONFIGURATION.md#jina-crawl-diagnostics) for configuration and correlation.
@@ -176,24 +180,39 @@ fences, including unclosed fences, in complete and streamed replies.
    only, and does not include `.env`, raw conversation messages, or user file
    contents. Subprocess diagnostics are captured as UTF-8, with Python helpers
    emitting UTF-8 even on non-UTF-8 hosts and escaping unencodable characters.
-   Thread manifests follow the local launcher's runtime paths: checkout `.env`
-   values override shell exports, and a project-root override alone still uses
-   `backend/.deer-flow` first. Simple variable references such as
-   `DEER_FLOW_HOME="$PWD/backend/.deer-flow"` use the checkout as `PWD`;
-   single-quoted references remain literal. If the checkout `.env` cannot be read or decoded
-   as UTF-8, thread diagnostics retain shell exports and default storage paths. For standalone Gateway launches using `backend/.env`
-   or `DEER_FLOW_ENV_FILE`, export the effective `DEER_FLOW_HOME` when collecting
-   the bundle and ensure the checkout `.env` does not override it.
    Doctor's internal tool probes also decode UTF-8 with replacement for invalid
    bytes so the remaining diagnostic output stays available.
 
-   When a thread manifest is requested, a nonempty `DEER_FLOW_HOME` selects the
-   runtime data directory instead of stale checkout data. External data paths
-   appear as `{DEER_FLOW_HOME}` in the report; file contents remain excluded.
-   Runtime path settings also come from the checkout `.env`, with shell exports
-   taking precedence. Relative paths resolve from the checkout as in `make dev`.
-   Without an explicit home, a configured `DEER_FLOW_PROJECT_ROOT` selects its
-   `.deer-flow` directory; external paths use that variable name in the report.
+   Thread manifests are opt-in. `make support-bundle` passes only
+   `--include-doctor`, so following the recipe above produces a bundle without
+   `thread-summary.json`. With the affected thread id set, request the manifest
+   from the checkout root:
+
+   ```bash
+   cd backend && uv run python ../scripts/support_bundle.py \
+     --thread-id "$THREAD_ID" --include-doctor
+   ```
+
+   For thread manifests, runtime path assignments in the checkout `.env`
+   override shell exports, even when the assigned value is empty. For the
+   bundle, relative paths resolve from the checkout. Simple references such as
+   `DEER_FLOW_HOME="$PWD/backend/.deer-flow"` use the checkout as `PWD`.
+   Single-quoted references remain literal. If the checkout `.env` cannot be
+   read or decoded as UTF-8, the bundle uses shell exports and default paths.
+
+   A nonempty `DEER_FLOW_HOME` is the only runtime root searched. With only
+   `DEER_FLOW_PROJECT_ROOT` set, the bundle searches the local launcher's
+   `backend/.deer-flow` first, then the configured project's `.deer-flow`.
+   When both values are empty or unset, it searches the checkout's
+   `.deer-flow` first, then `backend/.deer-flow`. For configured roots outside
+   the checkout, the report shows `{DEER_FLOW_HOME}` or
+   `{DEER_FLOW_PROJECT_ROOT}/.deer-flow` in place of the absolute directory.
+
+   A standalone Gateway resolves a relative `DEER_FLOW_HOME` against its own
+   working directory, which the bundle does not share. When the Gateway reads
+   runtime paths from `backend/.env` or `DEER_FLOW_ENV_FILE`, export the
+   absolute path of the data directory it is using before collecting the
+   bundle, and make sure the checkout `.env` does not override it.
 
    > **Advanced / manual configuration**: If you prefer to edit `config.yaml` directly, run `make config` instead to copy the full template. Optional dependency auto-detection accepts UTF-8 configuration files with or without a byte-order mark (BOM). It checks an existing `DEER_FLOW_CONFIG_PATH` first, then `DEER_FLOW_PROJECT_ROOT/config.yaml`, before the checkout's default locations. Local startup also accepts the project-root configuration when the checkout has no `config.yaml`. See `config.example.yaml` for the complete reference including CLI-backed providers (Codex CLI, Claude Code OAuth), OpenRouter, Responses API, subagent runtime caps such as `subagents.max_total_per_run`, and more.
 
@@ -392,9 +411,11 @@ fences, including unclosed fences, in complete and streamed replies.
    - `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` accepts a UTF-8 token handoff and reuses it for later model instances in the same process. Undecodable handoffs are skipped so Claude Code can still try its override or default credentials file.
    - CLI credential JSON files accept UTF-8 with or without a BOM, independently of the host locale. `make doctor` accepts the same files when checking CLI authentication. Invalid text encoding is treated as an unreadable source; Claude Code can still try its default file after an invalid override.
    - ACP agent entries are separate from model providers — if you configure `acp_agents.codex`, point it at a Codex ACP adapter such as `npx -y @zed-industries/codex-acp`
-   - A bare or absolute ACP agent `command` is resolved before the agent starts, so npm-installed launchers work on Windows too: `npx` or `mcode` is spawned as its `npx.cmd`/`mcode.cmd` shim instead of failing with a command-not-found error, and an absolute path such as `C:\Users\me\AppData\Roaming\npm\mcode` resolves to the `mcode.cmd` shim beside npm's extensionless shell script instead of failing with `WinError 193`. The lookup uses the `PATH` the agent subprocess will actually see (`acp_agents.<name>.env.PATH` when set, otherwise the Gateway's) and hands the spawn an absolute path, so a relative `PATH` entry cannot be re-interpreted inside the agent's own workspace. A relative `command` (for example `bin/mcode`) is used as configured, and a command that cannot be resolved is still reported with the install guidance below.
-   - Each ACP agent's `timeout_seconds` (default: 1800) is one shared budget for initialization, session creation, and the prompt, starting after the subprocess launches. On timeout, DeerFlow aborts the invocation and closes the subprocess before returning an error. Workspace/MCP preparation and subprocess cleanup are outside this budget. A `TimeoutError` raised by the SDK before this deadline expires retains its own error message.
-   - If an ACP agent exits before answering (for example because it is not authenticated or a configured argument is wrong), DeerFlow reports its exit code within a few seconds instead of waiting for `timeout_seconds`, and records the end of the agent's stderr in the Gateway log. Agent stderr is read continuously, so an agent that logs heavily cannot stall on a full pipe.
+   - The ACP agent `command` is resolved before the agent starts, so npm-installed launchers work on Windows too: `npx` or `mcode` is spawned as its `npx.cmd`/`mcode.cmd` shim instead of failing with a command-not-found error, and an absolute path such as `C:\Users\me\AppData\Roaming\npm\mcode` resolves to the `mcode.cmd` shim beside npm's extensionless shell script instead of failing with `WinError 193`. The lookup uses the `PATH` the agent subprocess will actually see (`acp_agents.<name>.env.PATH` when set, otherwise the Gateway's) and hands the spawn an absolute path, so a relative `PATH` entry cannot be re-interpreted inside the agent's own workspace. Relative launchers (for example `bin/mcode`) are resolved from the Gateway working directory. Install launchers outside writable task workspaces and use an absolute path if the Gateway working directory can vary. If a configured path fails to launch, check that the file exists and the Gateway account can execute it.
+   - Set `acp_agents.<name>.model` to an external agent's model ID to select it after session creation and before the prompt. DeerFlow uses an advertised `category: model` select option, or a select option with ID `model` if its category is omitted. For these options, the model must be an advertised choice and the agent must confirm it as the current selection before DeerFlow sends the prompt. If no model option is advertised, DeerFlow uses the legacy `session/set_model` interface. A rejected selection fails the invocation before the prompt; omitting `model` keeps the agent's default.
+   - Each ACP agent's `timeout_seconds` (default: 1800) is one shared budget for initialization, session creation, model selection, and the prompt, starting after the subprocess launches. On timeout, DeerFlow aborts the invocation and closes the subprocess before returning an error. Workspace/MCP preparation and subprocess cleanup are outside this budget. A transport timeout raised before the deadline is reported separately.
+   - If an ACP agent exits before answering (for example because it is not authenticated or a configured argument is wrong), DeerFlow reports its exit code within a few seconds instead of waiting for `timeout_seconds`, and records the exit status in the Gateway log. DeerFlow drains agent stderr continuously to keep the subprocess responsive.
+   - Keep Gateway launch configuration writable only by operators. ACP launchers run with the Gateway OS user, independently of the thread sandbox provider.
    - MiniMax Code speaks ACP directly. Install and authenticate it, then add it as an ACP agent:
 
    ```bash
@@ -412,6 +433,26 @@ fences, including unclosed fences, in complete and streamed replies.
    ```
 
    `mcode` must be on the Gateway process's `PATH`; installing it only on the Docker host does not make it available inside the Gateway container. DeerFlow invokes it through `invoke_acp_agent` in a per-thread ACP workspace and forwards enabled MCP servers. Keep `auto_approve_permissions: false` for untrusted tasks; enable it only when mcode must edit files or run commands and you trust the task.
+
+   Pi can be used as an external coding agent through the community `pi-acp` adapter. The adapter launches the separate `pi` executable, so install both packages in the Gateway environment before starting DeerFlow. `pi-acp` currently requires Node.js 22+ and pi 0.81.0+:
+
+   ```bash
+   npm install --global @earendil-works/pi-coding-agent
+   npm install --global pi-acp
+   ```
+
+   Configure pi's model provider and API key separately for the user that runs the Gateway. For interactive providers, start `pi` in that same environment, then run `/login` in Pi's terminal UI and select your provider. Alternatively, provide the provider's documented environment variables. The `pi` executable and its credentials must be available inside the Gateway container; installing or authenticating them only on the Docker host is not sufficient.
+
+   ```yaml
+   acp_agents:
+     pi:
+       command: pi-acp
+       args: []
+       description: Pi coding agent for repository tasks and code generation
+       auto_approve_permissions: false
+   ```
+
+   Node.js and both `pi-acp` and `pi` must be available on the Gateway process's `PATH`. When the Gateway runs in Docker, install them inside the Gateway image or container. Pi executes its filesystem and shell tools directly in its working environment. `auto_approve_permissions` only controls permission requests sent through ACP; leaving it disabled does not sandbox these direct operations. Run untrusted Pi tasks in an independently isolated process, container, or VM with only the required files, credentials, and network access. Keep `auto_approve_permissions: false` for untrusted tasks. Alternatively, set `command: npx` and `args: ["-y", "pi-acp"]` to fetch the adapter on demand; this requires `npx` on the Gateway's `PATH` and may require network access at startup. Preinstalling the adapter lets deployment tooling control its version without fetching it during an invocation.
    - On macOS, export Claude Code auth explicitly if needed:
 
    ```bash
@@ -479,3 +520,40 @@ and objects, so parsing does not silently change its value. Python-literal sets
 and tuples containing non-finite floats also retain the complete argument as
 text, including when nested in other containers. Dictionary keys and values
 are checked recursively as well.
+
+## Rapid-MLX on Apple Silicon
+
+[Rapid-MLX](https://github.com/raullenchai/Rapid-MLX) exposes an
+OpenAI-compatible local endpoint. After installing it, start a server with an
+explicit port (omitting the port allows the server to choose another free port):
+
+```bash
+rapid-mlx serve qwen3.5-4b-4bit --port 8000
+curl http://127.0.0.1:8000/v1/models
+```
+
+Run `make setup` and select **Rapid-MLX (local)**. Accept or edit the default
+`http://127.0.0.1:8000/v1` endpoint, then enter the exact model ID from the
+`data[].id` field returned by `/v1/models`. The wizard skips secret input and
+writes a non-secret `api_key: not-required` placeholder for the OpenAI client;
+no API-key environment variable is needed. It does not infer vision or reasoning
+capabilities from the server name.
+
+Equivalent manual model configuration:
+
+```yaml
+models:
+  - name: rapid-mlx-local
+    display_name: Rapid-MLX (local)
+    use: langchain_openai:ChatOpenAI
+    model: <exact model ID from /v1/models>
+    base_url: http://127.0.0.1:8000/v1
+    api_key: not-required
+```
+
+For containerized DeerFlow, loopback refers to the container. Use a host-reachable
+endpoint such as `http://host.docker.internal:8000/v1` on Docker Desktop, and
+configure the server to listen on an interface reachable from that container.
+For Web setup, use **Custom OpenAI-compatible** with the same endpoint and model
+ID; no separate managed-provider preset is required. Streaming and tool calling
+depend on the selected model and server; check both before using it for agent tasks.

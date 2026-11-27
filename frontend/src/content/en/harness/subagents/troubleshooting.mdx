@@ -29,9 +29,9 @@ Expected. A failed subagent is an ordinary tool result; the parent run does not 
 
 ### The result is marked `token_capped` or `loop_capped`
 
-**Cause**: the token budget or loop detection hard stop fired ([#3931](https://github.com/bytedance/deer-flow/pull/3931), [#3980](https://github.com/bytedance/deer-flow/pull/3980)).
+**Cause**: the token budget or the hash-based loop detector stopped the run after repeated identical calls with no progress ([#3931](https://github.com/bytedance/deer-flow/pull/3931), [#3980](https://github.com/bytedance/deer-flow/pull/3980)).
 
-**Fix**: first check the step timeline for the same tool being called over and over. If more budget is genuinely needed, adjust `subagents.token_budget.max_tokens` or `loop_detection.tool_freq_overrides`. Note that the default token ceiling is coupled to `summarization.enabled`; an explicit value is not.
+**Fix**: first check the step timeline for the same call being repeated without progress. If more work is genuinely needed, adjust `subagents.token_budget.max_tokens` or another explicit work budget. Tool-name frequency entries in the logs are observability metrics and do not cause `loop_capped`; `loop_detection.tool_freq_overrides` only tunes those metrics. Note that the default token ceiling is coupled to `summarization.enabled`; an explicit value is not.
 
 ### The result is marked `model_length_capped`
 
@@ -76,7 +76,7 @@ Check in order:
 
 ### `Bash subagent is disabled for LocalSandboxProvider`
 
-The local sandbox does not allow host command execution by default. Set `sandbox.allow_host_bash: true` only in a fully trusted local environment, or switch to a container sandbox.
+Switch to an isolated sandbox provider to enable command execution.
 
 ### A subagent reports `Error: task is not a valid tool`
 
@@ -168,7 +168,7 @@ Since [#3658](https://github.com/bytedance/deer-flow/pull/3658) usage is attribu
 
 ### Subtask steps disappear after a reload
 
-Steps are backfilled from `subagent.step` run events ([#3845](https://github.com/bytedance/deer-flow/pull/3845)). Older versions dropped a batch when the event store write failed; since [#4082](https://github.com/bytedance/deer-flow/pull/4082) it is re-buffered and retried. Check that the run event store is writable.
+Steps are backfilled from `subagent.step` run events. Check that the event store is writable and inspect the run's `subagent history incomplete` finalization warning. Only a write explicitly confirmed as uncommitted is re-buffered for retry (including transient DB pre-commit failures and successful JSONL I/O rollback). Three consecutive failed attempts, an ambiguous error, or store cancellation stops further subagent-event persistence for that run and releases pending payloads. Live streaming continues, but reloaded history may be incomplete. Finalization logs unconfirmed and skipped event counts plus a bounded sample of affected task IDs. An unconfirmed batch may already be stored; its count is not a count of definitely lost events.
 
 ### The chat page suddenly shows only the subagent's conversation
 

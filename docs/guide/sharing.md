@@ -24,6 +24,12 @@ for download. Text previews show at most 512 KiB. HTML scripts, forms and networ
 requests are blocked. The page rechecks availability on return and every
 30 seconds while visible.
 
+Links and inline images for copied output files retain queries and fragments
+such as `report.pdf#page=3` or `charts.svg#detail`. The file must appear in the
+snapshot's artifact manifest. DeerFlow drops the reserved `download` parameter
+from copied links and images so they can open inline. Use the snapshot's
+download action to save the file. External images remain blocked.
+
 ![A public read-only conversation snapshot](assets/sharing/share-preview.png)
 
 Choose **Continue in my workspace** to create an independent conversation with
@@ -32,6 +38,28 @@ page. The copy uses their default agent and permissions. It does not inherit the
 source's agent, project, sandbox, uploads, tool calls or credentials. Tool results
 are imported as historical assistant text. The copied conversation remains
 usable after the source link is revoked.
+
+The copied messages are context for the model, not something the visitor said,
+so memory extraction skips them, also when compaction removes them. New turns in
+the copy are remembered as in any other conversation. With the default DeerMem
+backend, extraction is also told that the conversation continues someone else's,
+so details an assistant reply repeats from the copy, such as the sharer's name or
+preferences, are not recorded as the visitor's. Other memory backends receive the
+visitor's turns without that note.
+
+The copy records its origin in server-owned thread state, so compaction, a branch
+of the copy and later runs keep it. A copy made before this behavior existed is
+updated before its next run, before a manual compaction and when it is branched.
+If a manual compaction cannot determine whether the thread is such a copy, it
+compacts without updating memory. When the history the import wrote can no
+longer be read, the copy's own turns cannot be told from the copied ones, so
+memory is not updated from that conversation until a later run can read it. When
+the update cannot be stored at all, for example while the checkpoint store is
+unavailable, the run is refused with `503` and can be retried. Two
+cases can still pass the copied turns of such an older copy to memory: a run that
+starts from a checkpoint written before the update, for example an edit of an
+earlier turn, and the run that resumes a tool approval that was pending when the
+Gateway was upgraded.
 
 ## Deployment and limits
 
@@ -62,7 +90,7 @@ All paths below are relative to `/api`.
 | `DELETE /threads/{id}/shares/{share_id}` | Owner with `threads:write`; revokes access and removes stored snapshot bytes. |
 | `GET /shares/{token}` | Anonymous capability read; returns visible messages, artifact manifest, checkpoint and sequence. |
 | `GET`, `HEAD /shares/{token}/artifacts/{path}` | Reads only a copied manifest entry. Supports byte ranges and `?download=true`. |
-| `POST /shares/{token}/fork` | Signed-in visitor with `threads:write`; body contains a UUID `request_id`. Returns the new `thread_id`. Retrying the same request reuses a completed import. |
+| `POST /shares/{token}/fork` | Signed-in visitor with `threads:write`; body contains a UUID `request_id`. Returns the new `thread_id`. Retrying the same request reuses a completed import. Importing a share that carries artifacts requires a POSIX host; other hosts answer `422` before creating any state. |
 
 Creation captures the latest idle root checkpoint and its persisted visible
 history under exclusive thread admission. `checkpoint_id`, when supplied, is

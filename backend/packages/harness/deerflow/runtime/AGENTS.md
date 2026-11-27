@@ -34,14 +34,23 @@ make test-blocking-io
   would overwrite the thread view of an SDK client. Consumers that only handle the
   root run ignore namespaced frames.
 
+- **Memory writers fence the captured generation.** After waiting for the stream Condition, check `retired` and `ended` before allocating an event ID or appending; rejected writes consume no sequence number, and END is idempotent for that generation.
+
 ## Checkpoints
 
 - **The channel mode is fixed for the life of the process.** A reader in `full`
   mode rejects a `delta` checkpoint; it does not guess.
 - **Read and change state through `CheckpointStateAccessor`** with the thread's
   effective schema. It preserves mode gates, parentage and pending writes.
+- **A failed pre-run snapshot leaves no message-ID boundary.** When a
+  checkpointer exists but the pre-run capture fails, the first `values` frame
+  establishes a replay baseline; only later message IDs can decide this run's
+  LLM error fallback.
 - **Delta resume and rollback rewrite the current head.** They do not fork.
   Reject a missing tuple or pending sends before the first write.
+- **Redis history cache purges include the previous default namespace.** On
+  the v1-to-v2 upgrade, purge thread data under both prefixes for the same
+  database identity. Custom namespaces have an operator-managed migration.
 
 ## Admission and terminal commit
 
@@ -59,6 +68,11 @@ make test-blocking-io
 
 - **`RunJournal` is changed on its owning event loop only.** A recorder failure
   fails open, and a slow recorder must not delay tool state.
+- **Retry a sub-agent event batch only on `RunEventStoreNotCommittedError`.**
+  Drain writes before propagating caller cancellation. Signal retry only for
+  transient failures that committed no events. An uncertain outcome stops
+  history writes to prevent duplicate steps. Close the SQL producer only when
+  the final flush confirms all writes.
 - **Usage replay may enrich a message, never add or remove one.** A provider can
   report the end of the same model call twice.
 - **Event-store mutations of one thread share one fence** (an asyncio lock plus a

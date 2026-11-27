@@ -6,6 +6,13 @@ Editing a one-time task's title or prompt preserves its original execution time,
 
 An unchanged one-time execution time can still be saved within `scheduler.min_once_delay_seconds` of its run. New execution times and reactivated finished tasks must satisfy that minimum delay.
 
+For one-time tasks, the Gateway returns `schedule_spec.run_at` in calendar
+date and time format, including seconds and any fractional seconds. A value
+with an explicit offset is stored and returned in UTC. A value without an
+offset stays a local time in the task's timezone, so changing just the
+timezone keeps the same wall-clock time. Older tasks use the same response
+format, including after their last run.
+
 Current MVP capabilities:
 
 - Manage tasks at `/workspace/scheduled-tasks`
@@ -23,6 +30,7 @@ Current MVP capabilities:
 - A scheduled run whose completion hook fails is finalized from its durable terminal run on the next scheduler poll instead of staying `running` until a restart.
 - A storage or bookkeeping error on one occurrence during queue cleanup or dispatch is logged without stopping the remaining occurrences and healthy due tasks in that poll. The affected occurrence remains subject to normal queue and lease recovery; persistent storage failures can delay its recovery. A run that has exceeded `scheduler.queue_timeout_seconds` never starts while cleanup is retried, and expired rows do not consume capacity or fair-queue slots from healthy waiting work; they stay queued until a later timeout sweep records the skip.
 - A recurring task whose saved schedule can no longer be computed (for example, its timezone is missing from the time zone database after an upgrade) is paused with the reason as its last error, and every other task keeps running. Resuming it reports the problem until you fix the schedule.
+- A late failure or busy-thread retry from a recovered scheduled launch no longer releases the execution slot of the newer claim that replaced it.
 - Share execution slots fairly between task owners: one owner may have at most `scheduler.max_concurrent_runs_per_user` scheduled runs starting or running at a time (default 2, never more than `max_concurrent_runs`; `0` turns the per-owner cap off), and the waiting queue is drained owner by owner, so one owner's backlog never holds back another owner's run. A run that waits longer than `scheduler.queue_timeout_seconds` is skipped, and its history reads "Skipped: it waited too long for a free slot"
 - Freeze a task's definition while an occurrence is `queued`, `launching`, or `running`, so a durable occurrence cannot silently pick up a different prompt, thread, or schedule; transitioning a task to paused or deleting it cancels an existing waiting occurrence, while `launching`/`running` work must finish before those mutations are retried and an explicit manual trigger may still wait and run without resuming a paused schedule
 - Pause, resume, trigger, inspect history, and delete tasks
@@ -32,6 +40,8 @@ Current MVP capabilities:
 - Browse execution history in pages of 50; older pages pause automatic refresh, with an explicit return to the latest runs. Counts appear only after a successful read; loading and failed reads are not reported as zero runs.
 
 Derived run summaries omit leading inline `<think>` reasoning before limiting the text, so a long thought does not replace the actual answer in previews or scheduled notices. Original response history and literal tags in the answer are unchanged; previously stored run summaries are not rewritten.
+
+Text that leaves for an IM platform through a notice is scrubbed first: known token shapes, key assignments, private-key blocks, a URL's embedded user info, and `Authorization` or `Cookie` header values are replaced with `[redacted]` in the task title, stop condition, and result summary. The scrub is best effort. Most rules keep the surrounding sentence, but a `Cookie` header and a `Digest` credential are replaced through the end of the line, so text that follows them on the same line is removed too. Check a notice before forwarding it somewhere else.
 
 **Filter execution history through the API**
 
@@ -118,6 +128,9 @@ live card with the schedule, the stop condition and buttons, and the agent
 replies in one or two sentences; IM and other non-web turns describe the
 schedule, the next run and the stop condition in plain text.
 
+Conversation scheduling actions require an active owner account. The Gateway
+returns `authority_expired` when the account is no longer active.
+
 - **Which tasks a conversation manages.** The tasks created in it, and, in a run
   conversation (the chat a scheduled run posted into), the task that run belongs
   to: “pause this” or “move it to 10:00” work there too. This applies only to
@@ -171,6 +184,8 @@ provides a source reference, not an automatic summary or a post-back into the
 originating chat.
 
 To start a trial, use the task card's **Run once now** button or the corresponding action on `/workspace/scheduled-tasks`. A request in chat can bring up the card, but its wording alone does not dispatch a run. The action uses the existing authenticated, owner-checked endpoint; an already waiting run is not duplicated. A trial does not count toward `max_runs`.
+
+Automatic runs and manual trials both use the unattended tool policy. Native subagents inherit its clarification restriction and unattended guidance, including when a durable batch resumes after a restart. Set `subagent_enabled: true` through the [Scheduled Tasks API](../../backend/docs/API.md#scheduled-tasks) to allow delegation on a schedule. With durable batches also enabled, the run can submit batch work and inspect results. Automatic batch follow-ups require an originating interactive session with follow-up authority.
 
 A goal occurrence can use up to nine agent turns, with an evaluator request after
 each. Evaluator requests and provider-reported tokens are included in run usage;

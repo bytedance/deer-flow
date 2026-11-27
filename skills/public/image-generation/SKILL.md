@@ -39,7 +39,7 @@ Call the Python script:
 python /mnt/skills/public/image-generation/scripts/generate.py \
   --prompt-file /mnt/user-data/workspace/prompt-file.json \
   --reference-images /path/to/ref1.jpg /path/to/ref2.png \
-  --output-file /mnt/user-data/outputs/generated-image.jpg
+  --output-file /mnt/user-data/outputs/generated-image.jpg \
   --aspect-ratio 16:9
 ```
 
@@ -155,6 +155,17 @@ Read the following template file only when matching the user request.
 
 ## Output Handling
 
+Gemini image data is base64-decoded before the output directory or
+file is created. If decoding fails, an existing output image is preserved and no
+empty output file is left behind.
+
+The OpenAI-compatible path rejects an empty download or an empty data URL before
+the output directory or file is created, so an existing image is preserved too.
+
+The legacy MiniMax `/v1/image_generation` writer opens the destination before
+decoding. If decoding fails, it can leave an empty file or erase an existing
+image. Use a fresh `--output-file` path when you need to keep the previous image.
+
 After generation:
 
 - Images are typically saved in `/mnt/user-data/outputs/`
@@ -182,15 +193,25 @@ For scenarios where visual accuracy is critical, **use the `image_search` tool f
 
 This approach significantly improves generation quality by providing the model with concrete visual guidance rather than relying solely on text descriptions.
 
-## Providers (Gemini / MiniMax / OpenAI-compatible)
+## Providers (Gemini / MiniMax / OpenAI-compatible / BytePlus Agent Plan)
 
 This skill auto-selects the provider by environment variables (no CLI change):
 
 - `GEMINI_API_KEY` set → use Gemini (default, unchanged).
 - Otherwise, `MINIMAX_API_KEY` set → use MiniMax (`/v1/image_generation`, model `image-01`).
 - Otherwise, `IMAGE_GENERATION_API_KEY` set → use an OpenAI-compatible Images API.
-- Force one explicitly with `IMAGE_GENERATION_PROVIDER=gemini|minimax|openai`.
-  `openai-compatible` is also accepted as an alias for `openai`.
+- Otherwise, `BYTEPLUS_AGENTPLAN_API_KEY` set → use BytePlus Agent Plan Seedream (`/api/plan/v3/images/generations`, default model `dola-seedream-5.0-pro`; also powers `ppt-generation` slide decks with the same key).
+- Force one explicitly with `IMAGE_GENERATION_PROVIDER=gemini|minimax|openai|byteplus_agentplan`.
+  `openai-compatible` is accepted as an alias for `openai`; `byteplus`, `byteplus-agentplan`, and `seedream` are accepted as aliases for `byteplus_agentplan`.
+  If the selected provider's key is missing, the CLI names it on stderr and exits with status 1.
+
+BytePlus Agent Plan settings:
+
+- `BYTEPLUS_AGENTPLAN_API_KEY` (required; available on all Personal and Enterprise Agent Plan tiers)
+- `BYTEPLUS_AGENTPLAN_BASE_URL` (default `https://ark.ap-southeast.bytepluses.com/api/plan/v3`)
+- `BYTEPLUS_AGENTPLAN_IMAGE_MODEL` (default `dola-seedream-5.0-pro`; also supports `dola-seedream-5.5` and `dola-seedream-5.0-flash`)
+- `BYTEPLUS_AGENTPLAN_IMAGE_SIZE` (optional fixed-size override such as `2K` or `2048x2048`; by default maps `--aspect-ratio` across `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3`, and `21:9` to Seedream 2K dimensions and rejects unmapped ratios explicitly)
+- The full structured JSON prompt is forwarded intact (preserving `style`, `composition`, `negative_prompt`, and slide instructions), and `output_format` matches the destination suffix (`.jpg`/`.jpeg` requests `jpeg`; other extensions request `png`). Every response is decoded and validated (container + pixel load) in memory — converting mismatched codecs when needed — before opening the destination file, preserving any existing output on invalid, truncated, or failed responses. Reference images passed via `--reference-images` are sent as data URLs in the JSON `image` field of `POST {base_url}/images/generations` (single string for one image, list for multiple images).
 
 OpenAI-compatible settings:
 
@@ -202,13 +223,21 @@ OpenAI-compatible settings:
 Text-to-image calls use `POST {base_url}/images/generations`. Reference-image calls
 use multipart `POST {base_url}/images/edits`; a relay may support generation without
 supporting edits. Responses may contain base64 image data, a data URL, or a downloadable
-URL. Aspect ratios map to `1024x1024`, `1536x1024`, or `1024x1536` unless
+URL. Downloads require HTTPS on port 443 and a final 2xx response. The downloader
+accepts public IPv4 literals and checks DNS hostname syntax without resolving names.
+It revalidates the URL at every redirect.
+
+Aspect ratios map to `1024x1024`, `1536x1024`, or `1024x1536` unless
 `IMAGE_GENERATION_SIZE` is set. The output extension selects the API `output_format`:
 `.jpg`/`.jpeg` uses `jpeg`, `.webp` uses `webp`, and all other extensions use `png`.
 When `dall-e-2` or `dall-e-3` is configured instead, the request uses the model's
 supported dimensions and `response_format=b64_json`; DALL-E output files must use a
 `.png` extension. Reference-image editing with DALL-E models is not supported by this
 skill; use the default GPT Image model for edits.
+
+Gemini, MiniMax, and OpenAI-compatible generation requests follow up to five
+HTTP 307 or 308 redirects on the same scheme, host, and port. These redirects
+preserve the POST body, including reference images.
 
 MiniMax optional overrides: `MINIMAX_API_HOST` (default `https://api.minimaxi.com`),
 `MINIMAX_IMAGE_MODEL` (default `image-01`). Reference images are sent as the MiniMax
@@ -220,8 +249,9 @@ the same structured JSON regardless of which provider is active. MiniMax `image-
 consumes a single text string, so the MiniMax path itself sends only the JSON `prompt`
 field (the other fields such as `style` / `composition` / `negative_prompt` apply to the
 Gemini path) and enables `prompt_optimizer` so MiniMax expands it server-side. MiniMax
-caps that prompt at 1500 characters; if the `prompt` field is longer, the script returns
-an error instead of calling the API. The Gemini path receives the full structured JSON.
+accepts prompts up to 1500 characters. For longer prompts, the CLI reports the length
+limit on stderr and exits with status 1 before contacting MiniMax or writing the image.
+The Gemini path receives the full structured JSON.
 
 ## Notes
 

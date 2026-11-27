@@ -31,7 +31,7 @@ def _invoker(monkeypatch, tool_name):
     monkeypatch.setattr(tools, "get_app_config", lambda: config)
     real_client = httpx.AsyncClient
 
-    async def invoke(payload, *, status_code=200):
+    async def invoke(payload, *, status_code=200, url=_FETCH_URL, expected_requests=1):
         requests = []
 
         def respond(request):
@@ -47,8 +47,10 @@ def _invoker(monkeypatch, tool_name):
         if tool_name == "web_search":
             result = await tools.web_search_tool.ainvoke({"query": _SEARCH_QUERY})
         else:
-            result = await tools.web_fetch_tool.ainvoke({"url": _FETCH_URL})
-        assert len(requests) == 1
+            result = await tools.web_fetch_tool.ainvoke({"url": url})
+            for request in requests:
+                assert json.loads(request.content)["query"] == url
+        assert len(requests) == expected_requests
         return result
 
     return invoke
@@ -143,8 +145,17 @@ async def test_fetch_skips_malformed_entries_and_returns_the_first_usable_result
 
 
 async def test_valid_fetch_keeps_existing_response(invoke_fetch, caplog):
-    assert await invoke_fetch({"results": [{"title": "Page", "content": "Body text"}]}) == "# Page\n\nBody text"
+    target = "https://docs.example/pages%2Fsummary?ref=one&ref=two"
+    assert await invoke_fetch({"results": [{"title": "Page", "content": "Body text"}]}, url=target) == "# Page\n\nBody text"
     assert _error_logs(caplog) == []
+
+
+async def test_fetch_rejects_private_url_before_any_request(invoke_fetch, caplog):
+    caplog.set_level(logging.DEBUG, logger=_LOGGER_NAME)
+    marker = "private-fetch-marker"
+    result = await invoke_fetch({"results": []}, url=f"https://127.0.0.1/{marker}", expected_requests=0)
+    assert result.startswith("Error:")
+    assert marker not in result and marker not in caplog.text
 
 
 @pytest.mark.parametrize(

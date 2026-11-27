@@ -188,7 +188,12 @@ export const zhCN: Translations = {
         "deerflow-extension-knowledge-center",
         "zh-CN",
       ),
+      skillEvolution: bundledCopy(
+        "deerflow-extension-skill-evolution",
+        "zh-CN",
+      ),
       lightrag: bundledCopy("deerflow-extension-lightrag", "zh-CN"),
+      runPostmortem: bundledCopy("deerflow-extension-run-postmortem", "zh-CN"),
       weknora: bundledCopy("deerflow-extension-weknora", "zh-CN"),
       example: bundledCopy("deerflow-extension-example", "zh-CN"),
     },
@@ -203,6 +208,21 @@ export const zhCN: Translations = {
 
   capabilities: {
     toolsAndIntegrations: "工具与集成",
+    mcpConnections: {
+      title: "我的 MCP 连接",
+      action: (action, name) => `${action} ${name}`,
+      disconnect: "断开",
+      reconnect: "重新连接",
+      actionFailed: "无法更改连接，请重试。",
+      loadFailed: "无法加载你的 MCP 连接。",
+      status: {
+        disconnected: "未连接",
+        connected: "已连接",
+        reconnect_required: "重新连接后即可使用此服务器。",
+        removed: "此服务器已停用用户授权。",
+        unavailable: "连接不可用，请联系管理员。",
+      },
+    },
     icon: {
       title: "插件图标",
       upload: "上传插件图标",
@@ -400,6 +420,19 @@ export const zhCN: Translations = {
     linkCopied: "链接已复制到剪贴板",
   },
 
+  artifactSelection: {
+    rewrite: "改写选区",
+    instructions: "描述如何修改后，选择「改写选区」。普通追问请使用发送按钮。",
+    exactRequired: "切换到源码，选择准确范围后即可改写。",
+    review: "预览替换内容",
+    original: "选中段落",
+    replacement: "替换内容",
+    apply: "应用到草稿",
+    applied: "选区已替换到草稿，请检查后保存文件。",
+    changed: "文件或草稿已变化，请重新选择段落。",
+    limit: "请选择不超过 12,000 个字符。",
+  },
+
   artifactEditing: {
     unsaved: "未保存",
     saving: "正在保存...",
@@ -559,16 +592,18 @@ export const zhCN: Translations = {
     inputPolishCancel: "取消优化",
     voiceInputStartLabel: "语音输入",
     voiceInputStopLabel: "停止语音输入",
-    voiceInputStart:
-      "语音输入。DeerFlow 只接收转写文本，音频由浏览器或系统语音服务处理。",
+    voiceInputStart: "录音结束后，将音频发送到已配置的转写服务。",
     voiceInputStop: "停止语音输入",
-    voiceInputListening: "正在聆听... 点击停止语音输入。",
+    voiceInputListening: "正在录音… 结束后可检查文字或润色。",
+    voiceInputStarting: "正在等待麦克风…",
+    voiceInputFinishing: "正在转写音频…",
+    voiceInputCancel: "取消语音输入",
     voiceInputUnsupported:
-      "当前浏览器不支持语音输入。建议使用 Chrome 或 Edge。",
+      "录音需要通过 HTTPS（或 localhost）访问，并使用支持麦克风录音的浏览器。",
     voiceInputPermissionDenied: "麦克风权限被拒绝。请允许麦克风访问后重试。",
     voiceInputMicrophoneUnavailable: "未检测到麦克风。请检查设备输入后重试。",
-    voiceInputUnsupportedLanguage: "当前浏览器不支持该语言的语音输入。",
-    voiceInputNetworkError: "无法连接浏览器语音识别服务。",
+    voiceInputTooLarge: "录音超过大小限制，请缩短录音后重试。",
+    voiceInputUnavailable: "语音输入已停用，草稿已保留。",
     voiceInputNoSpeech: "没有检测到语音，请重试。",
     voiceInputFailed: "语音输入失败，请重试。",
     mode: "模式",
@@ -720,14 +755,15 @@ export const zhCN: Translations = {
       },
     ],
     pleaseWaitStreaming: "请等待当前响应完成。",
+    send: "发送",
     runInputMode: "运行中发送方式",
     queueMode: "排队执行",
     steerMode: "调整当前任务",
     queueModeHelp: "当前任务结束后再执行",
     steerModeHelp: "在下一处可处理的位置调整当前任务",
     runInputSend: "发送补充消息",
-    runInputTextOnly:
-      "运行中请发送纯文字，附件和斜杠命令请等当前任务结束后发送。",
+    runInputTextOnly: "调整当前任务时请发送纯文字。发送附件请选择排队执行。",
+    runInputUnsupported: "请等当前任务结束后再发送引用和斜杠命令。",
     runInputUnavailable:
       "尚未确认消息是否送达，请检查任务状态后重试，输入内容已保留。",
     stopRun: "停止当前任务",
@@ -1583,6 +1619,7 @@ export const zhCN: Translations = {
     branchCreated: "已创建分叉对话",
     branchFailed: "创建分叉对话失败。",
     streamReplayGap: "部分实时更新已过期，已从持久化状态恢复对话。",
+    sandboxBusy: "沙箱暂时不可用，请稍后重试。",
     streamServerError: (status) =>
       `服务暂时不可用（HTTP ${status}），请稍后重试。`,
     outlineLabel: "对话章节",

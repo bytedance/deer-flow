@@ -54,11 +54,15 @@ def checkpoint_cache_db_hash(db_config: Any) -> str:
     return hashlib.sha256(identity.encode()).hexdigest()[:12]
 
 
+def _default_key_prefix(app_config: AppConfig, version: int) -> str:
+    return f"ckpt-hist:v{version}:{checkpoint_cache_db_hash(app_config.database)}"
+
+
 def checkpoint_cache_key_prefix(app_config: AppConfig) -> str:
     cache_config = app_config.database.checkpoint_cache
     if cache_config.key_prefix:
         return cache_config.key_prefix
-    return f"ckpt-hist:v{CACHE_FORMAT_VERSION}:{checkpoint_cache_db_hash(app_config.database)}"
+    return _default_key_prefix(app_config, CACHE_FORMAT_VERSION)
 
 
 @contextlib.asynccontextmanager
@@ -91,6 +95,8 @@ async def make_checkpoint_cache(
             _resolve_redis_url(config),
             serde=serde,
             ttl_seconds=config.ttl_seconds,
+            # v1 keys may still contain thread data, including keys without a TTL.
+            legacy_key_prefix=_default_key_prefix(app_config, 1) if not config.key_prefix else None,
         )
         logger.info("Checkpoint history cache initialised: redis (ttl_seconds=%d)", config.ttl_seconds)
         try:

@@ -18,6 +18,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.config import get_stream_writer
 from langgraph.types import Command
 
+from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.middlewares.receipt_verification import verify_receipt_citations
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.community.ragflow.sources import cited_source_artifact
@@ -33,9 +34,9 @@ from deerflow.models.selection import authorize_selected_model
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
-from deerflow.subagents.acceptance_checks import check_acceptance_criteria, render_acceptance_section
-from deerflow.subagents.capacity import SubagentExecutionCapacity
-from deerflow.subagents.config import resolve_subagent_model_name
+from deerflow.subagents.acceptance_checks import check_acceptance_criteria_async, render_acceptance_section
+from deerflow.subagents.capacity import SubagentExecutionCapacity, configured_subagent_queue_timeout_seconds
+from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 from deerflow.subagents.context_snapshot import ParentContextSnapshot
 from deerflow.subagents.executor import (
     SubagentStatus,
@@ -80,6 +81,12 @@ _UNEXPECTED_EXIT_GRACE_SECONDS = 5.0
 # window so callbacks emitted during cleanup are not lost.
 _TERMINAL_USAGE_TAIL_POLLS = 12
 
+# Completion margin for the main wait. The executor's execution timeout starts
+# at admission, so the main wait covers queue wait plus execution time; the
+# cancellation/deferred-cleanup unwinds run after admission and stay bounded by
+# execution time alone.
+_POLL_COMPLETION_MARGIN_SECONDS = 60
+
 # Sentinel returned by ``_peek_subagent_result`` when the registry entry exists
 # but cannot be read (persistent status-lookup / status-object failure).
 _STATUS_UNREADABLE = object()
@@ -100,7 +107,7 @@ def _preflight_delegation_checks(
     context_mode: str,
     runtime_app_config: Any | None,
     allowed_subagents: Any | None,
-) -> tuple[Any | None, str | None]:
+) -> tuple[SubagentConfig, None] | tuple[None, str]:
     """Read-only preflight (validate-then-mutate).
 
     Runs every precondition check in one pass before any side-effecting
@@ -127,8 +134,6 @@ def _preflight_delegation_checks(
     after all checks pass, so a rejected recovery request does not consume the
     source task (see issue #7633).
     """
-    config: Any | None = None
-
     if context_mode not in {"isolated", "snapshot"}:
         return None, f"Unknown context_mode '{context_mode}'. Use isolated or snapshot."
 
@@ -304,6 +309,32 @@ async def _await_subagent_terminal(execution_id: str, max_polls: int, *, trace_i
         else:
             await asyncio.sleep(_SUBAGENT_POLL_INTERVAL_SECONDS)
         polls += 1
+
+
+def _main_wait_poll_budget(timeout_seconds: int, queue_timeout_seconds: int | None = None) -> int:
+    """Polls the tool waits for a queued execution and its execution.
+
+    A subagent can wait in the capacity queue before its execution clock
+    starts; ``queue_timeout_seconds`` bounds that stage separately. Waiting only
+    ``timeout_seconds`` would report a healthy queued subagent as
+    ``polling_timed_out`` before it ran a turn.
+
+    The bound comes from the injected capacity when there is one, because the
+    SDK runtime builds its own controller and never installs a process-wide
+    snapshot. Without an injected capacity the startup snapshot applies.
+    """
+    if queue_timeout_seconds is None:
+        queue_timeout_seconds = configured_subagent_queue_timeout_seconds()
+    return int((queue_timeout_seconds + timeout_seconds + _POLL_COMPLETION_MARGIN_SECONDS) // _SUBAGENT_POLL_INTERVAL_SECONDS)
+
+
+def _cleanup_poll_budget(timeout_seconds: int) -> int:
+    """Polls available to cancellation and deferred cleanup.
+
+    These paths run after admission, so they wait for execution teardown only
+    and must not inherit the queue-wait allowance.
+    """
+    return int((timeout_seconds + _POLL_COMPLETION_MARGIN_SECONDS) // _SUBAGENT_POLL_INTERVAL_SECONDS)
 
 
 async def _finalize_interrupted_subagent(
@@ -840,9 +871,8 @@ async def task_tool(
       when the assignment has clear specialist or context-isolation benefit, or is
       one of several independent, non-overlapping tasks that can actually run in
       parallel.
-    - **bash**: Command execution specialist for running bash commands. This is only
-      available when host bash is explicitly allowed or when using an isolated shell
-      sandbox such as `AioSandboxProvider`. Use it only for a bounded shell workflow
+    - **bash**: Command execution specialist that requires an isolated sandbox provider
+      such as `AioSandboxProvider`. Use it only for a bounded shell workflow
       with clear context-isolation or independent-parallel benefit.
       Routine git, build, test, or deploy operations are not sufficient reason to delegate.
 
@@ -971,6 +1001,7 @@ async def task_tool(
             status="failed",
             error=preflight_error,
         )
+    assert preflight_config is not None
     config = preflight_config
     # Rejected delegations must not serialize the retained history. Capture
     # after delegation validation, before child setup (including tool loading).
@@ -1072,6 +1103,9 @@ async def task_tool(
 
     if overrides:
         config = replace(config, **overrides)
+
+    interaction_policy = resolve_run_interaction_policy({"configurable": runtime.config.get("configurable", {}) if runtime is not None else {}, "context": parent_context})
+    config = interaction_policy.apply_to_subagent(config)
 
     # Get available tools (excluding task tool to prevent nesting)
     # Lazy import to avoid circular dependency
@@ -1183,8 +1217,11 @@ async def task_tool(
     poll_count = 0
     last_status = None
     last_message_count = 0  # Track how many AI messages we've already sent
-    # Polling timeout: execution timeout + 60s buffer, checked every 5s
-    max_poll_count = (config.timeout_seconds + 60) // 5
+    # Polling timeout: queue wait + execution timeout + 60s buffer, checked every 5s
+    max_poll_count = _main_wait_poll_budget(
+        config.timeout_seconds,
+        getattr(explicit_capacity, "queue_timeout_seconds", None),
+    )
 
     logger.info(f"[trace={trace_id}] Started background task {tool_call_id} (execution_id={execution_id}, subagent={subagent_type}, timeout={config.timeout_seconds}s, polling_limit={max_poll_count} polls)")
 
@@ -1288,8 +1325,10 @@ async def task_tool(
                 acceptance_verdict = None
                 if acceptance_criteria:
                     try:
-                        acceptance_verdict = await asyncio.to_thread(
-                            check_acceptance_criteria,
+                        # The async entry point decides sandbox:execute on this
+                        # event loop (loop-affine providers must be constructed
+                        # here) and offloads the checklist itself.
+                        acceptance_verdict = await check_acceptance_criteria_async(
                             acceptance_criteria,
                             runtime=runtime,
                             thread_data=thread_data,
@@ -1396,10 +1435,21 @@ async def task_tool(
             poll_count += 1
 
             # Polling timeout as a safety net (in case thread pool timeout doesn't work)
-            # Set to execution timeout + 60s buffer, in 5s poll intervals
+            # Set to queue wait + execution timeout + 60s buffer, in 5s poll intervals
             # This catches edge cases where the background task gets stuck
             if poll_count > max_poll_count:
-                timeout_minutes = config.timeout_seconds // 60
+                result = get_background_task_result(execution_id)
+                if result is None:
+                    continue
+                # Report the window this poller actually waited: the execution
+                # timeout alone understates it by the whole queue allowance.
+                timeout_minutes = int(max_poll_count * _SUBAGENT_POLL_INTERVAL_SECONDS // 60)
+                message = f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
+                # Use the executor's terminal write to decide the race before
+                # emitting an event. If it already finished, handle its result.
+                if not result.try_set_terminal(SubagentStatus.TIMED_OUT, error=message):
+                    continue
+                request_cancel_background_task(execution_id)
                 logger.error(f"[trace={trace_id}] Task {tool_call_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
                 _report_subagent_usage(runtime, result)
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
@@ -1412,12 +1462,9 @@ async def task_tool(
                     },
                     writer=writer,
                 )
-                # The task may still be running in the background. Signal cooperative
-                # cancellation and schedule deferred cleanup to remove the entry from
-                # _background_tasks once the background thread reaches a terminal state.
-                request_cancel_background_task(execution_id)
-                _schedule_deferred_subagent_cleanup(runtime, execution_id, trace_id, max_poll_count)
-                message = f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
+                # Keep the entry until the background execution settles and
+                # deferred cleanup can report its final usage.
+                _schedule_deferred_subagent_cleanup(runtime, execution_id, trace_id, _cleanup_poll_budget(config.timeout_seconds))
                 return result_command(
                     tool_call_id=tool_call_id,
                     status="polling_timed_out",
@@ -1440,7 +1487,7 @@ async def task_tool(
                 f"[trace={trace_id}] Failed to request cancellation for background task {execution_id} during unwind",
                 exc_info=True,
             )
-        await _finalize_interrupted_subagent(runtime, execution_id, trace_id, max_poll_count)
+        await _finalize_interrupted_subagent(runtime, execution_id, trace_id, _cleanup_poll_budget(config.timeout_seconds))
         raise
     except Exception:
         # Unexpected poller failure (emit error, status-lookup bug, writer
@@ -1459,7 +1506,7 @@ async def task_tool(
                 f"[trace={trace_id}] Failed to request cancellation for background task {execution_id} during unwind",
                 exc_info=True,
             )
-        await _finalize_interrupted_subagent(runtime, execution_id, trace_id, max_poll_count, grace_seconds=_UNEXPECTED_EXIT_GRACE_SECONDS)
+        await _finalize_interrupted_subagent(runtime, execution_id, trace_id, _cleanup_poll_budget(config.timeout_seconds), grace_seconds=_UNEXPECTED_EXIT_GRACE_SECONDS)
         current_task = asyncio.current_task()
         if current_task is not None and current_task.cancelling():
             # A graph-node cancellation landed inside the grace wait and was

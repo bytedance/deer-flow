@@ -14,6 +14,28 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 3. Configure each server’s command, arguments, and environment variables as needed.
 4. Restart the application to load and register MCP tools.
 
+## Image results and model capabilities
+
+For a model configured with `supports_vision: false`, image blocks returned by
+MCP tools become text placeholders in the model request. This covers standard
+`image` blocks, legacy `image_url` blocks, and native OpenAI Responses
+`input_image` blocks. Other result text remains available, and the original
+images stay in tool messages and checkpoints. Models configured with
+`supports_vision: true` continue to receive images. Direct SDK factories without
+a model capability profile retain their existing image handling.
+
+When the compatibility middleware rewrites history, the OpenAI Responses API
+request replays the projected messages. After a switch to a text-only model,
+this lets the provider see the placeholders and surrounding tool text.
+
+## Structured-only stdio tool results
+
+When a stdio MCP tool returns `structuredContent` with an empty `content` list,
+DeerFlow exposes the JSON result as model-visible text. File references in its
+string values follow the same `/mnt/user-data/...` translation as text results.
+The tool artifact retains the original JSON. Existing content blocks take
+precedence over the fallback, and errors follow the usual error handling.
+
 ## Stdio Working Directory
 
 Set `cwd` when a stdio server needs to resolve its entrypoint or data files
@@ -588,6 +610,74 @@ membership for identical per-user copies. Wildcards, group matching, static
 per-agent tokens and refresh-token grants are not supported. Enabled bindings
 must not overlap for the same server, agent and owner.
 
+### Runtime grants
+
+A use case deployed by CI changes its definition digest with every release,
+and a sync job that copies one agent into many accounts changes the owners
+with every member. With the grants in `config.yaml`, each such change is a
+configuration rollout. Declare the binding with `grants: runtime` to keep the
+server and OAuth client in `config.yaml` and let an administrator maintain the
+owners and digests through the Gateway API instead:
+
+```yaml
+mcp_agent_auth:
+  research-tickets:
+    server: ticketing
+    agent: research-bot
+    grants: runtime  # owners and definition_digests come from the admin API
+    oauth:
+      grant_type: client_credentials
+      token_url: https://idp.example/realms/work/protocol/openid-connect/token
+      client_id: research-bot
+      client_secret: $RESEARCH_BOT_CLIENT_SECRET
+```
+
+A runtime binding admits nobody until it has a grant, and `config.yaml` must
+not list owners or digests for it. Grants are stored with the same backend as
+custom agents (`agent_storage.backend`: the database, or one JSON file per
+binding under the data root). All routes require an administrator; PATs are
+not accepted.
+
+| Method and path | Effect |
+|---|---|
+| `GET /api/mcp/agent-auth` | Every binding with the owners and digests in force, then retired grants; never the OAuth settings |
+| `GET /api/mcp/agent-auth/{binding}` | One binding |
+| `GET /api/mcp/agent-auth/{binding}/definition-digest?owner=<user id>` | The digest of that user's stored copy of the agent, computed as run admission does |
+| `PUT /api/mcp/agent-auth/{binding}/grants` | Replace the grant: `{"owners": [...], "definition_digests": [...]}` |
+| `DELETE /api/mcp/agent-auth/{binding}/grants` | Remove the grant; the binding admits nobody. Also removes a retired grant |
+
+A write to a `grants: config` binding returns 409, as does a grant whose owners
+another enabled binding already covers for the same server and agent. A stored
+grant covers its owners for the agent and server it was approved for even when
+it is `stale` or `retired`, because rolling `config.yaml` back makes it current
+again; delete it to release them.
+
+Changes apply without a restart. The next run admits against the new owners
+and digests, and every protected call rechecks the owners, so removing an
+owner denies that owner's next call, poll or cancellation. Removing a digest
+stops new runs of that definition; runs and durable tasks already admitted
+keep the definition version they started with. If the grant store cannot be
+read, admission and calls are denied.
+
+A `PUT` records what the grant is approved for: the binding's agent and
+server, the server's destination (transport and URL) and its OAuth client
+(every OAuth setting except the secret). If `config.yaml` later changes any of
+them, the stored grant admits nobody and the API reports it with
+`"approval": "stale"` until an administrator replaces it. Rotating the client
+secret of the same account keeps the grant. `approval` is otherwise `current`
+(the grant is in force), `none` (no grant), `config` (`grants: config`) or
+`retired`: the binding was removed from `config.yaml` and the grant is still
+stored, shown with the agent and server it was approved for.
+A binding moved to `grants: config` while its runtime grant is still stored
+also returns that grant as `stored_grant` (the server and agent it was
+approved for, its owners and digests): it admits nobody but keeps those
+owners reserved until it is deleted.
+
+A deploy pipeline adds the new digest right after it deploys (read it from the
+deploy account's copy with `definition-digest`, after reviewing that copy),
+then removes the old one once every copy is updated. A membership sync replaces
+the owners.
+
 ### Approve a definition
 
 Generate the digest in the Gateway environment with the same DeerFlow version
@@ -640,7 +730,8 @@ references; rotating the same account's client secret keeps them valid and
 refreshes the cache. Missing grants or failed token acquisition never fall
 back to user or server credentials.
 
-Grant edits are hot-reloaded independently of the server connection snapshot.
+Grant edits are hot-reloaded independently of the server connection snapshot;
+runtime grants need no reload at all.
 As with other task-tool connection settings, changing the server's
 `agent_auth` flag requires a Gateway restart when it has `task_toolsets`.
 Environment secrets are resolved at configuration load; roll out a config
@@ -835,12 +926,63 @@ material already retained by those systems. Restarting or upgrading DeerFlow doe
 not rotate credentials or perform historical cleanup; operators must complete
 both actions explicitly.
 
+### Browser authorization for deployment MCP
+
+An operator can opt a Streamable HTTP server into per-user browser authorization
+by setting its `user_oauth` block in `extensions_config.json`. Register the
+exact public Gateway callback URL `/api/mcp/user-oauth/callback` with the
+provider before enabling the server. Configure access logs to omit the query
+string for this callback, which carries the one-time code and state.
+
+```json
+{
+  "mcpServers": {
+    "tickets": {
+      "type": "http",
+      "url": "https://mcp.example.com/mcp",
+      "user_oauth": {
+        "issuer": "https://identity.example.com",
+        "client_id": "deerflow",
+        "client_secret": "$TICKETS_OAUTH_CLIENT_SECRET",
+        "redirect_uri": "https://deerflow.example.com/api/mcp/user-oauth/callback",
+        "scope": "tickets:read"
+      }
+    }
+  }
+}
+```
+
+Omit `client_secret` for a registered public client. The authorization server
+must support authorization code with S256 PKCE and publish MCP resource and
+authorization server metadata. Discovered authorization and token endpoints
+must share the configured issuer origin. For explicitly trusted private MCP or
+issuer addresses, set `allow_private_addresses: true` in `user_oauth`; both
+origins still require HTTPS. Local browser callbacks may use loopback HTTP.
+
+Sign in and open **Capability Center → Tools & integrations → My MCP connections** to connect
+or disconnect your account. Browsing and invoking the tools uses your upstream
+permissions. An existing conversation picks up the connection on the next
+run. Disconnect takes effect before the next dispatch, including in existing
+runs on another Gateway. A request already accepted by the remote server
+may finish. If an operator disables the server or removes its browser authorization
+configuration, you can still disconnect your saved grant in My MCP connections.
+Foreground lead-agent chat supports these connections. Subagents,
+scheduled runs, IM, and other background runs use their existing credential modes.
+
+This mode requires SQLite or PostgreSQL and the existing credentials key.
+Multiple Gateway hosts need shared PostgreSQL and the same credentials key.
+A server using browser authorization has a single authorization source: omit
+`agent_auth`, `user_auth`, deployment `oauth`, any static or per-request
+`Authorization` header, and durable MCP task toolsets for that server. Increase
+`grant_revision` when deliberately invalidating grants, including if an old
+issuer or server configuration is restored.
+
 ## Tool Discovery Cache
 
-MCP tool discovery is cached per server. The cache is keyed by server name and
-holds, for each server, the discovered tools together with a canonical snapshot
-of that server's configuration, the normalized global interceptor chain and the
-pooled stdio session binding they were discovered against.
+Deployment servers that do not require a browser grant use a shared discovery
+cache keyed by server name. Entries contain the tools, server configuration
+snapshot, normalized interceptor chain, and any pooled stdio session binding.
+Browser-authorized tools are discovered for the signed-in user within each run.
 
 - **Reuse.** On every (re)initialization, a server's cached tools are reused only
   when its configuration snapshot and global interceptor chain are unchanged

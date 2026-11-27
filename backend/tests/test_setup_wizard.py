@@ -6,6 +6,7 @@ Run from repo root:
 
 from __future__ import annotations
 
+import pytest
 import yaml
 from wizard import ui as wizard_ui
 from wizard.providers import LLM_PROVIDERS, SEARCH_PROVIDERS, WEB_FETCH_PROVIDERS, LLMProvider, with_thinking_support
@@ -28,6 +29,7 @@ class TestProviders:
         providers = {provider.name: provider for provider in LLM_PROVIDERS}
 
         expected = {
+            "byteplus_agentplan",
             "volcengine",
             "zai",
             "openai",
@@ -56,6 +58,31 @@ class TestProviders:
         assert providers["mimo"].use == "deerflow.models.patched_mimo:PatchedChatMiMo"
         assert providers["deepseek"].use == "deerflow.models.patched_deepseek:PatchedChatDeepSeek"
         assert providers["volcengine"].extra_config["api_base"] == "https://ark.cn-beijing.volces.com/api/v3"
+        assert providers["byteplus_agentplan"].extra_config["api_base"] == "https://ark.ap-southeast.bytepluses.com/api/plan/v3"
+        assert providers["byteplus_agentplan"].sandbox_env_vars == ("BYTEPLUS_AGENTPLAN_API_KEY",)
+
+    def test_byteplus_agentplan_vision_and_sandbox_env_wiring(self):
+        provider = next(p for p in LLM_PROVIDERS if p.name == "byteplus_agentplan")
+        assert provider.default_model == "dola-seed-2.1-turbo"
+        assert provider.extra_config_for("dola-seed-2.1-turbo")["supports_vision"] is True
+        assert provider.extra_config_for("deepseek-v4.1-flash")["supports_vision"] is True
+        assert provider.extra_config_for("deepseek-v4-pro")["supports_vision"] is False
+        assert provider.extra_config_for("deepseek-v4.1-flash-economy")["supports_vision"] is False
+
+        content = build_minimal_config(
+            provider_use=provider.use,
+            model_name=provider.default_model,
+            display_name=f"{provider.display_name} / {provider.default_model}",
+            api_key_field=provider.api_key_field,
+            env_var=provider.env_var,
+            extra_model_config=provider.extra_config_for(provider.default_model),
+            sandbox_env_vars=provider.sandbox_env_vars,
+        )
+        data = yaml.safe_load(content)
+        model = data["models"][0]
+        assert model["api_base"] == "https://ark.ap-southeast.bytepluses.com/api/plan/v3"
+        assert model["api_key"] == "$BYTEPLUS_AGENTPLAN_API_KEY"
+        assert data["sandbox"]["environment"]["BYTEPLUS_AGENTPLAN_API_KEY"] == "$BYTEPLUS_AGENTPLAN_API_KEY"
 
     def test_zai_glm_flash_declares_the_reasoning_contract(self):
         """GLM-5.3-Flash cannot disable thinking and only accepts low/high/max (issue #5073).
@@ -314,15 +341,17 @@ class TestBuildMinimalConfig:
         assert "sandbox" in data
         assert "use" in data["sandbox"]
         assert data["sandbox"]["use"] == "deerflow.sandbox.local:LocalSandboxProvider"
-        assert data["sandbox"]["allow_host_bash"] is False
+        assert "allow_host_bash" not in data["sandbox"]
 
-    def test_bash_tool_disabled_by_default(self):
+    @pytest.mark.parametrize("include_bash_tool", [False, True])
+    def test_local_config_omits_bash_tool(self, include_bash_tool):
         content = build_minimal_config(
             provider_use="langchain_openai:ChatOpenAI",
             model_name="gpt-4o",
             display_name="OpenAI",
             api_key_field="api_key",
             env_var="OPENAI_API_KEY",
+            include_bash_tool=include_bash_tool,
         )
         data = yaml.safe_load(content)
         tool_names = [t["name"] for t in data.get("tools", [])]
@@ -483,6 +512,55 @@ class TestThinkingSupport:
 
 
 class TestLLMStep:
+    @pytest.mark.parametrize("override", [False, True])
+    def test_rapid_mlx_keyless_config(self, monkeypatch, tmp_path, override):
+        provider_index = next(i for i, p in enumerate(LLM_PROVIDERS) if p.name == "rapid_mlx")
+        monkeypatch.setattr(llm_step, "ask_choice", lambda *_args, **_kwargs: provider_index)
+        prompts = []
+
+        def ask_text(prompt, default="", **_kwargs):
+            prompts.append((prompt, default))
+            if override:
+                return "http://host.docker.internal:8000/v1" if len(prompts) == 1 else "my-exact-model-id"
+            return default
+
+        monkeypatch.setattr(llm_step, "ask_text", ask_text)
+        monkeypatch.setattr(
+            llm_step,
+            "ask_secret",
+            lambda *_args: pytest.fail("keyless provider requested a secret"),
+        )
+        monkeypatch.setattr(
+            llm_step,
+            "ask_yes_no",
+            lambda *_args, **_kwargs: pytest.fail("unexpected capability prompt"),
+        )
+        result = llm_step.run_llm_step()
+        assert prompts == [
+            ("Rapid-MLX base URL", "http://127.0.0.1:8000/v1"),
+            ("Exact model ID from GET /v1/models", "qwen3.5-4b-4bit"),
+        ]
+        assert result.api_key is None
+        assert result.provider.env_var is None
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(
+            config_path,
+            provider_use=result.provider.use,
+            model_name=result.model_name,
+            display_name=result.provider.display_name,
+            api_key_field=result.provider.api_key_field,
+            env_var=result.provider.env_var,
+            extra_model_config=result.provider.extra_config_for(result.model_name),
+            base_url=result.base_url,
+        )
+        model = yaml.safe_load(config_path.read_text())["models"][0]
+        assert model["use"] == "langchain_openai:ChatOpenAI"
+        assert model["api_key"] == "not-required"
+        assert model["base_url"] == ("http://host.docker.internal:8000/v1" if override else "http://127.0.0.1:8000/v1")
+        assert model["model"] == ("my-exact-model-id" if override else "qwen3.5-4b-4bit")
+        assert not any(key in model for key in ("supports_thinking", "supports_vision", "reasoning"))
+        assert LLM_PROVIDERS[provider_index].extra_config["base_url"] == "http://127.0.0.1:8000/v1"
+
     def test_model_selection_defaults_to_provider_default_model(self, monkeypatch):
         provider = LLMProvider(
             name="test",
@@ -595,6 +673,55 @@ class TestLLMStep:
 
         assert result.provider.extra_config["supports_thinking"] is False
         assert "when_thinking_enabled" not in result.provider.extra_config
+
+    def test_byteplus_agentplan_sandbox_sharing_is_opt_in(self, monkeypatch):
+        provider = next(p for p in LLM_PROVIDERS if p.name == "byteplus_agentplan")
+        asked: list[tuple[str, bool]] = []
+
+        monkeypatch.setattr(llm_step, "LLM_PROVIDERS", [provider])
+        monkeypatch.setattr(llm_step, "ask_choice", lambda *_args, **_kwargs: 0)
+        monkeypatch.setattr(llm_step, "ask_secret", lambda _prompt: "bp-secret")
+        monkeypatch.setattr(llm_step, "print_header", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(llm_step, "print_info", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(llm_step, "print_success", lambda *_args, **_kwargs: None)
+
+        def decline(prompt, default=True):
+            asked.append((prompt, default))
+            return False
+
+        monkeypatch.setattr(llm_step, "ask_yes_no", decline)
+        declined = llm_step.run_llm_step()
+
+        assert asked == [("Share BYTEPLUS_AGENTPLAN_API_KEY with sandboxes?", False)]
+        assert declined.sandbox_env_vars == ()
+        declined_cfg = yaml.safe_load(
+            build_minimal_config(
+                provider_use=declined.provider.use,
+                model_name=declined.model_name,
+                display_name=declined.provider.display_name,
+                api_key_field=declined.provider.api_key_field,
+                env_var=declined.provider.env_var,
+                extra_model_config=declined.provider.extra_config_for(declined.model_name),
+                sandbox_env_vars=declined.sandbox_env_vars or None,
+            )
+        )
+        assert "environment" not in declined_cfg["sandbox"]
+
+        monkeypatch.setattr(llm_step, "ask_yes_no", lambda *_args, **_kwargs: True)
+        accepted = llm_step.run_llm_step()
+        assert accepted.sandbox_env_vars == ("BYTEPLUS_AGENTPLAN_API_KEY",)
+        accepted_cfg = yaml.safe_load(
+            build_minimal_config(
+                provider_use=accepted.provider.use,
+                model_name=accepted.model_name,
+                display_name=accepted.provider.display_name,
+                api_key_field=accepted.provider.api_key_field,
+                env_var=accepted.provider.env_var,
+                extra_model_config=accepted.provider.extra_config_for(accepted.model_name),
+                sandbox_env_vars=accepted.sandbox_env_vars or None,
+            )
+        )
+        assert accepted_cfg["sandbox"]["environment"]["BYTEPLUS_AGENTPLAN_API_KEY"] == "$BYTEPLUS_AGENTPLAN_API_KEY"
 
 
 class TestChannelsStep:

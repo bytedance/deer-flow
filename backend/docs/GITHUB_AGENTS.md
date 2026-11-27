@@ -1,16 +1,17 @@
 # GitHub Event-Driven Agents
 
-GitHub is a **webhook-push** channel: there is no long-polling worker. Every GitHub App / repository delivery lands at `POST /api/webhooks/github`, where it is HMAC-verified, fan-out'd to one `InboundMessage` per matching custom-agent binding, and shipped to the rest of DeerFlow through the same `ChannelManager` that handles Feishu/Slack/Telegram. For the high-level orientation, see [AGENTS.md](../AGENTS.md) → "GitHub event-driven agents".
+GitHub is a **webhook-push** channel: there is no long-polling worker. Every GitHub App / repository delivery lands at `POST /api/webhooks/github`, where it is HMAC-verified, fan-out'd to one `InboundMessage` per matching custom-agent binding, and shipped to the rest of DeerFlow through the same `ChannelManager` that handles Feishu/Slack/Telegram. For the high-level orientation, see [channel guidance](../app/channels/AGENTS.md#github-channel).
 
-This document covers the **architecture** of that pipeline:
+This guide covers setup and the architecture of that pipeline:
 
 - Per-agent bindings (`config.yaml` → `github:` block)
 - Webhook → fan-out → `InboundMessage` dispatch
+- Author authorization (`allow_authors` and `allow_author_associations`)
 - Mention-handle precedence for `require_mention` triggers
 - `preferred_thread_id = UUID5(repo, number, agent_name)` thread determinism
-- GH token lifecycle (`GITHUB_APP_ID` + `PRIVATE_KEY` → `run_context["github_token"]` → sandbox `GH_TOKEN`/`GITHUB_TOKEN`)
+- [Configuring GitHub tools for webhook runs](#github-tool-setup)
 - `ConflictError` (HTTP 409) thread-create race recovery
-- Why **outbound is log-only** (agents post via `gh` from their sandbox)
+- Why **outbound is log-only**
 - Follow-up buffering while busy (issue #4121): buffer → watch → drain, and the single-process scope limit
 
 ## Overview
@@ -86,7 +87,7 @@ sequenceDiagram
     Mgr->>Client: runs.create() [fire_and_forget=True]
     Client->>Gateway: start run
     Gateway-->>Client: pending
-    Note over Mgr: Manager returns immediately.<br/>Agent posts to GitHub via gh CLI.
+    Note over Mgr: Manager returns immediately.<br/>The agent can use configured GitHub tools.
 ```
 
 ## `preferred_thread_id = UUID5(...)` Thread Determinism
@@ -139,50 +140,112 @@ graph LR
 
 Whitespace-only values at every level are treated as unset, so the chain falls through cleanly. The `_is_self_event` gate uses the same precedence (with the agent's whole `bindings[*].triggers[*].mention_login` aggregated across all bindings, plus an `agent.name` fallback) so the self-loop gate and the mention gate stay coherent.
 
-## GH Token Lifecycle
+## Author Authorization
 
-GitHub Agents get push/write credentials as **per-call installation tokens**, not as inherited environment. The minted token string is bound into `run_context["github_token"]` on the bus-consumer side and exposed to the agent's sandbox commands as both `GH_TOKEN` and `GITHUB_TOKEN` via per-call `extra_env` on `execute_command`. No `os.environ` mutation, no cross-repo bleed.
+Webhook HMAC verification only proves that a delivery came from GitHub; it does not authorize the GitHub account that triggered the event. Because each matched agent executes in its DeerFlow owner's bucket (`owner_user_id`), `event_should_fire()` enforces a fail-closed author gate on every user-authored event (`issue_comment`, `pull_request_review_comment`, `pull_request_review`, `issues`, `pull_request`):
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Bus as MessageBus
-    participant Mgr as ChannelManager<br/>_handle_chat_on_thread
-    participant Pol as inject_github_credentials()<br/>(github/run_policy.py)
-    participant Auth as mint_installation_token<br/>(github/app_auth.py)
-    participant GH as GitHub API<br/>(POST /app/installations/{id}/access_tokens)
-    participant Run as runs.create
-    participant GW as Gateway runtime
-    participant Bash as bash_tool
-    participant Sandbox as Sandbox process
-    participant Cmd as Sandbox command<br/>(gh / git push)
+- **`allow_authors`** (default `[]`): GitHub logins (case-insensitive) explicitly authorized to trigger the agent. Use this for specific humans or third-party bots (for example `Copilot` or `coderabbitai[bot]`).
+- **`allow_authors_bypass_mention`** (default `true`): Controls whether `allow_authors` matches skip `require_mention`. Set to `false` when using `allow_authors` strictly as an authorization allowlist that must still `@mention` the bot.
+- **`allow_author_associations`** (default `["OWNER", "MEMBER", "COLLABORATOR"]`): GitHub `author_association` values authorized when the actor is not listed in `allow_authors`. Association-authorized actors remain subject to `require_mention` when enabled.
+- **Sender binding**: Every user-authored delivery must carry a valid `sender.login`. Because GitHub attaches `author_association` to the authored object (`comment`, `issue`, `pull_request`, `review`), the dispatcher accepts that association only when `sender.login` matches the object's `user.login` (case-insensitively), failing closed when `sender` is missing or `null` and preventing another actor on edit or update deliveries from inheriting the original author's association.
+- **Fail-closed default**: External associations (`NONE`, `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, `FIRST_TIMER`, `MANNEQUIN`) and missing or unattributable associations are rejected with `unauthorized_author` even when the body mentions `@bot`.
+- **Stricter scoping in large organizations**: On organization-owned repositories, GitHub reports `MEMBER` (not `OWNER`) for internal org admins and maintainers, while `COLLABORATOR` only covers outside collaborators. When org-wide read-only members should not trigger the agent, set `allow_author_associations: []` paired with an explicit `allow_authors` list (and `allow_authors_bypass_mention: false` if `@mention` should still be required), adding `"COLLABORATOR"` only when outside collaborators should also be permitted.
 
-    Bus->>Mgr: msg (channel=github, metadata.github.installation_id)
-    Mgr->>Pol: _apply_channel_policy(msg, run_context)
-    Pol->>Auth: mint_installation_token(installation_id)
-    Auth->>GH: exchange installation_id for token<br/>(JWT signed with PRIVATE_KEY)
-    GH-->>Auth: {token, expires_at}
-    Auth-->>Pol: token string (cached ~55min)
-    Pol->>Mgr: run_context["github_token"] = token
-    Mgr->>Run: client.runs.create(<br/>thread_id, assistant_id,<br/>context={..., github_token})
-    Run->>GW: POST /threads/{id}/runs
-    GW-->>Run: pending
-    Run-->>Mgr: returns once pending
-    Note over Mgr: Manager returns immediately (fire_and_forget)
+## GitHub Tool Setup
 
-    Note over GW,Bash: Harness side
-    GW->>Bash: bash_tool call<br/>cmd="git push https://x-access-token:$GH_TOKEN@..."
-    Bash->>Sandbox: execute_command(<br/>env={"GH_TOKEN": "...",<br/>     "GITHUB_TOKEN": "..."})
-    Note over Sandbox: AioSandbox: bash.exec(env=...) on fresh session<br/>LocalSandbox: subprocess.run(env=...)
-    Sandbox->>Cmd: gh pr comment / git push / etc.
-    Cmd->>GH: authenticated GitHub API call
+Webhook delivery starts the agent independently of its GitHub tool settings.
+`GITHUB_WEBHOOK_SECRET` verifies incoming deliveries. For repository operations,
+the [official GitHub MCP Server](https://github.com/github/github-mcp-server) can
+authenticate as a GitHub App installation in `stdio` mode. It obtains and
+refreshes installation tokens without an interactive login. Git and the GitHub
+CLI use their own authentication settings.
+
+### Configure the GitHub App and webhook
+
+1. [Register a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app)
+   or reuse an existing App. Install it on the repositories the agent should
+   access. For the read-only tools below, grant read access to **Contents**,
+   **Issues**, and **Pull requests**.
+2. In the App settings, set the webhook URL to
+   `https://<deerflow-host>/api/webhooks/github` and subscribe to
+   [**Issue comment**](https://docs.github.com/en/webhooks/webhook-events-and-payloads#issue_comment)
+   events to trigger on issue and PR conversation comments. Set the same webhook
+   secret in GitHub and in the Gateway's `GITHUB_WEBHOOK_SECRET` environment
+   variable. Set `channels.github.enabled: true` in the deployment `config.yaml`.
+
+### Connect the MCP server
+
+Install [GitHub MCP Server v2.2.0](https://github.com/github/github-mcp-server/releases/tag/v2.2.0)
+on the Gateway. In the Gateway environment, set `GITHUB_APP_ID` to the App ID
+from its settings and `GITHUB_APP_INSTALLATION_ID` to the installation ID
+(`installation.id` in a GitHub App webhook payload). Generate a private key in
+the App settings and make its PEM file readable by the MCP process. For Docker,
+provide the Linux binary inside the Gateway container and mount the PEM as a
+read-only secret. Keep the key out of source control and outside agent-accessible
+mounts.
+
+Merge the `github-app` entry into `mcpServers` in
+[`extensions_config.json`](MCP_SERVER.md#setup). Adjust the executable and PEM
+paths for the Gateway environment.
+
+```json
+{
+  "mcpServers": {
+    "github-app": {
+      "enabled": true,
+      "type": "stdio",
+      "command": "/usr/local/bin/github-mcp-server",
+      "args": [
+        "stdio",
+        "--read-only",
+        "--tools=issue_read,pull_request_read,get_file_contents"
+      ],
+      "env": {
+        "GITHUB_APP_ID": "$GITHUB_APP_ID",
+        "GITHUB_APP_INSTALLATION_ID": "$GITHUB_APP_INSTALLATION_ID",
+        "GITHUB_APP_PRIVATE_KEY_PATH": "/run/secrets/github-app.pem"
+      }
+    }
+  }
+}
 ```
 
-Why a string and not a closure: `run_context` is JSON-encoded by the `langgraph_sdk` HTTP client before reaching Gateway. A Python callable does not survive that serialization. The harness side (`_github_env_from_runtime`) already accepts either shape, but only `str` round-trips through the SDK transport.
+This MCP server uses a deployment-wide credential. Use it on a trusted Gateway
+and scope repository access through the App installation and its permissions.
+See the [MCP server's GitHub App authentication guide](https://github.com/github/github-mcp-server/blob/v2.2.0/docs/github-app-auth.md)
+for installation-token errors and GitHub Enterprise configuration.
 
-**App JWT signing**: the mint builds the App JWT in a worker thread, because it reads `GITHUB_APP_PRIVATE_KEY_PATH` and signs with the key. The key is still read on every mint, but it is parsed again only when its PEM text changes (parsing an RSA-2048 key takes tens of milliseconds and holds the GIL). A rotated key, inline or on disk, is used by the next mint without a restart.
+### Bind and verify the agent
 
-**Token TTL caveat**: GitHub installation tokens are valid for ~1 hour. Most agent runs finish well inside that window. Truly long coder runs (multi-hour refactors at the higher `recursion_limit=250` ceiling) may see a 401 on a late `git push` / `gh pr create`. Auto-refresh past the 1h TTL is intentionally deferred — it requires registering a token-provider lookup on the harness side, which crosses the harness/app boundary (`tests/test_harness_boundary.py`). Until refresh ships, long runs should finish GitHub writes before expiry or accept the loss. If minting fails (bad App id, wrong installation_id, missing private key), the agent still runs without push/write credentials — read-only is better than no response.
+Add or update the `github` block in the custom agent's `config.yaml`. Set
+`bot_login` to the App slug without `[bot]` and substitute the repository and App
+slug below.
+
+```yaml
+github:
+  bot_login: example-review-app
+  bindings:
+    - repo: your-org/your-repo
+      triggers:
+        issue_comment:
+          actions: [created]
+          require_mention: true
+```
+
+Restart the Gateway. In Docker, recreate the Gateway container to apply new
+environment variables and mounts. In the custom agent's **Plugins and skills**
+settings, select `github-app`. On a test PR in the bound repository, post a
+conversation comment such as `@example-review-app summarize this pull request`.
+Verify that GitHub's Recent Deliveries response lists the agent under
+`dispatch.fired_agents` and that the DeerFlow run successfully calls
+`pull_request_read`. This checks both the webhook dispatch and the
+installation's repository access.
+
+To let the bot post conversation comments, grant the App **Issues: Read and
+write** and approve the updated installation permissions if GitHub prompts you.
+Add `add_issue_comment` to `--tools`, remove `--read-only`, and restart the
+Gateway. The agent must call this tool to post a comment. Its final response is
+logged by the GitHub channel. See [GitHub's comment permissions](https://docs.github.com/en/rest/issues/comments#create-an-issue-comment).
 
 ## Thread-create Race Recovery
 
@@ -278,33 +341,33 @@ graph LR
     classDef gh fill:#D7D3E8,stroke:#6B6680,color:#29263A
 
     Run["GitHub agent run"]:::agent
-    GhCLI["gh CLI<br/>(in sandbox)"]:::gh
+    GitHubTool["Configured GitHub tool"]:::gh
     Issue["GitHub issue / PR"]:::gh
     Channel["GitHubChannel.send()<br/>(log-only)"]:::send
     Log["gateway.log<br/>(INFO line)"]:::send
 
-    Run -->|"mid-run intentional writeback"| GhCLI --> Issue
+    Run -->|"mid-run intentional writeback"| GitHubTool --> Issue
     Run -->|"final assistant message"| Channel --> Log
 ```
 
-GitHub agents post to GitHub themselves via the `gh` CLI from inside their sandbox (`gh issue comment`, `gh pr comment`, `gh pr create`, etc.). The channel's `send()` is **log-only** by design — the agent's final assistant message is logged at INFO for visibility but never auto-posted.
+A configured GitHub tool can post comments or open pull requests during a run. The channel logs the final assistant message at INFO.
 
 Why:
 
-- **Multiple agents can bind the same event.** coder + reviewer on a mention would each auto-post a reply, producing two replies per mention even when only one had useful work. Letting the LLM call `gh` mid-run means silence is just "the LLM did not call `gh`".
+- **Multiple agents can bind the same event.** coder + reviewer on a mention would each auto-post a reply, producing two replies per mention even when only one had useful work. Each agent chooses whether to post during its run.
 - **The agent often wants to post intermediate updates** (an issue comment linking the PR, a sub-issue comment, a PR description edit). The auto-post-the-final-message contract didn't model that and forced the final message to play double duty.
-- **The dispatcher's per-agent `_is_self_event` gate** already prevents comments the LLM posts via `gh` from looping the webhook back into a new run for the same agent.
+- **The dispatcher's per-agent `_is_self_event` gate** already prevents comments the agent posts from looping the webhook back into a new run for the same agent.
 
 This is also why the GitHub channel registers `ChannelRunPolicy.fire_and_forget=True`: the manager calls `runs.create()` and returns once the run is `pending`, no outbound ferrying, no SDK 300s `httpx.ReadTimeout` on a legitimate long coder run.
 
 ## Cross-references
 
-- [AGENTS.md](../AGENTS.md) → "GitHub event-driven agents" — the index view in `backend/AGENTS.md` (binding shape, per-event triggers, mention precedence, token env summary, follow-up buffering summary)
+- [Channel guidance](../app/channels/AGENTS.md#github-channel)
 - [IM_CHANNEL_CONNECTIONS.md](IM_CHANNEL_CONNECTIONS.md) — interactive IM channels (Telegram/Slack/etc.) for the full `_handle_chat` and owner-scoped file storage flow
 - `app/gateway/github/dispatcher.py` — `fanout_event`, `_is_self_event`, mention precedence chain
 - `app/channels/manager.py` — `_buffer_followup`, `_drain_followups_for_thread`, `_watch_run_and_drain_followups` (follow-up buffering while busy, issue #4121)
 - `app/gateway/github/identity.py` — `resolve_thread_id` (UUID5), `extract_target`
 - `app/gateway/github/triggers.py` — `event_should_fire`, `DEFAULT_TRIGGERS`
-- `app/gateway/github/run_policy.py` — `inject_github_credentials`, `register_policy`
+- `app/gateway/github/run_policy.py` — `register_policy`
 - `app/gateway/routers/github_webhooks.py` — HMAC verify, route mount predicate
 - `app/channels/github.py` — `GitHubChannel` (log-only outbound)

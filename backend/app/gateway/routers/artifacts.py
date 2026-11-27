@@ -24,7 +24,7 @@ from app.gateway.authz import SandboxRequestLease, require_permission, try_acqui
 from app.gateway.deps import get_run_manager
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.path_utils import normalize_outputs_virtual_path, resolve_outputs_confined_path, resolve_thread_virtual_path
-from deerflow.authz.sandbox_authz import safe_app_config
+from deerflow.authz.sandbox_authz import safe_app_config_async
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.user_context import get_effective_user_id
@@ -309,6 +309,11 @@ def _load_skill_archive_member(actual_skill_path: Path, skill_file_path: str, in
         raise HTTPException(status_code=404, detail=f"Skill file not found: {skill_file_path}")
     if not actual_skill_path.is_file():
         raise HTTPException(status_code=400, detail=f"Path is not a file: {skill_file_path}")
+    # A trailing ".skill/" requests no member at all. Without this guard the
+    # archive lookup's fallback matches the first directory entry (name ends
+    # with "/") and returns its empty body with 200 instead of 404 (#8500).
+    if not internal_path:
+        raise HTTPException(status_code=404, detail=f"No skill archive member requested: {skill_file_path}")
     content = _extract_file_from_skill_archive(actual_skill_path, internal_path)
     if content is None:
         raise HTTPException(status_code=404, detail=f"File '{internal_path}' not found in skill archive")
@@ -848,7 +853,7 @@ async def update_artifact(
                     sandbox_provider,
                     thread_id,
                     user_id=effective_user_id,
-                    app_config=safe_app_config(),
+                    app_config=await safe_app_config_async(),
                     owner_prefix="gateway:artifact",
                 )
                 sandbox = sandbox_lease.sandbox

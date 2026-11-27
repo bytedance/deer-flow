@@ -35,6 +35,8 @@ make test-blocking-io
 - **`mcp_tasks` is read at startup.** The installed submitter decides whether task
   tools are exposed. Editing the config on disk does not change a running process.
 
+- **Disconnect cleanup is bounded.** A transport failure waits at most `SESSION_CLOSE_TIMEOUT` for session cleanup; if the owner is still unwinding, its teardown remains strongly tracked in `_teardown_tasks` while the caller receives the original transport error.
+
 ## Credentials
 
 - **Header names are case-insensitive.** Every credential interceptor writes
@@ -52,14 +54,21 @@ make test-blocking-io
 - **Background task calls have no request.** `McpTaskToolCaller` binds the task
   owner's identity for the call and restores the previous value afterwards.
 - **Agent grants are live policy, not run snapshots.** Every protected call
-  rechecks the operator binding even with a cached token. Durable references
+  rechecks the operator binding, and for `grants: runtime` the stored grant
+  (in force only while its recorded agent, server, destination and OAuth client match),
+  even with a cached token. An unreadable grant store denies the call. Durable references
   retain the admitted definition revision; definition rollouts preserve them,
   while grant revocation denies them. See the per-agent section in the MCP guide.
 
 ## Results
 
 - **Never put base64 payloads in text.** Unsupported content (inline audio) raises
-  a recoverable tool error.
+  a recoverable tool error, and the stdio conversion reports an error result with
+  no text block by content shape, never the payload. sse/http tools keep
+  `langchain-mcp-adapters`' conversion, which still stringifies that fallback;
+  `ToolErrorHandlingMiddleware` redacts inline `base64` fields and `data:`
+  payloads from tool error messages before truncation, so neither the
+  model-visible message nor the checkpoint carries the bytes.
 - **`ResourceLink` items do not become URL-sourced `file` blocks.** Chat
   Completions serialization rejects them, and a checkpointed block would break
   every later turn of the thread.

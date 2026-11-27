@@ -22,6 +22,7 @@ class LLMStepResult:
     model_name: str
     api_key: str | None
     base_url: str | None = None
+    sandbox_env_vars: tuple[str, ...] = ()
 
 
 def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
@@ -43,9 +44,7 @@ def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
         model_name = provider.models[0]
 
     print()
-    base_url: str | None = None
-    if provider.name in {"openrouter", "vllm"}:
-        base_url = provider.extra_config.get("base_url")
+    base_url: str | None = provider.extra_config.get("base_url")
 
     if provider.base_url_prompt:
         print_header(f"{step_label} · Connection details")
@@ -83,9 +82,22 @@ def run_llm_step(step_label: str = "Step 1/3") -> LLMStepResult:
     if api_key:
         print_success(f"Key will be saved to .env as {provider.env_var}")
 
+    sandbox_env_vars: tuple[str, ...] = ()
+    if provider.sandbox_env_vars:
+        var_list = ", ".join(provider.sandbox_env_vars)
+        print()
+        print_info(
+            f"Sharing {var_list} with sandbox.environment enables image, PPT, and video skills, "
+            "but exposes this key to every command-enabled sandbox run."
+        )
+        if ask_yes_no(f"Share {var_list} with sandboxes?", default=False):
+            sandbox_env_vars = provider.sandbox_env_vars
+            print_success(f"{var_list} will be forwarded to sandbox.environment")
+
     return LLMStepResult(
         provider=provider,
         model_name=model_name,
         api_key=api_key,
         base_url=base_url,
+        sandbox_env_vars=sandbox_env_vars,
     )

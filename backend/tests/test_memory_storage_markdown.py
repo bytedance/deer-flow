@@ -142,6 +142,46 @@ def test_cached_load_does_not_scan_all_fact_files(storage: FileMemoryStorage, mo
     assert storage.load("agent-a", user_id="alice")["facts"][0]["content"] == "Project uses Python 3.12"
 
 
+def test_memory_cache_keeps_only_the_most_recently_used_scopes(storage: FileMemoryStorage, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(storage_module, "MEMORY_CACHE_MAX_SCOPES", 2)
+    # A commit drops the user's cached scopes, so each scope here is its own user.
+    assert storage.save(_memory_with_fact("A"), "agent-a", user_id="alice")
+    assert storage.save(_memory_with_fact("B"), "agent-a", user_id="bob")
+    assert list(storage._memory_cache) == [("alice", "agent-a"), ("bob", "agent-a")]
+    reads: list[str | None] = []
+    read_document = storage._read_document
+
+    def counting_read(path: Path, agent_name: str | None, *, user_id: str | None) -> dict:
+        reads.append(user_id)
+        return read_document(path, agent_name, user_id=user_id)
+
+    monkeypatch.setattr(storage, "_read_document", counting_read)
+
+    # A cache hit marks the scope as recently used without reading its files.
+    assert storage.load("agent-a", user_id="alice")["facts"][0]["content"] == "A"
+    assert reads == []
+    # A scope a request only names (no files) still takes a cache slot, so it
+    # evicts the least recently used scope instead of growing the cache.
+    assert storage.load("agent-unknown", user_id="carol")["facts"] == []
+    assert list(storage._memory_cache) == [("alice", "agent-a"), ("carol", "agent-unknown")]
+
+    # An evicted scope is read from its files again, with the same document.
+    assert storage.load("agent-a", user_id="bob")["facts"][0]["content"] == "B"
+    assert reads == ["carol", "bob"]
+    assert list(storage._memory_cache) == [("carol", "agent-unknown"), ("bob", "agent-a")]
+
+    # A save caches the document it committed as the most recent scope.
+    assert storage.save(_memory_with_fact("A2"), "agent-a", user_id="alice")
+    assert list(storage._memory_cache) == [("bob", "agent-a"), ("alice", "agent-a")]
+    assert reads == ["carol", "bob", "alice"]
+    assert storage.load("agent-a", user_id="alice")["facts"][0]["content"] == "A2"
+    assert reads == ["carol", "bob", "alice"]
+
+    # A reload replaces a scope that is still cached and makes it the most recent.
+    assert storage.reload("agent-a", user_id="bob")["facts"][0]["content"] == "B"
+    assert list(storage._memory_cache) == [("alice", "agent-a"), ("bob", "agent-a")]
+
+
 @pytest.mark.parametrize("read", ["load", "reload"])
 def test_unlocked_read_skips_fact_deleted_after_directory_listing(storage: FileMemoryStorage, monkeypatch: pytest.MonkeyPatch, read: str) -> None:
     for fact_id in ("fact_keep", "fact_drop"):
@@ -1127,6 +1167,54 @@ def test_full_rebuild_index_accepts_original_email_user_scope(tmp_path: Path) ->
 
     assert result == {"supported": True, "indexed": 1, "failed": 0}
     assert retrieval.fact_ids == ["fact_01HZZZZZZZZZZZZZZZZZZZZZZZ"]
+
+
+def test_full_rebuild_index_reads_only_the_memory_buckets(tmp_path: Path) -> None:
+    """The host's storage root is the runtime home, which also holds every thread's workspace.
+
+    A sandbox can write a valid fact file into its workspace; the full rebuild
+    must not index it as the user's memory, and a stray ``facts/`` file there
+    is not a failed fact.
+    """
+
+    class RecordingRetrieval:
+        def __init__(self) -> None:
+            self.indexed: list[tuple[str, dict]] = []
+
+        def upsert(self, fact, *, scope, path):
+            self.indexed.append((fact["id"], scope))
+
+        def remove(self, fact_id, *, scope):
+            pass
+
+        def search(self, query, *, scopes, top_k, mode, filters):
+            return []
+
+    retrieval = RecordingRetrieval()
+    scoped = FileMemoryStorage(DeerMemConfig(storage_path=str(tmp_path)), retrieval=retrieval)
+    scoped.upsert_fact({"id": "fact_user", "content": "user fact", "category": "context", "confidence": 0.9}, user_id="alice", agent_name="agent-a")
+    scoped.upsert_fact({"id": "fact_legacy", "content": "legacy fact", "category": "context", "confidence": 0.9}, user_id=None, agent_name="agent-a")
+    user_fact = next(tmp_path.glob("users/alice/agents/agent-a/facts/*/fact_user.md"))
+    legacy_fact = next(tmp_path.glob("agents/agent-a/facts/*/fact_legacy.md"))
+    for workspace, source, planted_id in [
+        (tmp_path / "users" / "alice" / "threads" / "t1" / "user-data" / "workspace", user_fact, "fact_planted_user"),
+        (tmp_path / "threads" / "t1" / "user-data" / "workspace", legacy_fact, "fact_planted_legacy"),
+    ]:
+        planted = workspace / "agents" / "agent-a" / "facts" / "00" / f"{planted_id}.md"
+        planted.parent.mkdir(parents=True)
+        planted.write_text(source.read_text(encoding="utf-8").replace(source.stem, planted_id), encoding="utf-8")
+        stray = workspace / "docs" / "facts" / "notes.md"
+        stray.parent.mkdir(parents=True)
+        stray.write_text("# Project facts\n", encoding="utf-8")
+    retrieval.indexed.clear()
+
+    result = scoped.rebuild_index()
+
+    assert result == {"supported": True, "indexed": 2, "failed": 0}
+    assert sorted(retrieval.indexed, key=lambda item: item[0]) == [
+        ("fact_legacy", {"userId": None, "agentName": "agent-a"}),
+        ("fact_user", {"userId": "alice", "agentName": "agent-a"}),
+    ]
 
 
 def test_full_rebuild_index_skips_fact_deleted_after_directory_listing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

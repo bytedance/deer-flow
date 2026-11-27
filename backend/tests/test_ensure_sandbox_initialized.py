@@ -4,20 +4,32 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from langchain.tools import ToolRuntime
+from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
 from langgraph.types import Overwrite
 
-from deerflow.sandbox.exceptions import SandboxNotFoundError
+from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, normalize_tool_message, tool_result_for_model
+from deerflow.sandbox.exceptions import SandboxCapacityExceededError, SandboxNotFoundError
 from deerflow.sandbox.lease import SANDBOX_LEASE_OWNER_CONTEXT_KEY, get_sandbox_lease_manager
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, reset_sandbox_provider, set_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.tools import (
     _run_sync_tool_after_async_sandbox_init,
+    bash_tool,
     ensure_sandbox_initialized,
     ensure_sandbox_initialized_async,
+    glob_tool,
+    grep_tool,
+    ls_tool,
+    read_file_tool,
+    str_replace_tool,
+    write_file_tool,
 )
 
 
@@ -142,6 +154,56 @@ def _make_runtime(state: dict) -> ToolRuntime:
         tool_call_id="call-1",
         store=None,
     )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    ("tool", "args", "reason", "explanation"),
+    [
+        (bash_tool, {"command": "echo test"}, "capacity", "sandbox pool is busy"),
+        (ls_tool, {"path": "/mnt/user-data/workspace"}, "capacity", "sandbox pool is busy"),
+        (glob_tool, {"path": "/mnt/user-data/workspace", "pattern": "*.txt"}, "capacity", "sandbox pool is busy"),
+        (grep_tool, {"path": "/mnt/user-data/workspace", "pattern": "test"}, "capacity", "sandbox pool is busy"),
+        (read_file_tool, {"path": "/mnt/user-data/workspace/note.txt"}, "capacity", "sandbox pool is busy"),
+        (str_replace_tool, {"path": "/mnt/user-data/workspace/note.txt", "old_str": "a", "new_str": "b"}, "capacity", "sandbox pool is busy"),
+        (write_file_tool, {"path": "/mnt/user-data/workspace/note.txt", "content": "note"}, "shutdown", "provider is shutting down"),
+        (ls_tool, {"path": "/mnt/user-data/workspace"}, "capacity_backend", "sandbox capacity service is unavailable"),
+        (ls_tool, {"path": "/mnt/user-data/workspace"}, "capacity_initializing", "sandbox capacity service is initializing"),
+        (ls_tool, {"path": "/mnt/user-data/workspace"}, "other", "capacity is temporarily unavailable"),
+    ],
+    ids=["bash", "ls", "glob", "grep", "read-file", "str-replace", "write-file", "backend-unavailable", "initializing", "other-reason"],
+)
+async def test_capacity_rejection_reaches_the_model(tool, args, reason, explanation, asynchronous, monkeypatch):
+    error = SandboxCapacityExceededError(replicas=2, retry_after_seconds=17, reason=reason)
+    provider = _FallthroughProvider()
+    acquire = AsyncMock(side_effect=error) if asynchronous else Mock(side_effect=error)
+    monkeypatch.setattr(provider, "acquire_async" if asynchronous else "acquire", acquire)
+    graph = StateGraph(MessagesState).add_node("tools", ToolNode([tool])).add_edge(START, "tools").compile()
+    inputs = {"messages": [AIMessage(content="", tool_calls=[{"name": tool.name, "args": args, "id": "call-1"}])]}
+    config = {"configurable": {"thread_id": "capacity-test"}}
+
+    set_sandbox_provider(provider)
+    try:
+        result = await graph.ainvoke(inputs, config) if asynchronous else await asyncio.to_thread(graph.invoke, inputs, config)
+    finally:
+        reset_sandbox_provider()
+
+    acquire.assert_called_once()
+    if asynchronous:
+        acquire.assert_awaited_once()
+    message = result["messages"][-1]
+    assert isinstance(message, ToolMessage)
+    assert (message.tool_call_id, message.name, message.status) == ("call-1", tool.name, "error")
+    meta = normalize_tool_message(message).additional_kwargs[TOOL_META_KEY]
+    assert meta["error_type"] == "capacity"
+    assert meta["recommended_next_action"] == "retry_later"
+    assert meta["retry_after_seconds"] == 17
+    assert meta["recoverable_by_model"] is True
+    model_message = tool_result_for_model(message)
+    assert explanation in model_message.content
+    assert "17 seconds" in model_message.content
+    assert "tell the user" in model_message.content
 
 
 def test_post_acquire_lookup_failure_unwinds_sync_execution_lease() -> None:
