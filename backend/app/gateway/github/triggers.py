@@ -64,39 +64,87 @@ def _comment_body(event: str, payload: dict[str, Any]) -> str:
     ``pull_request_review`` the body is the review summary. Other events
     have no user-authored text to mention-check and return ``""``.
     """
-    if event in ("issue_comment", "pull_request_review_comment"):
-        body = (payload.get("comment") or {}).get("body")
-        return body if isinstance(body, str) else ""
-    if event == "issues":
-        body = (payload.get("issue") or {}).get("body")
-        return body if isinstance(body, str) else ""
-    if event == "pull_request":
-        body = (payload.get("pull_request") or {}).get("body")
-        return body if isinstance(body, str) else ""
-    if event == "pull_request_review":
-        body = (payload.get("review") or {}).get("body")
-        return body if isinstance(body, str) else ""
-    return ""
+    authored = _authored_object(event, payload)
+    if authored is None:
+        return ""
+    body = authored.get("body")
+    return body if isinstance(body, str) else ""
 
 
 def _author_login(event: str, payload: dict[str, Any]) -> str | None:
-    """Login of the human who triggered the event, for ``allow_authors``."""
-    # Object authors need not be the actor on edits, labels, or dismissals.
-    # Keep the object fallback for payloads without a sender identity.
-    sender_login = (payload.get("sender") or {}).get("login")
-    if isinstance(sender_login, str):
-        return sender_login
+    """Login of the webhook ``sender`` who triggered the event."""
+    del event
+    sender = payload.get("sender")
+    if not isinstance(sender, dict):
+        return None
+    sender_login = sender.get("login")
+    if isinstance(sender_login, str) and sender_login.strip():
+        return sender_login.strip()
+    return None
+
+
+def _authored_object(event: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     if event in ("issue_comment", "pull_request_review_comment"):
-        login = (payload.get("comment") or {}).get("user", {}).get("login")
+        authored = payload.get("comment")
     elif event == "pull_request":
-        login = (payload.get("pull_request") or {}).get("user", {}).get("login")
+        authored = payload.get("pull_request")
     elif event == "pull_request_review":
-        login = (payload.get("review") or {}).get("user", {}).get("login")
+        authored = payload.get("review")
     elif event == "issues":
-        login = (payload.get("issue") or {}).get("user", {}).get("login")
+        authored = payload.get("issue")
     else:
-        login = (payload.get("sender") or {}).get("login")
-    return login if isinstance(login, str) else None
+        return None
+    return authored if isinstance(authored, dict) else None
+
+
+def _author_association(event: str, payload: dict[str, Any]) -> str | None:
+    """Return the GitHub ``author_association`` attributable to the actor.
+
+    GitHub attaches ``author_association`` to the authored object rather than
+    ``sender``. Require a valid ``sender.login`` and only accept the object's
+    association when ``sender.login`` matches the object's ``user.login``
+    (case-insensitively), so missing/null senders fail closed and a different
+    actor editing or labeling an owner's issue/PR/comment never inherits the
+    owner's association.
+    """
+    authored = _authored_object(event, payload)
+    if authored is None:
+        return None
+    sender_login = _author_login(event, payload)
+    authored_user = authored.get("user")
+    authored_login = authored_user.get("login") if isinstance(authored_user, dict) else None
+    if not sender_login or not isinstance(authored_login, str) or not authored_login.strip():
+        return None
+    if sender_login.lower() != authored_login.strip().lower():
+        return None
+    raw = authored.get("author_association")
+    if not isinstance(raw, str):
+        return None
+    normalized = raw.strip().upper()
+    return normalized or None
+
+
+def is_actor_authorized(
+    event: str,
+    payload: dict[str, Any],
+    trigger: GitHubTriggerConfig,
+) -> tuple[bool, bool, str | None, str | None]:
+    """Evaluate fail-closed actor authorization for ``trigger``.
+
+    Returns ``(authorized, matched_allow_authors, author, association)``.
+    """
+    if event == "ping":
+        return True, False, None, None
+    author = _author_login(event, payload)
+    allowed_authors = {entry.strip().lower() for entry in trigger.allow_authors if entry.strip()}
+    if author and author.lower() in allowed_authors:
+        return True, True, author, None
+
+    association = _author_association(event, payload)
+    allowed_associations = {entry.strip().upper() for entry in trigger.allow_author_associations if entry.strip()}
+    if association and association in allowed_associations:
+        return True, False, author, association
+    return False, False, author, association
 
 
 def _resolved_trigger(
@@ -124,12 +172,12 @@ def _resolved_trigger(
 
     default = DEFAULT_TRIGGERS.get(event)
     if default is None:
-        return override
+        return override.model_copy(deep=True)
 
     # Field-wise merge: take fields the binding explicitly set,
     # backfill the rest from the per-event default.
     explicit = override.model_dump(exclude_unset=True)
-    merged = default.model_copy(update=explicit)
+    merged = default.model_copy(update=explicit, deep=True)
     return merged
 
 
@@ -183,16 +231,15 @@ def event_should_fire(
         if action not in trigger.actions:
             return False, f"action={action!r} not in {trigger.actions}"
 
-    # allow_authors bypasses require_mention entirely. Useful so a repo
-    # owner can talk to the bot without typing the handle every time.
-    # Match is case-insensitive — GitHub logins are, and the sibling gates
-    # in this module already are (``_mentions`` uses re.IGNORECASE; the
-    # self-event check lowercases both sides). A bare ``in`` membership
-    # test would drop an owner whose YAML casing differs from the payload.
-    if trigger.allow_authors:
-        author = _author_login(event, payload)
-        if author and author.lower() in {a.lower() for a in trigger.allow_authors}:
-            return True, f"allow_authors:{author}"
+    # Fail-closed actor authorization for user-authored events: the triggering
+    # actor must either appear in ``allow_authors`` (case-insensitive) or carry
+    # an ``author_association`` matching ``allow_author_associations`` (default:
+    # OWNER, MEMBER, COLLABORATOR).
+    authorized, matched_allow_authors, author, association = is_actor_authorized(event, payload, trigger)
+    if not authorized:
+        return False, f"unauthorized_author:{author!r} (association={association!r})"
+    if matched_allow_authors and trigger.allow_authors_bypass_mention:
+        return True, f"allow_authors:{author!r}"
 
     if trigger.require_mention:
         # ``trigger.mention_login`` is normalized (whitespace-only -> None)

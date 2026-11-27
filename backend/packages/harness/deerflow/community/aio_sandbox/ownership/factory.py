@@ -65,7 +65,10 @@ def resolve_ownership_redis_url(
     config: SandboxOwnershipConfig,
 ) -> str:
     """Resolve the Redis endpoint shared by ownership-adjacent stores."""
-    return config.redis_url or os.getenv(_ENV_OWNERSHIP_REDIS_URL) or os.getenv(_ENV_STREAM_BRIDGE_REDIS_URL) or os.getenv("REDIS_URL") or "redis://localhost:6379/0"
+    url = config.redis_url or os.getenv(_ENV_OWNERSHIP_REDIS_URL) or os.getenv(_ENV_STREAM_BRIDGE_REDIS_URL) or os.getenv("REDIS_URL")
+    if config.redis_mode == "cluster" and not url:
+        raise ValueError("sandbox.ownership cluster mode requires a seed redis_url or Redis URL environment variable")
+    return url or "redis://localhost:6379/0"
 
 
 def compute_lease_ttl(config: SandboxOwnershipConfig) -> float:
@@ -104,6 +107,7 @@ def make_sandbox_ownership_store(config: SandboxOwnershipConfig | None, *, owner
         return RedisOwnershipStore(
             owner_id=effective_owner_id,
             redis_url=redis_url,
+            cluster_nodes=resolved.cluster_nodes,
             ttl_seconds=ttl,
             key_prefix=resolved.key_prefix,
         )

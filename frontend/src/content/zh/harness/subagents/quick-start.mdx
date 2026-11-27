@@ -12,7 +12,7 @@ import { Callout, Steps } from "nextra/components";
 ## 前提
 
 - 已按[快速上手](/docs/application/quick-start)完成配置并能正常对话。`config.yaml` 里的 `subagents:` 段可以完全留空，内置默认值即可使用。
-- 想用 `bash` 子 Agent，需要配置容器沙箱；或者在本地沙箱下显式设置 `sandbox.allow_host_bash: true`，这只适合完全可信的本地环境。否则目录会隐藏 `bash`。
+- 使用隔离沙箱可启用 `bash` 子 Agent。
 
 <Steps>
 

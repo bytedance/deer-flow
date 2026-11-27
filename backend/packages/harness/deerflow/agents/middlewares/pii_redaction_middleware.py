@@ -267,6 +267,13 @@ def redact_texts(texts: Sequence[str], config: PiiRedactionConfig | None) -> lis
     return [redactor.redact(text) for text in texts]
 
 
+def redact_message_content(content: object, config: PiiRedactionConfig) -> object:
+    """Apply the configured PII policy to model-bound message content."""
+    if not config.enabled:
+        return content
+    return _redact_content(content, _make_redactor(config))[0]
+
+
 def redact_text_excerpts(text: str, ranges: Sequence[tuple[int, int]], config: PiiRedactionConfig) -> list[str]:
     """Extract validated ranges after redacting the full text.
 

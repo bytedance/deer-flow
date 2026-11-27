@@ -6,7 +6,8 @@ export function resolveShareArtifact(
   artifacts: SharedArtifact[],
   basePath = "",
 ) {
-  let path = href.replace(/^sandbox:/, "");
+  // Split URL syntax before decoding: %23 and %3F are filename characters.
+  let path = href.split(/[?#]/, 1)[0]!.replace(/^sandbox:/, "");
   try {
     path = decodeURIComponent(path);
   } catch {
@@ -31,14 +32,40 @@ export function resolveShareArtifact(
   return artifacts.find((artifact) => artifact.path === normalized.join("/"));
 }
 
-export function sharedLink(
+/** Build an inline URL only for a file in the snapshot manifest. */
+export function sharedArtifactLink(
   href: string,
   token: string,
   artifacts: SharedArtifact[],
   basePath = "",
 ) {
   const artifact = resolveShareArtifact(href, artifacts, basePath);
-  if (artifact) return shareArtifactURL(token, artifact.path);
+  if (!artifact) return undefined;
+
+  const [, query = "", fragment = ""] =
+    /^[^?#]*(\?[^#]*)?(#[\s\S]*)?$/.exec(href) ?? [];
+  // The Gateway reserves `download` for its explicit download action. Keep
+  // other query entries in their original encoding and leave fragments intact.
+  const inlineQuery = query
+    .slice(1)
+    .split("&")
+    .filter((part) => !new URLSearchParams(`?${part}`).has("download"))
+    .join("&");
+  return (
+    shareArtifactURL(token, artifact.path) +
+    (inlineQuery ? `?${inlineQuery}` : "") +
+    fragment
+  );
+}
+
+export function sharedLink(
+  href: string,
+  token: string,
+  artifacts: SharedArtifact[],
+  basePath = "",
+) {
+  const copied = sharedArtifactLink(href, token, artifacts, basePath);
+  if (copied) return copied;
   try {
     const url = new URL(href);
     if (

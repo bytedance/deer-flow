@@ -26,19 +26,22 @@ import uuid
 from collections.abc import Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MethodType
 from typing import Any, Literal
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.graph.state import CompiledStateGraph
 
-from deerflow.agents.lead_agent.agent import _authorize_model_name, build_middlewares
+from deerflow.agents.lead_agent.agent import _authorize_model_name, _resolve_model_name, build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config, has_bash_tool
 from deerflow.agents.middlewares.tool_declarations import layer_one_outcome, narrow_declared_tools, verify_declared_tool_view
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
-from deerflow.config.agents_config import AGENT_NAME_PATTERN, load_agent_config
+from deerflow.config.agents_config import AGENT_NAME_PATTERN, AgentConfig, load_agent_config
 from deerflow.config.app_config import get_app_config, reload_app_config
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
@@ -174,6 +177,13 @@ class _AIMessageAccumulator:
         return "".join(self._chunks.get(self.last_id, ()))
 
 
+@dataclass(frozen=True)
+class _CachedAgent:
+    key: tuple
+    graph: CompiledStateGraph
+    model_name: str | None
+
+
 class DeerFlowClient:
     """Embedded Python client for DeerFlow agent system.
 
@@ -273,11 +283,14 @@ class DeerFlowClient:
         self._thread_incarnations: dict[str, str] = {}
 
         # Lazy agent — created on first call, recreated when config changes.
-        self._agent = None
-        self._agent_config_key: tuple | None = None
-        self._effective_model_name: str | None = None
-        self._loaded_agent_config_key: tuple[str, str] | None = None
-        self._loaded_agent_config = None
+        self._agent_cache: _CachedAgent | None = None
+        self._loaded_agent_config: tuple[tuple[str, str], AgentConfig | None] | None = None
+
+    @property
+    def _agent(self) -> CompiledStateGraph | None:
+        """Expose the last cached graph for existing diagnostics."""
+        cached = self._agent_cache
+        return cached.graph if cached is not None else None
 
     def reset_agent(self) -> None:
         """Force the internal agent to be recreated on the next call.
@@ -286,10 +299,7 @@ class DeerFlowClient:
         installations) that should be reflected in the system prompt
         or tool set.
         """
-        self._agent = None
-        self._agent_config_key = None
-        self._effective_model_name = None
-        self._loaded_agent_config_key = None
+        self._agent_cache = None
         self._loaded_agent_config = None
 
     # ------------------------------------------------------------------
@@ -323,13 +333,15 @@ class DeerFlowClient:
             "is_plan_mode": overrides.get("plan_mode", self._plan_mode),
             "subagent_enabled": overrides.get("subagent_enabled", self._subagent_enabled),
         }
+        if "reasoning_effort" in overrides:
+            configurable["reasoning_effort"] = overrides["reasoning_effort"]
         return RunnableConfig(
             configurable=configurable,
             recursion_limit=overrides.get("recursion_limit", 100),
         )
 
-    def _ensure_agent(self, config: RunnableConfig, *, context: Mapping[str, Any] | None = None):
-        """Create (or recreate) the agent when config-dependent params change."""
+    def _ensure_agent(self, config: RunnableConfig, *, context: Mapping[str, Any] | None = None) -> tuple[CompiledStateGraph, str | None]:
+        """Return the graph and effective model for this call's configuration."""
         cfg = dict(config.get("configurable", {}) or {})
         if context is not None:
             cfg.update(context)
@@ -343,8 +355,9 @@ class DeerFlowClient:
         agent_config = None
         if self._agent_name is not None:
             loaded_config_key = (self._agent_name, effective_user_id)
-            if getattr(self, "_loaded_agent_config_key", None) == loaded_config_key:
-                agent_config = self._loaded_agent_config
+            loaded_config = getattr(self, "_loaded_agent_config", None)
+            if loaded_config is not None and loaded_config[0] == loaded_config_key:
+                agent_config = loaded_config[1]
             else:
                 try:
                     agent_config = load_agent_config(self._agent_name, user_id=effective_user_id)
@@ -354,11 +367,11 @@ class DeerFlowClient:
                         self._agent_name,
                         exc_info=True,
                     )
-                self._loaded_agent_config_key = loaded_config_key
-                self._loaded_agent_config = agent_config
+                self._loaded_agent_config = (loaded_config_key, agent_config)
         memory_enabled = getattr(agent_config, "memory_enabled", True) is not False
         mcp_plugins = getattr(agent_config, "mcp_plugins", None)
         tool_groups = getattr(agent_config, "tool_groups", None)
+        reasoning_effort = cfg.get("reasoning_effort", getattr(agent_config, "reasoning_effort", None))
         # Delegation reads this run's metadata, including when the graph is cached.
         config.setdefault("metadata", {})["mcp_plugins"] = mcp_plugins
         config["metadata"]["tool_groups"] = tool_groups
@@ -381,6 +394,7 @@ class DeerFlowClient:
         key = (
             cfg.get("model_name"),
             cfg.get("thinking_enabled"),
+            reasoning_effort,
             cfg.get("is_plan_mode"),
             cfg.get("subagent_enabled"),
             cfg.get("max_concurrent_subagents"),
@@ -396,11 +410,20 @@ class DeerFlowClient:
             authorization_identity,
         )
 
-        if self._agent is not None and self._agent_config_key == key:
-            return
+        # Snapshot the key and graph together; another turn may replace the
+        # cache entry without affecting the graph this turn has selected.
+        cached = self._agent_cache
+        if cached is not None and cached.key == key:
+            return cached.graph, cached.model_name
 
         thinking_enabled = cfg.get("thinking_enabled", True)
         model_name = cfg.get("model_name")
+        if model_name is None:
+            model_name = getattr(agent_config, "model", None)
+            if model_name is not None:
+                model_name = _resolve_model_name(model_name, app_config=self._app_config)
+        agent_model_settings = getattr(agent_config, "model_settings", None)
+        agent_model_overrides = agent_model_settings.model_dump(exclude_none=True) if agent_model_settings else None
         # Phase 3: enforce model:use authorization on the embedded/library path
         # too, mirroring the Gateway runtime path in ``_make_lead_agent`` so the
         # role-scoped model policy cannot be bypassed by constructing the agent
@@ -469,7 +492,12 @@ class DeerFlowClient:
         )
         max_total_subagents = effective_total_subagents_per_run(cfg.get("max_total_subagents"), self._app_config)
 
-        tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled, mcp_plugins=mcp_plugins, groups=tool_groups)
+        # attach_tracing=False because ``stream()`` injects tracing
+        # callbacks at the graph invocation root so a single embedded run
+        # produces one trace with correct session_id / user_id propagation.
+        # Attaching them again on the model would emit duplicate spans.
+        chat_model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, attach_tracing=False, model_overrides=agent_model_overrides)
+        tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled, mcp_plugins=mcp_plugins, groups=tool_groups, chat_model=chat_model)
 
         # Add framework-provided tools before authorization so Layer 1 sees
         # every capability that can become model-visible.
@@ -541,11 +569,7 @@ class DeerFlowClient:
         verify_declared_tool_view(bound_middlewares, authorized_names=declared_authorized)
 
         kwargs: dict[str, Any] = {
-            # attach_tracing=False because ``stream()`` injects tracing
-            # callbacks at the graph invocation root so a single embedded run
-            # produces one trace with correct session_id / user_id propagation.
-            # Attaching them again on the model would emit duplicate spans.
-            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled, attach_tracing=False),
+            "model": chat_model,
             "tools": final_tools,
             "middleware": bound_middlewares,
             "system_prompt": apply_prompt_template(
@@ -573,17 +597,17 @@ class DeerFlowClient:
         if checkpointer is not None:
             kwargs["checkpointer"] = checkpointer
 
-        self._agent = create_agent(**kwargs)
-        self._agent_config_key = key
-        self._effective_model_name = model_name
+        graph = create_agent(**kwargs)
+        self._agent_cache = _CachedAgent(key, graph, model_name)
         logger.info("Agent created: agent_name=%s, model=%s, thinking=%s", self._agent_name, model_name, thinking_enabled)
+        return graph, model_name
 
     @staticmethod
-    def _get_tools(*, model_name: str | None, subagent_enabled: bool, mcp_plugins: list[str] | None = None, groups: list[str] | None = None):
+    def _get_tools(*, model_name: str | None, subagent_enabled: bool, chat_model: BaseChatModel, mcp_plugins: list[str] | None = None, groups: list[str] | None = None):
         """Lazy import to avoid circular dependency at module level."""
         from deerflow.tools import get_available_tools
 
-        return get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, mcp_plugins=mcp_plugins, groups=groups)
+        return get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, mcp_plugins=mcp_plugins, groups=groups, chat_model=chat_model)
 
     @staticmethod
     def _serialize_tool_calls(tool_calls) -> list[dict]:
@@ -812,12 +836,10 @@ class DeerFlowClient:
         """Get the complete materialized checkpoint history for a thread."""
         checkpointer = self._get_thread_checkpointer()
         config = self._get_runnable_config(thread_id)
-        self._ensure_agent(config)
-        if self._agent is None:
-            raise RuntimeError("Agent was not initialized")
+        agent, _ = self._ensure_agent(config)
 
         accessor = CheckpointStateAccessor.bind(
-            self._agent,
+            agent,
             checkpointer,
             mode=self._checkpoint_channel_mode,
         )
@@ -873,6 +895,19 @@ class DeerFlowClient:
         A caller that opened its own scope with ``request_trace_context`` keeps
         that id; otherwise the turn gets a fresh one.
         """
+        yield from self._stream_with_trace(message, thread_id=thread_id, emit_values=True, overrides=kwargs)
+
+    # Keep the built-in implementation identifiable when the public method is replaced.
+    _default_stream = stream
+
+    def _stream_with_trace(
+        self,
+        message: str,
+        *,
+        thread_id: str | None,
+        emit_values: bool,
+        overrides: dict[str, Any],
+    ) -> Generator[StreamEvent, None, None]:
         # Resolve the id once, without mutating the caller's context.
         trace_id = get_current_trace_id() or generate_trace_id()
 
@@ -885,7 +920,7 @@ class DeerFlowClient:
         # Per-step set/reset keeps LangGraph node execution and its log
         # records inside the binding while returning control to the caller
         # with the ContextVar restored.
-        inner = self._stream_turn(message, thread_id=thread_id, **kwargs)
+        inner = self._stream_turn(message, emit_values, thread_id=thread_id, **overrides)
         _EXHAUSTED = object()
         try:
             while True:
@@ -916,6 +951,8 @@ class DeerFlowClient:
     def _stream_turn(
         self,
         message: str,
+        emit_values: bool,
+        /,
         *,
         thread_id: str | None = None,
         **kwargs,
@@ -940,15 +977,15 @@ class DeerFlowClient:
         ``chat()`` already does this for you.
 
         Tool calls and tool results are still emitted once per logical
-        message.  ``values`` events continue to carry full state snapshots
-        after each graph node finishes. On resumed threads, historical messages
-        remain in those snapshots, but are not emitted again as per-message
-        events or counted in this turn's usage. AI text already delivered via
-        the ``messages`` stream is **not** re-synthesized from the snapshot to
-        avoid duplicate deliveries. When a later node replaces a delivered AI
-        message under the same id and appends to its text (a guard's stop
-        notice), only the appended text is emitted, as one more delta for that
-        id; new ``additional_kwargs`` arrive as a metadata-only follow-up.
+        message. When ``emit_values`` is enabled, ``values`` events carry full
+        state snapshots after each graph node finishes. On resumed threads,
+        historical messages remain in those snapshots, but are not emitted again
+        as per-message events or counted in this turn's usage. AI text already
+        delivered via the ``messages`` stream is **not** re-synthesized from the
+        snapshot to avoid duplicate deliveries. When a later node appends text
+        to an already-delivered AI message under the same id (a guard's stop
+        notice), only that text is emitted as a new delta for the same id.
+        New ``additional_kwargs`` arrive as a metadata-only follow-up.
 
         Why not reuse Gateway's ``run_agent``?
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -984,6 +1021,7 @@ class DeerFlowClient:
 
         Args:
             message: User message text.
+            emit_values: Serialize and emit full state snapshots for stream consumers.
             thread_id: Thread ID for conversation context. Auto-generated if None.
             **kwargs: Override client defaults (model_name, thinking_enabled,
                 plan_mode, subagent_enabled, recursion_limit). Trusted embedded
@@ -1056,9 +1094,8 @@ class DeerFlowClient:
         # survives worker/isolated-loop boundaries and matches the identity
         # used by prompt assembly and the agent cache.
         context["user_id"] = effective_user_id
-        self._ensure_agent(config, context=context)
+        agent, effective_model_name = self._ensure_agent(config, context=context)
         configurable = config.get("configurable") or {}
-        effective_model_name = getattr(self, "_effective_model_name", None)
         inject_langfuse_metadata(
             config,
             thread_id=thread_id,
@@ -1141,7 +1178,7 @@ class DeerFlowClient:
             sent.update(delta)
             return delta
 
-        agent_items = self._agent.stream(
+        agent_items = agent.stream(
             state,
             config=config,
             context=context,
@@ -1301,25 +1338,24 @@ class DeerFlowClient:
                 elif isinstance(msg, ToolMessage):
                     yield self._tool_message_event(msg)
 
-            # Emit a values event for each state snapshot
-            yield StreamEvent(
-                type="values",
-                data={
-                    "title": chunk.get("title"),
-                    "summary_text": chunk.get("summary_text"),
-                    "messages": [self._serialize_message(m) for m in messages],
-                    "artifacts": chunk.get("artifacts", []),
-                },
-            )
+            if emit_values:
+                yield StreamEvent(
+                    type="values",
+                    data={
+                        "title": chunk.get("title"),
+                        "summary_text": chunk.get("summary_text"),
+                        "messages": [self._serialize_message(m) for m in messages],
+                        "artifacts": chunk.get("artifacts", []),
+                    },
+                )
 
         yield StreamEvent(type="end", data={"usage": cumulative_usage})
 
     def chat(self, message: str, *, thread_id: str | None = None, **kwargs) -> str:
         """Send a message and return the final text response.
 
-        Convenience wrapper around :meth:`stream` that accumulates delta
-        ``messages-tuple`` events per ``id`` and returns the text of the
-        **last** AI message to complete.  Intermediate AI messages (e.g.
+        Accumulates ``messages-tuple`` deltas per ``id`` and returns the text of
+        the **last** AI message to complete. Intermediate AI messages (e.g.
         planner drafts) are discarded — only the final id's accumulated
         text is returned.  Use :meth:`stream` directly if you need every
         delta as it arrives.
@@ -1333,8 +1369,15 @@ class DeerFlowClient:
             The accumulated text of the last AI message, or empty string
             if no AI text was produced.
         """
+        stream = self.stream
+        # Callable wrappers can forward method attributes, including __class__.
+        if type(stream) is MethodType and stream.__self__ is self and stream.__func__ is DeerFlowClient._default_stream:
+            events = self._stream_with_trace(message, thread_id=thread_id, emit_values=False, overrides=kwargs)
+        else:
+            events = stream(message, thread_id=thread_id, **kwargs)
+
         answer = _AIMessageAccumulator()
-        for event in self.stream(message, thread_id=thread_id, **kwargs):
+        for event in events:
             answer.observe(event)
         return answer.answer()
 

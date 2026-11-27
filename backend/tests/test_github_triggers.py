@@ -14,20 +14,36 @@ from deerflow.config.agents_config import GitHubTriggerConfig
 BOT = "coding-llm-gateway"
 
 
-def _pr_payload(action: str = "opened", author: str = "zhfeng") -> dict:
+def _pr_payload(
+    action: str = "opened",
+    author: str = "zhfeng",
+    author_association: str | None = "OWNER",
+) -> dict:
+    pr: dict[str, object] = {"number": 7, "user": {"login": author}}
+    if author_association is not None:
+        pr["author_association"] = author_association
     return {
         "action": action,
-        "pull_request": {"number": 7, "user": {"login": author}},
+        "pull_request": pr,
         "repository": {"full_name": "a/b"},
+        "sender": {"login": author},
     }
 
 
-def _comment_payload(body: str, author: str = "zhfeng") -> dict:
+def _comment_payload(
+    body: str,
+    author: str = "zhfeng",
+    author_association: str | None = "OWNER",
+) -> dict:
+    comment: dict[str, object] = {"body": body, "user": {"login": author}}
+    if author_association is not None:
+        comment["author_association"] = author_association
     return {
         "action": "created",
         "issue": {"number": 11},
-        "comment": {"body": body, "user": {"login": author}},
+        "comment": comment,
         "repository": {"full_name": "a/b"},
+        "sender": {"login": author},
     }
 
 
@@ -254,8 +270,9 @@ def test_enabling_issues_via_override() -> None:
         "issues",
         {
             "action": "opened",
-            "issue": {"number": 1, "user": {"login": "x"}},
+            "issue": {"number": 1, "user": {"login": "x"}, "author_association": "OWNER"},
             "repository": {"full_name": "a/b"},
+            "sender": {"login": "x"},
         },
         trigger,
         BOT,
@@ -274,8 +291,9 @@ def test_issues_require_mention_fires_when_body_mentions_bot() -> None:
         "issues",
         {
             "action": "opened",
-            "issue": {"number": 1, "user": {"login": "alice"}, "body": f"Hey @{BOT} please fix this"},
+            "issue": {"number": 1, "user": {"login": "alice"}, "author_association": "OWNER", "body": f"Hey @{BOT} please fix this"},
             "repository": {"full_name": "a/b"},
+            "sender": {"login": "alice"},
         },
         trigger,
         BOT,
@@ -290,8 +308,9 @@ def test_issues_require_mention_skips_without_mention() -> None:
         "issues",
         {
             "action": "opened",
-            "issue": {"number": 1, "user": {"login": "alice"}, "body": "just a normal bug report"},
+            "issue": {"number": 1, "user": {"login": "alice"}, "author_association": "OWNER", "body": "just a normal bug report"},
             "repository": {"full_name": "a/b"},
+            "sender": {"login": "alice"},
         },
         trigger,
         BOT,
@@ -309,6 +328,7 @@ def test_issues_allow_authors_bypasses_mention() -> None:
             "action": "opened",
             "issue": {"number": 1, "user": {"login": "zhfeng"}, "body": "no mention here"},
             "repository": {"full_name": "a/b"},
+            "sender": {"login": "zhfeng"},
         },
         trigger,
         BOT,
@@ -324,8 +344,9 @@ def test_pull_request_require_mention_scans_pr_body() -> None:
         "pull_request",
         {
             "action": "opened",
-            "pull_request": {"number": 3, "user": {"login": "bob"}, "body": f"@{BOT} can you finish this?"},
+            "pull_request": {"number": 3, "user": {"login": "bob"}, "author_association": "COLLABORATOR", "body": f"@{BOT} can you finish this?"},
             "repository": {"full_name": "a/b"},
+            "sender": {"login": "bob"},
         },
         trigger,
         BOT,
@@ -348,8 +369,9 @@ def test_pull_request_review_require_mention_fires_on_review_body_mention() -> N
         {
             "action": "submitted",
             "pull_request": {"number": 4},
-            "review": {"user": {"login": "alice"}, "body": f"@{BOT} please look again", "state": "commented"},
+            "review": {"user": {"login": "alice"}, "author_association": "MEMBER", "body": f"@{BOT} please look again", "state": "commented"},
             "repository": {"full_name": "a/b"},
+            "sender": {"login": "alice"},
         },
         trigger,
         BOT,
@@ -365,8 +387,9 @@ def test_pull_request_review_require_mention_skips_without_mention() -> None:
         {
             "action": "submitted",
             "pull_request": {"number": 5},
-            "review": {"user": {"login": "alice"}, "body": "looks good", "state": "approved"},
+            "review": {"user": {"login": "alice"}, "author_association": "MEMBER", "body": "looks good", "state": "approved"},
             "repository": {"full_name": "a/b"},
+            "sender": {"login": "alice"},
         },
         trigger,
         BOT,
@@ -390,8 +413,9 @@ def test_mention_prefix_does_not_match_longer_login() -> None:
         {
             "action": "created",
             "issue": {"number": 1, "user": {"login": "alice"}},
-            "comment": {"body": "Hey @deerflow-bot please review", "user": {"login": "alice"}},
+            "comment": {"body": "Hey @deerflow-bot please review", "user": {"login": "alice"}, "author_association": "OWNER"},
             "repository": {"full_name": "a/b"},
+            "sender": {"login": "alice"},
         },
         trigger,
         "deerflow",
@@ -409,8 +433,9 @@ def test_mention_inside_email_does_not_match() -> None:
         {
             "action": "created",
             "issue": {"number": 1, "user": {"login": "alice"}},
-            "comment": {"body": f"contact noreply@{BOT}.example to retrigger", "user": {"login": "alice"}},
+            "comment": {"body": f"contact noreply@{BOT}.example to retrigger", "user": {"login": "alice"}, "author_association": "OWNER"},
             "repository": {"full_name": "a/b"},
+            "sender": {"login": "alice"},
         },
         trigger,
         BOT,
@@ -428,8 +453,9 @@ def test_mention_at_start_of_body_matches() -> None:
         {
             "action": "created",
             "issue": {"number": 1, "user": {"login": "alice"}},
-            "comment": {"body": f"@{BOT} ping", "user": {"login": "alice"}},
+            "comment": {"body": f"@{BOT} ping", "user": {"login": "alice"}, "author_association": "OWNER"},
             "repository": {"full_name": "a/b"},
+            "sender": {"login": "alice"},
         },
         trigger,
         BOT,
@@ -447,10 +473,209 @@ def test_mention_followed_by_punctuation_matches() -> None:
             {
                 "action": "created",
                 "issue": {"number": 1, "user": {"login": "alice"}},
-                "comment": {"body": body, "user": {"login": "alice"}},
+                "comment": {"body": body, "user": {"login": "alice"}, "author_association": "OWNER"},
                 "repository": {"full_name": "a/b"},
+                "sender": {"login": "alice"},
             },
             trigger,
             BOT,
         )
         assert fire is True, f"expected mention to match in: {body!r}"
+
+
+# ---------------------------------------------------------------------------
+# Author authorization (fail-closed by default)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "association",
+    ["NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "MANNEQUIN", None, ""],
+)
+def test_issue_comment_rejects_untrusted_author_even_with_mention(association: str | None) -> None:
+    trigger = _resolve("issue_comment")
+    fire, reason = event_should_fire(
+        "issue_comment",
+        _comment_payload(f"@{BOT} run this", author="outsider", author_association=association),
+        trigger,
+        BOT,
+    )
+    assert fire is False
+    assert "unauthorized_author" in reason
+
+
+@pytest.mark.parametrize("association", ["OWNER", "MEMBER", "COLLABORATOR"])
+def test_issue_comment_allows_trusted_associations_with_mention(association: str) -> None:
+    trigger = _resolve("issue_comment")
+    fire, _ = event_should_fire(
+        "issue_comment",
+        _comment_payload(f"@{BOT} please review", author="maintainer", author_association=association),
+        trigger,
+        BOT,
+    )
+    assert fire is True
+
+
+@pytest.mark.parametrize("event, object_key", [("issues", "issue"), ("pull_request", "pull_request"), ("pull_request_review", "review"), ("pull_request_review_comment", "comment")])
+def test_other_authored_events_reject_untrusted_authors_by_default(event: str, object_key: str) -> None:
+    trigger = _resolve(event, GitHubTriggerConfig(require_mention=False))
+    payload = {
+        "action": "opened" if event in ("issues", "pull_request") else "created",
+        object_key: {"number": 1, "user": {"login": "outsider"}, "author_association": "NONE", "body": f"@{BOT}"},
+        "repository": {"full_name": "a/b"},
+        "sender": {"login": "outsider"},
+    }
+    fire, reason = event_should_fire(event, payload, trigger, BOT)
+    assert fire is False
+    assert "unauthorized_author" in reason
+
+
+@pytest.mark.parametrize("event, object_key", [("issue_comment", "comment"), ("issues", "issue"), ("pull_request", "pull_request")])
+def test_sender_mismatch_does_not_inherit_object_author_association(event: str, object_key: str) -> None:
+    trigger = _resolve(event, GitHubTriggerConfig(actions=["edited"], require_mention=False))
+    payload = {
+        "action": "edited",
+        object_key: {"number": 1, "user": {"login": "repo-owner"}, "author_association": "OWNER", "body": f"@{BOT}"},
+        "repository": {"full_name": "a/b"},
+        "sender": {"login": "outsider"},
+    }
+    fire, reason = event_should_fire(event, payload, trigger, BOT)
+    assert fire is False
+    assert "unauthorized_author" in reason
+
+
+@pytest.mark.parametrize("malformed_sender", [None, {}, {"login": ""}, {"login": "   "}, "not-a-dict"])
+def test_malformed_sender_fails_closed_even_when_object_is_owner(malformed_sender: object) -> None:
+    trigger = _resolve("issue_comment")
+    payload = {
+        "action": "created",
+        "issue": {"number": 1},
+        "comment": {"body": f"@{BOT} hi", "user": {"login": "repo-owner"}, "author_association": "OWNER"},
+        "repository": {"full_name": "a/b"},
+        "sender": malformed_sender,
+    }
+    fire, reason = event_should_fire("issue_comment", payload, trigger, BOT)
+    assert fire is False
+    assert "unauthorized_author" in reason
+
+
+def test_missing_sender_fails_closed_even_when_object_is_owner_or_allowlisted() -> None:
+    trigger = _resolve("issue_comment", GitHubTriggerConfig(require_mention=True, allow_authors=["repo-owner"]))
+    payload = {
+        "action": "created",
+        "issue": {"number": 1},
+        "comment": {"body": f"@{BOT} hi", "user": {"login": "repo-owner"}, "author_association": "OWNER"},
+        "repository": {"full_name": "a/b"},
+    }
+    fire, reason = event_should_fire("issue_comment", payload, trigger, BOT)
+    assert fire is False
+    assert "unauthorized_author" in reason
+
+
+def test_resolved_trigger_deep_copies_default_lists() -> None:
+    first = _resolve("issue_comment")
+    second = _resolve("issue_comment")
+    first.allow_author_associations.append("NONE")
+    assert second.allow_author_associations == ["OWNER", "MEMBER", "COLLABORATOR"]
+    assert DEFAULT_TRIGGERS["issue_comment"].allow_author_associations == ["OWNER", "MEMBER", "COLLABORATOR"]  # type: ignore[union-attr]
+
+
+def test_empty_allow_author_associations_requires_explicit_allow_authors() -> None:
+    trigger = _resolve("issue_comment", GitHubTriggerConfig(require_mention=True, allow_authors=["alice"], allow_author_associations=[]))
+    fire_owner, reason = event_should_fire(
+        "issue_comment",
+        _comment_payload(f"@{BOT} please review", author="bob", author_association="OWNER"),
+        trigger,
+        BOT,
+    )
+    assert fire_owner is False
+    assert "unauthorized_author" in reason
+
+    fire_listed, _ = event_should_fire(
+        "issue_comment",
+        _comment_payload("direct command", author="alice", author_association="NONE"),
+        trigger,
+        BOT,
+    )
+    assert fire_listed is True
+
+
+def test_custom_allow_author_associations_can_exclude_org_members() -> None:
+    trigger = _resolve("issue_comment", GitHubTriggerConfig(allow_author_associations=["OWNER", "COLLABORATOR"]))
+    fire_member, reason = event_should_fire(
+        "issue_comment",
+        _comment_payload(f"@{BOT} run", author="org-member", author_association="MEMBER"),
+        trigger,
+        BOT,
+    )
+    assert fire_member is False
+    assert "unauthorized_author" in reason
+
+    fire_collab, _ = event_should_fire(
+        "issue_comment",
+        _comment_payload(f"@{BOT} run", author="collab", author_association="COLLABORATOR"),
+        trigger,
+        BOT,
+    )
+    assert fire_collab is True
+
+
+def test_explicit_opt_in_to_none_association_allows_external_mention() -> None:
+    trigger = _resolve("issue_comment", GitHubTriggerConfig(allow_author_associations=["OWNER", "NONE"]))
+    fire, _ = event_should_fire(
+        "issue_comment",
+        _comment_payload(f"@{BOT} triage this", author="outsider", author_association="NONE"),
+        trigger,
+        BOT,
+    )
+    assert fire is True
+
+
+def test_allow_authors_with_bypass_mention_disabled_still_requires_mention() -> None:
+    trigger = _resolve(
+        "issue_comment",
+        GitHubTriggerConfig(
+            require_mention=True,
+            allow_authors=["alice", "coderabbitai[bot]"],
+            allow_authors_bypass_mention=False,
+            allow_author_associations=[],
+        ),
+    )
+    fire_no_mention, reason_no_mention = event_should_fire(
+        "issue_comment",
+        _comment_payload("ordinary review discussion", author="alice", author_association="MEMBER"),
+        trigger,
+        BOT,
+    )
+    assert fire_no_mention is False
+    assert "mention required" in reason_no_mention
+
+    fire_with_mention, _ = event_should_fire(
+        "issue_comment",
+        _comment_payload(f"@{BOT} please check this", author="coderabbitai[bot]", author_association="NONE"),
+        trigger,
+        BOT,
+    )
+    assert fire_with_mention is True
+
+    fire_unlisted_member, reason_unlisted = event_should_fire(
+        "issue_comment",
+        _comment_payload(f"@{BOT} please check this", author="bob", author_association="MEMBER"),
+        trigger,
+        BOT,
+    )
+    assert fire_unlisted_member is False
+    assert "unauthorized_author" in reason_unlisted
+
+
+def test_unauthorized_reason_escapes_control_characters_in_sender_login() -> None:
+    trigger = _resolve("issue_comment")
+    fire, reason = event_should_fire(
+        "issue_comment",
+        _comment_payload(f"@{BOT} hi", author="bad\nactor", author_association="NONE"),
+        trigger,
+        BOT,
+    )
+    assert fire is False
+    assert "\n" not in reason
+    assert "unauthorized_author" in reason

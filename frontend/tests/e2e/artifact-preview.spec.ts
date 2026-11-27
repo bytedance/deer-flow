@@ -19,6 +19,7 @@ const PRESENTED_THREAD_ID = "00000000-0000-0000-0000-000000003123";
 const PERSISTED_PANEL_THREAD_ID = "00000000-0000-0000-0000-000000003125";
 const PDF_THREAD_ID = "00000000-0000-0000-0000-000000003124";
 const LARGE_JSON_THREAD_ID = "00000000-0000-0000-0000-000000003126";
+const REJECTED_PRESENT_THREAD_ID = "00000000-0000-0000-0000-000000003127";
 
 function writeFileMessages({
   path = ARTIFACT_PATH,
@@ -732,6 +733,85 @@ test.describe("Artifact preview stability", () => {
     await expect(
       page.locator("#artifacts").getByText("Presented Report"),
     ).toBeVisible();
+  });
+
+  test("offers no file the backend rejected in the card or the panel", async ({
+    page,
+  }) => {
+    // The backend rejects a present_files call whose path is outside the
+    // outputs directory, and the agent then presents the file it wrote.
+    const [human, presented] = presentFilesMessages();
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: REJECTED_PRESENT_THREAD_ID,
+          title: "Rejected present_files call",
+          messages: [
+            human,
+            {
+              type: "ai",
+              id: "msg-ai-present-rejected",
+              content: "",
+              tool_calls: [
+                {
+                  id: "present-file-rejected",
+                  name: "present_files",
+                  args: { filepaths: ["/mnt/user-data/uploads/secret.md"] },
+                },
+              ],
+            },
+            {
+              type: "tool",
+              id: "msg-tool-present-rejected",
+              name: "present_files",
+              tool_call_id: "present-file-rejected",
+              content:
+                "Error: Only files in /mnt/user-data/outputs can be presented: /mnt/user-data/uploads/secret.md",
+              additional_kwargs: { deerflow_tool_meta: { status: "error" } },
+            },
+            presented,
+            {
+              type: "tool",
+              id: "msg-tool-present-file",
+              name: "present_files",
+              tool_call_id: "present-file-artifact",
+              content: "Successfully presented files",
+            },
+          ],
+          artifacts: [],
+        },
+      ],
+    });
+    await page.route(
+      `**/api/threads/${REJECTED_PRESENT_THREAD_ID}/artifacts/mnt/user-data/outputs/presented-report.md`,
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "text/markdown",
+          body: "# Presented Report\n\nGenerated content",
+        }),
+    );
+
+    await page.goto(`/workspace/chats/${REJECTED_PRESENT_THREAD_ID}`);
+
+    const presentedCard = page.getByRole("button", {
+      name: /presented-report\.md/,
+    });
+    await expect(presentedCard.first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole("button", { name: /secret\.md/ })).toHaveCount(
+      0,
+    );
+
+    await page.getByText("presented-report.md").first().click();
+    const artifactsPanel = page.locator("#artifacts");
+    await expect(artifactsPanel.getByText("Presented Report")).toBeVisible();
+    await artifactsPanel.getByRole("combobox").click();
+    await expect(
+      page.getByRole("option", { name: "presented-report.md" }),
+    ).toBeVisible();
+    await expect(page.getByRole("option", { name: /secret\.md/ })).toHaveCount(
+      0,
+    );
   });
 
   test("renders a PDF in an unsandboxed iframe so Chromium's viewer can display it (urlOfArtifact path)", async ({

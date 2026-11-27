@@ -81,7 +81,7 @@ test.describe("custom-agent knowledge scope", () => {
     await page
       .getByPlaceholder(/how can i assist you/i)
       .fill("Find the policy");
-    await page.getByRole("button", { name: "Submit" }).click();
+    await page.getByRole("button", { name: "Send", exact: true }).click();
     await expect.poll(() => streamBody).toBeDefined();
 
     expect(streamBody).toMatchObject({
@@ -170,7 +170,7 @@ test.describe("custom-agent knowledge scope", () => {
     await page
       .getByPlaceholder(/how can i assist you/i)
       .fill("Find the policy");
-    await page.getByRole("button", { name: "Submit" }).click();
+    await page.getByRole("button", { name: "Send", exact: true }).click();
     await expect.poll(() => streamBody).toBeDefined();
 
     expect(streamBody).toMatchObject({

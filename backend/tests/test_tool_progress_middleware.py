@@ -333,13 +333,20 @@ def test_recoverable_errors_stay_warned_indefinitely():
     assert state.consecutive_problems == 10
 
 
-def test_recoverable_error_re_injects_hint_past_escalation():
+@pytest.mark.parametrize(
+    ("error_type", "action", "hint_text"),
+    [
+        ("no_results", "rewrite_query", "rephrasing your search"),
+        ("capacity", "retry_later", "try again later"),
+    ],
+)
+def test_recoverable_error_re_injects_hint_past_escalation(error_type, action, hint_text):
     # After crossing threshold+escalation for a recoverable error, each additional
     # problem call should still queue a hint.
     mw = _make_mw(stagnation_threshold=2, warn_escalation_count=1, inject_assessment=True)
     rt = _make_runtime()
     req = _make_tool_request(runtime=rt)
-    error_msg = _make_error_message()
+    error_msg = _make_error_message(error_type=error_type, recommended_next_action=action)
 
     def handler(_r):
         return error_msg
@@ -353,7 +360,7 @@ def test_recoverable_error_re_injects_hint_past_escalation():
     # not just the initial WARNED hint at call 2.
     hints = mw._drain_pending(rt)
     assert len(hints) >= 2
-    assert all("PROGRESS HINT" in h for h in hints)
+    assert all("PROGRESS HINT" in hint and hint_text in hint for hint in hints)
 
 
 # ---------------------------------------------------------------------------

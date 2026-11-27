@@ -63,6 +63,9 @@ make test-blocking-io
   state or a missing cleanup receipt quarantines the sandbox.
 - **Cleanup markers support cooperative cleanup.** They do not isolate hostile
   code.
+- **Cleanup interrupts the marked process groups before it terminates them.**
+  The shell exported the marker itself, so its own environ lacks it; killing
+  only the children first lets it run the rest of the command.
 - **Broker logs carry argument count, exit code and duration**, never argument
   values.
 - **`read_file` returns content or an `Error: ...` string and never raises.** A
@@ -74,6 +77,13 @@ make test-blocking-io
   egress. Reject a host that the policy denies before any DNS lookup.
 - **An approval never replays a tool call.** Subagent and non-interactive runs
   deny without asking.
+- **Denial recording is bounded and best effort.** The sidecar's only writable
+  space is a 16 MiB tmpfs, and a sandbox can deny unlimited unique hosts, so
+  superseded and resolved events are pruned inside the recording transaction.
+  Retention orders resolved rows by when the decision was applied and reserves
+  room for pending approvals. A surfaced undecided row is a card the user is
+  looking at and survives pruning, and a policy-database failure still returns
+  a denial rather than closing the connection.
 - **Discovery and enumeration are read-only**, also when the policy or network
   mode does not match. Only the provider replaces a sandbox, under the teardown
   reservation and the cross-instance lease. The sandbox, its sidecar and both

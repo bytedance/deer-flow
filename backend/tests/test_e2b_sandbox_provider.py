@@ -4566,6 +4566,20 @@ def test_grep_single_file_path_with_matching_glob():
 # Capacity enforcement tests (#4339)
 
 
+def test_capacity_startup_failure_closes_the_ownership_store(monkeypatch):
+    from deerflow.community.e2b_sandbox import e2b_sandbox_provider as provider
+
+    monkeypatch.setattr(provider.E2BSandboxProvider, "_load_config", lambda self: {"replicas": 1, "overflow_policy": "wait"})
+    ownership = MagicMock()
+    monkeypatch.setattr(provider, "make_sandbox_ownership_store", lambda *args, **kwargs: ownership)
+    capacity = MagicMock(side_effect=CapacityBackendError("discovery failed"))
+    monkeypatch.setattr(provider, "make_e2b_capacity_store", capacity)
+    with pytest.raises(CapacityBackendError, match="discovery failed"):
+        provider.E2BSandboxProvider()
+    capacity.assert_called_once()
+    ownership.close.assert_called_once()
+
+
 def test_deployment_capacity_reserves_commits_and_rejects_globally(monkeypatch) -> None:
     gateway_a = _make_provider(replicas=1, overflow_policy="reject")
     gateway_b = _make_provider(replicas=1, overflow_policy="reject")

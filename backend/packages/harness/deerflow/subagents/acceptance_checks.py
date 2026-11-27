@@ -57,7 +57,7 @@ to the runtime hard gate so the model never conflates deterministic
 execution evidence with task acceptance.
 
 All functions are pure (sandbox IO only through the injected reader/prober);
-the async caller offloads the whole check with ``asyncio.to_thread``.
+the async caller offloads the whole check and drains it on cancellation.
 """
 
 from __future__ import annotations
@@ -460,7 +460,12 @@ def _probe_file_size(runtime: Any, resolved: str, thread_data: Mapping[str, Any]
     try:
         from deerflow.sandbox.tools import _resolve_local_read_path, ensure_sandbox_initialized, is_local_sandbox
 
+        sandbox = None if is_local_sandbox(runtime) else ensure_sandbox_initialized(runtime)
         if is_local_sandbox(runtime):
+            # Lazy acquisition followed a lexical scope check. Apply the
+            # same canonical scope check as for an initialized local sandbox.
+            if sandbox is not None and _resolve_scoped_path(resolved, thread_data, resolve_symlinks=True) is None:
+                return None
             host_path = _resolve_local_read_path(resolved, thread_data)
             if host_path == resolved:
                 # A mount-mapped virtual path: only the provider's mount
@@ -468,7 +473,7 @@ def _probe_file_size(runtime: Any, resolved: str, thread_data: Mapping[str, Any]
                 return None
             stat_result = os.stat(host_path)
             return stat_result.st_size if stat.S_ISREG(stat_result.st_mode) else None
-        sandbox = ensure_sandbox_initialized(runtime)
+        assert sandbox is not None
         root = "/".join(resolved.split("/")[:4])  # the /mnt/user-data/{workspace|outputs} mount root
         output = sandbox.execute_command(
             f"/usr/bin/env -i /bin/sh -c {shlex.quote(_SIZE_PROBE_INNER_SCRIPT)} probe {shlex.quote(resolved)} {shlex.quote(root)}",
@@ -570,8 +575,19 @@ _JSON_READ_INNER_SCRIPT = (
 )
 
 
-def _read_bounded_file_content(runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None, *, deadline: float | None = None) -> bytes | None:
-    """Read up to the cap plus one byte to detect growth; return None if completeness is uncertain."""
+def _read_bounded_file_content(
+    runtime: Any,
+    resolved: str,
+    thread_data: Mapping[str, Any] | None,
+    *,
+    deadline: float | None = None,
+    admission_denied: bool | None = None,
+) -> bytes | None:
+    """Read up to the cap plus one byte to detect growth; return None if completeness is uncertain.
+
+    ``admission_denied=False`` carries an admission decision already made on
+    the owning event loop; ``None`` rechecks the live grant here (sync path).
+    """
     from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
     from deerflow.sandbox.tools import _resolve_local_read_path, ensure_sandbox_initialized, is_local_sandbox
 
@@ -599,7 +615,8 @@ def _read_bounded_file_content(runtime: Any, resolved: str, thread_data: Mapping
             return None
         return payload[:-4] if payload.endswith(b"\n000") else None
     # Reuse live sandbox authorization; persisted local sandbox IDs cannot bypass revoked permissions.
-    authorize_sandbox_execution(context=getattr(runtime, "context", None) or {}, app_config=safe_app_config())
+    if admission_denied is None:
+        authorize_sandbox_execution(context=getattr(runtime, "context", None) or {}, app_config=safe_app_config())
     host_path = _resolve_local_read_path(resolved, thread_data)
     if host_path == resolved:
         return None
@@ -629,7 +646,7 @@ def _reject_json_constant(value: str) -> None:
     raise _NonStandardJSONConstant(value)
 
 
-def _check_json_file(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None, probed_size: int) -> AcceptanceLeaf:
+def _check_json_file(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None, probed_size: int, *, admission_denied: bool | None = None) -> AcceptanceLeaf:
     """Check JSON syntax only for complete UTF-8 documents within the read cap."""
     from deerflow.sandbox.exceptions import SandboxError, SandboxFileNotFoundError
 
@@ -637,7 +654,7 @@ def _check_json_file(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_d
         base["detail"] = f"JSON file exceeds {_FILE_CONTENT_READ_CAP_BYTES}-byte read cap; content not read"
         return base
     try:
-        content = _read_bounded_file_content(runtime, resolved, thread_data)
+        content = _read_bounded_file_content(runtime, resolved, thread_data, admission_denied=admission_denied)
     except (FileNotFoundError, SandboxFileNotFoundError):
         base["checked"] = True
         base["detail"] = "file does not exist"
@@ -683,14 +700,14 @@ def _parse_csv_columns(criterion: str) -> list[str] | None:
     return columns if len(set(columns)) == len(columns) else None
 
 
-def _check_csv_header(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None, probed_size: int, columns: list[str]) -> AcceptanceLeaf:
+def _check_csv_header(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None, probed_size: int, columns: list[str], *, admission_denied: bool | None = None) -> AcceptanceLeaf:
     """Check only the first CSV record from a bounded prefix, never the data rows."""
     from deerflow.sandbox.exceptions import SandboxError, SandboxFileNotFoundError
     from deerflow.sandbox.tools import is_local_sandbox
 
     deadline = time.monotonic() + 5 if is_local_sandbox(runtime) else None
     try:
-        content = _read_bounded_file_content(runtime, resolved, thread_data, deadline=deadline)
+        content = _read_bounded_file_content(runtime, resolved, thread_data, deadline=deadline, admission_denied=admission_denied)
     except (FileNotFoundError, SandboxFileNotFoundError):
         base["checked"] = True
         base["detail"] = "file does not exist"
@@ -771,7 +788,16 @@ def _check_file_leaf(
     size_prober: Callable[[Any, str, Mapping[str, Any] | None], int | None],
     readable_prober: Callable[[Any, str, Mapping[str, Any] | None], bool | None],
     csv_columns: list[str] | None = None,
+    admission_denied: bool | None = None,
 ) -> AcceptanceLeaf:
+    """Check one file criterion.
+
+    ``admission_denied`` carries a ``sandbox:execute`` decision made by the
+    async entry point (``check_acceptance_criteria_async``): ``True`` denies
+    without probing, ``False`` means already authorized, and ``None`` (the
+    synchronous default) runs the live gate here — a persisted local sandbox
+    id never retains a grant.
+    """
     criterion_path = path.strip()
     # Lazy imports: the sandbox helpers pull the provider stack, and this
     # package is imported in cycles with deerflow.tools (same pattern as
@@ -783,10 +809,14 @@ def _check_file_leaf(
     if family == "file_csv_columns" and csv_columns is None:
         base["detail"] = "csv-columns requires a nonempty JSON array of unique nonempty strings"
         return base
-    if family in ("file_json_valid", "file_csv_columns") and is_local_sandbox(runtime):
+    if admission_denied is True:
+        base["detail"] = "sandbox access denied; file unverified"
+        return base
+    local = is_local_sandbox(runtime)
+    if local and admission_denied is None:
         from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
 
-        # Authorize before canonicalization or metadata probes can disclose file existence.
+        # Authorize before canonicalization or metadata probes.
         try:
             authorize_sandbox_execution(context=getattr(runtime, "context", None) or {}, app_config=safe_app_config())
         except SandboxError:
@@ -796,7 +826,7 @@ def _check_file_leaf(
     # Symlink escapes are a local-sandbox concern (host-visible links); remote
     # providers resolve paths inside the sandbox where the parent cannot
     # canonicalize, so the check stays lexical there.
-    resolved = _resolve_scoped_path(criterion_path, thread_data, resolve_symlinks=is_local_sandbox(runtime))
+    resolved = _resolve_scoped_path(criterion_path, thread_data, resolve_symlinks=local)
     if resolved is None:
         base["detail"] = "path is outside the shared thread workspace" if thread_data else "shared thread workspace unavailable"
         return base
@@ -814,9 +844,9 @@ def _check_file_leaf(
         base["detail"] = "file size could not be established by a bounded probe; content not read"
         return base
     if family == "file_csv_columns" and csv_columns is not None:
-        return _check_csv_header(base, runtime, resolved, thread_data, probed_size, csv_columns)
+        return _check_csv_header(base, runtime, resolved, thread_data, probed_size, csv_columns, admission_denied=admission_denied)
     if family == "file_json_valid":
-        return _check_json_file(base, runtime, resolved, thread_data, probed_size)
+        return _check_json_file(base, runtime, resolved, thread_data, probed_size, admission_denied=admission_denied)
     if probed_size > _FILE_CONTENT_READ_CAP_BYTES:
         # Large deliverable: the size probe proved the file exists, is
         # regular, and is non-empty (size > cap > 0) — answering the
@@ -857,6 +887,10 @@ def _check_file_leaf(
     except (OSError, SandboxError) as exc:
         base["detail"] = _bound_detail(f"read failed: {exc}")
         return base
+    # The probes above may have lazily initialized the parent's sandbox, so the
+    # earlier classification can be stale: recheck before interpreting the
+    # provider result. A local read returns genuine content even when it starts
+    # with ``Error:``; only a remote provider encodes failures as text.
     if not is_local_sandbox(runtime) and content.startswith(_PROVIDER_ERROR_PREFIX):
         # A missing/inaccessible file on a REMOTE provider comes back as an
         # error string, not an exception — the check ran and the file cannot
@@ -2161,13 +2195,20 @@ def check_acceptance_criteria(
     content_reader: Callable[[Any, str], str] | None = None,
     size_prober: Callable[[Any, str, Mapping[str, Any] | None], int | None] | None = None,
     readable_prober: Callable[[Any, str, Mapping[str, Any] | None], bool | None] | None = None,
+    admission_denied: bool | None = None,
 ) -> AcceptanceVerdict | None:
     """Check each decidable criterion against recorded execution evidence.
 
     Returns ``None`` when no usable criterion exists (caller stamps nothing).
-    Synchronous: the async call site offloads via ``asyncio.to_thread`` —
-    ``content_reader`` performs sandbox IO. The shared normalizer keeps the
+    The async call site offloads the synchronous sandbox IO and drains it
+    before cleanup. The shared normalizer keeps the
     checked list identical to the persisted and delegated list.
+
+    ``admission_denied`` carries a ``sandbox:execute`` decision already made
+    by an async entry point (``check_acceptance_criteria_async``): ``True``
+    denies every file leaf without probing, ``False`` skips the worker
+    gate, and ``None`` (default) runs the live gate per leaf. The worker never
+    reconstructs a loop-affine authorization provider off the event loop.
     """
     criteria = normalize_acceptance_criteria(acceptance_criteria)
     if not criteria:
@@ -2198,6 +2239,7 @@ def check_acceptance_criteria(
                 size_prober=size_prober,
                 readable_prober=readable_prober,
                 csv_columns=_parse_csv_columns(criterion) if family == "file_csv_columns" else None,
+                admission_denied=admission_denied,
             )
         elif tests_match is not None:
             leaf = _check_tests_passed_leaf(tests_match.group("command"), bash_executions, thread_data)
@@ -2214,6 +2256,58 @@ def check_acceptance_criteria(
         unchecked=[leaf["criterion"] for leaf in leaves if not leaf["checked"]],
         all_hold=all(leaf["checked"] and leaf["holds"] for leaf in leaves),
     )
+
+
+async def check_acceptance_criteria_async(
+    acceptance_criteria: list[str] | None,
+    *,
+    runtime: Any = None,
+    thread_data: Mapping[str, Any] | None = None,
+    bash_executions: list[dict[str, Any]] | None = None,
+) -> AcceptanceVerdict | None:
+    """Async entry point: decide ``sandbox:execute`` on the owning event loop.
+
+    Custom authorization providers may create loop-affine clients in
+    ``__init__``, so the admission decision must be made here — before the
+    checklist is offloaded to a worker — not reconstructed inside the worker.
+    The decision applies even when the sandbox kind is unknown before lazy
+    acquisition. Drain the checklist before the parent releases its sandbox.
+    """
+    from deerflow.authz.sandbox_authz import authorize_sandbox_execution_async, safe_app_config_async
+    from deerflow.sandbox.exceptions import SandboxError
+    from deerflow.sandbox.lease import run_sync_lifecycle_operation
+    from deerflow.sandbox.tools import _SANDBOX_AUTHORIZATION_CHECKED
+
+    criteria = normalize_acceptance_criteria(acceptance_criteria)
+    if not criteria:
+        return None
+
+    admission_denied: bool | None = None
+    token = None
+    if any(parse_file_criterion(criterion) is not None for criterion in criteria):
+        try:
+            await authorize_sandbox_execution_async(
+                context=getattr(runtime, "context", None) or {},
+                app_config=await safe_app_config_async(),
+            )
+        except SandboxError:
+            admission_denied = True
+        else:
+            admission_denied = False
+            token = _SANDBOX_AUTHORIZATION_CHECKED.set(True)
+
+    try:
+        return await run_sync_lifecycle_operation(
+            check_acceptance_criteria,
+            criteria,
+            runtime=runtime,
+            thread_data=thread_data,
+            bash_executions=bash_executions,
+            admission_denied=admission_denied,
+        )
+    finally:
+        if token is not None:
+            _SANDBOX_AUTHORIZATION_CHECKED.reset(token)
 
 
 def validate_acceptance_verdict(value: object) -> AcceptanceVerdict | None:

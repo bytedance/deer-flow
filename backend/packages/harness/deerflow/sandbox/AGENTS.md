@@ -70,11 +70,12 @@ Windows. The portable string assertions do not replace it.
 
 ## Tools
 
+- Agent shell commands require a separate execution provider. The local provider
+  serves workspace file operations.
 - Tool execution depends on operational arguments only. The `description`
   argument is a progress label and may be empty.
-- Pass the local `cmd.exe` workspace as the subprocess working directory. For
-  PowerShell, share the single-quote escaping rule with path mapping and stop
-  execution if `Set-Location` fails.
+- Preserve subprocess working directory handling for direct `LocalSandbox`
+  calls that use the `cmd.exe` fallback.
 - Local writes publish a new file revision atomically and keep symlink targets and
   file metadata. Check write access without truncating the file.
 - Line endings are data. Full reads return the stored endings, and `str_replace`

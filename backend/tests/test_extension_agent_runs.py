@@ -2,7 +2,7 @@
 
 import os
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
@@ -169,6 +169,9 @@ async def runtime(host, monkeypatch, tmp_path):
         return {"messages": [AIMessage(content=f"answer:{prompt}")]}
 
     def factory(*, config):
+        if (settings := getattr(state, "observed_worker_settings", None)) is not None and "run_id" in config["context"]:
+            context = config["context"]
+            settings.append((config["recursion_limit"], context.get("thinking_enabled"), context.get("is_plan_mode")))
         builder = StateGraph(MessagesState)
         builder.add_node("answer", answer)
         builder.set_entry_point("answer")
@@ -790,20 +793,28 @@ async def worker_gateway(runtime, tmp_path):
     from app.gateway.coordination_workers import CoordinationWorkers
     from app.gateway.routers import coordination, thread_runs
     from deerflow.persistence.bootstrap import bootstrap_schema
+    from deerflow.persistence.channel_connections.sql import ChannelConnectionRepository
     from deerflow.persistence.coordination.workers import CoordinationWorkerRepository
     from deerflow.persistence.run import RunRepository
+    from deerflow.persistence.user.model import UserRow
     from deerflow.runtime import RunManager
     from deerflow.runtime.user_context import reset_current_user, set_current_user
 
     runs, state, request, entered, _ = runtime
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'workers.db'}")
+    # Match the Gateway journal mode so concurrent readers do not block worker commits.
+    async with engine.connect() as connection:
+        await connection.exec_driver_sql("PRAGMA journal_mode=WAL")
     await bootstrap_schema(engine, backend="sqlite")
     factory = async_sessionmaker(engine)
+    async with factory.begin() as session:
+        session.add(UserRow(id=str(request.state.user.id), email=request.state.user.email))
     state.run_store = RunRepository(factory)
     await state.run_manager.shutdown()
     state.run_manager = RunManager(store=state.run_store)
-    workers = state.coordination_workers = CoordinationWorkers(CoordinationWorkerRepository(factory))
+    state.coordination_workers = CoordinationWorkers(CoordinationWorkerRepository(factory), state.agent_runs_host, ChannelConnectionRepository(factory))
     state.release_worker = asyncio.Event()
+    state.observed_worker_settings = []
     request.app.include_router(coordination.router)
     request.app.include_router(thread_runs.router)
 
@@ -818,7 +829,7 @@ async def worker_gateway(runtime, tmp_path):
         async with AsyncClient(transport=ASGITransport(app=authenticated), base_url="http://gateway") as client:
             yield client, runs, state, entered, str(request.state.user.id)
     finally:
-        await workers.close()
+        await state.coordination_workers.close()
         await state.run_manager.shutdown()
         await engine.dispose()
 
@@ -834,6 +845,445 @@ async def _wait_for_worker(client, task_id, section, field, value):
             if view[section][field] == value:
                 return view
             await asyncio.sleep(0.05)
+
+
+async def _submit_screenshot(client, url, request_id, text, screenshot, *, mode="queue"):
+    import json
+
+    return await client.post(
+        url,
+        data={"input": json.dumps({"request_id": request_id, "text": text, "mode": mode})},
+        files=[("files", ("screenshot.png", screenshot, "image/png"))],
+    )
+
+
+def _png(color):
+    from io import BytesIO
+
+    from PIL import Image
+
+    output = BytesIO()
+    Image.new("RGB", (1, 1), color).save(output, format="PNG")
+    return output.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_queued_attachments_are_delivered_in_order_and_cancelled_bytes_are_discarded(worker_gateway, monkeypatch):
+    import asyncio
+
+    from sqlalchemy.exc import OperationalError
+
+    from deerflow.config.paths import get_paths
+
+    client, runs, state, entered, owner = worker_gateway
+    thread = await runs.create_thread(thread_id="queue-with-attachments")
+    uploads = get_paths().sandbox_uploads_dir(thread, user_id=owner)
+    staging = get_paths().thread_dir(thread, user_id=owner) / ".queued-uploads"
+    first_png, second_png, cancelled_png = (_png(color) for color in ("red", "blue", "green"))
+    observed = asyncio.Queue()
+    finish_first_followup = asyncio.Event()
+
+    def contents(directory):
+        return {path.read_bytes() for path in directory.rglob("*") if path.is_file()}
+
+    async def observe_uploads(prompt, runtime):
+        observed.put_nowait((prompt, runtime.context["run_id"], await asyncio.to_thread(contents, uploads)))
+        if prompt == "first follow-up":
+            await finish_first_followup.wait()
+
+    state.present_worker_report = observe_uploads
+    initial = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "wait"}]})
+    inputs_url = f"/api/threads/{thread}/runs/{initial.run_id}/inputs"
+    thread_inputs = f"/api/threads/{thread}/inputs"
+
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        assert (await _submit_screenshot(client, inputs_url, "steer", "update now", first_png, mode="steer")).status_code == 422
+        assert await asyncio.to_thread(contents, staging) == set()
+
+        # An older worker has no capability marker in its persisted state.
+        def remove_queue_attachment_capability(inputs, _row):
+            assert inputs.pop("queue_attachments") is True
+
+        def restore_queue_attachment_capability(inputs, _row):
+            inputs["queue_attachments"] = True
+
+        await state.run_store.mutate_run_inputs(initial.run_id, remove_queue_attachment_capability, user_id=owner)
+        assert (await _submit_screenshot(client, inputs_url, "old-worker", "old worker", first_png)).status_code == 409
+        assert not await asyncio.to_thread(staging.exists)
+        await state.run_store.mutate_run_inputs(initial.run_id, restore_queue_attachment_capability, user_id=owner)
+
+        async def fail_before_input_write(*args, **kwargs):
+            assert await asyncio.to_thread(contents, staging) == {first_png}
+            raise OperationalError("UPDATE runs", {}, OSError("RunStore write unavailable"))
+
+        with monkeypatch.context() as patch:
+            patch.setattr(state.run_store, "mutate_run_inputs", fail_before_input_write)
+            with pytest.raises(OperationalError, match="RunStore write unavailable"):
+                await _submit_screenshot(client, inputs_url, "failed-write", "failed write", first_png)
+        assert await asyncio.to_thread(contents, staging) == set()
+
+        first = (await _submit_screenshot(client, inputs_url, "first", "first follow-up", first_png)).raise_for_status().json()
+        repeated = (await _submit_screenshot(client, inputs_url, "first", "first follow-up", first_png)).raise_for_status().json()
+        assert first == repeated
+        assert first["files"] == [{"filename": "screenshot.png", "size": len(first_png)}]
+        assert (await _submit_screenshot(client, inputs_url, "first", "first follow-up", second_png)).status_code == 409
+        (await _submit_screenshot(client, inputs_url, "second", "second follow-up", second_png)).raise_for_status()
+        (await _submit_screenshot(client, inputs_url, "cancelled", "cancel this", cancelled_png)).raise_for_status()
+        entries = (await client.get(thread_inputs)).raise_for_status().json()["items"]
+        assert [(entry["id"], entry["status"], entry["files"][0]["filename"]) for entry in entries] == [
+            ("first", "pending", "screenshot.png"),
+            ("second", "pending", "screenshot.png"),
+            ("cancelled", "pending", "screenshot.png"),
+        ]
+        assert await asyncio.to_thread(contents, uploads) == set()
+        assert cancelled_png in await asyncio.to_thread(contents, staging)
+        (await client.delete(f"{inputs_url}/cancelled")).raise_for_status()
+        assert cancelled_png not in await asyncio.to_thread(contents, staging)
+
+        state.release_worker.set()
+        assert await asyncio.wait_for(observed.get(), 5) == ("wait", initial.run_id, set())
+        prompt, first_run, visible = await asyncio.wait_for(observed.get(), 5)
+        assert prompt == "first follow-up" and visible == {first_png}
+        finish_first_followup.set()
+        prompt, second_run, visible = await asyncio.wait_for(observed.get(), 5)
+        assert prompt == "second follow-up" and visible == {first_png, second_png}
+        assert (await runs.wait(thread_id=thread, run_id=second_run, timeout=5)).status == "success"
+
+        retried = (await client.post(f"{inputs_url}/first/retry")).raise_for_status().json()
+        assert retried["run_id"] == first_run
+        assert (await client.post(f"{inputs_url}/cancelled/retry")).status_code == 409
+        records = await state.run_manager.list_by_thread(thread, user_id=owner)
+        assert {record.run_id for record in records} == {initial.run_id, first_run, second_run}
+        assert len([path for path in uploads.rglob("*") if path.is_file()]) == 2
+        assert await asyncio.to_thread(contents, staging) == set()
+    finally:
+        state.release_worker.set()
+        finish_first_followup.set()
+
+    messages = (await runs.get_state(thread_id=thread))["values"]["messages"]
+    by_prompt = {message["content"]: message.get("additional_kwargs", {}) for message in messages}
+    assert "files" not in by_prompt["wait"]
+    (first_file,) = by_prompt["first follow-up"]["files"]
+    (second_file,) = by_prompt["second follow-up"]["files"]
+    assert first_file["filename"] == "screenshot.png"
+    assert second_file["filename"] == "screenshot_1.png"
+    root = "/mnt/user-data/uploads/"
+    assert (uploads / first_file["path"].removeprefix(root)).read_bytes() == first_png
+    assert (uploads / second_file["path"].removeprefix(root)).read_bytes() == second_png
+
+
+@pytest.mark.asyncio
+async def test_startup_sweep_removes_published_queue_stage_after_delete_failure(worker_gateway, monkeypatch):
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    from app.gateway import run_input_files
+    from app.gateway.run_input_cleanup import cleanup_abandoned_queued_uploads
+    from deerflow.config.paths import get_paths
+
+    client, runs, state, entered, owner = worker_gateway
+    paths = get_paths()
+    thread = await runs.create_thread(thread_id="queue-published-stage")
+    screenshot = _png("blue")
+    staging_root = paths.thread_dir(thread, user_id=owner) / ".queued-uploads"
+    initial = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "wait"}]})
+    inputs_url = f"/api/threads/{thread}/runs/{initial.run_id}/inputs"
+    remove = run_input_files.shutil.rmtree
+    failed_deletions = []
+
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        (await _submit_screenshot(client, inputs_url, "attachment", "read screenshot", screenshot)).raise_for_status()
+        (stage,) = staging_root.iterdir()
+
+        def fail_stage_removal(directory, *args, **kwargs):
+            if os.path.basename(directory) == stage.name:
+                failed_deletions.append(directory)
+                raise PermissionError("temporary staging deletion failure")
+            return remove(directory, *args, **kwargs)
+
+        with monkeypatch.context() as publish_patch:
+            publish_patch.setattr(run_input_files.shutil, "rmtree", fail_stage_removal)
+            state.release_worker.set()
+            source = await state.run_manager.get(initial.run_id, user_id=owner)
+            await asyncio.wait_for(asyncio.shield(source.task), 5)
+    finally:
+        state.release_worker.set()
+
+    assert len(failed_deletions) == 1
+    (receipt,) = (await client.get(f"/api/threads/{thread}/inputs")).raise_for_status().json()["items"]
+    assert receipt["status"] == "applied"
+    assert receipt["files"] == [{"filename": "screenshot.png", "size": len(screenshot)}]
+    upload = paths.sandbox_uploads_dir(thread, user_id=owner) / "screenshot.png"
+    assert upload.read_bytes() == screenshot
+    upload.unlink()
+    assert (stage / "0").read_bytes() == screenshot
+    old = (datetime.now(UTC) - timedelta(days=7)).timestamp()
+    os.utime(stage, (old, old))
+
+    assert await cleanup_abandoned_queued_uploads(state.run_store, paths) == 1
+    assert not stage.exists()
+
+
+@pytest.mark.asyncio
+async def test_attachment_only_queue_retry_reconciles_a_lost_dispatch_receipt(worker_gateway, monkeypatch):
+    import asyncio
+
+    from deerflow.config.paths import get_paths
+    from deerflow.runtime.runs.inputs import RunInputs
+
+    client, runs, state, entered, owner = worker_gateway
+    thread = await runs.create_thread(thread_id="queue-attachment-retry")
+    screenshot = _png("purple")
+    admitted = asyncio.Event()
+    lost_receipt = None
+    dispatched = RunInputs.dispatched
+
+    async def fail_first_receipt(self, input_id, run_id, *, attempt=0):
+        nonlocal lost_receipt
+        if input_id == "attachment" and lost_receipt is None:
+            # Fail the receipt write after ordinary admission already succeeded.
+            lost_receipt = run_id
+            admitted.set()
+            raise OSError("receipt write failed after admission")
+        await dispatched(self, input_id, run_id, attempt=attempt)
+
+    monkeypatch.setattr(RunInputs, "dispatched", fail_first_receipt)
+    initial = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "wait"}]})
+    inputs_url = f"/api/threads/{thread}/runs/{initial.run_id}/inputs"
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        receipt = (await _submit_screenshot(client, inputs_url, "attachment", "", screenshot)).raise_for_status().json()
+        assert receipt["status"] == "pending"
+    finally:
+        state.release_worker.set()
+
+    await asyncio.wait_for(admitted.wait(), 5)
+    assert (await runs.wait(thread_id=thread, run_id=lost_receipt, timeout=5)).status == "success"
+    before_retry = (await client.get(f"/api/threads/{thread}/inputs")).raise_for_status().json()["items"]
+    assert before_retry[0]["status"] == "dispatching"
+    reply = (await client.post(f"{inputs_url}/attachment/retry")).raise_for_status().json()
+    assert reply == {"run_id": lost_receipt}
+    after_retry = (await client.get(f"/api/threads/{thread}/inputs")).raise_for_status().json()["items"]
+    assert after_retry[0]["status"] == "applied"
+    records = await state.run_manager.list_by_thread(thread, user_id=owner)
+    assert {record.run_id for record in records} == {initial.run_id, lost_receipt}
+    uploads = get_paths().sandbox_uploads_dir(thread, user_id=owner)
+    assert [path.read_bytes() for path in uploads.rglob("*") if path.is_file()] == [screenshot]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["list_then_retry", "retry", "remove"])
+async def test_queued_attachment_can_recover_when_child_stops_before_publication(worker_gateway, monkeypatch, action):
+    import asyncio
+
+    from deerflow.config.paths import get_paths
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.inputs import RunInputs
+
+    client, runs, state, entered, owner = worker_gateway
+    thread = await runs.create_thread(thread_id="queue-unstarted-child")
+    screenshot = _png("purple")
+    paths = get_paths()
+    staging = paths.thread_dir(thread, user_id=owner) / ".queued-uploads"
+    start_child = asyncio.Event()
+    pending_child = asyncio.Event()
+    receipt_written = asyncio.Event()
+    first_child = None
+    try_start = state.run_manager.try_start
+    dispatched = RunInputs.dispatched
+    initial = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "wait"}]})
+    thread_inputs = f"/api/threads/{thread}/inputs"
+    inputs_url = f"/api/threads/{thread}/runs/{initial.run_id}/inputs"
+    input_url = f"{inputs_url}/attachment"
+
+    async def hold_first_child(run_id):
+        nonlocal first_child
+        if first_child is None:
+            first_child = run_id
+            pending_child.set()
+            await start_child.wait()
+        return await try_start(run_id)
+
+    async def observe_receipt(self, input_id, run_id, *, attempt=0):
+        await dispatched(self, input_id, run_id, attempt=attempt)
+        if input_id == "attachment":
+            receipt_written.set()
+
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        monkeypatch.setattr(state.run_manager, "try_start", hold_first_child)
+        monkeypatch.setattr(RunInputs, "dispatched", observe_receipt)
+        (await _submit_screenshot(client, inputs_url, "attachment", "read screenshot", screenshot)).raise_for_status()
+        (stage,) = staging.iterdir()
+        state.release_worker.set()
+        await asyncio.wait_for(pending_child.wait(), 5)
+        await asyncio.wait_for(receipt_written.wait(), 5)
+        assert (await runs.get(thread_id=thread, run_id=first_child)).status == "pending"
+        (receipt,) = (await client.get(thread_inputs)).raise_for_status().json()["items"]
+        assert receipt["status"] == "dispatching"
+        assert receipt["run_id"] == first_child
+
+        if action == "remove":
+            # A restarted Gateway sees the durable child but has no worker for it.
+            restarted = RunManager(store=state.run_store)
+            recovered = await restarted.reconcile_orphaned_inflight_runs(error="Gateway restarted", stop_reason="orphan_recovered")
+            assert [run.run_id for run in recovered] == [first_child]
+            (await client.delete(input_url)).raise_for_status()
+            assert not stage.exists()
+        else:
+            await runs.cancel(thread_id=thread, run_id=first_child)
+            start_child.set()
+            child = await state.run_manager.get(first_child, user_id=owner)
+            await asyncio.wait_for(asyncio.shield(child.task), 5)
+            if action == "list_then_retry":
+                (receipt,) = (await client.get(thread_inputs)).raise_for_status().json()["items"]
+                assert receipt["status"] == "not_applied"
+                assert "run_id" not in receipt
+            assert stage.is_dir()
+            reply = (await client.post(f"{input_url}/retry")).raise_for_status().json()
+            assert reply["run_id"] != first_child
+            assert (await client.post(f"{input_url}/retry")).raise_for_status().json() == reply
+            assert (await runs.wait(thread_id=thread, run_id=reply["run_id"], timeout=5)).status == "success"
+            assert (paths.sandbox_uploads_dir(thread, user_id=owner) / "screenshot.png").read_bytes() == screenshot
+            assert not stage.exists()
+    finally:
+        state.release_worker.set()
+        start_child.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["retry", "remove"])
+async def test_queued_attachment_publication_failure_leaves_input_actionable(worker_gateway, monkeypatch, action):
+    import asyncio
+
+    from app.gateway import run_input_files
+    from deerflow.config.paths import get_paths
+
+    client, runs, state, entered, owner = worker_gateway
+    thread = await runs.create_thread(thread_id="queue-attachment-publish-error")
+    screenshot = _png("orange")
+    uploads = get_paths().sandbox_uploads_dir(thread, user_id=owner)
+    uploads.mkdir(parents=True, exist_ok=True)
+    existing_screenshot = uploads / "screenshot.png"
+    original = _png("white")
+    existing_screenshot.write_bytes(original)
+    staging_root = get_paths().thread_dir(thread, user_id=owner) / ".queued-uploads"
+    attempts = []
+    executions = []
+    retry_entered = asyncio.Event()
+    finish_retry = asyncio.Event()
+    hold_retry = False
+    prepare_uploads = run_input_files.prepare_published_uploads
+
+    async def fail_first_prepare(paths, **kwargs):
+        attempts.append([path.name for path in paths])
+        if len(attempts) == 1:
+            raise OSError("transient queued attachment I/O failure")
+        await prepare_uploads(paths, **kwargs)
+
+    async def observe_run(prompt, runtime):
+        executions.append((prompt, runtime.context["run_id"]))
+        if hold_retry and prompt == "analyze screenshot":
+            retry_entered.set()
+            await finish_retry.wait()
+
+    monkeypatch.setattr(run_input_files, "prepare_published_uploads", fail_first_prepare)
+    state.present_worker_report = observe_run
+    initial = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "wait"}]})
+    inputs_url = f"/api/threads/{thread}/runs/{initial.run_id}/inputs"
+    input_url = f"{inputs_url}/attachment"
+    thread_inputs_url = f"/api/threads/{thread}/inputs"
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        (await _submit_screenshot(client, inputs_url, "attachment", "analyze screenshot", screenshot)).raise_for_status()
+        (stage,) = staging_root.iterdir()
+    finally:
+        state.release_worker.set()
+
+    source = await state.run_manager.get(initial.run_id, user_id=owner)
+    await asyncio.wait_for(asyncio.shield(source.task), 5)
+    ([destination],) = attempts
+    assert destination != existing_screenshot.name
+    (failed,) = [record for record in await state.run_manager.list_by_thread(thread, user_id=owner) if record.run_id != initial.run_id]
+    await asyncio.wait_for(asyncio.shield(failed.task), 5)
+    assert failed.status == "error"
+    assert executions == [("wait", initial.run_id)]
+    (receipt,) = (await client.get(thread_inputs_url)).raise_for_status().json()["items"]
+    assert receipt["status"] == "not_applied"
+    assert any(path.read_bytes() == screenshot for path in stage.iterdir() if path.is_file())
+    assert list(uploads.iterdir()) == [existing_screenshot]
+    assert existing_screenshot.read_bytes() == original
+
+    if action == "remove":
+        (await client.delete(input_url)).raise_for_status()
+        assert not stage.exists()
+        assert (await client.post(f"{input_url}/retry")).status_code == 409
+        assert executions == [("wait", initial.run_id)]
+        return
+
+    # A retry with an empty destination should still honor the name assigned
+    # for the original collision.
+    existing_screenshot.unlink()
+    hold_retry = True
+    try:
+        reply = (await client.post(f"{input_url}/retry")).raise_for_status().json()
+        await asyncio.wait_for(retry_entered.wait(), 5)
+        assert reply["run_id"] != failed.run_id
+        retry = await state.run_store.get(reply["run_id"], user_id=owner)
+        (message,) = retry["kwargs"]["input"]["messages"]
+        (file,) = message["additional_kwargs"]["files"]
+        assert file["filename"] == destination
+        assert file["path"] == f"/mnt/user-data/uploads/{destination}"
+        assert (await client.post(f"{input_url}/retry")).raise_for_status().json() == reply
+    finally:
+        finish_retry.set()
+    assert (await runs.wait(thread_id=thread, run_id=reply["run_id"], timeout=5)).status == "success"
+    assert (await client.post(f"{input_url}/retry")).raise_for_status().json() == reply
+    assert executions == [("wait", initial.run_id), ("analyze screenshot", reply["run_id"])]
+    assert attempts == [[destination], [destination]]
+    assert not stage.exists()
+    assert len(list(uploads.iterdir())) == 1
+    assert (uploads / destination).read_bytes() == screenshot
+    records = await state.run_manager.list_by_thread(thread, user_id=owner)
+    assert {record.run_id for record in records} == {initial.run_id, failed.run_id, reply["run_id"]}
+
+
+@pytest.mark.asyncio
+async def test_queued_report_keeps_its_relative_attachment_reference(worker_gateway):
+    import asyncio
+    import json
+    from pathlib import PurePosixPath
+
+    from deerflow.config.paths import get_paths
+
+    client, runs, state, entered, owner = worker_gateway
+    thread = await runs.create_thread(thread_id="queue-relative-attachments")
+    uploads = get_paths().sandbox_uploads_dir(thread, user_id=owner)
+    report_text = "![Chart](chart.png)\n"
+    chart = _png("red")
+    initial = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "wait"}]})
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        response = await client.post(
+            f"/api/threads/{thread}/runs/{initial.run_id}/inputs",
+            data={"input": json.dumps({"request_id": "report", "mode": "queue", "text": "review this report"})},
+            files=[("files", ("report.md", report_text.encode(), "text/markdown")), ("files", ("chart.png", chart, "image/png"))],
+        )
+        assert response.raise_for_status().json()["status"] == "pending"
+    finally:
+        state.release_worker.set()
+
+    source = await state.run_manager.get(initial.run_id, user_id=owner)
+    await asyncio.wait_for(asyncio.shield(source.task), 5)
+    messages = (await runs.get_state(thread_id=thread))["values"]["messages"]
+    report_message = next(message for message in messages if message["content"] == "review this report")
+    files = {item["filename"]: PurePosixPath(item["path"]) for item in report_message["additional_kwargs"]["files"]}
+    assert set(files) == {"report.md", "chart.png"}
+    assert files["report.md"].parent / "chart.png" == files["chart.png"]
+    assert (uploads / files["report.md"].name).read_text(encoding="utf-8") == report_text
+    assert (uploads / files["chart.png"].name).read_bytes() == chart
 
 
 @pytest.mark.asyncio
@@ -916,20 +1366,373 @@ async def test_managed_worker_routes_followups_and_retains_the_producing_runs_fi
 
 
 @pytest.mark.asyncio
+async def test_coordinator_recovers_its_decision_and_runs_dependent_workers(worker_gateway, monkeypatch):
+    import asyncio
+    from uuid import uuid4
+
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, LLMResult
+    from sqlalchemy import text
+
+    client, runs, state, entered, _ = worker_gateway
+
+    async def echo_model(prompt, runtime):
+        journal = runtime.context["__run_journal"]
+        answer = f"answer:{prompt}"
+        content = answer
+        if prompt == "wait":
+            content = [{"type": "reasoning", "text": "structured reasoning"}, {"type": "text", "text": f"<think>{'private reasoning ' * 300}</think>{answer}"}]
+        result = LLMResult(generations=[[ChatGeneration(message=AIMessage(content=content))]])
+        journal.on_llm_end(result, run_id=uuid4())
+
+    state.present_worker_report = echo_model
+    model = Mock()
+    model.bind_tools.return_value.ainvoke = AsyncMock(
+        side_effect=[
+            AIMessage(content="", tool_calls=[{"name": "inspect_task", "id": "inspect", "args": {}}]),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "submit_task_decision",
+                        "id": "decision",
+                        "args": {
+                            "tasks": [
+                                {"key": "research", "objective": "wait"},
+                                {"key": "report", "objective": "Write the report", "depends_on": ["research"]},
+                            ]
+                        },
+                    }
+                ],
+            ),
+        ]
+    )
+    monkeypatch.setattr("app.gateway.coordinator_agent.create_chat_model", lambda **_: model)
+    url = "/api/coordination/tasks"
+    settings = {"recursion_limit": 400, "thinking_enabled": True, "is_plan_mode": False}
+    body = {"request_id": "plan", "coordinator": True, "objective": "Research and write a report", "run": settings}
+    first = (await client.post(url, json=body)).raise_for_status().json()
+    task_id = first["task"]["id"]
+    planner_run = first["execution"]["run_id"]
+    assert first["task"]["run_settings"] == body["run"]
+    assert (await client.post(url, json=body)).raise_for_status().json()["execution"]["run_id"] == planner_run
+    assert (await client.post(url, json={**body, "coordinator": False})).status_code == 409
+    assert (await client.post(url, json={**body, "run": {"recursion_limit": 401}})).status_code == 409
+    assert (await runs.wait(thread_id=first["assignment"]["thread_id"], run_id=planner_run, timeout=8)).status == "success"
+    planned = (await client.get(f"{url}/{task_id}")).raise_for_status().json()
+    research = next(child for child in planned["children"] if child["objective"] == "wait")
+    report = next(child for child in planned["children"] if child["id"] != research["id"])
+    assert report["depends_on"] == [research["id"]]
+    assert report["status"] == research["status"] == "queued"
+    assert report["run_settings"] == research["run_settings"] == settings
+
+    # Keep a read transaction open while recovery admits the first worker.
+    async with state.coordination_workers.repo._sessions() as reader:
+        await reader.execute(text("BEGIN"))
+        assert await reader.scalar(text("SELECT id FROM coord_tasks WHERE id = :task_id"), {"task_id": task_id}) == task_id
+        await _restart_coordination(state)
+        state.coordination_workers.start_recovery()
+        await asyncio.wait_for(entered.wait(), 8)
+    waiting = (await client.get(f"{url}/{report['id']}")).raise_for_status().json()
+    assert waiting["execution"] is None
+    state.release_worker.set()
+    final = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+    assert {child["id"] for child in final["children"] if child["status"] == "succeeded"} == {research["id"], report["id"]}
+    assert final["execution"]["run_id"] == planner_run
+    assert state.observed_worker_settings == [(400, True, False)] * 2
+    finished_report = (await client.get(f"{url}/{report['id']}")).raise_for_status().json()
+    messages = (await client.get(finished_report["task"]["result_ref"])).raise_for_status().json()
+    assert any("answer:wait" in str(message["content"]) for message in messages["data"])
+    assert all("reasoning" not in str(message["content"]) for message in messages["data"])
+    assert model.bind_tools.return_value.ainvoke.await_count == 2
+    assert [tool.name for tool in model.bind_tools.call_args.args[0]] == ["submit_task_decision"]
+
+
+@pytest.mark.asyncio
+async def test_coordinator_replans_after_restart_before_submission(worker_gateway, monkeypatch):
+    import asyncio
+
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    client, _, state, _, _ = worker_gateway
+    planning, release = asyncio.Event(), asyncio.Event()
+
+    async def plan(_messages):
+        if not planning.is_set():
+            planning.set()
+            await release.wait()
+        return AIMessage(content="", tool_calls=[{"name": "submit_task_decision", "id": "decision", "args": {"tasks": [{"key": "draft", "objective": "Write a draft"}]}}])
+
+    model = Mock()
+    invoke = model.bind_tools.return_value.ainvoke = AsyncMock(side_effect=plan)
+    monkeypatch.setattr("app.gateway.coordinator_agent.create_chat_model", lambda **_: model)
+    monkeypatch.setattr("app.gateway.coordination_workers.RECOVERY_INTERVAL", 0.1)
+    url = "/api/coordination/tasks"
+    first = (await client.post(url, json={"request_id": "restart", "coordinator": True, "objective": "Write a draft"})).raise_for_status().json()
+    task_id = first["task"]["id"]
+    try:
+        await asyncio.wait_for(planning.wait(), 8)
+        assert (await client.get(f"{url}/{task_id}")).raise_for_status().json()["children"] == []
+        await _restart_coordination(state)
+        state.coordination_workers.start_recovery()
+        final = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+    finally:
+        release.set()
+    assert final["execution"]["run_id"] != first["execution"]["run_id"]
+    assert [(task["objective"], task["status"]) for task in final["children"]] == [("Write a draft", "succeeded")]
+    assert invoke.await_count == 2
+    original, replayed = ([message for message in attempt.args[0] if isinstance(message, HumanMessage)] for attempt in invoke.await_args_list)
+    assert len(original) == len(replayed) == 1
+    assert original[0].id and replayed[0].id == original[0].id
+    assert original[0].content == replayed[0].content == "Write a draft"
+
+
+@pytest.mark.asyncio
+async def test_coordinator_redacts_user_text_in_both_planning_calls(worker_gateway, monkeypatch):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
+    from deerflow.config.app_config import get_app_config, set_app_config
+    from deerflow.config.pii_redaction_config import PiiRedactionConfig
+
+    client, runs, _, _, _ = worker_gateway
+    pii = PiiRedactionConfig(enabled=True, token_secret="synthetic fixture only for tests")
+    set_app_config(get_app_config().model_copy(update={"pii_redaction": pii}))
+    objective = "Check the synthetic record for demo@example.test"
+    redacted = redact_text(objective, pii)
+    assert redacted != objective
+    model = Mock()
+    invoke = model.bind_tools.return_value.ainvoke = AsyncMock(
+        side_effect=[
+            AIMessage(content="", tool_calls=[{"name": "inspect_task", "id": "inspect", "args": {}}]),
+            AIMessage(content="", tool_calls=[{"name": "submit_task_decision", "id": "decision", "args": {"tasks": [{"key": "draft", "objective": "Write a draft"}]}}]),
+        ]
+    )
+    monkeypatch.setattr("app.gateway.coordinator_agent.create_chat_model", lambda **_: model)
+    root = (await client.post("/api/coordination/tasks", json={"request_id": "pii", "coordinator": True, "objective": objective})).raise_for_status().json()
+    record = await runs.wait(thread_id=root["assignment"]["thread_id"], run_id=root["execution"]["run_id"], timeout=8)
+    assert record.status == "success"
+    assert root["task"]["objective"] == objective
+    assert [[msg.content for msg in attempt.args[0] if isinstance(msg, HumanMessage)] for attempt in invoke.await_args_list] == [[redacted], [redacted]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "inspect_first", "recovery_expected", "expected_calls"),
+    [
+        ("rate-limit", False, True, 2),
+        ("missing-tool-call", False, True, 2),
+        ("invalid-arguments", True, True, 3),
+        ("rate-limit", False, False, 2),
+        ("invalid-credentials", False, False, 1),
+    ],
+)
+async def test_coordinator_bounds_retries_before_committing_a_decision(worker_gateway, monkeypatch, failure, inspect_first, recovery_expected, expected_calls):
+    import httpx
+    from langchain_core.messages import AIMessage
+    from openai import AuthenticationError, RateLimitError
+
+    client, runs, state, _, _ = worker_gateway
+    request = httpx.Request("POST", "https://provider.example.test/v1/chat/completions")
+    failure_outcomes = {
+        "rate-limit": RateLimitError("Rate limited", response=httpx.Response(429, request=request), body=None),
+        "missing-tool-call": AIMessage(content="Plan without a tool call."),
+        "invalid-arguments": AIMessage(content="", tool_calls=[{"name": "submit_task_decision", "id": "empty", "args": {"tasks": []}}]),
+        "invalid-credentials": AuthenticationError("Invalid credentials", response=httpx.Response(401, request=request), body=None),
+    }
+    decision = AIMessage(content="", tool_calls=[{"name": "submit_task_decision", "id": "decision", "args": {"tasks": [{"key": "draft", "objective": "Write a draft"}]}}])
+    bad_result = failure_outcomes[failure]
+    responses = [AIMessage(content="", tool_calls=[{"name": "inspect_task", "id": "inspect", "args": {}}])] if inspect_first else []
+    responses.extend([bad_result, decision if recovery_expected or failure == "invalid-credentials" else bad_result])
+    model = Mock()
+    invoke = model.bind_tools.return_value.ainvoke = AsyncMock(side_effect=responses)
+    monkeypatch.setattr("app.gateway.coordinator_agent.create_chat_model", lambda **_: model)
+    monkeypatch.setattr("app.gateway.coordination_workers.RECOVERY_INTERVAL", 0.1)
+    state.coordination_workers.start_recovery()
+    url = "/api/coordination/tasks"
+    started = (await client.post(url, json={"request_id": "pre-commit-error", "coordinator": True, "objective": "Write a draft"})).raise_for_status().json()
+    planner_run = started["execution"]["run_id"]
+    planner = await runs.wait(thread_id=started["assignment"]["thread_id"], run_id=planner_run, timeout=8)
+    assert planner.status == ("success" if recovery_expected else "error")
+    terminal_status = "succeeded" if recovery_expected else "failed"
+    final = await _wait_for_worker(client, started["task"]["id"], "task", "status", terminal_status)
+    assert final["execution"]["run_id"] == planner_run
+    assert [(child["objective"], child["status"]) for child in final["children"]] == ([("Write a draft", "succeeded")] if recovery_expected else [])
+    assert invoke.await_count == expected_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["failed", "cancelled"])
+async def test_coordinator_does_not_admit_dependents_of_unsuccessful_prerequisite(worker_gateway, monkeypatch, outcome):
+    import asyncio
+
+    from langchain_core.messages import AIMessage
+
+    client, _, state, _, _ = worker_gateway
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def research(prompt, runtime):
+        assert prompt == "Find sources"
+        started.set()
+        await release.wait()
+        if outcome == "failed":
+            raise RuntimeError("source unavailable")
+
+    state.present_worker_report = research
+    model = Mock()
+    tasks = [
+        {"key": "research", "objective": "Find sources"},
+        {"key": "report", "objective": "Write the report", "depends_on": ["research"]},
+        {"key": "summary", "objective": "Summarize the report", "depends_on": ["report"]},
+    ]
+    model.bind_tools.return_value.ainvoke = AsyncMock(return_value=AIMessage(content="", tool_calls=[{"name": "submit_task_decision", "id": "decision", "args": {"tasks": tasks}}]))
+    monkeypatch.setattr("app.gateway.coordinator_agent.create_chat_model", lambda **_: model)
+    monkeypatch.setattr("app.gateway.coordination_workers.RECOVERY_INTERVAL", 0.1)
+    state.coordination_workers.start_recovery()
+    url = "/api/coordination/tasks"
+    root = (await client.post(url, json={"request_id": "plan", "coordinator": True, "objective": "Research and write a report"})).raise_for_status().json()
+    task_id = root["task"]["id"]
+    try:
+        await asyncio.wait_for(started.wait(), 8)
+        view = (await client.get(f"{url}/{task_id}")).raise_for_status().json()
+        prerequisite = next(task for task in view["children"] if task["objective"] == "Find sources")
+        if outcome == "cancelled":
+            (await client.post(f"{url}/{prerequisite['id']}/cancel", json={"expected_revision": prerequisite["revision"]})).raise_for_status()
+    finally:
+        release.set()
+    final = await _wait_for_worker(client, task_id, "task", "status", "failed")
+    assert len(final["children"]) == 3
+    for task in final["children"]:
+        if task["id"] == prerequisite["id"]:
+            assert task["status"] == outcome
+        else:
+            assert task["status"] == "failed"
+            child = (await client.get(f"{url}/{task['id']}")).raise_for_status().json()
+            assert child["execution"] is None
+
+
+@pytest.mark.asyncio
+async def test_managed_worker_reuses_saved_run_settings_for_followups(worker_gateway):
+    import asyncio
+
+    client, _, state, entered, _ = worker_gateway
+    url = "/api/coordination/tasks"
+    settings = {"recursion_limit": 400, "thinking_enabled": True, "is_plan_mode": False}
+    body = {"request_id": "dispatch", "objective": "wait", "run": settings}
+    first = (await client.post(url, json=body)).raise_for_status().json()
+    task_id = first["task"]["id"]
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        assert first["task"]["run_settings"] == settings
+        assert (await client.post(url, json=body)).raise_for_status().json() == first
+        assert (await client.post(url, json={**body, "run": {**settings, "is_plan_mode": True}})).status_code == 409
+        (await client.post(f"{url}/{task_id}/inputs", json={"request_id": "follow-up", "content": "Review the results"})).raise_for_status()
+    finally:
+        state.release_worker.set()
+
+    finished = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+    assert finished["execution"]["turn"] == 2
+    assert state.observed_worker_settings == [(400, True, False)] * 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settings", [{"recursion_limit": 0}, {"recursion_limit": True}, {"thinking_enabled": "false"}, {"user_id": "another-user"}, {"subagent_enabled": False}])
+async def test_managed_worker_rejects_invalid_run_settings(worker_gateway, settings):
+    client, _, _, _, _ = worker_gateway
+    response = await client.post("/api/coordination/tasks", json={"request_id": "invalid", "objective": "Review", "run": settings})
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"][:2] == ["body", "run"]
+
+
+@pytest.mark.asyncio
+async def test_managed_worker_create_retry_returns_task_after_grant_expires(worker_gateway, monkeypatch):
+    import asyncio
+
+    client, _, state, entered, owner = worker_gateway
+    url = "/api/coordination/tasks"
+    body = {"request_id": "create-replay", "objective": "wait"}
+    first = (await client.post(url, json=body)).raise_for_status().json()
+    assert first["task"]["run_settings"] is None
+    assert (await client.post(url, json={**body, "run": {}})).raise_for_status().json() == first
+    task_id = first["task"]["id"]
+    await asyncio.wait_for(entered.wait(), 10)
+    try:
+        grant = await state.coordination_workers.repo.grant(owner, task_id)
+        monkeypatch.setattr("deerflow.persistence.coordination.workers.time", lambda: grant["expires_at"] + 1)
+        detail = (await client.get(f"{url}/{task_id}")).raise_for_status().json()
+        replay = (await client.post(url, json=body)).raise_for_status().json()
+        assert replay == detail
+        assert replay["authorization_required"] is True
+        assert replay["execution"]["run_id"] == first["execution"]["run_id"]
+        assert (await client.post(url, json={**body, "objective": "changed"})).status_code == 409
+        assert (await client.post(url, json={**body, "assistant_id": "different"})).status_code == 409
+    finally:
+        state.release_worker.set()
+
+
+@pytest.mark.asyncio
+async def test_managed_worker_replays_accepted_inputs_after_grant_expires(worker_gateway, monkeypatch):
+    import asyncio
+
+    client, _, state, entered, owner = worker_gateway
+    tasks = "/api/coordination/tasks"
+    first = (await client.post(tasks, json={"request_id": "receipt-replay", "objective": "wait"})).raise_for_status().json()
+    task_id, thread_id, run_id = first["task"]["id"], first["assignment"]["thread_id"], first["execution"]["run_id"]
+    inputs = [
+        (f"{tasks}/{task_id}/inputs", "content", {"request_id": "follow-up", "content": "Task follow-up"}),
+        (f"/api/threads/{thread_id}/runs/{run_id}/inputs", "text", {"request_id": "follow-up", "mode": "queue", "text": "Run follow-up"}),
+    ]
+    await asyncio.wait_for(entered.wait(), 10)
+    try:
+        receipts = [(await client.post(path, json=payload)).raise_for_status().json() for path, _, payload in inputs]
+    finally:
+        state.release_worker.set()
+    finished = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+    workers = state.coordination_workers
+    grant = await workers.repo.grant(owner, task_id)
+    monkeypatch.setattr("deerflow.persistence.coordination.workers.time", lambda: grant["expires_at"] + 1)
+    wake = Mock(side_effect=AssertionError("receipt replay must not wake a Worker"))
+    monkeypatch.setattr(workers, "watch", wake)
+
+    for (path, text_field, payload), receipt in zip(inputs, receipts, strict=True):
+        assert (await client.post(path, json=payload)).raise_for_status().json() == receipt
+        assert (await client.post(path, json={**payload, text_field: "changed"})).status_code == 409
+        assert (await client.post(path, json={**payload, "request_id": "new"})).status_code == 403
+    wake.assert_not_called()
+    assert (await client.get(f"{tasks}/{task_id}")).raise_for_status().json() == finished
+
+
+@pytest.mark.asyncio
+async def test_managed_worker_replays_legacy_task_input_without_grant(worker_gateway):
+    from hashlib import sha256
+
+    client, _, state, _, owner = worker_gateway
+    repo = state.coordination_workers.repo
+    task = await repo.create(owner, request_id="old-task", objective="Review")
+    payload = {"request_id": "old-input", "content": "Check the report"}
+    receipt = await repo.append_input(owner, task["id"], request_id="input:" + sha256(b"old-input").hexdigest(), content=payload["content"])
+    url = f"/api/coordination/tasks/{task['id']}/inputs"
+    assert (await client.post(url, json=payload)).raise_for_status().json() == receipt
+    assert (await client.post(url, json={**payload, "request_id": "new"})).status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_managed_worker_requires_explicit_resume_and_fences_cancellation(worker_gateway):
     import asyncio
 
-    client, runs, _, entered, _ = worker_gateway
+    client, runs, state, entered, _ = worker_gateway
     url = "/api/coordination/tasks"
-    paused = (await client.post(url, json={"request_id": "pause", "objective": "approve"})).raise_for_status().json()
+    settings = {"recursion_limit": 240, "thinking_enabled": False, "is_plan_mode": True}
+    paused = (await client.post(url, json={"request_id": "pause", "objective": "approve", "run": settings})).raise_for_status().json()
     task_id = paused["task"]["id"]
     await _wait_for_worker(client, task_id, "execution", "status", "waiting_for_input")
     target = f"/api/threads/{paused['assignment']['thread_id']}/runs"
-    reply = {"json": {"command": {"resume": "confirmed"}}, "headers": {"Idempotency-Key": "reply"}}
+    reply = {"json": {"command": {"resume": "confirmed"}, "config": {"recursion_limit": 25}, "context": {"is_plan_mode": False}}, "headers": {"Idempotency-Key": "reply"}}
     answered = (await client.post(target, **reply)).raise_for_status().json()
     result = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
     assert result["task"]["result_ref"].endswith(f"/{answered['run_id']}/messages")
     assert (await client.post(target, **reply)).raise_for_status().json()["run_id"] == answered["run_id"]
+    assert state.observed_worker_settings == [(240, False, True)] * 2
 
     other = (await client.post(url, json={"request_id": "cancel", "objective": "wait"})).raise_for_status().json()
     await asyncio.wait_for(entered.wait(), 10)
@@ -983,3 +1786,147 @@ async def test_managed_worker_cancel_returns_cancelling_and_finishes_in_backgrou
     assert calls == [run_id, run_id]
     assert final["execution"]["status"] == "cancelled"
     assert (await runs.get(thread_id=first["assignment"]["thread_id"], run_id=run_id)).status == "interrupted"
+
+
+async def _restart_coordination(state):
+    from app.gateway.coordination_workers import CoordinationWorkers
+    from deerflow.runtime import RunManager
+
+    previous = state.coordination_workers
+    await previous.close()
+    await state.run_manager.shutdown()
+    state.agent_runs_host.close()
+    host = GatewayAgentRunsHost(state.agent_runs_host.app, load_user=state.agent_runs_host.load_user)
+    state.agent_runs_host = host
+    state.run_manager = RunManager(store=state.run_store)
+    state.coordination_workers = CoordinationWorkers(previous.repo, host, previous._connections)
+    await state.coordination_workers.recover_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previous_outcome", ["completed", "shutdown", "cancel-takeover", "orphan-no-checkpoint"])
+async def test_managed_worker_restart_reconciles_the_persisted_task(worker_gateway, tmp_path, previous_outcome):
+    import asyncio
+
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    from deerflow.config.app_config import get_app_config
+    from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON
+    from deerflow.runtime.runs.manager import STARTUP_ORPHAN_RECOVERY_ERROR
+
+    client, runs, state, entered, _ = worker_gateway
+    limit = get_app_config().max_recursion_limit
+    settings = {"recursion_limit": limit + 100, "thinking_enabled": False, "is_plan_mode": True}
+    path = str(tmp_path / "checkpoints.sqlite")
+    async with AsyncSqliteSaver.from_conn_string(path) as saver:
+        if previous_outcome != "orphan-no-checkpoint":
+            state.checkpointer = saver
+        first = (await client.post("/api/coordination/tasks", json={"objective": "wait", "request_id": "restart", "run": settings})).raise_for_status().json()
+        task_id, run_id, thread = first["task"]["id"], first["execution"]["run_id"], first["assignment"]["thread_id"]
+        await asyncio.wait_for(entered.wait(), 10)
+        await state.coordination_workers.close()
+        if previous_outcome == "completed":
+            state.release_worker.set()
+            assert (await runs.wait_coordination_worker(thread_id=thread, run_id=run_id)).status == "success"
+        await state.run_manager.shutdown()
+        if previous_outcome == "cancel-takeover":
+            await state.run_store.update_status(run_id, "error", error="Run reclaimed by worker during cancellation", stop_reason=ORPHAN_RECOVERY_STOP_REASON)
+        elif previous_outcome == "orphan-no-checkpoint":
+            await state.run_store.update_status(run_id, "error", error=STARTUP_ORPHAN_RECOVERY_ERROR, stop_reason=ORPHAN_RECOVERY_STOP_REASON)
+    async with AsyncSqliteSaver.from_conn_string(path) as saver:
+        state.checkpointer = saver
+        await _restart_coordination(state)
+        state.release_worker.set()
+        finished = await _wait_for_worker(client, task_id, "task", "status", "failed" if previous_outcome in ("cancel-takeover", "orphan-no-checkpoint") else "succeeded")
+    assert finished["assignment"]["thread_id"] == thread
+    assert finished["execution"]["turn"] == (2 if previous_outcome == "shutdown" else 1)
+    assert state.observed_worker_settings == [(limit, False, True)] * finished["execution"]["turn"]
+    assert finished["task"]["run_settings"] == settings
+    assert (finished["execution"]["run_id"] != run_id) is (previous_outcome == "shutdown")
+    if previous_outcome == "orphan-no-checkpoint":
+        assert finished["execution"]["status"] == "error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("denial", ["runs:create", "threads:write", "revoked"])
+async def test_managed_worker_admission_waits_for_restored_authorization(worker_gateway, monkeypatch, denial):
+    client, runs, state, _, owner = worker_gateway
+    service = state.coordination_workers
+    task = await service.repo.create(owner, request_id="pending-admission", objective="continue")
+    task_id = task["id"]
+    grant = service._new_grant(runs.capture_authority())
+    turn = await service.repo.prepare(owner, task_id, "lead_agent", initial_grant=grant)
+    authorized, grant_id = await service.authority(owner, task_id)
+    permissions = grant["authority"]["permissions"]
+    policy = AsyncMock(return_value=[permission for permission in permissions if permission != denial])
+    monkeypatch.setattr("app.gateway.extension_agent_runs.resolve_route_permissions", policy)
+    if denial == "revoked":
+        await service.repo.set_grant(owner, task_id, None)
+
+    driver = service.watch(authorized, owner, task_id, grant_id)
+    with pytest.raises(AgentRunError) as exc:
+        await driver
+    assert exc.value.status_code == 403
+    url = f"/api/coordination/tasks/{task_id}"
+    view = (await client.get(url)).raise_for_status().json()
+    assert view["execution"]["id"] == turn[1]["id"]
+    assert view["execution"]["run_id"] is None
+    assert view["task"]["status"] == "running"
+    assert view["execution"]["status"] == "admitting"
+    assert view["authorization_required"] is True
+    retry = await client.post("/api/coordination/tasks", json={"request_id": "pending-admission", "objective": "continue"})
+    assert retry.status_code == 403
+    await service.recover_once()
+    assert (owner, task_id) not in service._drivers
+
+    policy.return_value = permissions
+    if denial == "revoked":
+        assert (await client.put(f"{url}/authorization")).raise_for_status().json()["authorization_required"] is False
+    else:
+        assert (await service.repo.grant(owner, task_id))["id"] == grant_id
+    await service.recover_once()
+    finished = await _wait_for_worker(client, task_id, "task", "status", "succeeded")
+    assert finished["authorization_required"] is False
+    assert finished["execution"]["id"] == turn[1]["id"]
+
+
+@pytest.mark.asyncio
+async def test_managed_worker_restart_finishes_a_previously_fenced_cancellation(worker_gateway):
+    import asyncio
+
+    client, _, state, entered, owner = worker_gateway
+    first = (await client.post("/api/coordination/tasks", json={"objective": "wait", "request_id": "restart-cancel"})).raise_for_status().json()
+    task_id = first["task"]["id"]
+    await asyncio.wait_for(entered.wait(), 10)
+    await state.coordination_workers.repo.request_cancel(owner, task_id, expected_revision=first["task"]["revision"])
+    await _restart_coordination(state)
+    finished = await _wait_for_worker(client, task_id, "task", "status", "cancelled")
+    assert finished["execution"]["run_id"] == first["execution"]["run_id"]
+    assert finished["execution"]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_bound_channel_grant_is_invalid_after_reconnect_and_owner_can_reauthorize(worker_gateway):
+    import asyncio
+
+    from app.channels.message_bus import InboundMessage
+
+    client, _, state, entered, owner = worker_gateway
+    service = state.coordination_workers
+    binding = {"owner_user_id": owner, "provider": "telegram", "external_account_id": "sender"}
+    connection = await service._connections.upsert_connection(**binding)
+    message = InboundMessage(channel_name="telegram", chat_id="chat", user_id="sender", text="wait", connection_id=connection["id"], owner_user_id=owner)
+    first = await service.dispatch_bound_channel(message, request_id="event", objective="wait")
+    task_id = first["task"]["id"]
+    assert (await service.dispatch_bound_channel(message, request_id="event", objective="wait"))["execution"]["run_id"] == first["execution"]["run_id"]
+    await asyncio.wait_for(entered.wait(), 10)
+    await service._connections.disconnect_connection(connection_id=connection["id"], owner_user_id=owner)
+    with pytest.raises(AgentRunError, match="no longer bound"):
+        await service.dispatch_bound_channel(message, request_id="another-event", objective="wait")
+    await service._connections.upsert_connection(**binding)
+    url = f"/api/coordination/tasks/{task_id}"
+    assert (await client.get(url)).json()["authorization_required"] is True
+    assert (await client.post(f"{url}/inputs", json={"request_id": "new", "content": "retry"})).status_code == 403
+    assert (await client.put(f"{url}/authorization")).raise_for_status().json()["authorization_required"] is False
+    assert (await client.delete(f"{url}/authorization")).status_code == 204
+    assert (await client.get(url)).json()["authorization_required"] is True
