@@ -59,6 +59,9 @@ def split_skill_markdown(content: str) -> tuple[SkillMarkdownParts | None, str |
         metadata = yaml.safe_load(frontmatter_text)
     except (yaml.YAMLError, ValueError) as exc:
         return None, f"Invalid YAML in frontmatter: {exc}"
+    except AttributeError:
+        # PyYAML's explicit timestamp constructor assumes its pattern matched.
+        return None, "Invalid YAML in frontmatter: invalid scalar value"
 
     if not isinstance(metadata, dict):
         return None, "Frontmatter must be a YAML dictionary"

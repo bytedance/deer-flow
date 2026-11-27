@@ -788,7 +788,17 @@ def test_cli_reports_non_string_frontmatter_key_without_crashing(tmp_path, capsy
     assert "Unknown frontmatter field(s): 42, unexpected-field" in output
 
 
-@pytest.mark.parametrize("updated, valid", [("2026-02-30", False), ("2026-11-26T25:00:00Z", False), ("2026-11-26", True), ('"2026-02-30"', True)])
+@pytest.mark.parametrize(
+    "updated, valid",
+    [
+        ("2026-02-30", False),
+        ("2026-11-26T25:00:00Z", False),
+        ("!!timestamp 2026-11-26T13:45:00+08:0", False),
+        ("2026-11-26", True),
+        ("!!timestamp 2026-11-26T13:45:00+08:00", True),
+        ('"2026-02-30"', True),
+    ],
+)
 def test_cli_reports_invalid_yaml_timestamp_as_frontmatter_finding(tmp_path, capsys, updated, valid):
     from deerflow.skills.validation import validate_skill_frontmatter_text
 
