@@ -8,9 +8,11 @@ metadata row was saved but its first checkpoint write failed, retrying with
 the same thread ID seeds the missing checkpoint from the stored metadata.
 An existing head is preserved. If another writer owns the thread while a
 seed is still needed, the endpoint returns 409 and the caller can retry.
-If the creator detects lease loss before its seed write starts, it returns
-409 and preserves the current checkpoint history. If the write is already
-in progress, the gateway waits for it to finish before returning 409.
+The seed task rechecks its writer lease in the run store immediately before
+writing. If a peer took over while the task was queued, the creator returns
+409 and preserves the peer's checkpoint history, even before the creator's
+next heartbeat. If the creator detects lease loss during a write, it waits for
+the write to finish before returning 409.
 
 **Branch/regenerate checkpoint invariant**: `app/gateway/checkpoint_lineage.py`
 walks `parent_config` rather than globally ordered checkpoint history so replay

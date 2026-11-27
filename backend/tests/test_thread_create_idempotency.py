@@ -307,8 +307,8 @@ async def test_retry_preserves_checkpoint_published_before_reservation(thread_st
 @pytest.mark.parametrize("thread_store", ["sqlite"], indirect=True)
 @pytest.mark.parametrize(
     ("pause_at", "heartbeat"),
-    [("read", True), ("read", False), ("seed", True)],
-    ids=["heartbeat-cancels-read", "before-next-heartbeat", "heartbeat-before-seed-starts"],
+    [("read", True), ("read", False), ("seed", True), ("seed", False)],
+    ids=["heartbeat-cancels-read", "before-next-heartbeat", "heartbeat-before-seed-starts", "seed-before-next-heartbeat"],
 )
 async def test_create_losing_lease_preserves_peer_checkpoint(thread_store, pause_at, heartbeat, monkeypatch, tmp_path):
     thread_id = "expired-seed"

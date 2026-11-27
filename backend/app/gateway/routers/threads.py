@@ -1063,8 +1063,9 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
                 raise ConflictError(f"Thread {thread_id} reservation lease was lost")
 
             async def write_seed_if_owned() -> None:
-                # The lease can be revoked while await_drained's child is queued.
-                if reservation.ownership_lost or reservation.abort_event.is_set():
+                # The local heartbeat may not have observed a takeover while this task was queued.
+                owns_admission = await run_manager.owns_active_admission(reservation)
+                if not owns_admission or reservation.ownership_lost or reservation.abort_event.is_set():
                     raise ConflictError(f"Thread {thread_id} reservation lease was lost")
                 await write_initial_thread_checkpoint(checkpointer, config, initial_metadata=initial_metadata, created_at=coerce_iso(current.get("created_at")))
 
