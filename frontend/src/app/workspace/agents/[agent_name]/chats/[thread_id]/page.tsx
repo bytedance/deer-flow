@@ -732,6 +732,7 @@ export default function AgentChatPage() {
                     agentSkillNames={agent?.skills}
                     agentSkillsLoading={agentSkillsLoading}
                     defaultModelName={agent?.model}
+                    agentReasoning={agent}
                     knowledgeScopeControl={
                       selectorVisible && knowledgeScope ? (
                         <KnowledgeScopeSelector

@@ -816,7 +816,9 @@ export const enUS: Translations = {
     steerModeHelp: "Adjust the current task at the next available point",
     runInputSend: "Send update",
     runInputTextOnly:
-      "Send plain text while a task is running. Attachments and slash commands can be sent when it finishes.",
+      "Use plain text to steer. Choose Queue to send attachments.",
+    runInputUnsupported:
+      "Send references and slash commands after the current task finishes.",
     runInputUnavailable:
       "The message was not confirmed. Check the task status and try again; your draft is kept.",
     stopRun: "Stop current task",

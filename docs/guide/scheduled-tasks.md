@@ -6,10 +6,12 @@ Editing a one-time task's title or prompt preserves its original execution time,
 
 An unchanged one-time execution time can still be saved within `scheduler.min_once_delay_seconds` of its run. New execution times and reactivated finished tasks must satisfy that minimum delay.
 
-One-time local timestamps saved through chat or the API retain their seconds
-and fractional seconds when the Web UI resolves them in the task's timezone.
-This includes stored timestamps such as `2026-12-07T09:00.5`, which the
-scheduler interprets as `09:00:00.5` in that timezone.
+For one-time tasks, the Gateway returns `schedule_spec.run_at` in calendar
+date and time format, including seconds and any fractional seconds. A value
+with an explicit offset is stored and returned in UTC. A value without an
+offset stays a local time in the task's timezone, so changing just the
+timezone keeps the same wall-clock time. Older tasks use the same response
+format, including after their last run.
 
 Current MVP capabilities:
 
@@ -182,6 +184,8 @@ provides a source reference, not an automatic summary or a post-back into the
 originating chat.
 
 To start a trial, use the task card's **Run once now** button or the corresponding action on `/workspace/scheduled-tasks`. A request in chat can bring up the card, but its wording alone does not dispatch a run. The action uses the existing authenticated, owner-checked endpoint; an already waiting run is not duplicated. A trial does not count toward `max_runs`.
+
+Automatic runs and manual trials both use the unattended tool policy. Native subagents inherit its clarification restriction and unattended guidance, including when a durable batch resumes after a restart. Set `subagent_enabled: true` through the [Scheduled Tasks API](../../backend/docs/API.md#scheduled-tasks) to allow delegation on a schedule. With durable batches also enabled, the run can submit batch work and inspect results. Automatic batch follow-ups require an originating interactive session with follow-up authority.
 
 A goal occurrence can use up to nine agent turns, with an evaluator request after
 each. Evaluator requests and provider-reported tokens are included in run usage;

@@ -306,6 +306,29 @@ the response is HTTP 504 with detail
 
 ### Runs
 
+#### Submit an input while a Web run is active
+
+`POST /api/threads/{thread_id}/runs/{run_id}/inputs` accepts JSON with
+`request_id`, `text`, `mode` (`queue` or `steer`), and optional `context`.
+To queue attachments, send multipart form data with the JSON in `input`
+and one `files` part per file. Set `mode` to `queue`. The text may be empty
+when the message includes files. Upload limits and thread write permission
+apply. If the active run or the queued message uses Chat mode, the Gateway
+rejects attachments with HTTP 422 before staging any files.
+
+The input receipt and `GET /api/threads/{thread_id}/inputs` show attachment
+names and sizes. Files become readable by the Agent when the queued message's
+run starts. An available filename is preserved. If a name is taken, the
+Gateway picks an available name and remembers it for publication retries.
+An attachment input stays dispatching until the files are published. If its
+run stops before publication starts, or publication fails before the Agent
+receives the message, the same input can be removed or retried without another
+upload. An uncertain dispatch or publication outcome reuses the accepted run.
+On startup, the Gateway
+cleans up abandoned staging directories older than 24 hours.
+Remote sandboxes without thread-data mounts need Python 3 to publish queued
+attachments and reconcile partial transfers.
+
 #### Create Run
 
 Execute the agent with input.
@@ -1310,6 +1333,11 @@ Content-Type: application/json
 }
 ```
 
+An archive that is not a valid skill returns `400`, for example one with unsafe
+or conflicting member paths, invalid frontmatter, a member CRC-32 mismatch found
+during extraction, or a `SKILL.md` that is missing or is not a file. A skill name
+that already exists returns `409`.
+
 #### Upload and Install Skill
 
 Upload a local `.skill` archive and install it for the current user. Requires an
@@ -1916,6 +1944,7 @@ POST   /api/scheduled-tasks/preview-cron
 
 | Field | Type | Notes |
 |---|---|---|
+| `subagent_enabled` | boolean | Opt in to delegation for automatic and manual runs. Defaults to false on create. PATCH omission or null preserves the setting. Agent allowlists and runtime capacity limits still apply. |
 | `goal_objective` | string \| null | What one run must achieve (at most 4000 characters after whitespace normalization); requires `fresh_thread_per_run`. |
 | `max_runs` | integer \| null | Safety cap: automatic runs over the task's lifetime (trial runs excluded); at least 1. |
 | `end_at` | date-time \| null | Safety cap: no automatic run after this time. Without a UTC offset it is wall-clock time in the task's timezone. |

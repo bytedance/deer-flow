@@ -1,8 +1,10 @@
 """Run inputs are durable, owner-scoped and cannot race terminal admission."""
 
 import asyncio
+import os
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import pytest_asyncio
@@ -80,6 +82,102 @@ async def input_store(request, tmp_path):
     yield store
     if engine is not None:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_startup_sweep_keeps_inflight_and_retryable_queued_uploads(input_store, tmp_path, monkeypatch):
+    from app.gateway import app as gateway_app
+    from app.gateway import run_input_files
+    from app.gateway.run_inputs import _cancel_input
+    from deerflow.config import paths as paths_module
+    from deerflow.config.paths import Paths
+
+    paths = Paths(tmp_path)
+    monkeypatch.setattr(paths_module, "_paths", paths)
+    old = (datetime.now(UTC) - timedelta(days=7)).timestamp()
+
+    def stage(thread_id, staging_id, *, owner=USER_ID, age=old):
+        directory = paths.thread_dir(thread_id, user_id=owner) / ".queued-uploads" / staging_id
+        directory.mkdir(parents=True)
+        (directory / "0").write_bytes(b"staged bytes")
+        os.utime(directory, (age, age))
+        return directory
+
+    retryable = stage("thread", "a" * 32)
+    inputs = RunInputs(input_store, "run", USER_ID, "worker")
+    await inputs.reopen()
+    await inputs.submit("retry", "Retry this upload", "queue", attachment_stage={"id": retryable.name, "files": []})
+    admitted = stage("thread", "9" * 32)
+    await inputs.submit("admitted", "Still awaiting publication", "queue", attachment_stage={"id": admitted.name, "files": []})
+    cancelled = stage("thread", "f" * 32)
+    await inputs.submit("cancel", "Remove this upload", "queue", attachment_stage={"id": cancelled.name, "files": []})
+    remove_stage = Mock(side_effect=PermissionError("temporary staging deletion failure"))
+    with monkeypatch.context() as cancel_patch:
+        cancel_patch.setattr(run_input_files.shutil, "rmtree", remove_stage)
+        await _cancel_input(inputs, "thread", USER_ID, "cancel")
+    remove_stage.assert_called_once()
+    assert cancelled.is_dir()
+    assert (await inputs.read())["items"][-1]["status"] == "cancelled"
+    assert await input_store.update_status("run", "error", stop_reason="error")
+    await inputs.claim("admitted", retry=True)
+    await inputs.dispatched("admitted", "admitted-run")
+    # The cleanup must see the old receipt even beyond the API history limit.
+    for index in range(11):
+        run_id = f"later-{index}"
+        await input_store.put(run_id, thread_id="thread", user_id=USER_ID, status="running")
+        await RunInputs(input_store, run_id, USER_ID).submit(f"input-{index}", "later text", "queue")
+        assert await input_store.update_run_completion(run_id, status="success")
+
+    await input_store.put("peer", thread_id="Peer-Thread", user_id=USER_ID, status="running")
+    inflight = stage("peer-thread", "b" * 32)
+    orphan = stage("thread", "c" * 32)
+    fresh = stage("thread", "d" * 32, age=datetime.now(UTC).timestamp())
+    different_owner = stage("thread", retryable.name, owner="other-owner")
+    other_path = stage("thread", "other-directory")
+    await input_store.put("alias", thread_id="Case-Alias", user_id="Alias-Owner", status="running", owner_worker_id="worker")
+    alias = stage("case-alias", "e" * 32, owner="alias-owner")
+    alias_inputs = RunInputs(input_store, "alias", "Alias-Owner", "worker")
+    await alias_inputs.reopen()
+    await alias_inputs.submit("aliased", "Keep this upload", "queue", attachment_stage={"id": alias.name, "files": []})
+    assert await input_store.update_status("alias", "error", stop_reason="error")
+
+    app = SimpleNamespace(state=SimpleNamespace(run_store=input_store))
+    await gateway_app._run_startup_storage_sweeps(app, SimpleNamespace())
+
+    assert not orphan.exists()
+    assert not different_owner.exists()
+    assert not cancelled.exists()
+    for kept in (admitted, retryable, inflight, fresh, other_path, alias):
+        assert (kept / "0").read_bytes() == b"staged bytes"
+
+
+@pytest.mark.asyncio
+async def test_startup_sweep_keeps_replacement_at_a_discovered_stage_path(tmp_path, monkeypatch):
+    from app.gateway.run_input_cleanup import cleanup_abandoned_queued_uploads
+    from deerflow.config.paths import Paths
+
+    paths = Paths(tmp_path)
+    stage = paths.thread_dir("thread", user_id=USER_ID) / ".queued-uploads" / ("a" * 32)
+    stage.mkdir(parents=True)
+    old = (datetime.now(UTC) - timedelta(days=7)).timestamp()
+    os.utime(stage, (old, old))
+    store = MemoryRunStore()
+    lookup = store.list_input_runs
+    replaced = False
+
+    async def replace_during_lookup(*args, **kwargs):
+        nonlocal replaced
+        stage.rename(stage.with_name("moved-stage"))
+        stage.mkdir()
+        (stage / "0").write_bytes(b"replacement")
+        os.utime(stage, (old, old))
+        replaced = True
+        return await lookup(*args, **kwargs)
+
+    monkeypatch.setattr(store, "list_input_runs", replace_during_lookup)
+    assert await cleanup_abandoned_queued_uploads(store, paths) == 0
+    assert replaced
+    assert (stage / "0").read_bytes() == b"replacement"
 
 
 @pytest.mark.asyncio
@@ -211,6 +309,43 @@ async def test_dispatch_and_remove_serialize_and_recovery_retains_the_same_key(i
     assert (await inputs.claim("q", retry=True))["id"] == "q"
     await inputs.dispatched("q", "next-run")
     assert (await inputs.claim("q", retry=True))["run_id"] == "next-run"
+
+
+@pytest.mark.asyncio
+async def test_attachment_publication_failure_ignores_a_late_dispatch_receipt(input_store):
+    inputs = RunInputs(input_store, "run", USER_ID, "worker")
+    await inputs.reopen()
+    await inputs.submit("q", "Read this attachment", "queue", attachment_stage={"id": "a" * 32, "files": []})
+    await input_store.update_status("run", "success")
+    await inputs.claim("q")
+
+    await inputs.publication_failed("q", "failed-run", attempt=0)
+    await inputs.dispatched("q", "failed-run")
+    item = (await inputs.read())["items"][0]
+    assert item["status"] == "not_applied"
+    assert "run_id" not in item
+    with pytest.raises(InputConflict):
+        await inputs.begin_attachment_publication("q", "failed-run", attempt=0)
+
+    retry = await inputs.claim("q", retry=True)
+    assert retry["attachment_attempt"] == 1
+    await inputs.dispatched("q", "next-run", attempt=1)
+    await inputs.publication_succeeded("q", "failed-run", attempt=0)
+    await inputs.publication_failed("q", "failed-run", attempt=0)
+    retry = await inputs.claim("q", retry=True)
+    assert retry["run_id"] == "next-run"
+    assert "published" not in retry["attachment_stage"]
+
+    await inputs.begin_attachment_publication("q", "next-run", attempt=1)
+    uncertain = await inputs.publication_failed("q", "next-run", attempt=1, require_unstarted=True)
+    assert uncertain["status"] == "dispatching"
+    assert uncertain["run_id"] == "next-run"
+
+    await inputs.publication_succeeded("q", "next-run", attempt=1)
+    await inputs.publication_failed("q", "next-run", attempt=1)
+    retry = await inputs.claim("q", retry=True)
+    assert retry["run_id"] == "next-run"
+    assert retry["attachment_stage"]["published"] is True
 
 
 @pytest.mark.asyncio

@@ -474,11 +474,12 @@ async def test_regenerate_recovers_chat_mode_after_switching_modes(_stub_app_con
         ({"mode": "chat"}, {"mode": "flash", "thinking_enabled": False}, False, False),
         ({"mode": "ultra", "is_plan_mode": True, "subagent_enabled": True, "reasoning_effort": "low"}, {"mode": "flash"}, False, False),
         ({"mode": "thinking", "reasoning_effort": "high"}, {}, False, False),
+        ({"mode": "ultra", "reasoning_effort": "high", "mode_default_fields": ["reasoning_effort"]}, {"mode": "chat"}, False, False),
         ({}, {"mode": "chat"}, False, False),
         ({"mode": "thinking", "thinking_enabled": 0, "reasoning_effort": None}, {"mode": "chat"}, False, False),
         ({"mode": "flash", "thinking_enabled": False}, {"mode": "chat"}, True, True),
     ],
-    ids=["flash-attachment-to-chat", "chat-to-flash", "ultra-to-flash", "omitted-selection", "ordinary-default", "explicit-falsy", "legacy-answer-summary"],
+    ids=["flash-attachment-to-chat", "chat-to-flash", "ultra-to-flash", "omitted-selection", "source-reasoning-preset", "ordinary-default", "explicit-falsy", "legacy-answer-summary"],
 )
 async def test_replay_uses_original_mode_options(_stub_app_config, mode_app, monkeypatch, operation, original, selection, with_file, legacy_summary):
     from unittest.mock import AsyncMock
@@ -538,7 +539,7 @@ async def test_replay_uses_original_mode_options(_stub_app_config, mode_app, mon
         record = await manager.get(replay.json()["run_id"], user_id=owner)
         await record.task
         config = worker.await_args.kwargs["config"]
-        keys = {"mode", "thinking_enabled", "reasoning_effort", "is_plan_mode", "subagent_enabled"}
+        keys = {"mode", "mode_default_fields", "thinking_enabled", "reasoning_effort", "is_plan_mode", "subagent_enabled"}
         for section in ("configurable", "context"):
             assert {key: value for key, value in config[section].items() if key in keys} == original
         assert record.metadata.get("mode") == original.get("mode")
@@ -5626,13 +5627,14 @@ async def test_start_run_peer_idempotent_reuse_does_not_reject_later_runs_after_
     assert follow_up.run_id != first.run_id
 
 
-def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):
+@pytest.mark.parametrize("options", [{}, {"subagent_enabled": False}, {"subagent_enabled": True}])
+def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config, options):
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import patch
 
     from app.gateway.routers.thread_runs import RunCreateRequest
-    from app.gateway.services import launch_scheduled_thread_run
+    from app.gateway.services import get_trusted_internal_owner_user_id, launch_scheduled_thread_run, merge_run_context_overrides
 
     async def _scenario():
         captured: dict[str, object] = {}
@@ -5641,6 +5643,10 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
             captured["body"] = body
             captured["thread_id"] = thread_id
             captured["context"] = body.context
+            captured["trusted_owner"] = get_trusted_internal_owner_user_id(request)
+            config: dict = {}
+            merge_run_context_overrides(config, body.context, internal=True)
+            captured["runtime_config"] = config
             captured["scheduled_task_runtime"] = scheduled_task_runtime
             captured["metadata"] = body.metadata
             captured["idempotency_key"] = idempotency_key
@@ -5659,6 +5665,7 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
                     "scheduled_task_id": "task-1",
                     "scheduled_task_run_id": "task-run-1",
                 },
+                **options,
             )
         return captured, result
 
@@ -5667,7 +5674,12 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
     assert captured["thread_id"] == "thread-scheduled"
     assert isinstance(captured["body"], RunCreateRequest)
     assert captured["body"].config == {"recursion_limit": 1000}
-    assert captured["context"] == {"non_interactive": True, "user_id": "user-1"}
+    expected_context = {"non_interactive": True, "user_id": "user-1"}
+    if options.get("subagent_enabled"):
+        expected_context["subagent_enabled"] = True
+    assert captured["context"] == expected_context
+    assert captured["trusted_owner"] == "user-1"
+    assert captured["runtime_config"]["context"] == expected_context
     assert captured["scheduled_task_runtime"] == {"task_id": "task-1", "occurrence_id": "task-run-1", "user_id": "user-1"}
     assert captured["metadata"] == {
         "scheduled_task_id": "task-1",

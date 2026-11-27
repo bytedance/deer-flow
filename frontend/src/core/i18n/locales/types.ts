@@ -666,6 +666,7 @@ export interface Translations {
     steerModeHelp: string;
     runInputSend: string;
     runInputTextOnly: string;
+    runInputUnsupported: string;
     runInputUnavailable: string;
     stopRun: string;
     runInputQueued: string;

@@ -6,15 +6,21 @@ the original worker is then released and cleaned up normally.
 """
 
 import asyncio
+import importlib.util
 import json
 import sqlite3
+import sys
 import threading
+import time
+from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
@@ -196,5 +202,238 @@ def test_fresh_gateway_boot_recovers_self_stop_once_after_running_snapshot(tmp_p
                 "after_resume_and_old_callback": restored["status"],
             }
         print("Gateway stop recovery evidence: " + json.dumps(evidence, sort_keys=True))
+    finally:
+        reset_app_config()
+
+
+def _tool_call(name, **args):
+    return AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": name, "type": "tool_call"}])
+
+
+class _ScheduledReportModel(FakeMessagesListChatModel):
+    schemas: dict = {}
+    system_prompts: list[str] = []
+
+    def bind_tools(self, tools, **kwargs):
+        self.schemas.update({tool.name: convert_to_openai_tool(tool)["function"]["parameters"] for tool in tools})
+        return self
+
+    def _generate(self, messages, *args, **kwargs):
+        self.system_prompts.extend(str(message.content) for message in messages if message.type == "system")
+        if not self.responses:
+            if any("There is no human available" in prompt and "smallest reasonable assumption" in prompt for prompt in self.system_prompts):
+                self.responses = [
+                    _tool_call("write_file", path="/mnt/user-data/outputs/monthly.csv", content="month,total\n2026-11,42\n"),
+                    AIMessage(content="Report saved. Assumption: use the reporting month from the schedule."),
+                ]
+            else:
+                self.responses = [AIMessage(content="Which month should I use?")]
+        return super()._generate(messages, *args, **kwargs)
+
+
+def _await_result(read, condition):
+    for _ in range(300):
+        result = read()
+        if condition(result):
+            return result
+        time.sleep(0.1)
+    pytest.fail(f"Run did not reach the expected state: {result!r}")
+
+
+@pytest.fixture
+def report_executor(monkeypatch):
+    from deerflow import subagents
+    from deerflow.subagents import batch_service
+
+    task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
+
+    # conftest loads a stub to break lightweight unit-test imports. Use the
+    # production executor and reconnect its existing import sites here.
+    name = "deerflow.subagents.executor"
+    path = Path(__file__).parents[1] / "packages/harness/deerflow/subagents/executor.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, module)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(subagents, "executor", module, raising=False)
+    for target in (subagents, batch_service, task_tool_module):
+        for attr in (
+            "SubagentExecutor",
+            "SubagentStatus",
+            "cleanup_background_task",
+            "force_cleanup_background_task",
+            "get_background_task_result",
+            "request_cancel_background_task",
+            "run_on_isolated_subagent_loop",
+        ):
+            if hasattr(target, attr):
+                monkeypatch.setattr(target, attr, getattr(module, attr))
+    try:
+        yield module
+    finally:
+        module._shutdown_isolated_subagent_loop()
+
+
+@pytest.mark.no_auto_user
+@pytest.mark.parametrize(
+    ("trigger", "delegation", "arguments"),
+    [
+        ("automatic", None, {}),
+        ("manual", None, {}),
+        ("automatic", "task", {}),
+        ("manual", "task", {}),
+        ("automatic", "batch_task", {}),
+        ("manual", "batch_task", {"continuation": None, "legacy_extra": True}),
+        ("manual", "batch_task", {"continuation": ""}),
+        ("manual", "batch_task", {"continuation": "Publish the report"}),
+        ("interactive", "batch_task", {"continuation": "Publish the report"}),
+        ("interactive", "ask_clarification", {}),
+    ],
+)
+def test_gateway_scheduled_subagent_contract(tmp_path, monkeypatch, trigger, delegation, arguments, report_executor):
+    from app.gateway import deps
+    from app.gateway.app import create_app
+    from deerflow.agents.lead_agent import agent as lead_agent
+    from deerflow.config import paths
+    from deerflow.sandbox.local.local_sandbox import LocalSandbox
+
+    execute_command = LocalSandbox.execute_command
+
+    def execute_without_remote_probe(self, command, *args, **kwargs):
+        # A local file check must work without GNU filesystem utilities.
+        if (kwargs.get("env") or {}).get("_DEERFLOW_SIZE_PROBE"):
+            raise OSError("Remote file probe is unavailable on this local host")
+        return execute_command(self, command, *args, **kwargs)
+
+    monkeypatch.setattr(LocalSandbox, "execute_command", execute_without_remote_probe)
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "0")
+    monkeypatch.setenv("AUTH_JWT_SECRET", "local-scheduled-report-test-secret")
+    monkeypatch.setattr(ExtensionsConfig, "from_file", lambda *args, **kwargs: ExtensionsConfig())
+    monkeypatch.setattr(paths, "_paths", None)
+    monkeypatch.setattr(deps, "_cached_local_provider", None)
+    monkeypatch.setattr(deps, "_cached_repo", None)
+    config = AppConfig.model_validate(
+        {
+            "models": [{"name": "offline", "use": "langchain_openai:ChatOpenAI", "model": "offline", "api_key": "unused"}],
+            "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+            "tools": [{"name": "write_file", "group": "file:write", "use": "deerflow.sandbox.tools:write_file_tool"}],
+            "database": {"backend": "sqlite", "sqlite_dir": str(tmp_path / "db")},
+            "scheduler": {"enabled": True, "poll_interval_seconds": 300, "min_once_delay_seconds": 1},
+            "subagent_batches": {"enabled": True, "poll_interval_seconds": 0.1},
+            "memory": {"enabled": False},
+            "title": {"enabled": False},
+            "summarization": {"enabled": False},
+            "skills": {"path": str(tmp_path / "skills")},
+            "subagents": {"custom_agents": {"reporter": {"description": "Monthly reports", "system_prompt": "Generate the monthly report.", "disallowed_tools": [], "skills": []}}},
+        }
+    )
+    criterion = "file:/mnt/user-data/outputs/monthly.csv non-empty"
+    prompt = "Generate a CSV report. No month was supplied; the schedule normally reports November 2026."
+    if delegation == "task":
+        call = _tool_call("task", description="Monthly report", prompt=prompt, subagent_type="reporter", acceptance_criteria=[criterion])
+    elif delegation == "batch_task":
+        call = _tool_call("batch_task", title="Monthly report", items=[{"key": "report", "prompt": prompt, "acceptance_criteria": [criterion]}], subagent_type="reporter", **arguments)
+    elif delegation == "ask_clarification":
+        call = _tool_call("ask_clarification", question="Which month?", clarification_type="missing_info")
+    else:
+        call = AIMessage(content="Run completed without delegation.")
+    lead = _ScheduledReportModel(responses=[call, AIMessage(content="Lead turn complete."), AIMessage(content="Follow-up published.")])
+    child = _ScheduledReportModel(responses=[AIMessage(content="Finished interactive work.")] if trigger == "interactive" else [])
+    child_builds = []
+
+    def child_model(**kwargs):
+        child_builds.append(child)
+        return child
+
+    monkeypatch.setattr(lead_agent, "create_chat_model", lambda *args, **kwargs: lead)
+    monkeypatch.setattr(report_executor, "create_chat_model", child_model)
+    set_app_config(config)
+    try:
+        app = create_app()
+        with ExitStack() as clients:
+            client = clients.enter_context(TestClient(app))
+            recover_batch = trigger == "automatic" and delegation == "batch_task"
+            if recover_batch:
+                client.portal.call(app.state.subagent_batch_service.stop)
+
+            def request(method, url, **kwargs):
+                response = client.request(method, url, **kwargs)
+                assert response.is_success, response.text
+                return response.json()
+
+            request("POST", "/api/v1/auth/register", json={"email": "reporter@example.com", "password": "local-report-fixture-strong-372!"})
+            client.headers["X-CSRF-Token"] = client.cookies["csrf_token"]
+            if trigger == "interactive":
+                thread_id = request("POST", "/api/threads", json={})["thread_id"]
+                thread_url = f"/api/threads/{thread_id}"
+                request("POST", f"{thread_url}/runs/wait", json={"assistant_id": "lead_agent", "input": {"messages": [{"role": "user", "content": prompt}]}, "context": {"subagent_enabled": True}})
+            else:
+                due = datetime.now(UTC) + timedelta(minutes=2)
+                task_id = request(
+                    "POST", "/api/scheduled-tasks", json={"title": "Monthly report", "prompt": prompt, "schedule_type": "once", "schedule_spec": {"run_at": due.isoformat()}, "timezone": "UTC", "subagent_enabled": delegation is not None}
+                )["id"]
+                task_url = f"/api/scheduled-tasks/{task_id}"
+                assert request("GET", task_url)["subagent_enabled"] is (delegation is not None)
+                if trigger == "manual":
+                    request("POST", f"{task_url}/trigger")
+                else:
+
+                    async def tick():
+                        await app.state.scheduled_task_service.run_once(now=due + timedelta(seconds=1))
+
+                    client.portal.call(tick)
+                history = _await_result(lambda: request("GET", f"{task_url}/runs"), lambda rows: rows and rows[0]["status"] in TERMINAL_RUN_STATUSES)
+                assert history[0]["status"] == "success", history
+                thread_url = f"/api/threads/{history[0]['thread_id']}"
+            if delegation is None:
+                assert not {"task", "batch_task", "ask_clarification"} & lead.schemas.keys()
+                assert not child_builds
+                return
+            assert delegation in lead.schemas
+            messages = request("GET", f"{thread_url}/state")["values"]["messages"]
+            receipt = next(message for message in messages if message.get("tool_call_id") == delegation)
+            if delegation == "ask_clarification":
+                assert receipt["artifact"]["human_input"]["question"] == "Which month?"
+                return
+            if delegation == "batch_task":
+                assert ("continuation" in lead.schemas["batch_task"]["properties"]) is (trigger == "interactive")
+                batch_url = f"{thread_url}/subagent-batches"
+                batches = request("GET", batch_url)
+                if trigger != "interactive" and arguments.get("continuation") is not None:
+                    expected = "must contain 1 to 4000 characters" if not arguments["continuation"] else "requires its originating Agent run authority"
+                    assert expected in receipt["content"]
+                    assert batches == []
+                    return
+                assert len(batches) == 1, receipt
+                batch_url = f"{batch_url}/{batches[0]['id']}"
+                if recover_batch:
+                    assert request("GET", f"{batch_url}/items")[0]["status"] in {"queued", "pending"}
+                    assert not child_builds
+                    clients.close()
+                    monkeypatch.setattr(deps, "_cached_local_provider", None)
+                    monkeypatch.setattr(deps, "_cached_repo", None)
+                    client = clients.enter_context(TestClient(create_app()))
+                    request("POST", "/api/v1/auth/login/local", data={"username": "reporter@example.com", "password": "local-report-fixture-strong-372!"})
+                    client.headers["X-CSRF-Token"] = client.cookies["csrf_token"]
+                items = _await_result(lambda: request("GET", f"{batch_url}/items"), lambda rows: rows and rows[0]["status"] in {"succeeded", "failed", "cancelled"})
+                assert items[0]["status"] == "succeeded", items
+                if trigger == "interactive":
+                    batch = _await_result(lambda: request("GET", batch_url), lambda row: row["continuation_status"] not in {"pending", "dispatching"})
+                    assert batch["continuation_status"] == "dispatched", batch
+                    follow_up_url = f"{thread_url}/runs/{batch['continuation_run_id']}"
+                    follow_up = _await_result(lambda: request("GET", follow_up_url), lambda run: run["status"] not in {"pending", "running"})
+                    assert follow_up["status"] == "success", follow_up
+                    assert len(request("GET", f"{thread_url}/subagent-batches")) == 1
+                    assert "ask_clarification" in child.schemas
+                    return
+                verdict = items[0]["acceptance_verdict"]
+            else:
+                assert receipt["additional_kwargs"]["subagent_status"] == "completed", receipt
+                verdict = receipt["additional_kwargs"]["subagent_acceptance_verdict"]
+            assert "ask_clarification" not in child.schemas
+            assert any("There is no human available" in message for message in child.system_prompts)
+            assert verdict["all_hold"], verdict
+            assert [path.read_text(encoding="utf-8") for path in (tmp_path / "home").rglob("monthly.csv")] == ["month,total\n2026-11,42\n"]
     finally:
         reset_app_config()
