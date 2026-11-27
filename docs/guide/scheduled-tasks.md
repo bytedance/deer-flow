@@ -16,7 +16,9 @@ Stored timestamps with an explicit hour-only UTC offset (for example,
 editor. This also covers comma fractions and omitted seconds, such as
 `2026-12-12T09:30:00,5+08` and `2026-12-12T09:30.5+08`; both denote
 `2026-12-12T01:30:00.5Z`. Opening the editor preserves the original stored
-timestamp spelling. The date/time separator may also be lowercase `t`.
+timestamp spelling. The date/time separator may also be lowercase `t`. Hour-precision times
+such as `2026-12-12T09+08` use zero minutes and seconds and retain their
+original spelling when only the title is edited.
 
 Current MVP capabilities:
 

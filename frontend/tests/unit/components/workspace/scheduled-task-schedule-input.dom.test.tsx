@@ -67,6 +67,28 @@ describe("ScheduledTaskScheduleInput", () => {
     },
   );
 
+  test("opens an hour-precision offset without rewriting the stored time", () => {
+    const runAt = "2026-12-12T09+08";
+    const emitted: ScheduleValue[] = [];
+    const { container } = render(
+      <I18nProvider initialLocale="en-US">
+        <ScheduledTaskScheduleInput
+          initial={{
+            schedule_type: "once",
+            schedule_spec: { run_at: runAt },
+            timezone: "Asia/Shanghai",
+          }}
+          onChange={(value) => emitted.push(value)}
+        />
+      </I18nProvider>,
+    );
+    expect(
+      container.querySelector<HTMLInputElement>('input[type="datetime-local"]')
+        ?.value,
+    ).toBe("2026-12-12T09:00");
+    expect(emitted.at(-1)?.schedule_spec.run_at).toBe(runAt);
+  });
+
   async function selectPreset(name: string) {
     fireEvent.keyDown(screen.getByTestId("schedule-preset"), {
       key: "ArrowDown",

@@ -8,6 +8,11 @@ test.use({ timezoneId: "Asia/Shanghai" });
 
 for (const { runAt, time, nextRunAt } of [
   {
+    runAt: "2027-12-07T09-05",
+    time: "09:00",
+    nextRunAt: "2027-12-07T14:00:00Z",
+  },
+  {
     runAt: "2027-12-07T09:00:00-05",
     time: "09:00",
     nextRunAt: "2027-12-07T14:00:00Z",
@@ -92,6 +97,10 @@ for (const { runAt, time, nextRunAt } of [
     const form = page.getByTestId("scheduled-task-form");
     await expect(form.getByLabel("Run at")).toHaveValue(`2027-12-07T${time}`);
 
+    // The hour-precision spelling must remain a title-only edit even after it fires.
+    if (runAt === "2027-12-07T09-05") {
+      await page.clock.setFixedTime(new Date("2028-01-01T00:00:00Z"));
+    }
     await form.getByLabel("Title", { exact: true }).fill("Renamed task");
     await form
       .getByRole("button", { name: "Save changes", exact: true })
