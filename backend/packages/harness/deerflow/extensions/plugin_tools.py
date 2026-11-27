@@ -22,7 +22,7 @@ from langchain_core.tools import StructuredTool, ToolException
 from deerflow.config.plugin_settings import defaults
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.tool_provenance import tag_plugin_tool
-from deerflow.utils.messages import TOOL_META_KEY
+from deerflow.utils.messages import TOOL_META_KEY, make_tool_result_meta
 
 logger = logging.getLogger(__name__)
 
@@ -112,8 +112,8 @@ def _build_tool(source, plugin, declaration):
                     raise ToolException("Plugin result exceeds 64 KiB.")
                 if runtime.tool_call_id is None:
                     return result.content
-                # Unstamped text-only results keep the legacy error recognition.
-                reported_success = status == "success" or (status is None and artifact is not None)
+                # An artifact can carry diagnostics for a legacy error result.
+                # Only an explicit success overrides content-based error recognition.
                 # A JSON roundtrip detaches nested values retained by the handler.
                 return ToolMessage(
                     content=result.content,
@@ -121,7 +121,7 @@ def _build_tool(source, plugin, declaration):
                     name=name,
                     tool_call_id=runtime.tool_call_id,
                     status=status or "success",
-                    additional_kwargs={TOOL_META_KEY: {"status": "success", "source": "tool_return"}} if reported_success else {},
+                    additional_kwargs={TOOL_META_KEY: make_tool_result_meta(status="success")} if status == "success" else {},
                 )
             encoded = json.dumps(result, ensure_ascii=False, allow_nan=False)
             if len(encoded.encode()) > 64 * 1024:

@@ -30,19 +30,23 @@ from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactR
 from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
-from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
+from deerflow.agents.middlewares.tool_output_budget_middleware import TOOL_OUTPUT_BLOB_KEY, ToolOutputBudgetMiddleware
+from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.agents.thread_state import ThreadState
 from deerflow.community.crawl4ai import crawl4ai_client
 from deerflow.community.crawl4ai import tools as crawl4ai_tools
+from deerflow.community.opensandbox.sandbox import OpenSandboxSandbox
 from deerflow.config import paths as paths_module
 from deerflow.config.acp_config import ACPAgentConfig
 from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.extensions.plugin_tools import build_plugin_tools
 from deerflow.extensions.registry import ExtensionRegistry
 from deerflow.sandbox import sandbox_provider
 from deerflow.sandbox.sandbox import CommandOutput, Sandbox
-from deerflow.sandbox.tools import bash_tool
+from deerflow.sandbox.tools import bash_tool, read_file_tool
+from deerflow.storage.backends.local_fs.local_fs_store import LocalFsBlobStore
 from deerflow.tools.artifact_registry import generate_handle
 from deerflow.tools.builtins import view_image_tool
 from deerflow.tools.builtins.invoke_acp_agent_tool import build_invoke_acp_agent_tool
@@ -67,14 +71,16 @@ class RecordingToolCallingModel(FakeToolCallingModel):
 
 
 _COMPACTION_SUMMARY = "The first request finished."
+_SUCCESS_META = {"status": "success", "source": "tool_return", "error_type": None, "recoverable_by_model": True, "recommended_next_action": "continue"}
 
 
-def _compacting_agent(model, selected_tool):
+def _compacting_agent(model, *tools, checkpointer=None, output_budget=None):
     return create_agent(
         model=model,
-        tools=[selected_tool],
+        tools=tools,
         middleware=[
-            ToolOutputBudgetMiddleware(),
+            output_budget or ToolOutputBudgetMiddleware(),
+            ArtifactResolutionMiddleware(),
             ToolErrorHandlingMiddleware(),
             ArtifactCaptureMiddleware(),
             DurableContextMiddleware(),
@@ -86,7 +92,7 @@ def _compacting_agent(model, selected_tool):
             ),
         ],
         state_schema=ThreadState,
-        checkpointer=InMemorySaver(),
+        checkpointer=checkpointer if checkpointer is not None else InMemorySaver(),
     )
 
 
@@ -237,17 +243,29 @@ _PLUGIN_REPORT = "Error: the report summarizes past validation failures."
 _PLUGIN_REPORT_ARTIFACT = {"structured_content": {"file": _PLUGIN_REPORT_URL}}
 
 
+def _report_plugin_tool(handler):
+    declaration = ModelTool("report", "Generate a report.", {"type": "object"}, handler, response_format="content_and_artifact")
+    registry = ExtensionRegistry()
+    with registry.attributed_to("test"):
+        registry.plugin(PluginContribution(namespace="test.reports", title="Reports", enabled=True, tools=(declaration,)))
+    (selected_tool,) = build_plugin_tools(registry.build())
+    return selected_tool
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "outcome,expected_error",
     [
-        pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT), None, id="typed-result"),
-        pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT | {"deerflow_http_response": {"status_code": 200}}), None, id="http-200"),
+        pytest.param(PluginToolResult("The report is ready.", _PLUGIN_REPORT_ARTIFACT), None, id="legacy-report"),
+        pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT, status="success"), None, id="explicit-report"),
+        pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT | {"deerflow_http_response": {"status_code": 200}}, status="success"), None, id="http-200"),
         pytest.param(PluginToolResult(_PLUGIN_REPORT, _PLUGIN_REPORT_ARTIFACT | {"deerflow_http_response": {"status_code": 404}}, status="success"), "not_found", id="http-404"),
         pytest.param(PluginToolResult(_PLUGIN_REPORT, status="success"), None, id="text-only-success"),
         pytest.param(PluginToolResult("Could not generate the report.", _PLUGIN_REPORT_ARTIFACT, status="error"), "unknown", id="explicit-error"),
         pytest.param(PluginToolResult(f"Error: Could not generate {_PLUGIN_REPORT_URL}"), "unknown", id="legacy-text-error"),
         pytest.param(PluginToolResult(json.dumps({"error": f"Could not generate {_PLUGIN_REPORT_URL}"})), "unknown", id="legacy-json-error"),
+        pytest.param(PluginToolResult(json.dumps({"error": f"Could not generate {_PLUGIN_REPORT_URL}"}), {}), "unknown", id="legacy-json-error-empty-artifact"),
+        pytest.param(PluginToolResult(json.dumps({"error": f"Could not generate {_PLUGIN_REPORT_URL}"}), {"request_id": "req-1"}), "unknown", id="legacy-json-error-diagnostic"),
         pytest.param(ToolException(f"Error: Could not generate {_PLUGIN_REPORT_URL}"), "unknown", id="tool-exception"),
     ],
 )
@@ -257,11 +275,7 @@ async def test_plugin_report_artifacts_follow_invocation_status_through_compacti
             raise outcome
         return outcome
 
-    declaration = ModelTool("report", "Generate a report.", {"type": "object"}, handler, response_format="content_and_artifact")
-    registry = ExtensionRegistry()
-    with registry.attributed_to("test"):
-        registry.plugin(PluginContribution(namespace="test.reports", title="Reports", enabled=True, tools=(declaration,)))
-    (selected_tool,) = build_plugin_tools(registry.build())
+    selected_tool = _report_plugin_tool(handler)
     model = _one_tool_model(selected_tool.name, {}, "call_plugin_report")
     agent = _compacting_agent(model, selected_tool)
     config = {"configurable": {"thread_id": THREAD_ID}}
@@ -288,6 +302,36 @@ async def test_plugin_report_artifacts_follow_invocation_status_through_compacti
     compacted_request = await _compact_and_check_artifacts(agent, model, config, context, expected_refs)
     if not success:
         assert not any("report.pdf [available]" in item.content for item in compacted_request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_first", [False, True], ids=["duplicate-success", "recovery-after-errors"])
+async def test_plugin_success_participates_in_tool_progress(failed_first):
+    report = PluginToolResult("The completed report contains verified financial projections for each region and department.", status="success")
+    failure = PluginToolResult("Could not generate the report.", status="error")
+    outcomes = iter([failure] * 3 + [report] if failed_first else [report] * 4)
+
+    async def handler(payload, context):
+        return next(outcomes)
+
+    selected_tool = _report_plugin_tool(handler)
+    model = RecordingToolCallingModel(
+        responses=[
+            *(AIMessage(content="", tool_calls=[{"name": selected_tool.name, "args": {}, "id": f"call_{index}", "type": "tool_call"}]) for index in range(4)),
+            AIMessage(content="Done."),
+        ]
+    )
+    progress = ToolProgressMiddleware()
+    agent = create_agent(model=model, tools=[selected_tool], middleware=[progress, ToolErrorHandlingMiddleware()], state_schema=ThreadState)
+    await agent.ainvoke({"messages": [HumanMessage(content="Generate the report.")]}, context={"thread_id": THREAD_ID})
+
+    phase = progress._phase_states.get(THREAD_ID, {}).get(selected_tool.name)
+    if failed_first:
+        assert any("[PROGRESS HINT]" in str(message.content) for message in model.received[3])
+        assert phase is not None and phase.phase == "active" and phase.consecutive_problems == 0
+    else:
+        assert any("The tool is returning duplicate results." in str(message.content) for message in model.received[-1])
+        assert phase is not None and phase.phase == "warned"
 
 
 _ACP_REPORT_AGENT = """\
@@ -346,6 +390,7 @@ async def test_acp_report_artifacts_follow_invocation_status_through_compaction(
     compacted_request = await _compact_and_check_artifacts(agent, model, config, context, [report_url] if success else [])
     if success:
         assert message.content == report
+        assert message.additional_kwargs[TOOL_META_KEY] == _SUCCESS_META
     else:
         assert not any("report.pdf [available]" in item.content for item in compacted_request)
         if stop_reason != "request_error":
@@ -387,12 +432,63 @@ async def test_crawl4ai_artifacts_follow_fetch_status_through_compaction(monkeyp
     assert message.content == (markdown if success else f"Error: Crawl4AI reported failure for {report_url}")
     await _compact_and_check_artifacts(agent, model, config, context, [report_url] if success else [])
     assert message.additional_kwargs[TOOL_META_KEY]["status"] == ("success" if success else "error")
+    if success:
+        assert message.additional_kwargs[TOOL_META_KEY] == _SUCCESS_META
 
 
 @pytest.mark.asyncio
-async def test_failed_bash_diagnostic_artifact_survives_compaction(tmp_path, monkeypatch):
+async def test_opensandbox_success_keeps_report_artifact_through_compaction(tmp_path, monkeypatch):
     outputs = tmp_path / "outputs"
     outputs.mkdir()
+    stdout = f"Error: the report lists historical failures. Saved to {REAL_REF}"
+
+    def run(command, *, opts):
+        (outputs / "report.md").write_text("Historical failures", encoding="utf-8")
+        return SimpleNamespace(exit_code=0, logs=SimpleNamespace(stdout=[SimpleNamespace(text=stdout)], stderr=[]))
+
+    def read_mounted_report(path):
+        assert path == REAL_REF
+        return (outputs / "report.md").read_text(encoding="utf-8")
+
+    sdk = SimpleNamespace(commands=SimpleNamespace(run=run), files=SimpleNamespace(read_file=read_mounted_report))
+    sandbox = OpenSandboxSandbox("opensandbox:report", sdk, run_command_opts_cls=SimpleNamespace)
+    provider = Mock(spec=sandbox_provider.SandboxProvider, uses_thread_data_mounts=True)
+    provider.get.return_value = sandbox
+    provider.get_scoped.return_value = sandbox
+    monkeypatch.setattr(sandbox_provider, "_default_sandbox_provider", provider)
+    model = _one_tool_model("bash", {"command": "run-report"}, "call_bash")
+    read_call = AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"path": ""}, "id": "call_read", "type": "tool_call"}])
+    model.responses.extend([read_call, AIMessage(content="Done.")])
+    agent = _compacting_agent(model, bash_tool, read_file_tool)
+    config = {"configurable": {"thread_id": THREAD_ID}}
+    context = {"thread_id": THREAD_ID}
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage(content="Run the report command.")], "thread_data": {"outputs_path": str(outputs)}, "sandbox": {"sandbox_id": sandbox.id}},
+        config,
+        context=context,
+    )
+
+    assert (outputs / "report.md").read_text(encoding="utf-8") == "Historical failures"
+    await _compact_and_check_artifacts(agent, model, config, context, [REAL_REF])
+    message = next(message for message in result["messages"] if isinstance(message, ToolMessage))
+    assert message.content == stdout
+    assert message.additional_kwargs[TOOL_META_KEY]["status"] == "success"
+    assert message.additional_kwargs[TOOL_META_KEY]["exit_code"] == 0
+    (entry,) = (await agent.aget_state(config)).values["tool_artifacts"]
+    read_call.tool_calls[0]["args"]["path"] = entry["handle"]
+    result = await agent.ainvoke({"messages": [HumanMessage(content="Read the report.")]}, config, context=context)
+    read_result = next(item for item in result["messages"] if isinstance(item, ToolMessage) and item.tool_call_id == "call_read")
+    assert read_result.status == "success"
+    assert read_result.content == "Historical failures"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shared_blob", [False, True], ids=["local-output", "shared-blob"])
+async def test_failed_bash_diagnostic_artifact_survives_compaction(tmp_path, monkeypatch, shared_blob):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    store = LocalFsBlobStore(tmp_path / "blobs") if shared_blob else None
+    monkeypatch.setattr("deerflow.agents.middlewares.tool_output_budget_middleware.get_blob_store_if_enabled", lambda: store)
     missing_path = "/mnt/user-data/outputs/missing.pdf"
     stdout = f"Could not produce {missing_path}\n" + "diagnostic line\n" * 850 + "Exit Code: 2"
     sandbox = Mock(spec=Sandbox, id="fixture:diagnostics", execute_command=Mock(return_value=CommandOutput(stdout, 2)), supports_command_cancellation=False)
@@ -401,7 +497,8 @@ async def test_failed_bash_diagnostic_artifact_survives_compaction(tmp_path, mon
     provider.get_scoped.return_value = sandbox
     monkeypatch.setattr(sandbox_provider, "_default_sandbox_provider", provider)
     model = _one_tool_model("bash", {"command": "run-report"}, "call_bash")
-    agent = _compacting_agent(model, bash_tool)
+    checkpointer = InMemorySaver()
+    agent = _compacting_agent(model, bash_tool, checkpointer=checkpointer)
     config = {"configurable": {"thread_id": THREAD_ID}}
     context = {"thread_id": THREAD_ID}
 
@@ -423,6 +520,34 @@ async def test_failed_bash_diagnostic_artifact_survives_compaction(tmp_path, mon
     assert log.read_text(encoding="utf-8") == stdout
     ref = f"/mnt/user-data/outputs/{log.relative_to(outputs).as_posix()}"
     await _compact_and_check_artifacts(agent, model, config, context, [ref])
+    if shared_blob:
+        compacted = (await agent.aget_state(config)).values
+        (entry,) = compacted["tool_artifacts"]
+        other_outputs = tmp_path / "other-outputs"
+        other_outputs.mkdir()
+
+        def read_mounted_file(path):
+            return (other_outputs / path.removeprefix("/mnt/user-data/outputs/")).read_text(encoding="utf-8")
+
+        files = SimpleNamespace(read_file=read_mounted_file)
+        resumed_sandbox = OpenSandboxSandbox(sandbox.id, SimpleNamespace(files=files), run_command_opts_cls=SimpleNamespace)
+        resumed_provider = Mock(spec=sandbox_provider.SandboxProvider, uses_thread_data_mounts=True)
+        resumed_provider.get.return_value = resumed_sandbox
+        resumed_provider.get_scoped.return_value = resumed_sandbox
+        monkeypatch.setattr(sandbox_provider, "_default_sandbox_provider", resumed_provider)
+        read_model = _one_tool_model("read_file", {"path": entry["handle"]}, "call_read")
+        # The read can return all the original bytes to the model in this run.
+        reader = _compacting_agent(read_model, read_file_tool, checkpointer=checkpointer, output_budget=ToolOutputBudgetMiddleware(config=ToolOutputConfig(enabled=False)))
+        restored = await reader.ainvoke(
+            {"messages": [HumanMessage(content="Read the diagnostic.")], "thread_data": {"outputs_path": str(other_outputs)}},
+            config,
+            context=context,
+        )
+        read_result = next(item for item in restored["messages"] if isinstance(item, ToolMessage) and item.tool_call_id == "call_read")
+        assert read_result.status == "success", read_result.content
+        assert read_result.content == stdout
+        assert (other_outputs / log.relative_to(outputs)).read_bytes() == stdout.encode("utf-8")
+        assert entry[TOOL_OUTPUT_BLOB_KEY] == message.additional_kwargs[TOOL_OUTPUT_BLOB_KEY]
 
 
 @pytest.mark.parametrize(

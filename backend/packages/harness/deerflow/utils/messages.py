@@ -15,6 +15,24 @@ ToolResultStatus = Literal["success", "error", "partial_success"]
 KNOWN_TOOL_RESULT_STATUSES = get_args(ToolResultStatus)
 
 
+def make_tool_result_meta(
+    *,
+    status: ToolResultStatus,
+    source: str = "tool_return",
+    error_type: str | None = None,
+    recoverable_by_model: bool = True,
+    recommended_next_action: str = "continue",
+) -> dict[str, object]:
+    """Build the complete execution metadata consumed by the progress guard."""
+    return {
+        "status": status,
+        "error_type": error_type,
+        "recoverable_by_model": recoverable_by_model,
+        "recommended_next_action": recommended_next_action,
+        "source": source,
+    }
+
+
 def get_tool_message_status(message: ToolMessage) -> ToolResultStatus:
     """Read execution status from message fields, giving either error signal priority."""
     if message.status == "error":

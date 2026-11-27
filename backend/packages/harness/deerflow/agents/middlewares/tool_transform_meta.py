@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from typing import Any, Final
 
 from langchain_core.messages.content import KNOWN_BLOCK_TYPES
 
 TOOL_TRANSFORMS_KEY = "deerflow_tool_transforms"
+# Server-owned reference stored on externalized tool messages and diagnostics.
+TOOL_OUTPUT_BLOB_KEY: Final = "deerflow_tool_output_blob"
 _SHA256_HEX_LENGTH = 64
 _HEX_DIGITS = frozenset("0123456789abcdef")
 

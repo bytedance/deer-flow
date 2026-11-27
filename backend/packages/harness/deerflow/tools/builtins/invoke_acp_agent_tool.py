@@ -13,7 +13,7 @@ from langchain_core.tools import BaseTool, InjectedToolArg, StructuredTool
 from pydantic import BaseModel, Field
 
 from deerflow.tools.types import Runtime
-from deerflow.utils.messages import TOOL_META_KEY
+from deerflow.utils.messages import TOOL_META_KEY, make_tool_result_meta
 
 logger = logging.getLogger(__name__)
 
@@ -309,7 +309,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 content=content,
                 name="invoke_acp_agent",
                 tool_call_id=call_id,
-                additional_kwargs={TOOL_META_KEY: {"status": "success", "source": "tool_return"}},
+                additional_kwargs={TOOL_META_KEY: make_tool_result_meta(status="success")},
             )
 
         if agent not in _agents:

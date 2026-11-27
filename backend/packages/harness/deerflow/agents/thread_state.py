@@ -413,6 +413,7 @@ class ArtifactEntry(TypedDict):
     mime_type: NotRequired[str]
     created_at: str
     consumed_by: NotRequired[list[str]]
+    deerflow_tool_output_blob: NotRequired[dict[str, Any]]
 
 
 def merge_tool_artifacts(existing: list[ArtifactEntry] | None, new: list[ArtifactEntry] | None) -> list[ArtifactEntry]:

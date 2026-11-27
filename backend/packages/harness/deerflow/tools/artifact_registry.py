@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 
 from langchain_core.messages import ToolMessage
 
-from deerflow.agents.middlewares.tool_transform_meta import read_tool_transforms
+from deerflow.agents.middlewares.tool_transform_meta import TOOL_OUTPUT_BLOB_KEY, read_tool_transforms
 from deerflow.agents.thread_state import ArtifactEntry
 from deerflow.utils.messages import get_tool_message_status
 
@@ -413,7 +413,11 @@ def extract_artifacts_from_result(
     tool_call_id = result.tool_call_id or ""
     sink = _EntrySink(thread_id=thread_id, tool_call_id=tool_call_id, call_index=call_index, created_at=now, tool_name=tool_name, occurrence_id=result.id)
     if diagnostic_path is not None:
-        return [sink.add(artifact_type="file", display_name=_display_name_for_ref(diagnostic_path), real_ref=diagnostic_path)]
+        entry = sink.add(artifact_type="file", display_name=_display_name_for_ref(diagnostic_path), real_ref=diagnostic_path)
+        blob = (result.additional_kwargs or {}).get(TOOL_OUTPUT_BLOB_KEY)
+        if isinstance(blob, dict) and blob.get("virtual_path") == diagnostic_path:
+            entry[TOOL_OUTPUT_BLOB_KEY] = blob
+        return [entry]
 
     entries: list[ArtifactEntry] = []
     seen_refs: set[str] = set()

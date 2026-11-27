@@ -8,7 +8,7 @@ from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.url_safety import validate_delegated_backend_url, validate_public_http_url
 from deerflow.config import get_app_config
 from deerflow.tools.types import Runtime
-from deerflow.utils.messages import TOOL_META_KEY
+from deerflow.utils.messages import TOOL_META_KEY, make_tool_result_meta
 
 from .crawl4ai_client import Crawl4AiClient, Crawl4AiFetchError
 
@@ -146,7 +146,7 @@ def _fetch_result(runtime: Runtime | None, content: str, *, failed: bool = False
         content=content,
         name="web_fetch",
         tool_call_id=call_id,
-        additional_kwargs={TOOL_META_KEY: {"status": "success", "source": "tool_return"}},
+        additional_kwargs={TOOL_META_KEY: make_tool_result_meta(status="success")},
     )
 
 

@@ -774,7 +774,9 @@ def _normalize_external_tool_artifacts(value: Any, *, location: str) -> list[dic
         handle = entry.get("handle")
         if not isinstance(handle, str) or not handle:
             raise HTTPException(status_code=400, detail=f"{location}[{index}].handle must be a non-empty string")
-        normalized.append(dict(entry))
+        clean_entry = dict(entry)
+        clean_entry.pop(TOOL_OUTPUT_BLOB_KEY, None)
+        normalized.append(clean_entry)
     return normalized
 
 

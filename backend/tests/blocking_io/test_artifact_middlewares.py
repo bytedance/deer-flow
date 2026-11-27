@@ -14,7 +14,9 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
 from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
 from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+from deerflow.agents.middlewares.tool_transform_meta import TOOL_OUTPUT_BLOB_KEY
 from deerflow.agents.thread_state import ThreadState
+from deerflow.storage.backends.local_fs.local_fs_store import LocalFsBlobStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -62,6 +64,38 @@ async def test_async_unknown_handle_returns_error_without_io_or_execution():
 
     reply = await ArtifactResolutionMiddleware().awrap_tool_call(req, never)
     assert reply.status == "error" and "art_00000000" in reply.content
+
+
+async def test_async_diagnostic_handle_restores_blob_without_blocking(tmp_path, monkeypatch):
+    def prepare_blob():
+        store = LocalFsBlobStore(tmp_path / "blobs")
+        ref = store.put_bytes(b"diagnostic", kind="tool-output", content_type="text/plain; charset=utf-8")
+        return store, ref.model_dump(mode="json", exclude_none=True)
+
+    store, ref = await asyncio.to_thread(prepare_blob)
+    monkeypatch.setattr("deerflow.agents.middlewares.tool_output_budget_middleware.get_blob_store_if_enabled", lambda: store)
+    outputs = tmp_path / "outputs"
+    virtual_path = "/mnt/user-data/outputs/.tool-results/diagnostic.log"
+    handle = "art_00000000"
+    state = {
+        "thread_data": {"outputs_path": str(outputs)},
+        "tool_artifacts": [
+            {
+                "handle": handle,
+                "real_ref": virtual_path,
+                TOOL_OUTPUT_BLOB_KEY: {"version": 1, "virtual_path": virtual_path, "storage_subdir": ".tool-results", "encoding": "utf-8", "ref": ref},
+            }
+        ],
+    }
+    req = ToolCallRequest(tool_call={"name": "read_file", "args": {"path": handle}, "id": "read", "type": "tool_call"}, tool=None, state=state, runtime=SimpleNamespace(state=state))
+
+    async def read(request):
+        assert request.tool_call["args"]["path"] == virtual_path
+        content = await asyncio.to_thread((outputs / ".tool-results" / "diagnostic.log").read_text, encoding="utf-8")
+        return ToolMessage(content=content, tool_call_id="read")
+
+    reply = await ArtifactResolutionMiddleware().awrap_tool_call(req, read)
+    assert reply.content == "diagnostic"
 
 
 async def test_async_oversized_structured_payload_is_rejected_before_serialization(monkeypatch):

@@ -16,7 +16,7 @@ from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_transform_meta import append_tool_transform, read_tool_transforms
 from deerflow.utils.bash_exit import BASH_TOOL_NAMES, bash_exit_status
-from deerflow.utils.messages import KNOWN_TOOL_RESULT_STATUSES, TOOL_META_KEY, ToolResultStatus
+from deerflow.utils.messages import KNOWN_TOOL_RESULT_STATUSES, TOOL_META_KEY, ToolResultStatus, make_tool_result_meta
 
 PROGRESS_GUARD_ERROR_TYPE = "blocked_by_progress_guard"
 
@@ -139,21 +139,11 @@ def _extract_json_error_text(content: str) -> str | None:
     return error if isinstance(error, str) else json.dumps(error)
 
 
-def _make_meta(*, status: str, source: str, error_type: str | None = None, recoverable_by_model: bool = True, recommended_next_action: str = "continue") -> dict[str, object]:
-    return {
-        "status": status,
-        "error_type": error_type,
-        "recoverable_by_model": recoverable_by_model,
-        "recommended_next_action": recommended_next_action,
-        "source": source,
-    }
-
-
 def stamp_exception_meta(msg: ToolMessage, exc_info: BaseException | str) -> ToolMessage:
     """Replace any existing tool metadata with the failure classified from the exception."""
     attrs = classify_exception(exc_info)
     updated_kwargs = dict(msg.additional_kwargs or {})
-    updated_kwargs[TOOL_META_KEY] = _make_meta(status="error", source="exception", **attrs)
+    updated_kwargs[TOOL_META_KEY] = make_tool_result_meta(status="error", source="exception", **attrs)
     msg.additional_kwargs = updated_kwargs
     return msg
 
@@ -191,21 +181,21 @@ def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
         attrs = {**_UNKNOWN_ERROR}
         if subagent_status in {"timed_out", "polling_timed_out"}:
             attrs["error_type"] = "transient"
-        meta = _make_meta(status="error", source="tool_return", **attrs)
+        meta = make_tool_result_meta(status="error", **attrs)
     elif category is not None:
-        meta = _make_meta(status="error", source="tool_return", **{**_UNKNOWN_ERROR, "error_type": category})
+        meta = make_tool_result_meta(status="error", **{**_UNKNOWN_ERROR, "error_type": category})
     elif msg.status == "error":
-        meta = _make_meta(status="error", source="tool_return", **_UNKNOWN_ERROR)
+        meta = make_tool_result_meta(status="error", **_UNKNOWN_ERROR)
     elif content.startswith(_ERROR_PREFIX):
         # Legacy tool envelopes, including unstamped read_file checkpoints, use
         # this prefix. Producer-stamped successful file contents return above.
-        meta = _make_meta(status="error", source="tool_return", **_UNKNOWN_ERROR)
+        meta = make_tool_result_meta(status="error", **_UNKNOWN_ERROR)
     elif msg.name != "read_file" and _extract_json_error_text(content) is not None:
-        meta = _make_meta(status="error", source="tool_return", **_UNKNOWN_ERROR)
+        meta = make_tool_result_meta(status="error", **_UNKNOWN_ERROR)
     elif failed_bash:
-        meta = _make_meta(status="error", source="content_analysis", **_UNKNOWN_ERROR)
+        meta = make_tool_result_meta(status="error", source="content_analysis", **_UNKNOWN_ERROR)
     else:
-        meta = _make_meta(status="success", source="tool_return")
+        meta = make_tool_result_meta(status="success")
 
     updated_kwargs = dict(msg.additional_kwargs or {})
     updated_kwargs[TOOL_META_KEY] = meta

@@ -11,9 +11,9 @@ error without executing the tool.
 from __future__ import annotations
 
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
-from typing import override
+from typing import Any, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -21,9 +21,12 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.tool_output_budget_middleware import restore_tool_artifact_blobs
 from deerflow.agents.middlewares.tool_result_meta import normalize_tool_result
+from deerflow.agents.middlewares.tool_transform_meta import TOOL_OUTPUT_BLOB_KEY
 from deerflow.agents.task_continuity.state import RESOLVED_TOOL_CALL_ARGS_KEY
 from deerflow.config.tool_artifact_config import ToolArtifactConfig
+from deerflow.sandbox.lease import run_sync_lifecycle_operation
 
 _HANDLE_PATTERN = r"(?:`(art_[0-9a-f]{8})`|(?<!\w)(art_[0-9a-f]{8})(?!\w))"
 
@@ -44,8 +47,12 @@ class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
     ) -> ToolMessage | Command:
         if not (self._config.enabled and self._config.resolve_handles_in_args):
             return handler(request)
-        resolved = self._resolve_request(request)
-        return resolved if isinstance(resolved, ToolMessage) else handler(resolved)
+        resolved, blobs = self._resolve_request(request)
+        if isinstance(resolved, ToolMessage):
+            return resolved
+        if blobs:
+            restore_tool_artifact_blobs(resolved, blobs)
+        return handler(resolved)
 
     @override
     async def awrap_tool_call(
@@ -55,22 +62,24 @@ class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
     ) -> ToolMessage | Command:
         if not (self._config.enabled and self._config.resolve_handles_in_args):
             return await handler(request)
-        resolved = self._resolve_request(request)
-        return resolved if isinstance(resolved, ToolMessage) else await handler(resolved)
+        resolved, blobs = self._resolve_request(request)
+        if isinstance(resolved, ToolMessage):
+            return resolved
+        if blobs:
+            await run_sync_lifecycle_operation(restore_tool_artifact_blobs, resolved, blobs)
+        return await handler(resolved)
 
-    def _resolve_request(self, request: ToolCallRequest) -> ToolCallRequest | ToolMessage:
+    def _resolve_request(self, request: ToolCallRequest) -> tuple[ToolCallRequest | ToolMessage, list[Mapping[str, Any]]]:
         args = request.tool_call.get("args")
         if not isinstance(args, dict):
-            return request
+            return request, []
 
         state = request.state or {}
-        artifacts = state.get("tool_artifacts") or []
-        handle_map: dict[str, str] = {}
-        for entry in artifacts:
-            if isinstance(entry, dict) and entry.get("handle") and isinstance(entry.get("real_ref"), str) and entry["real_ref"]:
-                handle_map[str(entry["handle"])] = entry["real_ref"]
+        entries = {str(entry["handle"]): entry for entry in state.get("tool_artifacts") or [] if isinstance(entry, dict) and entry.get("handle") and isinstance(entry.get("real_ref"), str) and entry["real_ref"]}
+        handle_map = {handle: entry["real_ref"] for handle, entry in entries.items()}
 
-        unknown = self._unknown_handles(args, handle_map)
+        referenced = self._referenced_handles(args)
+        unknown = referenced - handle_map.keys()
         if unknown:
             missing = ", ".join(sorted(unknown)[:10])
             if len(unknown) > 10:
@@ -85,7 +94,7 @@ class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
                 tool_call_id=str(request.tool_call.get("id") or "missing_tool_call_id"),
                 status="error",
             )
-            return normalize_tool_result(message, tool_call_id=message.tool_call_id)
+            return normalize_tool_result(message, tool_call_id=message.tool_call_id), []
 
         # Share resolved batch arguments for note admission only in this runtime; preserve message history.
         if request.tool_call.get("name") == "task_note" and request.runtime is not None:
@@ -97,16 +106,17 @@ class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
 
         resolved_args = self._resolve_value(args, handle_map)
         if resolved_args == args:
-            return request
-        return request.override(tool_call={**request.tool_call, "args": resolved_args})
+            return request, []
+        blobs = [blob for handle in referenced if isinstance(blob := entries[handle].get(TOOL_OUTPUT_BLOB_KEY), Mapping) and blob.get("virtual_path") == handle_map[handle]]
+        return request.override(tool_call={**request.tool_call, "args": resolved_args}), blobs
 
-    def _unknown_handles(self, value, handle_map: dict[str, str]) -> set[str]:
+    def _referenced_handles(self, value) -> set[str]:
         if isinstance(value, str):
-            return {handle for match in self._handle_re.finditer(value) if (handle := match.group(1) or match.group(2)) not in handle_map}
+            return {match.group(1) or match.group(2) for match in self._handle_re.finditer(value)}
         if isinstance(value, dict):
             value = list(value.values())
         if isinstance(value, list):
-            return set().union(*(self._unknown_handles(item, handle_map) for item in value))
+            return set().union(*(self._referenced_handles(item) for item in value))
         return set()
 
     def _resolve_value(self, value, handle_map: dict[str, str]):

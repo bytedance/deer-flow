@@ -41,6 +41,11 @@ path: a concurrent publisher may already have replaced it and durably
 checkpointed that content. Remove published files only as part of inactive
 thread-data maintenance.
 
+The artifact registry retains the blob reference for saved failure diagnostics.
+After compaction removes the tool message, resolving its diagnostic handle
+restores the file under the current Gateway's thread outputs directory using the
+same digest and path checks as message-based recovery.
+
 ## Structured tool results
 
 `type=json` payloads count toward the configured text budget, including results

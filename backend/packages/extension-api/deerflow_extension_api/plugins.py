@@ -50,7 +50,7 @@ class PluginToolResult:
 
     Set status to report a business failure or to mark successful text that
     resembles an error. When omitted, the host recognizes legacy error content
-    for results without an artifact.
+    even if the result carries an artifact.
     """
 
     content: str
