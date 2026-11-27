@@ -11,6 +11,12 @@ This section accumulates work toward the **2.3.0** milestone
 ([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
 
 ### Added
+- **images:** Administrators can configure and test image models in Settings or
+  use a typed server configuration. When both a server model and a web profile
+  are available, interactive runs ask which to use; unattended runs use the
+  server model. PPT generation can resume verified slides after a model change.
+  ([#7827])
+
 - **crawl4ai:** `web_fetch` accepts an optional `max_chars` output cap (default
   4096). A page cut at the cap ends with a note giving the kept and total
   length. ([#8553](https://github.com/bytedance/deer-flow/pull/8553))
@@ -71,6 +77,10 @@ This section accumulates work toward the **2.3.0** milestone
   of skipping. ([#8139])
 
 ### Fixed
+- **skills:** PPT composition now saves and validates a temporary deck before
+  replacing the requested output. A failed save leaves an existing PPTX intact
+  and removes the incomplete temporary file. ([#7827])
+
 
 - **agents:** A todo list revised after the last `write_todos` call (for
   example an approved plan edited on resume) is shown to the model again
@@ -113,7 +123,7 @@ This section accumulates work toward the **2.3.0** milestone
   `deerflow_agent_name` key was also copied into the next state update as if
   the server had set it. The first checkpoint now takes none of these keys
   from the request. ([#8019])
-  
+
 - **mcp:** Two enabled MCP servers could bind the same tool name (server `a`
   exposing `b_x` and server `a_b` exposing `x` both bind `a_b_x`). Both
   declarations reached the model and the provider silently kept only one.
@@ -124,7 +134,7 @@ This section accumulates work toward the **2.3.0** milestone
   implementation behind a bound name can alternate across cache generations
   with server health.
   ([#8135](https://github.com/bytedance/deer-flow/pull/8135))
-  
+
 - **channels:** WeCom no longer drops images between 2 MB and 10 MB. The
   adapter capped image uploads at 2 MB — the voice limit in the same protocol —
   so a larger chart was skipped before upload and the turn arrived without it.
@@ -143,7 +153,7 @@ This section accumulates work toward the **2.3.0** milestone
   group became chat turns. Leading mentions are skipped for the command lookup
   only; ordinary chat keeps them and `/connect` is unchanged. Mirrors the Feishu
   and DingTalk handling. ([#8118])
-  
+
 - **subagents:** Apply tool allowlists and denylists to middleware-declared
   tools even when global authorization is disabled, including the default
   denial of `task`. Restricted subagents reject non-Sequence declarations
@@ -195,7 +205,7 @@ This section accumulates work toward the **2.3.0** milestone
   disabled or the gated tools change during a pause, now reaches the thread's
   message history under the resume run instead of existing only in checkpoint
   state. ([#8073](https://github.com/bytedance/deer-flow/pull/8073))
-  
+
 - **summarization:** vLLM compaction counts reasoning tokens replayed to the
   model when checking the trigger and estimating how much history to keep.
   ([#8077](https://github.com/bytedance/deer-flow/pull/8077))
@@ -206,7 +216,7 @@ This section accumulates work toward the **2.3.0** milestone
   same run, hit that unique key and the Gateway failed with an unhandled
   database error. The 409 points callers at `PUT` on the same route, which
   updates the existing feedback. ([#8064])
-  
+
 - **frontend:** Reopening a conversation restores successfully handed-off shared
   artifacts in the Artifacts sidebar. ([#8080](https://github.com/bytedance/deer-flow/pull/8080))
 
@@ -256,7 +266,7 @@ This section accumulates work toward the **2.3.0** milestone
   provider reuses message IDs, so repeated IDs no longer bypass the configured
   cap. Hard stops preserve already-completed structured-output tool results.
   ([#8050](https://github.com/bytedance/deer-flow/pull/8050))
-  
+
 - **subagents:** Managed subagent creation now rejects Windows reserved device
   names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) at the shared
   `normalize_managed_subagent_name(..., for_creation=True)` validator and
@@ -290,7 +300,7 @@ This section accumulates work toward the **2.3.0** milestone
   expired, every later poll failed before admitting any due task. That task
   is now paused with the reason as its last error, and resuming it reports
   the problem until the schedule is fixed. ([#7993])
-  
+
 - **models:** A Claude model using a Claude Code OAuth token no longer fails
   every request once the request carries `betas`. The OAuth betas
   (`oauth-2025-04-20`, …) were only the client's default `anthropic-beta`
@@ -314,7 +324,7 @@ This section accumulates work toward the **2.3.0** milestone
   Firecrawl SDK send `FIRECRAWL_API_KEY` to the fastCRW endpoint, and a blank
   `TAVILY_API_KEY`, `EXA_API_KEY` or `FIRECRAWL_API_KEY` now counts as missing
   instead of reaching the SDK as is. ([#7981])
-  
+
 - **community:** Browserless is the last search/fetch provider that read its
   token raw. A `BROWSERLESS_TOKEN` or configured `token` from a file kept its
   trailing newline and became the auth query parameter, so every `web_fetch`
@@ -323,7 +333,7 @@ This section accumulates work toward the **2.3.0** milestone
   omitted `token` key falls back to the environment: an explicit `""` or
   `null` keeps opting a self-hosted capture endpoint out of authentication.
   ([#8043])
-  
+
 - **docker:** Images built from a checkout no longer contain its local
   configuration. `.dockerignore` did not exclude `config.yaml`,
   `config.yaml.bak`, `extensions_config.json` or `mcp_config.json`, so a
@@ -337,7 +347,7 @@ This section accumulates work toward the **2.3.0** milestone
   `frontend/.env.local`; the Docker stack's single nginx origin needs none of
   them. Published CI images were not affected; rebuild local images that were
   pushed or shared. ([#7958])
-  
+
 - **agents:** Unfinished todos no longer trigger additional model calls or
   tool execution after a loop-detection, run token-budget, provider-safety, or
   model output-length stop. Todo state is preserved so users can continue in a
@@ -358,7 +368,7 @@ This section accumulates work toward the **2.3.0** milestone
   fits, and a longer final answer continues in up to 10 cards replied to the
   same message, split at line breaks; a retry resumes after the cards already
   delivered. ([#7798])
-  
+
 - **channels:** WeCom group messages now have their own conversation. Every
   message used the sender's userid as both chat and topic ID, so a member's
   private chat and every group they wrote in shared one DeerFlow thread
@@ -370,7 +380,7 @@ This section accumulates work toward the **2.3.0** milestone
   threads. A group bound with its own `/connect` keeps its thread; a legacy
   group binding, which covers every group of the bot, starts a new one in
   each group. ([#7794])
-  
+
 - **memory:** DeerMem rejects backups with duplicate fact IDs before replacing
   saved memory, regardless of entry order. ([#8151])
 
@@ -439,7 +449,7 @@ This section accumulates work toward the **2.3.0** milestone
   returns as if it succeeded, so neither the text running reply nor the
   `sampleMarkdown` fallback for the final answer ever ran. The channel now
   sends card requests itself and falls back when one fails. ([#7781])
-  
+
 - **harness:** Retrying a failed item no longer reopens a cancelled durable
   subagent batch. `retry_item` kept only a paused batch as it was, so a failed
   item of a cancelled batch put the batch back to `queued`, the worker claimed
@@ -467,7 +477,7 @@ This section accumulates work toward the **2.3.0** milestone
   bash processes, including ordinary `nohup` children, before releasing the
   execution lease. Concurrent work and background services from successful
   earlier turns remain running. ([#7772])
-  
+
 - **agents:** A clarification no longer overwrites an earlier question when the
   provider reuses a tool-call ID across turns (for example `call_0` on every
   response). Its message ID, which is also the human-input `request_id`, named

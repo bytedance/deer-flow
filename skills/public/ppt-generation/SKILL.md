@@ -36,7 +36,7 @@ Choose one of the following styles when creating the presentation plan:
 
 ### Step 1: Understand Requirements
 
-When a user requests presentation generation, identify:
+When a user requests a new presentation, identify:
 
 - Topic/subject: What is the presentation about
 - Number of slides: How many slides are needed (default: 5-10)
@@ -44,6 +44,13 @@ When a user requests presentation generation, identify:
 - Aspect ratio: Standard (16:9) or classic (4:3)
 - Content outline: Key points for each slide
 - You don't need to check the folder under `/mnt/user-data`
+
+Before creating a new plan or resuming a stopped deck, call
+`check_image_generation`. If it reports missing or invalid configuration, stop
+and direct the user to Settings > Models > Image models. If the user asks to
+continue a stopped deck, do not create a new plan. Read its progress record as
+described in Step 3. If the user chooses to restart, reset the record
+explicitly and regenerate every slide.
 
 ### Step 2: Create Presentation Plan
 
@@ -79,9 +86,28 @@ Create a JSON file in `/mnt/user-data/workspace/` with the presentation structur
 }
 ```
 
+Give each deck distinct plan, progress, and slide-image names so an older deck
+cannot be mistaken for this one. Before generating slide 1, initialize its
+progress record with the exact slide-image paths in plan order:
+
+```bash
+python /mnt/skills/public/ppt-generation/scripts/progress.py init \
+  --plan-file /mnt/user-data/workspace/presentation-plan.json \
+  --manifest-file /mnt/user-data/workspace/presentation-progress.json \
+  --slide-images /mnt/user-data/outputs/slide-01.jpg /mnt/user-data/outputs/slide-02.jpg
+```
+
+List **every** planned slide, not just the two shown above. `init` refuses to
+overwrite an existing record. Use `--restart` only after the user explicitly
+chooses to regenerate the entire deck; it resets recorded progress but keeps
+existing files until generation replaces them.
+
 ### Step 3: Generate Slide Images Sequentially
 
 **IMPORTANT**: Generate slides **strictly one by one, in order**. Do NOT parallelize or batch image generation. Each slide depends on the previous slide's output as a reference image. Generating slides in parallel will break visual consistency and is not allowed.
+
+Generate each slide through the `generate_image` tool; the tool supplies the
+selected provider configuration to that command.
 
 1. Read the image-generation skill: `/mnt/skills/public/image-generation/SKILL.md`
 
@@ -97,11 +123,8 @@ Create a JSON file in `/mnt/user-data/workspace/` with the presentation structur
 }
 ```
 
-```bash
-python /mnt/skills/public/image-generation/scripts/generate.py \
-  --prompt-file /mnt/user-data/workspace/slide-01-prompt.json \
-  --output-file /mnt/user-data/outputs/slide-01.jpg \
-  --aspect-ratio 16:9
+```json
+{"prompt_file": "/mnt/user-data/workspace/slide-01-prompt.json", "output_file": "/mnt/user-data/outputs/slide-01.jpg", "aspect_ratio": "16:9"}
 ```
 
 3. **For subsequent slides (slide 2+)**, use the PREVIOUS slide as a reference image:
@@ -116,28 +139,40 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 }
 ```
 
-```bash
-python /mnt/skills/public/image-generation/scripts/generate.py \
-  --prompt-file /mnt/user-data/workspace/slide-02-prompt.json \
-  --reference-images /mnt/user-data/outputs/slide-01.jpg \
-  --output-file /mnt/user-data/outputs/slide-02.jpg \
-  --aspect-ratio 16:9
+```json
+{"prompt_file": "/mnt/user-data/workspace/slide-02-prompt.json", "reference_images": ["/mnt/user-data/outputs/slide-01.jpg"], "output_file": "/mnt/user-data/outputs/slide-02.jpg", "aspect_ratio": "16:9"}
 ```
 
 4. **Continue for all remaining slides**. Use the previous slide as a reference only after the script reports that it generated that slide. A failed attempt can leave an older image at the same path.
 
+Call `generate_image` once per slide, waiting for success before the next call.
+For example, use slide 2 as the reference for slide 3, then slide 3 for slide 4.
+After each successful call, record that slide before continuing:
+
 ```bash
-python /mnt/skills/public/image-generation/scripts/generate.py \
-  --prompt-file /mnt/user-data/workspace/slide-03-prompt.json \
-  --reference-images /mnt/user-data/outputs/slide-02.jpg \
-  --output-file /mnt/user-data/outputs/slide-03.jpg \
-  --aspect-ratio 16:9 &&
-python /mnt/skills/public/image-generation/scripts/generate.py \
-  --prompt-file /mnt/user-data/workspace/slide-04-prompt.json \
-  --reference-images /mnt/user-data/outputs/slide-03.jpg \
-  --output-file /mnt/user-data/outputs/slide-04.jpg \
-  --aspect-ratio 16:9
+python /mnt/skills/public/ppt-generation/scripts/progress.py mark \
+  --manifest-file /mnt/user-data/workspace/presentation-progress.json \
+  --slide-number 1
 ```
+
+On a follow-up request to continue, run
+`progress.py status --manifest-file <same progress file>`. It validates the
+plan and each recorded image, returning `completed_slides`, `next_slide`, and
+`invalid_from`. Start at `next_slide`; regenerate that slide and all following
+slides in order, using the verified previous slide as the reference. If the
+record is missing or invalid, do not infer progress from image filenames or
+silently adopt old files; explain that a full restart is needed.
+
+If `generate_image` returns `IMAGE_PROFILE_CHANGED`, stop this run. Do not
+retry in the held sandbox or compose a partial deck. Run `progress.py status`
+to report the verified completed prefix, then offer the user two choices in
+the final reply: **continue from the failed slide in a new request with the
+newly selected image model**, or **regenerate all slides with that model**.
+Do not call `ask_clarification` to wait inside the same run: it retains the
+old sandbox. The next request acquires a container for the current profile.
+For any other error, stop and report its code and slide number. A network or
+rate-limit error may be transient; authentication or unsupported-edit errors
+need a configuration change.
 
 ### Step 4: Compose PPT
 
@@ -151,6 +186,7 @@ Transparent slide images retain their alpha channel in the presentation. Opaque 
 python /mnt/skills/public/ppt-generation/scripts/generate.py \
   --plan-file /mnt/user-data/workspace/presentation-plan.json \
   --slide-images /mnt/user-data/outputs/slide-01.jpg /mnt/user-data/outputs/slide-02.jpg /mnt/user-data/outputs/slide-03.jpg \
+  --progress-file /mnt/user-data/workspace/presentation-progress.json \
   --output-file /mnt/user-data/outputs/presentation.pptx
 ```
 
@@ -159,6 +195,8 @@ Parameters:
 - `--plan-file`: Absolute path to the presentation plan JSON file (required)
 - `--slide-images`: Absolute paths to slide images in order (required, space-separated)
 - `--output-file`: Absolute path to output PPTX file (required)
+- `--progress-file`: Progress record for this deck; composition rejects missing,
+  changed, or unverified images
 
 [!NOTE]
 Do NOT read the python file, just call it with the parameters.
@@ -227,11 +265,20 @@ Create `/mnt/user-data/workspace/ai-product-plan.json`:
 
 Read `/mnt/skills/public/image-generation/SKILL.md` to understand how to generate images.
 
+Initialize the five-slide progress record before generating the first image:
+
+```bash
+python /mnt/skills/public/ppt-generation/scripts/progress.py init \
+  --plan-file /mnt/user-data/workspace/ai-product-plan.json \
+  --manifest-file /mnt/user-data/workspace/ai-product-progress.json \
+  --slide-images /mnt/user-data/outputs/ai-product-slide-01.jpg /mnt/user-data/outputs/ai-product-slide-02.jpg /mnt/user-data/outputs/ai-product-slide-03.jpg /mnt/user-data/outputs/ai-product-slide-04.jpg /mnt/user-data/outputs/ai-product-slide-05.jpg
+```
+
 ### Step 3: Generate slide images sequentially with reference chaining
 
 **Slide 1 - Title (establishes the visual language):**
 
-Create `/mnt/user-data/workspace/nova-slide-01.json`:
+Create `/mnt/user-data/workspace/ai-product-slide-01.json`:
 ```json
 {
   "prompt": "Ultra-premium presentation title slide with glassmorphism design. Background: smooth flowing gradient from deep purple (#667eea) through magenta (#f093fb) to cyan (#00d4ff), soft and vibrant. Center: large frosted glass panel with strong backdrop blur effect, rounded corners 32px, containing bold white sans-serif title 'Introducing Nova AI' (72pt, SF Pro Display style, font-weight 700) with subtle text shadow, subtitle 'Intelligence, Reimagined' below in lighter weight. The glass panel has subtle white border (1px rgba 255,255,255,0.25) and soft purple-tinted drop shadow. Floating around the card: 3D glass spheres with refraction, translucent geometric shapes (icosahedrons, abstract blobs), creating depth and dimension. Soft luminous glow emanating from behind the glass panel. Small floating particles of light. Apple Vision Pro / visionOS UI aesthetic. Professional presentation slide, 16:9 aspect ratio. Hyper-modern, premium tech product launch feel.",
@@ -243,16 +290,20 @@ Create `/mnt/user-data/workspace/nova-slide-01.json`:
 }
 ```
 
+```json
+{"prompt_file": "/mnt/user-data/workspace/ai-product-slide-01.json", "output_file": "/mnt/user-data/outputs/ai-product-slide-01.jpg", "aspect_ratio": "16:9"}
+```
+
+After `generate_image` succeeds, record slide 1:
+
 ```bash
-python /mnt/skills/public/image-generation/scripts/generate.py \
-  --prompt-file /mnt/user-data/workspace/nova-slide-01.json \
-  --output-file /mnt/user-data/outputs/nova-slide-01.jpg \
-  --aspect-ratio 16:9
+python /mnt/skills/public/ppt-generation/scripts/progress.py mark \
+  --manifest-file /mnt/user-data/workspace/ai-product-progress.json --slide-number 1
 ```
 
 **Slide 2 - Content (MUST reference slide 1 for consistency):**
 
-Create `/mnt/user-data/workspace/nova-slide-02.json`:
+Create `/mnt/user-data/workspace/ai-product-slide-02.json`:
 ```json
 {
   "prompt": "Presentation slide continuing EXACT visual style from reference image. SAME purple-to-cyan gradient background, SAME glassmorphism aesthetic, SAME typography style. Left side: frosted glass card with backdrop blur containing title 'Why Nova?' in bold white (matching reference font style), three feature points as subtle glass pill badges below. Right side: abstract 3D neural network visualization made of interconnected glass nodes with soft cyan glow, floating in space. Floating translucent geometric shapes (matching style from reference) adding depth. The frosted glass has identical treatment: white border, purple-tinted shadow, same blur intensity. CRITICAL: This slide must look like it belongs in the exact same presentation as the reference image - same colors, same glass treatment, same overall aesthetic.",
@@ -263,13 +314,12 @@ Create `/mnt/user-data/workspace/nova-slide-02.json`:
 }
 ```
 
-```bash
-python /mnt/skills/public/image-generation/scripts/generate.py \
-  --prompt-file /mnt/user-data/workspace/nova-slide-02.json \
-  --reference-images /mnt/user-data/outputs/nova-slide-01.jpg \
-  --output-file /mnt/user-data/outputs/nova-slide-02.jpg \
-  --aspect-ratio 16:9
+```json
+{"prompt_file": "/mnt/user-data/workspace/ai-product-slide-02.json", "reference_images": ["/mnt/user-data/outputs/ai-product-slide-01.jpg"], "output_file": "/mnt/user-data/outputs/ai-product-slide-02.jpg", "aspect_ratio": "16:9"}
 ```
+
+After slide 2 succeeds, run `progress.py mark` for slide 2. Repeat after each
+subsequent successful slide.
 
 **Slides 3-5: Continue the same pattern, each referencing the previous slide**
 
@@ -283,9 +333,10 @@ Key consistency rules for subsequent slides:
 
 ```bash
 python /mnt/skills/public/ppt-generation/scripts/generate.py \
-  --plan-file /mnt/user-data/workspace/nova-plan.json \
-  --slide-images /mnt/user-data/outputs/nova-slide-01.jpg /mnt/user-data/outputs/nova-slide-02.jpg /mnt/user-data/outputs/nova-slide-03.jpg /mnt/user-data/outputs/nova-slide-04.jpg /mnt/user-data/outputs/nova-slide-05.jpg \
-  --output-file /mnt/user-data/outputs/nova-presentation.pptx
+  --plan-file /mnt/user-data/workspace/ai-product-plan.json \
+  --slide-images /mnt/user-data/outputs/ai-product-slide-01.jpg /mnt/user-data/outputs/ai-product-slide-02.jpg /mnt/user-data/outputs/ai-product-slide-03.jpg /mnt/user-data/outputs/ai-product-slide-04.jpg /mnt/user-data/outputs/ai-product-slide-05.jpg \
+  --progress-file /mnt/user-data/workspace/ai-product-progress.json \
+  --output-file /mnt/user-data/outputs/ai-product-presentation.pptx
 ```
 
 ## Style-Specific Guidelines

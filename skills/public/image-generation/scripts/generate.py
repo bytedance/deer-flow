@@ -7,6 +7,7 @@ import re
 import sys
 from typing import BinaryIO
 from urllib.parse import urljoin, urlsplit
+from uuid import uuid4
 
 import requests
 
@@ -17,6 +18,14 @@ MAX_REDIRECTS = 5
 # MiniMax image-01 caps the prompt at 1500 characters and rejects longer requests
 # with a generic "invalid params" error, so validate before calling the API.
 MINIMAX_PROMPT_MAX_CHARS = 1500
+
+
+class MissingImageCredentialError(ValueError):
+    """The selected image provider cannot be called without its API key."""
+
+
+class InvalidImageOutputError(RuntimeError):
+    """The provider did not write a decodable image."""
 
 
 def validate_image(image_path: str) -> bool:
@@ -52,7 +61,7 @@ def _resolve_provider(
         return "minimax"
     if os.getenv("IMAGE_GENERATION_API_KEY"):
         return "openai"
-    raise ValueError(
+    raise MissingImageCredentialError(
         f"No credentials found. Set GEMINI_API_KEY for {existing_provider}, "
         "MINIMAX_API_KEY for minimax, or IMAGE_GENERATION_API_KEY for openai "
         f"(optionally force with {override_env})."
@@ -60,7 +69,14 @@ def _resolve_provider(
 
 
 def _minimax_host() -> str:
-    return os.getenv("MINIMAX_API_HOST", MINIMAX_DEFAULT_HOST).rstrip("/")
+    image_host = (
+        os.getenv("IMAGE_GENERATION_BASE_URL")
+        if os.getenv("IMAGE_GENERATION_PROVIDER", "").strip().lower() == "minimax"
+        else None
+    )
+    return (image_host or os.getenv("MINIMAX_API_HOST") or MINIMAX_DEFAULT_HOST).rstrip(
+        "/"
+    )
 
 
 def _openai_base_url() -> str:
@@ -262,9 +278,14 @@ def _minimax_prompt(raw: str) -> str:
 def _generate_image_minimax(
     prompt: str, reference_images: list[str], output_file: str, aspect_ratio: str
 ) -> str:
-    bearer_value = os.getenv("MINIMAX_API_KEY")
+    image_key = (
+        os.getenv("IMAGE_GENERATION_API_KEY")
+        if os.getenv("IMAGE_GENERATION_PROVIDER", "").strip().lower() == "minimax"
+        else None
+    )
+    bearer_value = image_key or os.getenv("MINIMAX_API_KEY")
     if not bearer_value:
-        raise ValueError("MINIMAX_API_KEY is not set")
+        raise MissingImageCredentialError("MINIMAX_API_KEY is not set")
     prompt = _minimax_prompt(prompt)
     if len(prompt) > MINIMAX_PROMPT_MAX_CHARS:
         raise ValueError(
@@ -310,35 +331,39 @@ def _generate_image_minimax(
 def _generate_image_gemini(
     prompt: str, reference_images: list[str], output_file: str, aspect_ratio: str
 ) -> str:
-    bearer_value = os.getenv("GEMINI_API_KEY")
+    image_key = (
+        os.getenv("IMAGE_GENERATION_API_KEY")
+        if os.getenv("IMAGE_GENERATION_PROVIDER", "").strip().lower()
+        in {"gemini", "google"}
+        else None
+    )
+    bearer_value = image_key or os.getenv("GEMINI_API_KEY")
     if not bearer_value:
-        raise ValueError("GEMINI_API_KEY is not set")
+        raise MissingImageCredentialError("GEMINI_API_KEY is not set")
+    model = os.getenv("GEMINI_IMAGE_MODEL", "gemini-3-pro-image-preview")
 
     parts = []
-    valid_reference_images = []
     for ref_img in reference_images:
-        if validate_image(ref_img):
-            valid_reference_images.append(ref_img)
-        else:
-            print(f"Skipping invalid reference image: {ref_img}")
-    if len(valid_reference_images) < len(reference_images):
-        skipped = len(reference_images) - len(valid_reference_images)
-        print(
-            f"Note: {skipped} reference image(s) were skipped due to validation failure."
-        )
+        if not validate_image(ref_img):
+            raise ValueError(f"Reference image is missing or invalid: {ref_img}")
 
-    for reference_image in valid_reference_images:
+    for reference_image in reference_images:
+        from PIL import Image
+
+        with Image.open(reference_image) as image:
+            mime_type = Image.MIME.get(image.format, _guess_mime(reference_image))
         with open(reference_image, "rb") as f:
             image_b64 = base64.b64encode(f.read()).decode("utf-8")
-        parts.append({"inlineData": {"mimeType": "image/jpeg", "data": image_b64}})
+        parts.append({"inlineData": {"mimeType": mime_type, "data": image_b64}})
 
     response = _post_image(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent",
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
         headers={"x-goog-api-key": bearer_value, "Content-Type": "application/json"},
         json={
             "generationConfig": {"imageConfig": {"aspectRatio": aspect_ratio}},
             "contents": [{"parts": [*parts, {"text": prompt}]}],
         },
+        timeout=180,
     )
     data = response.json()
     response_parts: list[dict] = data["candidates"][0]["content"]["parts"]
@@ -390,7 +415,7 @@ def _generate_image_openai(
 ) -> str:
     bearer_value = os.getenv("IMAGE_GENERATION_API_KEY")
     if not bearer_value:
-        raise ValueError("IMAGE_GENERATION_API_KEY is not set")
+        raise MissingImageCredentialError("IMAGE_GENERATION_API_KEY is not set")
 
     url = f"{_openai_base_url()}/images/generations"
     headers = {"Authorization": f"Bearer {bearer_value}"}
@@ -469,6 +494,49 @@ def generate_image(
     )
 
 
+def generate_image_atomically(
+    prompt_file: str,
+    reference_images: list[str],
+    output_file: str,
+    aspect_ratio: str = "16:9",
+) -> str:
+    """Validate and publish only a complete image, using the same directory."""
+    from PIL import Image
+
+    stem, extension = os.path.splitext(output_file)
+    formats = {".png": "PNG", ".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP"}
+    expected = formats.get(extension.lower())
+    if expected is None:
+        raise ValueError("Output image must be PNG, JPEG or WebP")
+    temporary = f"{stem}.{uuid4().hex}{extension}"
+    try:
+        generate_image(prompt_file, reference_images, temporary, aspect_ratio)
+        try:
+            with Image.open(temporary) as image:
+                image.verify()
+            with Image.open(temporary) as image:
+                image.load()
+                source_format = image.format
+                converted = image.copy()
+            if source_format != expected:
+                if expected == "JPEG":
+                    converted = converted.convert("RGB")
+                converted.save(
+                    temporary,
+                    format=expected,
+                    **({"quality": 95} if expected == "JPEG" else {}),
+                )
+            with Image.open(temporary) as image:
+                image.verify()
+        except (OSError, ValueError, SyntaxError) as exc:
+            raise InvalidImageOutputError("Provider returned an invalid image") from exc
+        os.replace(temporary, output_file)
+        return f"Successfully generated image to {output_file}"
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -493,17 +561,64 @@ if __name__ == "__main__":
         default="16:9",
         help="Aspect ratio of the generated image",
     )
+    parser.add_argument("--success-marker", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     try:
-        print(
-            generate_image(
-                args.prompt_file,
-                args.reference_images,
-                args.output_file,
-                args.aspect_ratio,
-            )
+        message = generate_image_atomically(
+            args.prompt_file,
+            args.reference_images,
+            args.output_file,
+            args.aspect_ratio,
         )
-    except Exception as e:
-        print(f"Error while generating image: {e}", file=sys.stderr)
-        sys.exit(1)
+        print("Successfully generated image" if args.success_marker else message)
+        if args.success_marker:
+            print(args.success_marker)
+    except Exception as exc:
+        # The sandbox reports a non-zero shell exit to the agent. Keep the
+        # provider error on stderr without leaking a configured credential.
+        if isinstance(exc, MissingImageCredentialError):
+            code, message = "IMAGE_PROVIDER_NOT_CONFIGURED", str(exc)
+        elif isinstance(exc, requests.exceptions.HTTPError):
+            status = exc.response.status_code if exc.response is not None else None
+            if status in (401, 403):
+                code, message = (
+                    "IMAGE_PROVIDER_AUTH_FAILED",
+                    f"Provider returned HTTP {status}; check the API key",
+                )
+            elif status == 429:
+                code, message = (
+                    "IMAGE_PROVIDER_RATE_LIMITED",
+                    "Provider returned HTTP 429; retry later",
+                )
+            elif status is not None and status >= 500:
+                code, message = (
+                    "IMAGE_PROVIDER_UNAVAILABLE",
+                    f"Provider returned HTTP {status}; retry later",
+                )
+            else:
+                code, message = (
+                    "IMAGE_PROVIDER_REJECTED",
+                    f"Provider returned HTTP {status or 'error'}; check the model and endpoint",
+                )
+        elif isinstance(exc, requests.exceptions.Timeout):
+            code, message = "IMAGE_PROVIDER_TIMEOUT", "Provider request timed out"
+        elif isinstance(exc, requests.exceptions.RequestException):
+            code, message = (
+                "IMAGE_PROVIDER_NETWORK_ERROR",
+                "Could not reach the image provider",
+            )
+        elif isinstance(exc, FileNotFoundError):
+            code, message = "IMAGE_INPUT_MISSING", str(exc)
+        elif isinstance(exc, InvalidImageOutputError):
+            code, message = "IMAGE_GENERATION_INVALID_OUTPUT", str(exc)
+        elif isinstance(exc, ValueError):
+            code, message = "IMAGE_GENERATION_INVALID_INPUT", str(exc)
+        else:
+            code, message = "IMAGE_GENERATION_FAILED", str(exc)
+        for name in ("GEMINI_API_KEY", "MINIMAX_API_KEY", "IMAGE_GENERATION_API_KEY"):
+            secret = os.getenv(name)
+            if secret:
+                message = message.replace(secret, "[REDACTED]")
+        print(f"Error while generating image [{code}]: {message}", file=sys.stderr)
+        raise SystemExit(1) from None

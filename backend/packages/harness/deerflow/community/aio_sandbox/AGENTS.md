@@ -91,6 +91,9 @@ make test-blocking-io
 
 ## Shutdown
 
+- **Image profiles scope local AIO containers.** A profile or endpoint change
+  must not reuse a container holding old image credentials. Generic sandbox
+  acquisition remains available when image configuration is unreadable.
 - **`shutdown()` closes admission first and never reopens it**, also when a failed
   teardown leaves it retryable. A refused create rolls back its container.
 - **Under the Gateway the provider installs no SIGTERM or SIGINT handler.** The

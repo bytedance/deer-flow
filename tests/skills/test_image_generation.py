@@ -1,6 +1,7 @@
 import base64
 import runpy
 import sys
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ img = load("image-generation")
 def clean_env(monkeypatch):
     for k in [
         "GEMINI_API_KEY",
+        "GEMINI_IMAGE_MODEL",
         "MINIMAX_API_KEY",
         "IMAGE_GENERATION_PROVIDER",
         "MINIMAX_API_HOST",
@@ -25,6 +27,86 @@ def clean_env(monkeypatch):
         "IMAGE_GENERATION_SIZE",
     ]:
         monkeypatch.delenv(k, raising=False)
+
+
+def test_atomic_generation_rejects_invalid_image_without_replacing_output(
+    tmp_path, monkeypatch
+):
+    from PIL import Image
+
+    output = tmp_path / "slide.png"
+    Image.new("RGB", (8, 8), "blue").save(output)
+    original = output.read_bytes()
+
+    def write_invalid(_prompt, _references, temporary, _ratio):
+        Path(temporary).write_bytes(b"not an image")
+
+    monkeypatch.setattr(img, "generate_image", write_invalid)
+
+    with pytest.raises(img.InvalidImageOutputError):
+        img.generate_image_atomically("prompt.json", [], str(output))
+
+    assert output.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [output]
+
+
+def test_cli_reports_png_checksum_failure_as_invalid_output(
+    tmp_path, monkeypatch, capsys
+):
+    from PIL import Image
+
+    png = BytesIO()
+    Image.new("RGB", (8, 8), "blue").save(png, format="PNG")
+    corrupted = bytearray(png.getvalue())
+    idat_offset = 8 + 4 + 4 + 13 + 4
+    idat_length = int.from_bytes(corrupted[idat_offset : idat_offset + 4], "big")
+    corrupted[idat_offset + 8 + idat_length] ^= 1
+    with Image.open(BytesIO(corrupted)) as image:
+        with pytest.raises(SyntaxError, match="bad header checksum"):
+            image.verify()
+
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("A blue square", encoding="utf-8")
+    output = tmp_path / "slide.png"
+    output.write_bytes(b"previous image")
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "openai")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "zzzz1234zzzz")
+    encoded = base64.b64encode(corrupted).decode("ascii")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *_args, **_kwargs: FakeResp({"data": [{"b64_json": encoded}]}),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [img.__file__, "--prompt-file", str(prompt), "--output-file", str(output)],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        runpy.run_path(img.__file__, run_name="__main__")
+
+    assert error.value.code == 1
+    assert "IMAGE_GENERATION_INVALID_OUTPUT" in capsys.readouterr().err
+    assert output.read_bytes() == b"previous image"
+
+
+def test_atomic_generation_converts_before_replacing_output(tmp_path, monkeypatch):
+    from PIL import Image
+
+    output = tmp_path / "slide.jpg"
+
+    def write_png(_prompt, _references, temporary, _ratio):
+        Image.new("RGBA", (8, 8), "red").save(temporary, format="PNG")
+
+    monkeypatch.setattr(img, "generate_image", write_png)
+
+    img.generate_image_atomically("prompt.json", [], str(output))
+
+    with Image.open(output) as image:
+        assert image.format == "JPEG"
+        image.verify()
+    assert list(tmp_path.iterdir()) == [output]
 
 
 def test_resolve_prefers_gemini(monkeypatch):
@@ -71,6 +153,59 @@ def test_resolve_errors_when_none(monkeypatch):
         img._resolve_provider("IMAGE_GENERATION_PROVIDER", "gemini", False)
 
 
+def test_gemini_rejects_missing_reference_before_provider_call(monkeypatch, tmp_path):
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *_args, **_kwargs: pytest.fail("provider should not be called"),
+    )
+    with pytest.raises(ValueError, match="Reference image is missing or invalid"):
+        img._generate_image_gemini(
+            "slide",
+            [str(tmp_path / "missing.png")],
+            str(tmp_path / "slide.png"),
+            "16:9",
+        )
+
+
+def test_gemini_sends_actual_reference_mime_and_has_timeout(monkeypatch, tmp_path):
+    from PIL import Image
+
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-key")
+    reference = tmp_path / "slide.jpg"
+    Image.new("RGB", (2, 2), "blue").save(reference, format="PNG")
+    captured = {}
+
+    def post(_url, **kwargs):
+        captured.update(kwargs)
+        return FakeResp(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "inlineData": {
+                                        "data": base64.b64encode(b"image").decode()
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(img.requests, "post", post)
+    img._generate_image_gemini(
+        "slide", [str(reference)], str(tmp_path / "generated.png"), "16:9"
+    )
+    parts = captured["json"]["contents"][0]["parts"]
+    assert parts[0]["inlineData"]["mimeType"] == "image/png"
+    assert captured["timeout"] == 180
+
+
 @pytest.mark.parametrize(
     ("provider", "missing_key"),
     [
@@ -88,6 +223,9 @@ def test_cli_forced_provider_requires_its_key(
     for key in ("GEMINI_API_KEY", "MINIMAX_API_KEY", "IMAGE_GENERATION_API_KEY"):
         monkeypatch.setenv(key, "test-key")
     monkeypatch.delenv(missing_key)
+    if provider in {"minimax", "gemini", "google"}:
+        # Managed profiles can supply their key via IMAGE_GENERATION_API_KEY.
+        monkeypatch.delenv("IMAGE_GENERATION_API_KEY")
 
     def unexpected_post(*args, **kwargs):
         pytest.fail("A missing provider key must stop the request")
@@ -152,6 +290,71 @@ def test_minimax_builds_payload_and_writes(monkeypatch, tmp_path):
     assert captured["json"]["n"] == 1
     assert captured["json"]["prompt_optimizer"] is True
     assert "Successfully generated image" in msg
+
+
+def test_minimax_image_uses_dedicated_key_and_endpoint_without_changing_music(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "minimax")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setenv("IMAGE_GENERATION_BASE_URL", "https://images.example")
+    monkeypatch.setenv("MINIMAX_API_KEY", "music-key")
+    monkeypatch.setenv("MINIMAX_API_HOST", "https://music.example")
+    captured = {}
+
+    def post(url, **kwargs):
+        captured.update(url=url, headers=kwargs["headers"])
+        return FakeResp(
+            {
+                "data": {"image_base64": [base64.b64encode(b"image").decode()]},
+                "base_resp": {"status_code": 0},
+            }
+        )
+
+    monkeypatch.setattr(img, "_post_image", post)
+    img._generate_image_minimax("slide", [], str(tmp_path / "slide.png"), "1:1")
+    assert captured["url"] == "https://images.example/v1/image_generation"
+    assert captured["headers"]["Authorization"] == "Bearer image-key"
+    monkeypatch.delenv("IMAGE_GENERATION_PROVIDER")
+    img._generate_image_minimax("slide", [], str(tmp_path / "legacy.png"), "1:1")
+    assert captured["url"] == "https://music.example/v1/image_generation"
+    assert captured["headers"]["Authorization"] == "Bearer music-key"
+
+
+def test_gemini_image_uses_dedicated_key_without_changing_shared_key(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", "gemini")
+    monkeypatch.setenv("IMAGE_GENERATION_API_KEY", "image-key")
+    monkeypatch.setenv("GEMINI_API_KEY", "video-key")
+    captured = {}
+
+    def post(_url, **kwargs):
+        captured.update(kwargs["headers"])
+        return FakeResp(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "inlineData": {
+                                        "data": base64.b64encode(b"image").decode()
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(img, "_post_image", post)
+    img._generate_image_gemini("slide", [], str(tmp_path / "slide.png"), "1:1")
+    assert captured["x-goog-api-key"] == "image-key"
+    monkeypatch.delenv("IMAGE_GENERATION_PROVIDER")
+    img._generate_image_gemini("slide", [], str(tmp_path / "legacy.png"), "1:1")
+    assert captured["x-goog-api-key"] == "video-key"
 
 
 def test_minimax_reference_image_as_data_url(monkeypatch, tmp_path):
@@ -254,7 +457,7 @@ def test_minimax_plaintext_prompt_passes_through(monkeypatch, tmp_path, prompt):
     "existing", [False, True], ids=["new-output", "existing-output"]
 )
 def test_cli_minimax_rejects_overlong_prompt(monkeypatch, tmp_path, capsys, existing):
-    monkeypatch.setenv("MINIMAX_API_KEY", "m")
+    monkeypatch.setenv("MINIMAX_API_KEY", "zzzz1234zzzz")
 
     def fake_post(*args, **kwargs):
         pytest.fail("Overlong prompts must be rejected before calling MiniMax")

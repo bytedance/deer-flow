@@ -107,6 +107,29 @@ def test_outdated_version_emits_warning(caplog):
         assert "version is 2" in caplog.text
 
 
+def test_image_generation_schema_marks_v64_config_outdated(tmp_path, caplog):
+    """A v64 config must be prompted to pick up the new image_generation schema."""
+    repo_root = Path(__file__).resolve().parents[2]
+    example_src = repo_root / "config.example.yaml"
+    example_text = example_src.read_text(encoding="utf-8")
+    example_version = yaml.safe_load(example_text)["config_version"]
+    assert example_version > 64
+    assert "image_generation" in AppConfig.model_fields
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({"config_version": 64, "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "config.example.yaml").write_text(example_text, encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.config.app_config"):
+        AppConfig._check_config_version({"config_version": 64}, config_path)
+    assert "outdated" in caplog.text
+    assert "version 64" in caplog.text
+    assert f"version is {example_version}" in caplog.text
+
+
 def test_no_example_file_no_warning(caplog):
     """If config.example.yaml doesn't exist, no warning should be emitted."""
     with tempfile.TemporaryDirectory() as tmpdir:

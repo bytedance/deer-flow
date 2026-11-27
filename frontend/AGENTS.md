@@ -76,6 +76,10 @@ File attachments use typed session errors, preserving per-file causes independen
 of display text. Preview and upload ownership, Office worker budgets and resource
 regressions: [file preview ownership](docs/file-preview-ownership.md).
 
+Image model Settings are admin-only and gated by the Gateway feature flag;
+static deployments do not request the managed catalog. Keep server-config
+profiles read-only and display probe readiness independently of configuration.
+
 <!-- BEGIN:nextjs-agent-rules -->
 
 ## This is NOT the Next.js you know

@@ -360,3 +360,47 @@ describe("ToolApprovalCard", () => {
     expect(diff.textContent).toContain("+ second new line");
   });
 });
+
+describe("HumanInputCard image model choice (DOM)", () => {
+  it("renders two chat options and submits the selected model", async () => {
+    const onSubmit = rs.fn();
+    const request: HumanInputRequest = {
+      version: 1,
+      kind: "human_input_request",
+      source: "ask_clarification",
+      request_id: "clarification:image-choice-test",
+      clarification_type: "image_model_choice",
+      question: "Which image model should I use?",
+      input_mode: "single_choice",
+      options: [
+        {
+          id: "option-1",
+          label: "Web: Picture Model",
+          value: "Web: Picture Model",
+        },
+        { id: "option-2", label: "Server: Gemini", value: "Server: Gemini" },
+      ],
+    };
+    render(
+      <I18nContext.Provider
+        value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+      >
+        <HumanInputCard request={request} onSubmit={onSubmit} />
+      </I18nContext.Provider>,
+    );
+
+    expect(screen.queryByRole("textbox")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Server: Gemini" }));
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith({
+        version: 1,
+        kind: "human_input_response",
+        source: "ask_clarification",
+        request_id: "clarification:image-choice-test",
+        response_kind: "option",
+        option_id: "option-2",
+        value: "Server: Gemini",
+      }),
+    );
+  });
+});

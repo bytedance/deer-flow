@@ -82,7 +82,7 @@ def test_managed_model_write_keeps_the_replace_error_when_cleanup_also_fails(tmp
     def failing_replace(*_args, **_kwargs):
         raise OSError(5, "publish failed")
 
-    monkeypatch.setattr("deerflow.config.managed_models.os.replace", failing_replace)
+    monkeypatch.setattr("deerflow.config.encrypted_catalog.os.replace", failing_replace)
     attempts = _fail_unlink_where(lambda candidate: candidate.parent == tmp_path and candidate != target, monkeypatch)
 
     with pytest.raises(OSError) as raised:

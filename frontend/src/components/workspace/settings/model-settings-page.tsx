@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/select";
 import { GatewayApiError } from "@/core/api/errors";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { useImageGenerationManagementEnabled } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { MODELS_QUERY_KEY } from "@/core/models/hooks";
 import {
@@ -37,6 +38,7 @@ import {
 } from "@/core/models/management";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
+import { ImageModelSettings } from "./image-model-settings";
 import { ModelCatalogDialog } from "./model-catalog-dialog";
 import { ModelConnectionFields } from "./model-connection-fields";
 import { SettingsSection } from "./settings-section";
@@ -66,6 +68,7 @@ export function ModelSettingsPage() {
   const text = t.settings.models;
   const client = useQueryClient();
   const canManage = user?.system_role === "admin" && !isStaticWebsiteOnly();
+  const imageManagementEnabled = useImageGenerationManagementEnabled(canManage);
   const queryKey = ["managed-models", user?.id];
   const catalog = useQuery({
     queryKey,
@@ -103,137 +106,140 @@ export function ModelSettingsPage() {
     }
   }
   return (
-    <SettingsSection title={text.title} description={text.description}>
-      {!canManage ? (
-        <p>{text.adminOnly}</p>
-      ) : (
-        <div className="space-y-4">
-          <div className="flex flex-wrap gap-2">
-            <Button
-              disabled={pending || !providers.data}
-              onClick={() => setImporting(true)}
-            >
-              {text.importTitle}
-            </Button>
-            <Button
-              disabled={pending || !providers.data}
-              onClick={() => setEditing("new")}
-            >
-              {text.add}
-            </Button>
-            <Button
-              variant="outline"
-              disabled={pending || catalog.isFetching}
-              onClick={() => {
-                void catalog.refetch();
-                void providers.refetch();
-              }}
-            >
-              {text.reload}
-            </Button>
-          </div>
-          {(catalog.isLoading || providers.isLoading) && (
-            <p role="status">{text.loading}</p>
-          )}
-          {(catalog.error ?? providers.error) && (
-            <div role="alert">
-              <p>{text.failed}</p>
-            </div>
-          )}
-          {catalog.data?.models.length === 0 && <p>{text.empty}</p>}
-          <Input
-            aria-label={text.searchModels}
-            placeholder={text.searchModels}
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          />
-          {catalog.data?.models
-            .filter((model) =>
-              [
-                model.model,
-                model.name,
-                model.display_name,
-                model.source === "managed" ? model.provider : "",
-              ].some((value) =>
-                value
-                  ?.toLocaleLowerCase()
-                  .includes(search.trim().toLocaleLowerCase()),
-              ),
-            )
-            .map((model) => (
-              <div
-                key={`${model.source}:${model.name}`}
-                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-4"
+    <div className="space-y-8">
+      <SettingsSection title={text.title} description={text.description}>
+        {!canManage ? (
+          <p>{text.adminOnly}</p>
+        ) : (
+          <div className="space-y-4">
+            <div className="flex flex-wrap gap-2">
+              <Button
+                disabled={pending || !providers.data}
+                onClick={() => setImporting(true)}
               >
-                <div>
-                  <p className="font-medium">
-                    {model.display_name || model.name}
-                  </p>
-                  <p className="text-muted-foreground text-sm">
-                    {model.source === "managed" && (
-                      <>
-                        {model.provider === "openai-compatible"
-                          ? text.customProvider
-                          : (providers.data?.providers.find(
-                              (p) => p.id === model.provider,
-                            )?.display_name ?? model.provider)}{" "}
-                        ·{" "}
-                      </>
+                {text.importTitle}
+              </Button>
+              <Button
+                disabled={pending || !providers.data}
+                onClick={() => setEditing("new")}
+              >
+                {text.add}
+              </Button>
+              <Button
+                variant="outline"
+                disabled={pending || catalog.isFetching}
+                onClick={() => {
+                  void catalog.refetch();
+                  void providers.refetch();
+                }}
+              >
+                {text.reload}
+              </Button>
+            </div>
+            {(catalog.isLoading || providers.isLoading) && (
+              <p role="status">{text.loading}</p>
+            )}
+            {(catalog.error ?? providers.error) && (
+              <div role="alert">
+                <p>{text.failed}</p>
+              </div>
+            )}
+            {catalog.data?.models.length === 0 && <p>{text.empty}</p>}
+            <Input
+              aria-label={text.searchModels}
+              placeholder={text.searchModels}
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+            {catalog.data?.models
+              .filter((model) =>
+                [
+                  model.model,
+                  model.name,
+                  model.display_name,
+                  model.source === "managed" ? model.provider : "",
+                ].some((value) =>
+                  value
+                    ?.toLocaleLowerCase()
+                    .includes(search.trim().toLocaleLowerCase()),
+                ),
+              )
+              .map((model) => (
+                <div
+                  key={`${model.source}:${model.name}`}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-4"
+                >
+                  <div>
+                    <p className="font-medium">
+                      {model.display_name || model.name}
+                    </p>
+                    <p className="text-muted-foreground text-sm">
+                      {model.source === "managed" && (
+                        <>
+                          {model.provider === "openai-compatible"
+                            ? text.customProvider
+                            : (providers.data?.providers.find(
+                                (p) => p.id === model.provider,
+                              )?.display_name ?? model.provider)}{" "}
+                          ·{" "}
+                        </>
+                      )}
+                      {model.model} ·{" "}
+                      {model.source === "config"
+                        ? text.yaml
+                        : model.enabled
+                          ? text.enabled
+                          : text.disabled}
+                    </p>
+                    {model.source === "managed" && model.conflict && (
+                      <p role="alert">{text.conflict}</p>
                     )}
-                    {model.model} ·{" "}
-                    {model.source === "config"
-                      ? text.yaml
-                      : model.enabled
-                        ? text.enabled
-                        : text.disabled}
-                  </p>
-                  {model.source === "managed" && model.conflict && (
-                    <p role="alert">{text.conflict}</p>
+                  </div>
+                  {model.source === "managed" && (
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        disabled={pending || model.conflict}
+                        onClick={() => setEditing(model)}
+                      >
+                        {text.edit}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        disabled={pending || model.conflict}
+                        onClick={() => void toggle(model)}
+                      >
+                        {model.enabled ? text.disable : text.enable}
+                      </Button>
+                    </div>
                   )}
                 </div>
-                {model.source === "managed" && (
-                  <div className="flex gap-2">
-                    <Button
-                      variant="outline"
-                      disabled={pending || model.conflict}
-                      onClick={() => setEditing(model)}
-                    >
-                      {text.edit}
-                    </Button>
-                    <Button
-                      variant="outline"
-                      disabled={pending || model.conflict}
-                      onClick={() => void toggle(model)}
-                    >
-                      {model.enabled ? text.disable : text.enable}
-                    </Button>
-                  </div>
+              ))}
+            {importing && (
+              <ModelCatalogDialog
+                key={user?.id}
+                models={(catalog.data?.models ?? []).filter(
+                  (model): model is ManagedModel => model.source === "managed",
                 )}
-              </div>
-            ))}
-          {importing && (
-            <ModelCatalogDialog
-              key={user?.id}
-              models={(catalog.data?.models ?? []).filter(
-                (model): model is ManagedModel => model.source === "managed",
-              )}
-              providers={providers.data?.providers ?? []}
-              close={() => setImporting(false)}
-              saved={refresh}
-            />
-          )}
-          {editing && (
-            <ModelEditor
-              key={`${user?.id}:${editing === "new" ? "new" : editing.name}`}
-              model={editing === "new" ? undefined : editing}
-              close={() => setEditing(null)}
-              saved={refresh}
-              providers={providers.data?.providers ?? []}
-            />
-          )}
-        </div>
-      )}
-    </SettingsSection>
+                providers={providers.data?.providers ?? []}
+                close={() => setImporting(false)}
+                saved={refresh}
+              />
+            )}
+            {editing && (
+              <ModelEditor
+                key={`${user?.id}:${editing === "new" ? "new" : editing.name}`}
+                model={editing === "new" ? undefined : editing}
+                close={() => setEditing(null)}
+                saved={refresh}
+                providers={providers.data?.providers ?? []}
+              />
+            )}
+          </div>
+        )}
+      </SettingsSection>
+      {canManage && imageManagementEnabled && <ImageModelSettings />}
+    </div>
   );
 }
 

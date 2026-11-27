@@ -80,6 +80,11 @@ When you add or rename a field, update `config.example.yaml` and raise its
 
 ## Agent and model settings
 
+- **Image configuration has one YAML source.** The typed top-level
+  `image_generation` profile and legacy `sandbox.environment` image-specific
+  settings are mutually exclusive. Shared provider credentials for other skills
+  may coexist. Web-managed profiles may coexist with either source;
+  selection and saved defaults compare provider, model, endpoint and size.
 - **Stored agent config is parsed leniently, written strictly.** A reader ignores
   an invalid stored field and keeps the agent usable. Add a managed field to
   `MANAGED_AGENT_CONFIG_FIELDS`, or an unrelated update drops it.

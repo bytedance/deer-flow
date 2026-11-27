@@ -73,6 +73,8 @@ def transport(monkeypatch, tmp_path):
     skill = skills_root / "public" / "bench-skill" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_bytes(b"---\nname: bench-skill\ndescription: Benchmark fixture\n---\n")
+    # Worker threads must inherit scoped config; no checkout config.yaml is needed.
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "missing-config.yaml"))
     config = AppConfig(
         sandbox=SandboxConfig(
             use="deerflow.community.opensandbox:OpenSandboxProvider",
@@ -86,10 +88,6 @@ def transport(monkeypatch, tmp_path):
             environment={"BENCH_SECRET": "sentinel-environment"},
         )
     )
-    # Benchmark worker threads load the config from disk outside the caller's context.
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(config.model_dump_json(exclude_unset=True), encoding="utf-8")
-    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
     push_current_app_config(config)
     try:
         yield SimpleNamespace(remotes=remotes, requests=requests, config=config, skill=skill)

@@ -1,8 +1,7 @@
 # Runtime (`deerflow/runtime/`)
 
-Executes runs: admission, the run worker, the stream bridge (memory and Redis),
-checkpoint access, the run event store and journal, and the server-installed
-capabilities of a run. Background:
+Owns run admission, workers, streams, checkpoints, events and server-installed
+capabilities. Details:
 [runtime details](../../../../docs/runtime-guidance-details.md),
 [run event stream](../../../../docs/RUN_EVENT_STREAM.md),
 [streaming](../../../../docs/STREAMING.md),
@@ -22,9 +21,9 @@ make test-blocking-io
   covers a reconnect cursor, the bridge reports a gap and the reader reloads state.
 - **Reconnect cursors are client input.** Parse them strictly and answer a
   malformed one as bad input.
-- **Redis END publication is one Lua script.** The producer-token check, the END
-  detection and the append happen atomically. Restart all Gateways together when
-  the stream mode changes, because old and new producers cannot share a stream.
+- **Redis END publication is atomic.** One Lua script checks the producer token,
+  detects END and appends. Restart all Gateways together when stream mode changes;
+  old and new producers cannot share a stream.
 - **Subscribers get their own copy.** The memory bridge copies events outside its
   condition lock, and caches copy on ingest and on read, so one consumer cannot
   change what another sees.
@@ -34,7 +33,9 @@ make test-blocking-io
   would overwrite the thread view of an SDK client. Consumers that only handle the
   root run ignore namespaced frames.
 
-- **Memory writers fence the captured generation.** After waiting for the stream Condition, check `retired` and `ended` before allocating an event ID or appending; rejected writes consume no sequence number, and END is idempotent for that generation.
+- **Memory writers fence each stream generation.** After a Condition wait,
+  reject retired or ended generations before assigning event IDs. Rejected
+  writes consume no sequence number; END is idempotent.
 
 ## Checkpoints
 
@@ -69,19 +70,17 @@ make test-blocking-io
 - **`RunJournal` is changed on its owning event loop only.** A recorder failure
   fails open, and a slow recorder must not delay tool state.
 - **Retry a sub-agent event batch only on `RunEventStoreNotCommittedError`.**
-  Drain writes before propagating caller cancellation. Signal retry only for
-  transient failures that committed no events. An uncertain outcome stops
-  history writes to prevent duplicate steps. Close the SQL producer only when
-  the final flush confirms all writes.
+  Drain writes before propagating cancellation. Retry only when no events
+  committed; an uncertain outcome stops history writes. Close the SQL producer
+  only after the final flush confirms every write.
 - **Usage replay may enrich a message, never add or remove one.** A provider can
   report the end of the same model call twice.
 - **Event-store mutations of one thread share one fence** (an asyncio lock plus a
   PostgreSQL lock). The fence serializes writers. It does not tell an old run
   incarnation from a new one.
-- **The JSONL store is single-process.** It splits on LF only, because Unicode
-  line separators inside a field are data. A started mutation drains through
-  cancellation. The sequence watermark is saved before a run is deleted, and a
-  corrupt watermark fails closed.
+- **The JSONL store is single-process.** Split on LF; Unicode line separators
+  within fields are data. Drain started mutations through cancellation. Save
+  the sequence watermark before deletion, and fail closed if it is corrupt.
 - **The in-memory store copies caller-owned content at admission.**
 - **Event reads pass the trusted user identity**, and the owner on a `RunRecord`
   matches the durable row.
@@ -90,20 +89,20 @@ make test-blocking-io
 
 ## Goals
 
-- **Goal synthesis is read-only.** `runtime/goal_synthesis.py` composes the
-  `/goal from-chat` objective from the recent agreement; the Gateway route owns
-  the save. It treats the conversation as data, applies the evaluator's PII
-  redaction and oneshot-LLM path, excludes evidence tool results, keeps the
-  newest turn within its own 12,000-character budget even when a single paste
-  exceeds it, and caps the compaction summary at half so recent constraints
-  retain room.
+- **Goal synthesis is read-only.** `goal_synthesis.py` treats conversation as
+  data, redacts PII, excludes evidence tool results and uses the oneshot LLM.
+  The newest turn has its own 12,000-character budget; compaction summaries
+  use at most half. The Gateway saves the objective.
 
 ## Server-installed capabilities
 
-- **Capabilities exist for one request.** The scheduler capability, the
-  conversation reader and client capability hints are installed by the server.
-  A copy that a caller sends is rejected in both context carriers, and none is
-  restored from a checkpoint.
+- **Bind the image source before sandbox acquisition.** Unattended runs use a
+  usable server profile when image sources coexist; interactive runs require a
+  valid saved default or a correlated choice. Keep the binding through goal
+  continuations and subagents, and reject a changed profile during execution.
+- **Capabilities exist for one request.** The server installs scheduler,
+  conversation-reader and client hints. Reject caller copies in both context
+  carriers; restore none from checkpoints.
 - **Run metadata and hidden messages are display data.** They grant nothing.
 - **A scheduled goal is installed in a fresh thread only** and is removed before
   the terminal status commits.

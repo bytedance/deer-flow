@@ -6,6 +6,7 @@ import {
   DEFAULT_THREAD_ACTIVITY_FEATURE,
   fetchBrowserControlEnabled,
   fetchConversationReferencesCapability,
+  fetchImageGenerationManagementEnabled,
   fetchKnowledgeBaseFeature,
   fetchMcpTasksEnabled,
   fetchScheduledTasksFeature,
@@ -52,6 +53,18 @@ export function useMcpTasksEnabled() {
     enabled: data ?? false,
     isLoading: isPending,
   };
+}
+
+export function useImageGenerationManagementEnabled(enabled: boolean) {
+  const { data } = useQuery({
+    queryKey: ["features", "image_generation_management"],
+    queryFn: fetchImageGenerationManagementEnabled,
+    enabled,
+    staleTime: 0,
+    refetchOnMount: true,
+    retry: false,
+  });
+  return data ?? false;
 }
 
 export function useSubagentBatchesCapability() {

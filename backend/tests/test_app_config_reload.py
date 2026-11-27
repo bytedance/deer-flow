@@ -799,7 +799,8 @@ def test_get_app_config_does_not_reset_persistence_singletons_when_database_chan
         _reset_config_singletons()
 
 
-def test_get_app_config_does_not_mutate_singletons_when_reload_validation_fails(tmp_path, monkeypatch):
+@pytest.mark.parametrize("managed_catalog", [False, True])
+def test_get_app_config_does_not_mutate_singletons_when_reload_validation_fails(tmp_path, monkeypatch, managed_catalog):
     config_path = tmp_path / "config.yaml"
     extensions_path = tmp_path / "extensions_config.json"
     _write_extensions_config(extensions_path)
@@ -814,12 +815,22 @@ def test_get_app_config_does_not_mutate_singletons_when_reload_validation_fails(
 
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "runtime"))
+    if managed_catalog:
+        from deerflow.config.managed_models import ManagedModel, ManagedModelStore
+
+        ManagedModelStore().save(
+            ManagedModel(name="managed-test", model="test-model", base_url="https://example.com/v1", api_key="test-secret"),
+            expected_revision=None,
+        )
     _reset_config_singletons()
 
     try:
         previous_app_config = get_app_config()
         initial_checkpointer = get_checkpointer()
         initial_store = get_store()
+        previous_base_config = app_config_module._app_config
+        assert previous_base_config is not None
 
         _write_config_with_sections(
             config_path,
@@ -835,7 +846,10 @@ def test_get_app_config_does_not_mutate_singletons_when_reload_validation_fails(
         with pytest.raises(ValidationError):
             get_app_config()
 
-        assert app_config_module._app_config is previous_app_config
+        assert app_config_module._app_config is previous_base_config
+        from deerflow.config.managed_models import merge_managed_models
+
+        assert merge_managed_models(previous_base_config) is previous_app_config
         assert get_title_config().enabled is False
         assert get_tool_search_config().enabled is True
         assert get_checkpointer_config() is not None

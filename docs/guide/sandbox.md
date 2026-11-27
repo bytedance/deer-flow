@@ -19,7 +19,7 @@ retains failed termination handles for retry and rejects late acquisitions after
 reset or shutdown. If shutdown reports outstanding work, retry after its SDK
 workers finish or the remote service recovers.
 At process exit, outstanding cleanup is logged without an exception traceback.
-                                   
+
 In Local Execution, `glob` and `grep` can search the skills root (default
 `/mnt/skills`) across its mounted categories. Patterns stay relative to that
 root, and one result limit covers all categories. User isolation, disabled-skill
