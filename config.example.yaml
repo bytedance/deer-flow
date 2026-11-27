@@ -956,7 +956,7 @@ tools:
   #   group: web
   #   use: deerflow.community.serply.tools:web_search_tool
   #   max_results: 5                 # Serply accepts 1-100 per request
-  #   # vertical: search             # search (default), news, or scholar; time_range applies to search and news only
+  #   # vertical: search             # search (default), news, or scholar
   #   # gl: us                       # Optional country code for the results
   #   # hl: en                       # Optional interface language
   #   # api_key: $SERPLY_API_KEY     # Optional if the env var is set
@@ -968,7 +968,7 @@ tools:
   #   group: web
   #   use: deerflow.community.searchapi.tools:web_search_tool
   #   max_results: 5                 # One page per request: at most 10 (20 for scholar)
-  #   # vertical: search             # search (default), news, or scholar
+  #   # vertical: search             # search (default), news, or scholar; time_range applies to search and news only
   #   # gl: us                       # Optional country code for the results
   #   # hl: en                       # Optional interface language
   #   # api_key: $SEARCHAPI_API_KEY  # Optional if the env var is set
