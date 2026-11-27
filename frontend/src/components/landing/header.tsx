@@ -311,7 +311,7 @@ export function Header({
     >
       {showBanner && <AnnouncementBanner locale={activeLocale} />}
 
-      <div className="mx-auto flex h-16 max-w-[1280px] items-center justify-between gap-2 px-4 sm:gap-3 sm:px-6">
+      <div className="mx-auto flex h-16 max-w-[1280px] items-center justify-between gap-2 px-4 sm:gap-3 sm:px-6 lg:px-8">
         <div className="flex min-w-0 items-center gap-6">
           {isExternalHome ? (
             <a
@@ -432,7 +432,7 @@ export function Header({
           <ThemeToggle locale={activeLocale} />
 
           <Link
-            href="/workspace/chats/new"
+            href="/workspace"
             className="focus-visible:ring-ring/50 hidden h-9 items-center justify-center rounded-full bg-[var(--df-cta)] px-4 text-xs font-medium whitespace-nowrap text-[var(--df-cta-fg)] transition-colors duration-150 hover:bg-[var(--df-cta-hover)] focus-visible:ring-2 focus-visible:outline-none md:inline-flex"
           >
             {copy.getStarted}

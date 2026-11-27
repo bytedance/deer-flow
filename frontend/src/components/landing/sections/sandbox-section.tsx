@@ -10,7 +10,7 @@ import {
   Terminal as TerminalIcon,
 } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
+import { type KeyboardEvent, useId, useRef, useState } from "react";
 
 import {
   DEFAULT_LOCALE,
@@ -204,12 +204,38 @@ export function SandboxSection({
   className?: string;
   locale?: Locale;
 }) {
+  const idPrefix = useId();
+  const panelId = `${idPrefix}-panel`;
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const copy = SANDBOX_COPY[locale] ?? SANDBOX_COPY["en-US"];
   const lang = getLangByLocale(locale);
   const [activeSceneId, setActiveSceneId] = useState(TERMINAL_SCENES[0]!.id);
   const activeScene =
     TERMINAL_SCENES.find((scene) => scene.id === activeSceneId) ??
     TERMINAL_SCENES[0]!;
+
+  const handleTabKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    currentIndex: number,
+  ) => {
+    const count = TERMINAL_SCENES.length;
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") {
+      nextIndex = (currentIndex + 1) % count;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex = (currentIndex - 1 + count) % count;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = count - 1;
+    }
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const nextScene = TERMINAL_SCENES[nextIndex];
+    if (!nextScene) return;
+    setActiveSceneId(nextScene.id);
+    tabRefs.current[nextIndex]?.focus();
+  };
 
   return (
     <Section
@@ -330,15 +356,22 @@ export function SandboxSection({
               role="tablist"
               aria-label={copy.terminalAriaLabel}
             >
-              {TERMINAL_SCENES.map((scene) => {
+              {TERMINAL_SCENES.map((scene, index) => {
                 const isSelected = scene.id === activeScene.id;
                 return (
                   <button
                     key={scene.id}
+                    ref={(el) => {
+                      tabRefs.current[index] = el;
+                    }}
+                    id={`${idPrefix}-tab-${scene.id}`}
                     type="button"
                     role="tab"
                     aria-selected={isSelected}
+                    aria-controls={panelId}
+                    tabIndex={isSelected ? 0 : -1}
                     onClick={() => setActiveSceneId(scene.id)}
+                    onKeyDown={(event) => handleTabKeyDown(event, index)}
                     className={cn(
                       "focus-visible:ring-ring/50 min-h-[32px] rounded-full px-3 py-1 font-mono text-[11px] font-medium transition-colors duration-150 focus-visible:ring-2 focus-visible:outline-none",
                       isSelected
@@ -353,52 +386,63 @@ export function SandboxSection({
             </div>
           </div>
 
-          <pre className="overflow-x-auto p-5 font-mono text-xs leading-6 sm:p-6 sm:text-[13px]">
-            <code className="block space-y-1.5">
-              {activeScene.lines.map((line, index) => (
-                <div key={`${activeScene.id}-${index}`} className="flex gap-2">
-                  {line.kind === "command" && (
-                    <>
-                      <span
-                        className="shrink-0 font-semibold text-[var(--df-accent)] select-none"
-                        aria-hidden="true"
-                      >
-                        $
-                      </span>
-                      <span className="font-medium text-[var(--df-ink)]">
+          <div
+            id={panelId}
+            role="tabpanel"
+            aria-labelledby={`${idPrefix}-tab-${activeScene.id}`}
+            tabIndex={0}
+            className="focus-visible:ring-ring/50 focus-visible:ring-2 focus-visible:outline-none focus-visible:ring-inset"
+          >
+            <pre className="overflow-x-auto p-5 font-mono text-xs leading-6 sm:p-6 sm:text-[13px]">
+              <code className="block space-y-1.5">
+                {activeScene.lines.map((line, index) => (
+                  <div
+                    key={`${activeScene.id}-${index}`}
+                    className="flex gap-2"
+                  >
+                    {line.kind === "command" && (
+                      <>
+                        <span
+                          className="shrink-0 font-semibold text-[var(--df-accent)] select-none"
+                          aria-hidden="true"
+                        >
+                          $
+                        </span>
+                        <span className="font-medium text-[var(--df-ink)]">
+                          {line.text}
+                        </span>
+                      </>
+                    )}
+                    {line.kind === "output" && (
+                      <span className="pl-4 text-[var(--df-muted-fg)]">
                         {line.text}
                       </span>
-                    </>
-                  )}
-                  {line.kind === "output" && (
-                    <span className="pl-4 text-[var(--df-muted-fg)]">
-                      {line.text}
-                    </span>
-                  )}
-                  {line.kind === "info" && (
-                    <span className="pl-4 text-[var(--df-accent)]">
-                      {line.text}
-                    </span>
-                  )}
-                  {line.kind === "success" && (
-                    <span className="pl-4 text-emerald-700 dark:text-emerald-400">
-                      {line.text}
-                    </span>
-                  )}
-                </div>
-              ))}
-            </code>
-          </pre>
+                    )}
+                    {line.kind === "info" && (
+                      <span className="pl-4 text-[var(--df-accent)]">
+                        {line.text}
+                      </span>
+                    )}
+                    {line.kind === "success" && (
+                      <span className="pl-4 text-emerald-700 dark:text-emerald-400">
+                        {line.text}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </code>
+            </pre>
 
-          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--df-border-soft)] bg-[var(--df-surface)] px-5 py-2.5 font-mono text-[11px] text-[var(--df-muted-fg)]">
-            <span className="inline-flex items-center gap-1.5 text-[var(--df-accent)]">
-              <span
-                className="size-1.5 rounded-full bg-[var(--df-accent)]"
-                aria-hidden="true"
-              />
-              {copy.statusIsolated}
-            </span>
-            <span className="truncate">{activeScene.artifact}</span>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--df-border-soft)] bg-[var(--df-surface)] px-5 py-2.5 font-mono text-[11px] text-[var(--df-muted-fg)]">
+              <span className="inline-flex items-center gap-1.5 text-[var(--df-accent)]">
+                <span
+                  className="size-1.5 rounded-full bg-[var(--df-accent)]"
+                  aria-hidden="true"
+                />
+                {copy.statusIsolated}
+              </span>
+              <span className="truncate">{activeScene.artifact}</span>
+            </div>
           </div>
         </div>
       </div>

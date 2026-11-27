@@ -29,7 +29,7 @@ type FooterColumn = {
 };
 
 const QUICK_START_COMMANDS =
-  "git clone https://github.com/bytedance/deer-flow.git && cd deer-flow && make dev";
+  "git clone https://github.com/bytedance/deer-flow.git && cd deer-flow && make config && make install && make dev";
 
 function DeerFlowFooterMark() {
   return (
@@ -143,7 +143,7 @@ function getFooterCopy(locale: LandingLocale, docsLang: LandingDocsLang) {
         },
         {
           label: isZh ? "进入工作区" : "Open Workspace",
-          href: "/workspace/chats/new",
+          href: "/workspace",
         },
       ],
     },
@@ -263,7 +263,8 @@ export function Footer({ className, locale }: FooterProps) {
                   <span className="text-[var(--df-muted-fg)] select-none">
                     ${" "}
                   </span>
-                  cd deer-flow &amp;&amp; make dev
+                  cd deer-flow &amp;&amp; make config &amp;&amp; make install
+                  &amp;&amp; make dev
                 </code>
               </pre>
 

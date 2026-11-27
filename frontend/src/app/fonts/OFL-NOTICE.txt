@@ -1,0 +1,18 @@
+Bundled Web Fonts — SIL Open Font License 1.1 (OFL-1.1)
+
+The local .woff2 font files in this directory are bundled so DeerFlow builds
+without outbound build-time requests to fonts.googleapis.com. Each font family
+is distributed under the SIL Open Font License, Version 1.1
+(https://openfontlicense.org/open-font-license-official-text/):
+
+- Newsreader (`newsreader-latin.woff2`, `newsreader-italic-latin.woff2`)
+  Copyright 2020 The Newsreader Project Authors (Production Type)
+  https://github.com/productiontype/Newsreader
+
+- DM Sans (`dm-sans-latin.woff2`)
+  Copyright 2014 The DM Sans Project Authors (Colophon Foundry)
+  https://github.com/googlefonts/dm-fonts
+
+- JetBrains Mono (`jetbrains-mono-latin.woff2`)
+  Copyright 2020 The JetBrains Mono Project Authors (JetBrains s.r.o.)
+  https://github.com/JetBrains/JetBrainsMono

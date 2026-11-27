@@ -172,7 +172,7 @@ export function Hero({ className, locale = "en-US" }: HeroProps) {
             {/* Action cluster: distinctive rounded-full primary CTA + calm secondary links */}
             <div className="mt-7 flex w-full flex-wrap items-center gap-2.5 sm:gap-3">
               <Link
-                href="/workspace/chats/new"
+                href="/workspace"
                 className="focus-visible:ring-ring/50 inline-flex min-h-11 items-center justify-center gap-2 rounded-full bg-[var(--df-cta)] px-5 text-sm font-medium whitespace-nowrap text-[var(--df-cta-fg)] shadow-[0_6px_18px_-6px_color-mix(in_srgb,var(--df-cta)_65%,transparent)] transition-all duration-200 hover:-translate-y-0.5 hover:bg-[var(--df-cta-hover)] focus-visible:ring-2 focus-visible:outline-none sm:px-6"
               >
                 <span>{copy.getStarted}</span>

@@ -27,6 +27,7 @@ const LANGUAGE_OPTIONS: ReadonlyArray<{
 ];
 
 const DOCS_PATH_PATTERN = /^\/(en|zh)(\/docs(?:\/.*)?)$/;
+const BLOG_PATH_PATTERN = /^\/blog(?:\/|$)/;
 
 export type LanguageSwitchProps = {
   className?: string;
@@ -56,6 +57,27 @@ export function LanguageSwitch({ className, locale }: LanguageSwitchProps) {
         router.push(`/${nextDocsLang}${restPath}${search}${hash}`);
         return;
       }
+    }
+
+    if (pathname && BLOG_PATH_PATTERN.test(pathname)) {
+      const nextBlogLang = getLandingDocsLang(nextLocale);
+      const search =
+        typeof window !== "undefined" ? window.location.search : "";
+      const hash = typeof window !== "undefined" ? window.location.hash : "";
+      const params = new URLSearchParams(search);
+      const currentUrlLang = params.get("lang");
+      const hasUrlLangMismatch =
+        currentUrlLang !== null && currentUrlLang !== nextBlogLang;
+
+      if (hasUrlLangMismatch || nextLocale !== activeLocale) {
+        params.set("lang", nextBlogLang);
+        const nextSearch = params.toString();
+        router.push(`${pathname}${nextSearch ? `?${nextSearch}` : ""}${hash}`);
+        if (nextLocale !== activeLocale) {
+          router.refresh();
+        }
+      }
+      return;
     }
 
     if (setLocale) {

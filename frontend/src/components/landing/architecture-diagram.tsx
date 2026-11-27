@@ -13,7 +13,7 @@ import {
   Workflow,
   type LucideIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { type KeyboardEvent, useId, useRef, useState } from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -323,6 +323,9 @@ export function ArchitectureDiagram({
   className,
   locale = "en-US",
 }: ArchitectureDiagramProps) {
+  const idPrefix = useId();
+  const panelId = `${idPrefix}-panel`;
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const copy = BLUEPRINT_COPY[locale];
   const [activeModeId, setActiveModeId] = useState<WorkflowModeId>("research");
   const [inspectedModuleId, setInspectedModuleId] = useState<ModuleId | null>(
@@ -342,6 +345,29 @@ export function ArchitectureDiagram({
   const handleSelectMode = (modeId: WorkflowModeId) => {
     setActiveModeId(modeId);
     setInspectedModuleId(null);
+  };
+
+  const handleTabKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    currentIndex: number,
+  ) => {
+    const count = copy.modes.length;
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") {
+      nextIndex = (currentIndex + 1) % count;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex = (currentIndex - 1 + count) % count;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = count - 1;
+    }
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const nextMode = copy.modes[nextIndex];
+    if (!nextMode) return;
+    handleSelectMode(nextMode.id);
+    tabRefs.current[nextIndex]?.focus();
   };
 
   const handleToggleModule = (moduleId: ModuleId) => {
@@ -375,15 +401,22 @@ export function ArchitectureDiagram({
           aria-label={copy.tablistLabel}
           className="flex flex-wrap items-center gap-1 rounded-lg border border-[var(--df-border)] bg-[var(--df-surface)] p-0.5"
         >
-          {copy.modes.map((mode) => {
+          {copy.modes.map((mode, index) => {
             const isSelected = mode.id === activeMode.id;
             return (
               <button
                 key={mode.id}
+                ref={(el) => {
+                  tabRefs.current[index] = el;
+                }}
+                id={`${idPrefix}-tab-${mode.id}`}
                 type="button"
                 role="tab"
                 aria-selected={isSelected}
+                aria-controls={panelId}
+                tabIndex={isSelected ? 0 : -1}
                 onClick={() => handleSelectMode(mode.id)}
+                onKeyDown={(event) => handleTabKeyDown(event, index)}
                 className={cn(
                   "focus-visible:ring-ring/50 min-h-8 rounded-md px-2.5 py-1 text-xs font-medium whitespace-nowrap transition-colors duration-150 focus-visible:ring-2 focus-visible:outline-none",
                   isSelected
@@ -398,206 +431,214 @@ export function ArchitectureDiagram({
         </div>
       </div>
 
-      {/* 3-Tier Blueprint Canvas */}
-      <div className="p-3.5 sm:p-5">
-        {/* Tier 1: Entry & Triggers */}
-        <div>
-          <div className="mb-2 font-mono text-[10px] font-medium tracking-[0.14em] text-[var(--df-muted-fg)] uppercase">
-            {copy.tier1Label}
-          </div>
-          <div className="grid grid-cols-3 gap-1.5 sm:gap-2.5">
-            {copy.entries.map((entry) => {
-              const Icon = entry.icon;
-              const isActive = activeMode.activeEntry === entry.id;
-              return (
-                <button
-                  key={entry.id}
-                  type="button"
-                  data-node-id={`entry-${entry.id}`}
-                  data-active={isActive ? "true" : "false"}
-                  aria-pressed={isActive}
-                  onClick={() => handleSelectMode(entry.modeId)}
-                  className={cn(
-                    "focus-visible:ring-ring/50 flex min-w-0 flex-col items-start gap-1.5 rounded-xl border px-2.5 py-2.5 text-left transition-all duration-150 focus-visible:ring-2 focus-visible:outline-none sm:flex-row sm:items-center sm:gap-2.5 sm:px-3",
-                    isActive
-                      ? "border-[var(--df-accent)] bg-[var(--df-accent-soft,rgba(28,93,74,0.09))] shadow-[0_2px_10px_var(--df-shadow)]"
-                      : "border-[var(--df-border)] bg-[var(--df-surface)] hover:border-[var(--df-border-strong)] hover:bg-[var(--df-bg-soft)]",
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "flex size-7 shrink-0 items-center justify-center rounded-lg border transition-colors duration-150",
-                      isActive
-                        ? "border-[var(--df-accent)]/35 bg-[var(--df-panel)] text-[var(--df-accent)]"
-                        : "border-[var(--df-border-soft)] bg-[var(--df-panel)] text-[var(--df-muted-fg)]",
-                    )}
-                  >
-                    <Icon className="size-3.5" aria-hidden="true" />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-[11px] leading-tight font-semibold text-[var(--df-ink)] sm:text-xs">
-                      {entry.title}
-                    </span>
-                    <span className="mt-0.5 hidden truncate font-mono text-[10px] leading-tight text-[var(--df-muted-fg)] sm:block">
-                      {entry.subtitle}
-                    </span>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Orthogonal SVG Flow Connectors: Tier 1 -> Tier 2 */}
-        <TopBusConnectors activeEntry={activeMode.activeEntry} />
-
-        {/* Tier 2: DeerFlow LangGraph Harness */}
-        <div
-          data-testid="architecture-harness-core"
-          className="rounded-xl border border-[var(--df-accent)]/40 bg-[var(--df-accent-soft,rgba(28,93,74,0.07))] p-3 sm:p-4"
-        >
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-2">
-              <DeerFlowBlueprintMark className="size-4 shrink-0 text-[var(--df-accent)]" />
-              <span className="font-mono text-[10px] font-semibold tracking-[0.12em] text-[var(--df-accent)] uppercase sm:text-[11px]">
-                {copy.tier2Badge}
-              </span>
+      <div
+        id={panelId}
+        role="tabpanel"
+        aria-labelledby={`${idPrefix}-tab-${activeMode.id}`}
+      >
+        {/* 3-Tier Blueprint Canvas */}
+        <div className="p-3.5 sm:p-5">
+          {/* Tier 1: Entry & Triggers */}
+          <div>
+            <div className="mb-2 font-mono text-[10px] font-medium tracking-[0.14em] text-[var(--df-muted-fg)] uppercase">
+              {copy.tier1Label}
             </div>
-            <span className="rounded-full border border-[var(--df-accent)]/30 bg-[var(--df-panel)] px-2 py-0.5 font-mono text-[10px] font-medium tracking-wide text-[var(--df-accent)]">
-              {activeMode.harnessStatus}
-            </span>
-          </div>
-
-          <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-            {copy.engines.map((engine) => {
-              const Icon = engine.icon;
-              const isActive = activeMode.activeEngines.includes(engine.id);
-              return (
-                <div
-                  key={engine.id}
-                  data-node-id={`engine-${engine.id}`}
-                  data-active={isActive ? "true" : "false"}
-                  className={cn(
-                    "flex min-w-0 items-start gap-2.5 rounded-lg border px-3 py-2.5 transition-all duration-150",
-                    isActive
-                      ? "border-[var(--df-accent)]/60 bg-[var(--df-panel)] shadow-[0_2px_10px_var(--df-shadow)]"
-                      : "border-[var(--df-border)] bg-[var(--df-panel)]/70 opacity-75",
-                  )}
-                >
-                  <span
+            <div className="grid grid-cols-3 gap-1.5 sm:gap-2.5">
+              {copy.entries.map((entry) => {
+                const Icon = entry.icon;
+                const isActive = activeMode.activeEntry === entry.id;
+                return (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    data-node-id={`entry-${entry.id}`}
+                    data-active={isActive ? "true" : "false"}
+                    aria-pressed={isActive}
+                    onClick={() => handleSelectMode(entry.modeId)}
                     className={cn(
-                      "mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md border",
+                      "focus-visible:ring-ring/50 flex min-w-0 flex-col items-start gap-1.5 rounded-xl border px-2.5 py-2.5 text-left transition-all duration-150 focus-visible:ring-2 focus-visible:outline-none sm:flex-row sm:items-center sm:gap-2.5 sm:px-3",
                       isActive
-                        ? "border-[var(--df-accent)]/35 bg-[var(--df-accent-soft,rgba(28,93,74,0.09))] text-[var(--df-accent)]"
-                        : "border-[var(--df-border-soft)] bg-[var(--df-surface)] text-[var(--df-muted-fg)]",
+                        ? "border-[var(--df-accent)] bg-[var(--df-accent-soft,rgba(28,93,74,0.09))] shadow-[0_2px_10px_var(--df-shadow)]"
+                        : "border-[var(--df-border)] bg-[var(--df-surface)] hover:border-[var(--df-border-strong)] hover:bg-[var(--df-bg-soft)]",
                     )}
                   >
-                    <Icon className="size-3.5" aria-hidden="true" />
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-xs font-semibold text-[var(--df-ink)]">
-                        {engine.title}
-                      </span>
-                      {isActive && (
-                        <span
-                          aria-hidden="true"
-                          className="size-1.5 shrink-0 rounded-full bg-[var(--df-accent)]"
-                        />
-                      )}
-                    </div>
-                    <p className="mt-0.5 font-mono text-[10px] leading-relaxed text-[var(--df-muted-fg)]">
-                      {engine.subtitle}
-                    </p>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Orthogonal SVG Bus Connectors: Tier 2 -> Tier 3 */}
-        <BottomBusConnectors activeModules={highlightedModules} />
-
-        {/* Tier 3: Plug-in Execution Plane */}
-        <div>
-          <div className="mb-2 font-mono text-[10px] font-medium tracking-[0.14em] text-[var(--df-muted-fg)] uppercase">
-            {copy.tier3Label}
-          </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-2.5">
-            {copy.modules.map((mod) => {
-              const Icon = mod.icon;
-              const isHighlighted = highlightedModules.includes(mod.id);
-              const isInspected = inspectedModuleId === mod.id;
-              return (
-                <button
-                  key={mod.id}
-                  type="button"
-                  data-node-id={`module-${mod.id}`}
-                  data-active={isHighlighted ? "true" : "false"}
-                  aria-pressed={isInspected}
-                  onClick={() => handleToggleModule(mod.id)}
-                  className={cn(
-                    "focus-visible:ring-ring/50 flex min-w-0 flex-col items-start rounded-xl border px-3 py-2.5 text-left transition-all duration-150 focus-visible:ring-2 focus-visible:outline-none",
-                    isInspected
-                      ? "border-[var(--df-accent)] bg-[var(--df-accent-soft,rgba(28,93,74,0.1))] ring-1 ring-[var(--df-accent)]/40"
-                      : isHighlighted
-                        ? "border-[var(--df-accent)]/60 bg-[var(--df-panel)] shadow-[0_2px_10px_var(--df-shadow)]"
-                        : "border-[var(--df-border)] bg-[var(--df-surface)] hover:border-[var(--df-border-strong)] hover:bg-[var(--df-bg-soft)]",
-                  )}
-                >
-                  <div className="flex w-full items-center justify-between gap-1.5">
                     <span
                       className={cn(
-                        "flex size-6 shrink-0 items-center justify-center rounded-md border",
-                        isHighlighted
-                          ? "border-[var(--df-accent)]/35 bg-[var(--df-accent-soft,rgba(28,93,74,0.09))] text-[var(--df-accent)]"
+                        "flex size-7 shrink-0 items-center justify-center rounded-lg border transition-colors duration-150",
+                        isActive
+                          ? "border-[var(--df-accent)]/35 bg-[var(--df-panel)] text-[var(--df-accent)]"
                           : "border-[var(--df-border-soft)] bg-[var(--df-panel)] text-[var(--df-muted-fg)]",
                       )}
                     >
                       <Icon className="size-3.5" aria-hidden="true" />
                     </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-[11px] leading-tight font-semibold text-[var(--df-ink)] sm:text-xs">
+                        {entry.title}
+                      </span>
+                      <span className="mt-0.5 hidden truncate font-mono text-[10px] leading-tight text-[var(--df-muted-fg)] sm:block">
+                        {entry.subtitle}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Orthogonal SVG Flow Connectors: Tier 1 -> Tier 2 */}
+          <TopBusConnectors activeEntry={activeMode.activeEntry} />
+
+          {/* Tier 2: DeerFlow LangGraph Harness */}
+          <div
+            data-testid="architecture-harness-core"
+            className="rounded-xl border border-[var(--df-accent)]/40 bg-[var(--df-accent-soft,rgba(28,93,74,0.07))] p-3 sm:p-4"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-2">
+                <DeerFlowBlueprintMark className="size-4 shrink-0 text-[var(--df-accent)]" />
+                <span className="font-mono text-[10px] font-semibold tracking-[0.12em] text-[var(--df-accent)] uppercase sm:text-[11px]">
+                  {copy.tier2Badge}
+                </span>
+              </div>
+              <span className="rounded-full border border-[var(--df-accent)]/30 bg-[var(--df-panel)] px-2 py-0.5 font-mono text-[10px] font-medium tracking-wide text-[var(--df-accent)]">
+                {activeMode.harnessStatus}
+              </span>
+            </div>
+
+            <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+              {copy.engines.map((engine) => {
+                const Icon = engine.icon;
+                const isActive = activeMode.activeEngines.includes(engine.id);
+                return (
+                  <div
+                    key={engine.id}
+                    data-node-id={`engine-${engine.id}`}
+                    data-active={isActive ? "true" : "false"}
+                    className={cn(
+                      "flex min-w-0 items-start gap-2.5 rounded-lg border px-3 py-2.5 transition-all duration-150",
+                      isActive
+                        ? "border-[var(--df-accent)]/60 bg-[var(--df-panel)] shadow-[0_2px_10px_var(--df-shadow)]"
+                        : "border-[var(--df-border)] bg-[var(--df-panel)]/70 opacity-75",
+                    )}
+                  >
                     <span
-                      aria-hidden="true"
                       className={cn(
-                        "size-1.5 rounded-full transition-colors",
-                        isHighlighted
-                          ? "bg-[var(--df-accent)]"
-                          : "bg-[var(--df-border-strong)]/60",
+                        "mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md border",
+                        isActive
+                          ? "border-[var(--df-accent)]/35 bg-[var(--df-accent-soft,rgba(28,93,74,0.09))] text-[var(--df-accent)]"
+                          : "border-[var(--df-border-soft)] bg-[var(--df-surface)] text-[var(--df-muted-fg)]",
                       )}
-                    />
+                    >
+                      <Icon className="size-3.5" aria-hidden="true" />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-semibold text-[var(--df-ink)]">
+                          {engine.title}
+                        </span>
+                        {isActive && (
+                          <span
+                            aria-hidden="true"
+                            className="size-1.5 shrink-0 rounded-full bg-[var(--df-accent)]"
+                          />
+                        )}
+                      </div>
+                      <p className="mt-0.5 font-mono text-[10px] leading-relaxed text-[var(--df-muted-fg)]">
+                        {engine.subtitle}
+                      </p>
+                    </div>
                   </div>
-                  <span className="mt-2 block w-full truncate text-xs font-semibold text-[var(--df-ink)]">
-                    {mod.title}
-                  </span>
-                  <span className="mt-0.5 block w-full truncate font-mono text-[10px] text-[var(--df-muted-fg)]">
-                    {mod.subtitle}
-                  </span>
-                </button>
-              );
-            })}
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Orthogonal SVG Bus Connectors: Tier 2 -> Tier 3 */}
+          <BottomBusConnectors activeModules={highlightedModules} />
+
+          {/* Tier 3: Plug-in Execution Plane */}
+          <div>
+            <div className="mb-2 font-mono text-[10px] font-medium tracking-[0.14em] text-[var(--df-muted-fg)] uppercase">
+              {copy.tier3Label}
+            </div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-2.5">
+              {copy.modules.map((mod) => {
+                const Icon = mod.icon;
+                const isHighlighted = highlightedModules.includes(mod.id);
+                const isInspected = inspectedModuleId === mod.id;
+                return (
+                  <button
+                    key={mod.id}
+                    type="button"
+                    data-node-id={`module-${mod.id}`}
+                    data-active={isHighlighted ? "true" : "false"}
+                    aria-pressed={isInspected}
+                    onClick={() => handleToggleModule(mod.id)}
+                    className={cn(
+                      "focus-visible:ring-ring/50 flex min-w-0 flex-col items-start rounded-xl border px-3 py-2.5 text-left transition-all duration-150 focus-visible:ring-2 focus-visible:outline-none",
+                      isInspected
+                        ? "border-[var(--df-accent)] bg-[var(--df-accent-soft,rgba(28,93,74,0.1))] ring-1 ring-[var(--df-accent)]/40"
+                        : isHighlighted
+                          ? "border-[var(--df-accent)]/60 bg-[var(--df-panel)] shadow-[0_2px_10px_var(--df-shadow)]"
+                          : "border-[var(--df-border)] bg-[var(--df-surface)] hover:border-[var(--df-border-strong)] hover:bg-[var(--df-bg-soft)]",
+                    )}
+                  >
+                    <div className="flex w-full items-center justify-between gap-1.5">
+                      <span
+                        className={cn(
+                          "flex size-6 shrink-0 items-center justify-center rounded-md border",
+                          isHighlighted
+                            ? "border-[var(--df-accent)]/35 bg-[var(--df-accent-soft,rgba(28,93,74,0.09))] text-[var(--df-accent)]"
+                            : "border-[var(--df-border-soft)] bg-[var(--df-panel)] text-[var(--df-muted-fg)]",
+                        )}
+                      >
+                        <Icon className="size-3.5" aria-hidden="true" />
+                      </span>
+                      <span
+                        aria-hidden="true"
+                        className={cn(
+                          "size-1.5 rounded-full transition-colors",
+                          isHighlighted
+                            ? "bg-[var(--df-accent)]"
+                            : "bg-[var(--df-border-strong)]/60",
+                        )}
+                      />
+                    </div>
+                    <span className="mt-2 block w-full truncate text-xs font-semibold text-[var(--df-ink)]">
+                      {mod.title}
+                    </span>
+                    <span className="mt-0.5 block w-full truncate font-mono text-[10px] text-[var(--df-muted-fg)]">
+                      {mod.subtitle}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
         </div>
-      </div>
 
-      {/* Bottom Execution Trace Strip */}
-      <div
-        data-testid="architecture-trace"
-        aria-live="polite"
-        className="flex items-start gap-2 border-t border-[var(--df-border)] bg-[var(--df-bg-soft)] px-3.5 py-2.5 font-mono text-[11px] leading-relaxed text-[var(--df-text-soft)] sm:px-4 sm:text-xs"
-      >
-        <Terminal
-          className="mt-0.5 size-3.5 shrink-0 text-[var(--df-accent)]"
-          aria-hidden="true"
-        />
-        <p className="min-w-0 flex-1 break-words">
-          <span className="mr-1.5 font-semibold text-[var(--df-accent)]">
-            {inspectedModule ? copy.modulePrefix : copy.tracePrefix}
-          </span>
-          <span>
-            {inspectedModule ? inspectedModule.inspectTrace : activeMode.trace}
-          </span>
-        </p>
+        {/* Bottom Execution Trace Strip */}
+        <div
+          data-testid="architecture-trace"
+          aria-live="polite"
+          className="flex items-start gap-2 border-t border-[var(--df-border)] bg-[var(--df-bg-soft)] px-3.5 py-2.5 font-mono text-[11px] leading-relaxed text-[var(--df-text-soft)] sm:px-4 sm:text-xs"
+        >
+          <Terminal
+            className="mt-0.5 size-3.5 shrink-0 text-[var(--df-accent)]"
+            aria-hidden="true"
+          />
+          <p className="min-w-0 flex-1 break-words">
+            <span className="mr-1.5 font-semibold text-[var(--df-accent)]">
+              {inspectedModule ? copy.modulePrefix : copy.tracePrefix}
+            </span>
+            <span>
+              {inspectedModule
+                ? inspectedModule.inspectTrace
+                : activeMode.trace}
+            </span>
+          </p>
+        </div>
       </div>
     </div>
   );

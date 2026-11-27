@@ -70,12 +70,14 @@ type InspectorCopy = {
   eagerPrefix: string;
   play: string;
   pause: string;
+  autoplayDisabledHint: string;
   reset: string;
   promptLabel: string;
   frontmatterHeading: string;
   instructionsHeading: string;
   sandboxHeading: string;
   onDemandHint: string;
+  onDemandHintReducedMotion: string;
   executeHint: string;
   artifactDelivered: string;
   stepStatus: Record<ProgressionStepId, string>;
@@ -100,6 +102,7 @@ const INSPECTOR_COPY: Record<Locale, InspectorCopy> = {
     eagerPrefix: "Eager all-skills:",
     play: "Play",
     pause: "Pause",
+    autoplayDisabledHint: "Autoplay disabled when reduced motion is preferred",
     reset: "Reset",
     promptLabel: "MATCHED TASK",
     frontmatterHeading: "01 · YAML Frontmatter (always indexed)",
@@ -107,6 +110,8 @@ const INSPECTOR_COPY: Record<Locale, InspectorCopy> = {
     sandboxHeading: "03 · Sandbox Execution Trace",
     onDemandHint:
       "Select step 02 or press Play to inject the full SKILL.md instructions.",
+    onDemandHintReducedMotion:
+      "Select step 02 to inject the full SKILL.md instructions.",
     executeHint:
       "Advance to step 03 to run bundled scripts inside the thread sandbox.",
     artifactDelivered: "Deliverable saved",
@@ -239,12 +244,14 @@ const INSPECTOR_COPY: Record<Locale, InspectorCopy> = {
     eagerPrefix: "全量加载开销：",
     play: "播放",
     pause: "暂停",
+    autoplayDisabledHint: "已开启减少动态效果，自动播放已禁用",
     reset: "重置",
     promptLabel: "命中任务",
     frontmatterHeading: "01 · YAML 元数据清单（始终常驻索引）",
     instructionsHeading: "02 · 按需注入的技能指令与参考模板",
     sandboxHeading: "03 · 沙箱执行轨迹",
     onDemandHint: "点击步骤 02 或播放按钮，查看完整 SKILL.md 按需注入效果。",
+    onDemandHintReducedMotion: "点击步骤 02，查看完整 SKILL.md 按需注入效果。",
     executeHint: "切换至步骤 03，查看在会话沙箱中运行内置脚本与产物交付。",
     artifactDelivered: "交付物已生成",
     stepStatus: {
@@ -444,7 +451,10 @@ export default function ProgressiveSkillsAnimation({
     setSelectedSkillId(skillId);
   };
 
+  const effectiveIsPlaying = !reducedMotion && isPlaying;
+
   const handleTogglePlay = () => {
+    if (reducedMotion) return;
     if (isPlaying) {
       setIsPlaying(false);
       return;
@@ -562,21 +572,29 @@ export default function ProgressiveSkillsAnimation({
 
             <button
               type="button"
+              disabled={reducedMotion}
               onClick={handleTogglePlay}
-              aria-label={isPlaying ? copy.pause : copy.play}
+              title={reducedMotion ? copy.autoplayDisabledHint : undefined}
+              aria-label={
+                reducedMotion
+                  ? copy.autoplayDisabledHint
+                  : effectiveIsPlaying
+                    ? copy.pause
+                    : copy.play
+              }
               className={cn(
-                "focus-visible:ring-ring/50 inline-flex min-h-[34px] items-center gap-1.5 rounded-full px-3.5 py-1 font-mono text-xs font-medium transition-colors duration-150 focus-visible:ring-2 focus-visible:outline-none",
-                isPlaying
+                "focus-visible:ring-ring/50 inline-flex min-h-[34px] items-center gap-1.5 rounded-full px-3.5 py-1 font-mono text-xs font-medium transition-colors duration-150 focus-visible:ring-2 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45",
+                effectiveIsPlaying
                   ? "bg-[var(--df-cta)] text-[var(--df-cta-fg)] hover:bg-[var(--df-cta-hover)]"
-                  : "border border-[var(--df-border-strong)] bg-[var(--df-panel)] text-[var(--df-ink)] hover:border-[var(--df-accent)] hover:text-[var(--df-accent)]",
+                  : "border border-[var(--df-border-strong)] bg-[var(--df-panel)] text-[var(--df-ink)] enabled:hover:border-[var(--df-accent)] enabled:hover:text-[var(--df-accent)]",
               )}
             >
-              {isPlaying ? (
+              {effectiveIsPlaying ? (
                 <Pause className="size-3.5" aria-hidden="true" />
               ) : (
                 <Play className="size-3.5" aria-hidden="true" />
               )}
-              <span>{isPlaying ? copy.pause : copy.play}</span>
+              <span>{effectiveIsPlaying ? copy.pause : copy.play}</span>
             </button>
 
             <button
@@ -778,7 +796,9 @@ export default function ProgressiveSkillsAnimation({
                 </div>
               ) : (
                 <p className="mt-2 text-xs leading-6 text-[var(--df-muted-fg)]">
-                  {copy.onDemandHint}
+                  {reducedMotion
+                    ? copy.onDemandHintReducedMotion
+                    : copy.onDemandHint}
                 </p>
               )}
             </div>

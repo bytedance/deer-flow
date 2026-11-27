@@ -25,4 +25,24 @@ describe("docs search", () => {
     expect(pkg.devDependencies.pagefind).toMatch(/^\d+\.\d+\.\d+$/);
     expect(source(".gitignore")).toContain("/public/_pagefind/");
   });
+
+  it("passes resolved locale to Footer and avoids outer px-10 header gutters in docs and blog layouts", () => {
+    const docsLayout = source("src/app/[lang]/docs/layout.tsx");
+    const blogLayout = source("src/app/blog/layout.tsx");
+
+    expect(docsLayout).toContain('<Footer className="mt-0" locale={locale} />');
+    expect(blogLayout).toContain("<Footer locale={locale} />");
+    expect(docsLayout).not.toContain("px-10");
+    expect(blogLayout).not.toContain("px-10");
+  });
+
+  it("loads bundled local fonts without build-time next/font/google network requests", () => {
+    const rootLayout = source("src/app/layout.tsx");
+
+    expect(rootLayout).toContain('from "next/font/local"');
+    expect(rootLayout).not.toContain("next/font/google");
+    expect(rootLayout).toContain("--font-landing-serif");
+    expect(rootLayout).toContain("--font-landing-sans");
+    expect(rootLayout).toContain("--font-mono");
+  });
 });

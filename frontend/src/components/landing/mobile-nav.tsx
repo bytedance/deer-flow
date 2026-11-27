@@ -223,7 +223,7 @@ export function MobileNav({
                 <span>{githubLabel}</span>
               </a>
               <Link
-                href="/workspace/chats/new"
+                href="/workspace"
                 onClick={() => setOpen(false)}
                 className="inline-flex min-h-11 items-center justify-center rounded-full bg-[var(--df-cta)] px-4 text-sm font-medium text-[var(--df-cta-fg)] transition-colors hover:bg-[var(--df-cta-hover)]"
               >

@@ -27,7 +27,7 @@ describe("landing Hero", () => {
     expect(headings[0]?.textContent).toContain("DeerFlow");
 
     const getStarted = screen.getByRole("link", { name: /get started/i });
-    expect(getStarted.getAttribute("href")).toBe("/workspace/chats/new");
+    expect(getStarted.getAttribute("href")).toBe("/workspace");
 
     const quickStart = screen.getByRole("link", { name: /quick start/i });
     expect(quickStart.getAttribute("href")).toBe(
@@ -136,6 +136,59 @@ describe("landing Hero", () => {
     ).toBe("false");
   });
 
+  it("supports WAI-ARIA tabpanel linkage, roving tabIndex, and arrow/Home/End keyboard navigation", () => {
+    rs.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(null, { status: 204 }),
+    );
+
+    render(<Hero />);
+
+    const researchTab = screen.getByRole("tab", { name: "Research" });
+    const sandboxTab = screen.getByRole("tab", { name: "Code & Sandbox" });
+    const imBotTab = screen.getByRole("tab", { name: "IM Bot" });
+    const panel = screen.getByRole("tabpanel");
+
+    // Initial roving tabIndex & tabpanel linkage
+    expect(researchTab.tabIndex).toBe(0);
+    expect(sandboxTab.tabIndex).toBe(-1);
+    expect(imBotTab.tabIndex).toBe(-1);
+    expect(researchTab.getAttribute("aria-controls")).toBe(panel.id);
+    expect(sandboxTab.getAttribute("aria-controls")).toBe(panel.id);
+    expect(imBotTab.getAttribute("aria-controls")).toBe(panel.id);
+    expect(panel.getAttribute("aria-labelledby")).toBe(researchTab.id);
+
+    // ArrowRight moves selection and focus to Code & Sandbox
+    researchTab.focus();
+    fireEvent.keyDown(researchTab, { key: "ArrowRight" });
+    expect(sandboxTab.getAttribute("aria-selected")).toBe("true");
+    expect(sandboxTab.tabIndex).toBe(0);
+    expect(researchTab.tabIndex).toBe(-1);
+    expect(document.activeElement).toBe(sandboxTab);
+    expect(panel.getAttribute("aria-labelledby")).toBe(sandboxTab.id);
+
+    // End jumps to IM Bot
+    fireEvent.keyDown(sandboxTab, { key: "End" });
+    expect(imBotTab.getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(imBotTab);
+    expect(panel.getAttribute("aria-labelledby")).toBe(imBotTab.id);
+
+    // ArrowRight wraps around to Research
+    fireEvent.keyDown(imBotTab, { key: "ArrowRight" });
+    expect(researchTab.getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(researchTab);
+
+    // ArrowLeft wraps around to IM Bot
+    fireEvent.keyDown(researchTab, { key: "ArrowLeft" });
+    expect(imBotTab.getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(imBotTab);
+
+    // Home returns to Research
+    fireEvent.keyDown(imBotTab, { key: "Home" });
+    expect(researchTab.getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(researchTab);
+    expect(panel.getAttribute("aria-labelledby")).toBe(researchTab.id);
+  });
+
   it("inspects Tier 3 execution modules on click and clears inspection when switching modes", () => {
     rs.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(null, { status: 204 }),
@@ -170,7 +223,7 @@ describe("landing Hero", () => {
 
     expect(
       screen.getByRole("link", { name: "立即开始" }).getAttribute("href"),
-    ).toBe("/workspace/chats/new");
+    ).toBe("/workspace");
     expect(
       screen.getByRole("link", { name: "快速上手" }).getAttribute("href"),
     ).toBe("/zh/docs/application/quick-start");

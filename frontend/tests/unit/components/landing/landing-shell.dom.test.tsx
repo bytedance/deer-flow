@@ -109,6 +109,7 @@ beforeEach(() => {
   mocks.setTheme.mockReset();
   ensureStorage().clear();
   clearLocaleCookie();
+  window.history.replaceState(null, "", "/");
   document.documentElement.lang = "en-US";
   document.documentElement.style.removeProperty("--df-header-height");
   rs.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -181,6 +182,53 @@ describe("LanguageSwitch", () => {
     expect(mocks.push).toHaveBeenCalledWith("/zh/docs/application/quick-start");
     expect(document.cookie).toContain("locale=zh-CN");
   });
+
+  it("updates ?lang= on /blog routes while preserving other query params and hash", async () => {
+    mocks.pathname = "/blog/releases/2_0_rc";
+    window.history.replaceState(
+      null,
+      "",
+      "/blog/releases/2_0_rc?tab=notes&lang=zh#install",
+    );
+
+    render(<LanguageSwitch locale="zh-CN" />);
+
+    const trigger = screen.getByRole("button", { name: "切换语言" });
+    fireEvent.pointerDown(trigger);
+    fireEvent.click(trigger);
+
+    const enItem = await screen.findByRole("menuitem", { name: /English/ });
+    fireEvent.click(enItem);
+
+    expect(mocks.push).toHaveBeenCalledWith(
+      "/blog/releases/2_0_rc?tab=notes&lang=en#install",
+    );
+    expect(mocks.refresh).toHaveBeenCalled();
+    expect(document.cookie).toContain("locale=en-US");
+  });
+
+  it("navigates on /blog when the selected locale matches header state but disagrees with ?lang=", async () => {
+    mocks.pathname = "/blog/releases/2_0_rc";
+    window.history.replaceState(
+      null,
+      "",
+      "/blog/releases/2_0_rc?lang=zh#overview",
+    );
+
+    render(<LanguageSwitch locale="en-US" />);
+
+    const trigger = screen.getByRole("button", { name: "Switch language" });
+    fireEvent.pointerDown(trigger);
+    fireEvent.click(trigger);
+
+    const enItem = await screen.findByRole("menuitem", { name: /English/ });
+    fireEvent.click(enItem);
+
+    expect(mocks.push).toHaveBeenCalledWith(
+      "/blog/releases/2_0_rc?lang=en#overview",
+    );
+    expect(document.cookie).toContain("locale=en-US");
+  });
 });
 
 describe("AnnouncementBanner", () => {
@@ -245,7 +293,10 @@ describe("Header & Footer shell", () => {
     ).toBeTruthy();
 
     const getStarted = screen.getByRole("link", { name: /get started/i });
-    expect(getStarted.getAttribute("href")).toBe("/workspace/chats/new");
+    expect(getStarted.getAttribute("href")).toBe("/workspace");
+
+    const openWorkspace = screen.getByRole("link", { name: "Open Workspace" });
+    expect(openWorkspace.getAttribute("href")).toBe("/workspace");
 
     const quickStart = screen.getByRole("link", { name: "Quick Start" });
     expect(quickStart.getAttribute("href")).toBe(
@@ -254,6 +305,8 @@ describe("Header & Footer shell", () => {
 
     // 2-tier editorial footer: inline quick-start card, 4 columns, MIT + ByteDance attribution
     expect(container.textContent).toContain("git clone");
+    expect(container.textContent).toContain("make config");
+    expect(container.textContent).toContain("make install");
     expect(container.textContent).toContain("make dev");
     expect(screen.getByRole("heading", { name: "Product" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Capabilities" })).toBeTruthy();
@@ -261,5 +314,41 @@ describe("Header & Footer shell", () => {
     expect(screen.getByRole("heading", { name: "Community" })).toBeTruthy();
     expect(container.textContent).toContain("MIT License");
     expect(container.textContent).toContain("ByteDance");
+  });
+
+  it("copies the full config+install+dev quick-start command and renders zh-CN footer links when locale is passed", () => {
+    const writeText = rs.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    const { rerender } = render(<Footer locale="en-US" />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Copy quick-start commands" }),
+    );
+    expect(writeText).toHaveBeenCalledWith(
+      "git clone https://github.com/bytedance/deer-flow.git && cd deer-flow && make config && make install && make dev",
+    );
+
+    rerender(<Footer locale="zh-CN" />);
+    expect(screen.getByRole("heading", { name: "开源社区" })).toBeTruthy();
+    expect(
+      screen.getByRole("link", { name: "完整文档" }).getAttribute("href"),
+    ).toBe("/zh/docs");
+    expect(
+      screen.getByRole("link", { name: "进入工作区" }).getAttribute("href"),
+    ).toBe("/workspace");
+  });
+
+  it("routes the mobile drawer Get Started CTA through /workspace", () => {
+    render(<Header locale="en-US" />);
+    fireEvent.click(screen.getByRole("button", { name: "Open menu" }));
+
+    const links = screen.getAllByRole("link", { name: /get started/i });
+    expect(links.length).toBeGreaterThanOrEqual(1);
+    for (const link of links) {
+      expect(link.getAttribute("href")).toBe("/workspace");
+    }
   });
 });

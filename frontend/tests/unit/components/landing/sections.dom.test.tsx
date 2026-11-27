@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "@rstest/core";
+import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { Section } from "@/components/landing/section";
@@ -7,7 +7,10 @@ import { SandboxSection } from "@/components/landing/sections/sandbox-section";
 import { SkillsSection } from "@/components/landing/sections/skills-section";
 import { WhatsNewSection } from "@/components/landing/sections/whats-new-section";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  rs.restoreAllMocks();
+});
 
 describe("Landing Section shell & content sections", () => {
   it("Section renders numbered editorial split heading without gradient text or nested main landmark", () => {
@@ -80,6 +83,62 @@ describe("Landing Section shell & content sections", () => {
     );
   });
 
+  it("SkillsSection disables autoplay truthfully under prefers-reduced-motion while keeping manual controls interactive", () => {
+    rs.spyOn(window, "matchMedia").mockImplementation((query: string) => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+      media: query,
+      onchange: null,
+      addListener: rs.fn(),
+      removeListener: rs.fn(),
+      addEventListener: rs.fn(),
+      removeEventListener: rs.fn(),
+      dispatchEvent: rs.fn(),
+    }));
+
+    render(<SkillsSection locale="en-US" />);
+
+    const playButton = screen.getByRole<HTMLButtonElement>("button", {
+      name: /autoplay disabled when reduced motion is preferred/i,
+    });
+    expect(playButton.disabled).toBe(true);
+    expect(playButton.textContent).toContain("Play");
+
+    // Clicking the disabled autoplay button never flips it into a stuck Pause state
+    fireEvent.click(playButton);
+    expect(screen.queryByRole("button", { name: /^pause$/i })).toBeNull();
+    expect(playButton.textContent).toContain("Play");
+
+    // Manual step selection, skill selection, and Reset remain fully interactive
+    const discoverStep = screen.getByRole("button", {
+      name: /01 Discover Manifest/i,
+    });
+    fireEvent.click(discoverStep);
+    expect(discoverStep.getAttribute("aria-pressed")).toBe("true");
+    expect(
+      screen.getByText(
+        "Select step 02 to inject the full SKILL.md instructions.",
+      ),
+    ).toBeDefined();
+
+    const executeStep = screen.getByRole("button", {
+      name: /03 Execute in Sandbox/i,
+    });
+    fireEvent.click(executeStep);
+    expect(
+      screen.getByText("/mnt/user-data/outputs/sandbox-brief.md"),
+    ).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: /slide-deck/i }));
+    expect(
+      screen.getByText("/mnt/user-data/outputs/q3-architecture.pptx"),
+    ).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    expect(
+      screen.getByText("/mnt/skills/deep-research/SKILL.md"),
+    ).toBeDefined();
+  });
+
   it("SandboxSection renders mount topology, backend pills, interactive console tabs, and zh-CN copy", () => {
     const { container, rerender } = render(<SandboxSection locale="en-US" />);
 
@@ -91,7 +150,39 @@ describe("Landing Section shell & content sections", () => {
     expect(screen.getByText("Kubernetes")).toBeDefined();
     expect(screen.getByText("cat requirements.txt")).toBeDefined();
 
+    const buildTab = screen.getByRole("tab", { name: "build-and-test" });
     const dataTab = screen.getByRole("tab", { name: "data-pipeline" });
+    const panel = screen.getByRole("tabpanel");
+
+    expect(buildTab.tabIndex).toBe(0);
+    expect(dataTab.tabIndex).toBe(-1);
+    expect(buildTab.getAttribute("aria-controls")).toBe(panel.id);
+    expect(dataTab.getAttribute("aria-controls")).toBe(panel.id);
+    expect(panel.getAttribute("aria-labelledby")).toBe(buildTab.id);
+
+    // Keyboard navigation updates selection, focus, tabpanel linkage, and terminal content
+    buildTab.focus();
+    fireEvent.keyDown(buildTab, { key: "ArrowRight" });
+    expect(dataTab.getAttribute("aria-selected")).toBe("true");
+    expect(dataTab.tabIndex).toBe(0);
+    expect(buildTab.tabIndex).toBe(-1);
+    expect(document.activeElement).toBe(dataTab);
+    expect(panel.getAttribute("aria-labelledby")).toBe(dataTab.id);
+    expect(screen.getByText("Downloaded 12.4 MB (148,290 rows)")).toBeDefined();
+
+    fireEvent.keyDown(dataTab, { key: "Home" });
+    expect(buildTab.getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(buildTab);
+    expect(panel.getAttribute("aria-labelledby")).toBe(buildTab.id);
+
+    fireEvent.keyDown(buildTab, { key: "End" });
+    expect(dataTab.getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(dataTab);
+
+    fireEvent.keyDown(dataTab, { key: "ArrowLeft" });
+    expect(buildTab.getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(buildTab);
+
     fireEvent.click(dataTab);
     expect(screen.getByText("Downloaded 12.4 MB (148,290 rows)")).toBeDefined();
 
