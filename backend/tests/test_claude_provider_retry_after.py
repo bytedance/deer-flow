@@ -22,11 +22,16 @@ def test_unusable_claude_retry_after_uses_default_backoff(attempt: int, raw: str
     assert ClaudeChatModel._calc_backoff_ms(attempt, error) == 2400 * 2 ** (attempt - 1)
 
 
-@pytest.mark.parametrize(("raw", "expected_ms"), [("-2", 0), ("0", 0), ("60", 60000), ("86400", 86400000)])
+@pytest.mark.parametrize(("raw", "expected_ms"), [("-2", 0), ("0", 0), ("60", 60000), ("86400", 86400000), ("3.0", 3000), ("1.5", 1500)])
 def test_usable_claude_retry_after_is_preserved(raw: str, expected_ms: int) -> None:
     error = Exception("rate limited")
     error.response = SimpleNamespace(headers={"Retry-After": raw})
     assert ClaudeChatModel._calc_backoff_ms(1, error) == expected_ms
+
+
+def test_millisecond_retry_after_header_is_honoured() -> None:
+    error = SimpleNamespace(response=httpx.Response(429, headers={"retry-after-ms": "1500"}, request=httpx.Request("POST", "https://example.invalid/messages")))
+    assert ClaudeChatModel._calc_backoff_ms(1, error) == 1500
 
 
 @pytest.mark.anyio
