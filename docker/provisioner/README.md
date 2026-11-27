@@ -305,8 +305,9 @@ kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
 
 3. **Kubernetes Access**:
    - The provisioner needs permissions to:
-     - Create/read/delete Pods in the `deer-flow` namespace
-     - Create/read/delete Services in the `deer-flow` namespace
+     - Get/list/create/delete and patch Pods in the `deer-flow` namespace (patch
+       writes the adoption mark a concurrent creator records)
+     - Get/list/create/delete Services in the `deer-flow` namespace
      - Read Namespaces (to create `deer-flow` if missing)
 
 4. **Host Paths**:
@@ -454,24 +455,44 @@ chart's `provisioner.replicas`; compose runs a single container):
   its own success before reading the winner's objects back (including
   `MAX_SHELL_SESSIONS`, so a lower-capacity winner is still reported to the
   Gateway as `409`). Several Gateway Pods already run this race against a
-  single provisioner. When the loser's Service create fails for another
-  reason, it rolls back only a Pod it created itself, and only once the
-  Service is confirmed absent: a Service write that errored may still have
-  committed, and a Pod behind a live Service belongs to whoever already
-  uses it.
+  single provisioner. When a Service create fails for another reason, the
+  handler rolls back only a Pod it created itself, and only once the Service
+  is confirmed absent. A create that serves a Pod it did not create marks the
+  Pod before reporting it Running, and the fast path that returns an existing
+  sandbox marks it too; the fast path also rejects a Pod that started
+  terminating or was replaced while the response was attested. The rollback
+  checks that mark and deletes conditionally on the UID its own create
+  returned and the resourceVersion it read, so a Pod behind a Running create
+  response is never torn down. This coordination only holds once every
+  replica runs this version: during a rolling upgrade, a replica on the
+  previous image does not read the adoption mark and can still delete a Pod
+  that another replica adopted.
+- A Pod whose create committed while its Service write failed can be left
+  with no Service and would stay invisible to `GET /api/sandboxes`, which
+  enumerates Services. A sweep at startup, and inline on creates that reach
+  the creation path, deletes those leftovers once they are older than a
+  ten-minute grace period, so a caller that never retries does not leak them
+  past the next provisioner restart or such a create; each candidate is
+  re-read and deleted only while its listed UID still matches, and a Pod
+  carrying a live adoption mark (the current Pod's UID, or the legacy
+  `true`) is never swept (if `destroy_sandbox` deletes the Service but fails
+  to delete such a Pod, it needs manual cleanup).
 - `DELETE /api/sandboxes/{sandbox_id}` tolerates `404`, so two replicas
   deleting the same sandbox both return success.
 - NodePorts are allocated by the API server when the Service is created; the
   provisioner only reads the assigned port back.
-- No replica runs a background loop (there is no reaper or cache), and
-  `/api/capabilities` is derived from environment variables every replica of
-  one Deployment shares.
+- No replica runs a background loop or keeps a process-local cache: the
+  orphan sweep runs at startup and inline on create, and `/api/capabilities`
+  is derived from environment variables every replica of one Deployment
+  shares.
 
-The one startup write is `_ensure_namespace()`: when `K8S_NAMESPACE` does not
-exist yet, two replicas starting together can both see `404` and race to create
-it; the loser's `409 AlreadyExists` is treated as "the namespace exists", so
-both replicas start. Under the Helm chart the provisioner runs inside the
-namespace it manages, so this path never runs there.
+At startup the provisioner waits for the kubeconfig, initializes the client,
+ensures the namespace exists, and then runs the orphan sweep as a best-effort
+step that cannot stop startup. When `K8S_NAMESPACE` does not exist yet, two
+replicas starting together can both see `404` and race to create it; the
+loser's `409 AlreadyExists` is treated as "the namespace exists", so both
+replicas start. Under the Helm chart the provisioner runs inside the namespace
+it manages, so this path never runs there.
 
 ## Security Considerations
 

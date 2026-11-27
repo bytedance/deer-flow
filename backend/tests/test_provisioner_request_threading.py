@@ -5,15 +5,18 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import threading
 import time
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 import requests
+import urllib3
 from blockbuster import BlockBuster
 from kubernetes.client.rest import ApiException
 
@@ -322,7 +325,259 @@ def test_service_failure_rolls_back_the_pod_this_request_created(monkeypatch, pr
     assert error.value.status_code == 500
     assert "Service creation failed" in error.value.detail
     assert core.created_pods == ["sandbox-own-pod"]
-    delete_pod.assert_called_once_with("sandbox-sandbox-own-pod", provisioner_module.K8S_NAMESPACE)
+    delete_pod.assert_called_once()
+    args, kwargs = delete_pod.call_args
+    assert args == ("sandbox-sandbox-own-pod", provisioner_module.K8S_NAMESPACE)
+    preconditions = kwargs["body"].preconditions
+    assert preconditions.uid == "pod-sandbox-own-pod-1"
+    assert preconditions.resource_version == "1"
+
+
+def test_service_failure_keeps_pod_and_original_error_when_absence_check_transports(monkeypatch, provisioner_module, caplog):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: None)
+    monkeypatch.setattr(core, "create_namespaced_service", MagicMock(side_effect=ApiException(status=500, reason="service broke")))
+    # A read timeout surfaces as a urllib3 transport error, not an ApiException.
+    transport_error = urllib3.exceptions.MaxRetryError(None, "/services/sandbox-sandbox-transport-svc", "read timed out")
+    monkeypatch.setattr(core, "read_namespaced_service", MagicMock(side_effect=transport_error))
+    delete_pod = MagicMock()
+    monkeypatch.setattr(core, "delete_namespaced_pod", delete_pod)
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(provisioner_module.HTTPException) as error:
+            provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-transport"))
+    assert error.value.status_code == 500
+    assert "service broke" in error.value.detail
+    assert core.created_pods == ["sandbox-transport"]
+    delete_pod.assert_not_called()
+    assert any("absence" in record.message for record in caplog.records)
+
+
+def test_pod_race_adoption_marks_the_pod_before_reporting_running(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    reads = iter([None, "http://sandbox"])
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: next(reads))
+    monkeypatch.setattr(core, "create_namespaced_pod", MagicMock(side_effect=ApiException(status=409)))
+    original_response = provisioner_module._sandbox_response
+
+    def recording_response(*args, **kwargs):
+        core.events.append(("response", args[0]))
+        return original_response(*args, **kwargs)
+
+    monkeypatch.setattr(provisioner_module, "_sandbox_response", recording_response)
+    response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
+    assert response.status == "Running"
+    assert core.patched_pods == ["sandbox-existing"]
+    assert core.pod_annotations["sandbox-existing"] == {"deer-flow/adopted": "true"}
+    assert core.events.index(("patch", "sandbox-existing")) < core.events.index(("response", "sandbox-existing"))
+
+
+def test_adoption_mark_failure_reports_instead_of_running(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: None)
+    monkeypatch.setattr(core, "create_namespaced_pod", MagicMock(side_effect=ApiException(status=409)))
+    monkeypatch.setattr(core, "patch_namespaced_pod", MagicMock(side_effect=ApiException(status=404, reason="gone")))
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
+    assert error.value.status_code == 500
+    assert "Could not adopt Pod" in error.value.detail
+
+
+def test_fast_path_marks_the_existing_pod_before_reporting_running(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
+    assert response.status == "Running"
+    assert core.patched_pods == ["sandbox-existing"]
+    assert core.pod_annotations["sandbox-existing"] == {"deer-flow/adopted": "pod-sandbox-existing-0"}
+    assert core.created_pods == []
+
+
+def test_fast_path_does_not_report_running_when_the_pod_started_terminating(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    original_response = provisioner_module._sandbox_response
+
+    def delete_after_attestation(*args, **kwargs):
+        # The response is attested as Running, then the concurrent rollback's
+        # delete commits before the adoption mark. Kubernetes still accepts a
+        # metadata patch on a terminating Pod, so the mark alone would not
+        # stop this request from reporting a sandbox that is going away.
+        response = original_response(*args, **kwargs)
+        core.terminating_pods.add("sandbox-existing")
+        return response
+
+    monkeypatch.setattr(provisioner_module, "_sandbox_response", delete_after_attestation)
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
+    assert error.value.status_code == 409
+    assert "terminating" in error.value.detail
+
+
+def test_fast_path_does_not_report_running_when_the_pod_was_replaced(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    original_response = provisioner_module._sandbox_response
+
+    def replace_after_attestation(*args, **kwargs):
+        # The attested Pod is gone and another create owns the same name by
+        # the time the mark lands.
+        response = original_response(*args, **kwargs)
+        core.pod_uids["sandbox-existing"] = "pod-sandbox-existing-replacement"
+        return response
+
+    monkeypatch.setattr(provisioner_module, "_sandbox_response", replace_after_attestation)
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
+    assert error.value.status_code == 409
+    assert "replaced" in error.value.detail
+    # The mark landed on the replacement but records the attested UID, so the
+    # fence ignores it and the replacement's creator can still roll it back.
+    assert core.pod_annotations["sandbox-existing"] == {"deer-flow/adopted": "pod-sandbox-existing-0"}
+    assert provisioner_module._delete_pod_unless_adopted("sandbox-existing", expected_uid="pod-sandbox-existing-replacement") is True
+    assert core.deleted_pods == ["sandbox-existing"]
+
+
+def test_fast_path_adoption_mark_failure_reports_instead_of_running(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(core, "patch_namespaced_pod", MagicMock(side_effect=ApiException(status=500, reason="patch broke")))
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
+    assert error.value.status_code == 500
+    assert "Could not adopt Pod" in error.value.detail
+
+
+def test_rollback_keeps_pod_adopted_after_its_read_before_the_delete(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: None)
+    monkeypatch.setattr(core, "create_namespaced_service", MagicMock(side_effect=ApiException(status=500)))
+    original_delete = core.delete_namespaced_pod
+
+    def adopt_then_delete(name, namespace, body=None):
+        # A peer adopts the Pod after this request confirmed the Service absent.
+        core.patch_namespaced_pod(name, namespace, {"metadata": {"annotations": {"deer-flow/adopted": "true"}}})
+        return original_delete(name, namespace, body=body)
+
+    delete_pod = MagicMock(side_effect=adopt_then_delete)
+    monkeypatch.setattr(core, "delete_namespaced_pod", delete_pod)
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-adopted"))
+    assert error.value.status_code == 500
+    assert core.created_pods == ["sandbox-adopted"]
+    assert core.deleted_pods == []
+
+
+def test_rollback_keeps_pod_when_adoption_lands_before_its_read(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: None)
+    monkeypatch.setattr(core, "create_namespaced_service", MagicMock(side_effect=ApiException(status=500)))
+    original_read = core.read_namespaced_pod
+
+    def adopt_before_read(name, namespace):
+        # A peer adopts the Pod after the 404 absence check but before the
+        # rollback reads it. The new resourceVersion alone would satisfy the
+        # delete precondition, so only the adoption mark can keep the Pod.
+        core.patch_namespaced_pod(name, namespace, {"metadata": {"annotations": {"deer-flow/adopted": "true"}}})
+        return original_read(name, namespace)
+
+    monkeypatch.setattr(core, "read_namespaced_pod", MagicMock(side_effect=adopt_before_read))
+    delete_pod = MagicMock()
+    monkeypatch.setattr(core, "delete_namespaced_pod", delete_pod)
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-mark-first"))
+    assert error.value.status_code == 500
+    delete_pod.assert_not_called()
+
+
+def test_rollback_delete_transport_error_keeps_original_service_error(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: None)
+    monkeypatch.setattr(core, "create_namespaced_service", MagicMock(side_effect=ApiException(status=500, reason="service broke")))
+    transport_error = urllib3.exceptions.MaxRetryError(None, "/pods/sandbox-sandbox-delete-transport", "timed out")
+    monkeypatch.setattr(core, "delete_namespaced_pod", MagicMock(side_effect=transport_error))
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-delete-transport"))
+    assert error.value.status_code == 500
+    assert "service broke" in error.value.detail
+
+
+def test_create_sweeps_only_unserviced_pods_past_the_grace_period(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1, ready_after_service_reads={"sandbox-sweep": 1})
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    now = datetime.now(UTC)
+    old = now - timedelta(seconds=provisioner_module._ORPHAN_POD_GRACE_SECONDS + 60)
+    young = now - timedelta(seconds=60)
+    core.pod_shell_capacities["sandbox-old"] = 10
+    core.pod_uids["sandbox-old"] = "pod-sandbox-old-listed"
+    core.listed_pods = [
+        SimpleNamespace(metadata=SimpleNamespace(name="sandbox-sandbox-old", uid="pod-sandbox-old-listed", labels={"sandbox-id": "sandbox-old"}, creation_timestamp=old)),
+        SimpleNamespace(metadata=SimpleNamespace(name="sandbox-sandbox-young", uid="pod-sandbox-young-listed", labels={"sandbox-id": "sandbox-young"}, creation_timestamp=young)),
+        SimpleNamespace(metadata=SimpleNamespace(name="sandbox-sandbox-listed", uid="pod-sandbox-listed-listed", labels={"sandbox-id": "sandbox-listed"}, creation_timestamp=old)),
+    ]
+    response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-sweep"))
+    assert response.status == "Running"
+    assert core.deleted_pods == ["sandbox-old"]
+
+
+def test_create_sweep_keeps_orphan_adopted_between_listing_and_delete(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1, ready_after_service_reads={"sandbox-sweep": 1})
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    old = datetime.now(UTC) - timedelta(seconds=provisioner_module._ORPHAN_POD_GRACE_SECONDS + 60)
+    core.pod_shell_capacities["sandbox-old"] = 10
+    core.pod_uids["sandbox-old"] = "pod-sandbox-old-listed"
+    core.listed_pods = [
+        SimpleNamespace(metadata=SimpleNamespace(name="sandbox-sandbox-old", uid="pod-sandbox-old-listed", labels={"sandbox-id": "sandbox-old"}, creation_timestamp=old)),
+    ]
+    original_read = core.read_namespaced_pod
+
+    def adopt_before_read(name, namespace):
+        # The list said unserviced, but a peer adopted the Pod before the
+        # sweep re-read it. Deleting from the stale list would tear that
+        # sandbox down.
+        if name == "sandbox-sandbox-old":
+            core.patch_namespaced_pod(name, namespace, {"metadata": {"annotations": {"deer-flow/adopted": "true"}}})
+        return original_read(name, namespace)
+
+    monkeypatch.setattr(core, "read_namespaced_pod", MagicMock(side_effect=adopt_before_read))
+    response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-sweep"))
+    assert response.status == "Running"
+    assert core.patched_pods == ["sandbox-old"]
+    assert core.deleted_pods == []
+
+
+def test_create_sweep_keeps_a_replaced_pod(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1, ready_after_service_reads={"sandbox-sweep": 1})
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    old = datetime.now(UTC) - timedelta(seconds=provisioner_module._ORPHAN_POD_GRACE_SECONDS + 60)
+    core.listed_pods = [
+        SimpleNamespace(metadata=SimpleNamespace(name="sandbox-sandbox-old", uid="pod-sandbox-old-listed", labels={"sandbox-id": "sandbox-old"}, creation_timestamp=old)),
+    ]
+    # The listed Pod is gone by the time the sweep re-reads the name: another
+    # create has replaced it. The list's age and UID no longer describe the
+    # object under that name, so the sweep must not delete it.
+    core.pod_uids["sandbox-old"] = "pod-sandbox-old-replacement"
+    core.pod_shell_capacities["sandbox-old"] = 10
+    response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-sweep"))
+    assert response.status == "Running"
+    assert core.deleted_pods == []
+
+
+def test_create_sweep_skips_the_requested_sandbox(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1, ready_after_service_reads={"sandbox-sweep": 1})
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    old = datetime.now(UTC) - timedelta(seconds=provisioner_module._ORPHAN_POD_GRACE_SECONDS + 60)
+    core.listed_pods = [
+        SimpleNamespace(metadata=SimpleNamespace(name="sandbox-sandbox-sweep", uid="pod-sandbox-sweep-listed", labels={"sandbox-id": "sandbox-sweep"}, creation_timestamp=old)),
+    ]
+    response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-sweep"))
+    assert response.status == "Running"
+    assert "sandbox-sweep" not in core.deleted_pods
 
 
 def test_service_failure_keeps_pod_when_service_committed_despite_the_error(monkeypatch, provisioner_module):
@@ -718,6 +973,17 @@ class _RecordingCoreV1:
         self.created_pods: list[str] = []
         self.created_pod_specs: dict[str, object] = {}
         self.created_services: list[str] = []
+        self.patched_pods: list[str] = []
+        self.pod_resource_versions: dict[str, int] = {}
+        self.pod_uids: dict[str, str] = {}
+        self.pod_annotations: dict[str, dict[str, str]] = {}
+        self.terminating_pods: set[str] = set()
+        self.events: list[tuple[str, str]] = []
+        self.deleted_pods: list[str] = []
+        self.listed_pods: list = []
+
+    def _pod_uid(self, sandbox_id: str) -> str:
+        return self.pod_uids.get(sandbox_id) or f"pod-{sandbox_id}-{len(self.created_pods)}"
 
     def _record_k8s_call(self) -> None:
         thread_id = threading.get_ident()
@@ -750,7 +1016,12 @@ class _RecordingCoreV1:
         if capacity is None:
             raise ApiException(status=404)
         return SimpleNamespace(
-            metadata=SimpleNamespace(uid=f"pod-{sandbox_id}-{len(self.created_pods)}", deletion_timestamp=None),
+            metadata=SimpleNamespace(
+                uid=self._pod_uid(sandbox_id),
+                resource_version=str(self.pod_resource_versions.get(sandbox_id, 0)),
+                annotations=dict(self.pod_annotations.get(sandbox_id, {})),
+                deletion_timestamp=datetime.now(UTC) if sandbox_id in self.terminating_pods else None,
+            ),
             status=SimpleNamespace(phase="Running"),
             spec=self.created_pod_specs[sandbox_id].spec
             if sandbox_id in self.created_pod_specs
@@ -764,13 +1035,34 @@ class _RecordingCoreV1:
             ),
         )
 
-    def create_namespaced_pod(self, _namespace: str, pod) -> None:
+    def create_namespaced_pod(self, _namespace: str, pod):
         self._record_k8s_call()
         sandbox_id = pod.metadata.labels["sandbox-id"]
         self.created_pods.append(sandbox_id)
         self.created_pod_specs[sandbox_id] = pod
+        self.pod_resource_versions[sandbox_id] = self.pod_resource_versions.get(sandbox_id, 0) + 1
         env = {item.name: item.value for item in (pod.spec.containers[0].env or [])}
         self.pod_shell_capacities[sandbox_id] = int(env.get("MAX_SHELL_SESSIONS", "10"))
+        return SimpleNamespace(metadata=SimpleNamespace(uid=self._pod_uid(sandbox_id)))
+
+    def patch_namespaced_pod(self, name: str, _namespace: str, body):
+        self._record_k8s_call()
+        sandbox_id = name[len("sandbox-") :]
+        self.patched_pods.append(sandbox_id)
+        self.events.append(("patch", sandbox_id))
+        annotations = ((body or {}).get("metadata") or {}).get("annotations") or {}
+        self.pod_annotations.setdefault(sandbox_id, {}).update(annotations)
+        self.pod_resource_versions[sandbox_id] = self.pod_resource_versions.get(sandbox_id, 0) + 1
+        # Kubernetes accepts metadata patches on a Pod that is already
+        # terminating; model the returned object rather than hiding it.
+        return SimpleNamespace(
+            metadata=SimpleNamespace(
+                uid=self._pod_uid(sandbox_id),
+                resource_version=str(self.pod_resource_versions[sandbox_id]),
+                annotations=dict(self.pod_annotations[sandbox_id]),
+                deletion_timestamp=datetime.now(UTC) if sandbox_id in self.terminating_pods else None,
+            )
+        )
 
     def create_namespaced_service(self, _namespace: str, service) -> None:
         self._record_k8s_call()
@@ -782,9 +1074,22 @@ class _RecordingCoreV1:
         self._record_k8s_call()
         self.service_sandboxes.discard(_sandbox_id_from_service_name(_name))
 
-    def delete_namespaced_pod(self, _name: str, _namespace: str) -> None:
+    def delete_namespaced_pod(self, _name: str, _namespace: str, body=None) -> None:
         self._record_k8s_call()
-        self.pod_shell_capacities.pop(_name[len("sandbox-") :], None)
+        sandbox_id = _name[len("sandbox-") :]
+        preconditions = getattr(body, "preconditions", None)
+        if preconditions is not None:
+            if preconditions.uid is not None and preconditions.uid != self._pod_uid(sandbox_id):
+                raise ApiException(status=409)
+            if preconditions.resource_version is not None and preconditions.resource_version != str(self.pod_resource_versions.get(sandbox_id, 0)):
+                raise ApiException(status=409)
+        self.deleted_pods.append(sandbox_id)
+        self.pod_shell_capacities.pop(sandbox_id, None)
+
+    def list_namespaced_pod(self, _namespace: str, *, label_selector: str):
+        self._record_k8s_call()
+        assert label_selector == "app=deer-flow-sandbox"
+        return SimpleNamespace(items=list(self.listed_pods))
 
     def list_namespaced_service(self, _namespace: str, *, label_selector: str):
         self._record_k8s_call()
