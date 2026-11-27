@@ -91,7 +91,7 @@ class ConsoleUsageDay(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     runs: int = 0
-    batch_items: int = Field(default=0, description="Subagent batch items whose usage was last written this day; their tokens are included above")
+    batch_items: int = Field(default=0, description="Subagent batch items with an attempt whose usage was written this day; those tokens are included above")
     cost: float | None = Field(default=0.0, description="Estimated spend for the day across priced runs; null when any call explicitly lacks usage")
 
 
@@ -382,11 +382,13 @@ async def console_stats(request: Request) -> ConsoleStatsResponse:
             total_cost = round(cost_sum, 6) if cost_sum is not None else None
 
     # Subagent batch items are not runs; their tokens and spend still count.
+    # Each entry is one model's tokens of one item attempt, priced at that
+    # model's rate with its cache hits.
     for item in await SubagentBatchRepository(sf).list_item_token_usage(user_id=user_id or None):
         total_tokens += item["total_tokens"]
         price = _lookup_pricing(pricing, item["model_name"])
         if total_cost is not None and price is not None:
-            total_cost = round(total_cost + _token_cost(item["input_tokens"], item["output_tokens"], price), 6)
+            total_cost = round(total_cost + _token_cost(item["input_tokens"], item["output_tokens"], price, item["cache_read_tokens"]), 6)
 
     try:
         # Filesystem scan; resolves the effective user internally (AuthMiddleware
@@ -582,33 +584,39 @@ async def console_usage(
             if run_cost is not None:
                 entry.cost = round((entry.cost or 0.0) + run_cost, 6)
 
-    # Subagent batch items run outside any run; add their stored usage by the
-    # day it was last written. Items carry no cache or missing-usage detail.
+    # Subagent batch items run outside any run. Each entry is one model's
+    # tokens of one item attempt, dated by when that attempt's usage was
+    # written and priced at that model's rate with its cache hits.
     batch_items = await SubagentBatchRepository(sf).list_item_token_usage(user_id=user_id or None, updated_since=window_start_utc)
-    total_batch_items = 0
+    window_items: set[str] = set()
+    day_items: dict[str, set[str]] = {}
     for item in batch_items:
         at = _as_utc(item["at"])
-        bucket = day_buckets.get(((at + tz_delta).date()).isoformat()) if at is not None else None
+        day = ((at + tz_delta).date()).isoformat() if at is not None else None
+        bucket = day_buckets.get(day) if day is not None else None
         if bucket is None:
             continue
         bucket.total_tokens += item["total_tokens"]
         bucket.input_tokens += item["input_tokens"]
         bucket.output_tokens += item["output_tokens"]
-        bucket.batch_items += 1
+        day_items.setdefault(day, set()).add(item["item_id"])
+        bucket.batch_items = len(day_items[day])
         total_tokens += item["total_tokens"]
-        total_batch_items += 1
+        window_items.add(item["item_id"])
         model = item["model_name"] or "unknown"
         entry = by_model.setdefault(model, ConsoleUsageModelBreakdown())
         entry.tokens += item["total_tokens"]
         entry.input_tokens += item["input_tokens"]
+        entry.cache_read_tokens += item["cache_read_tokens"]
         price = _lookup_pricing(pricing, item["model_name"])
         if price is not None:
-            item_cost = _token_cost(item["input_tokens"], item["output_tokens"], price)
+            item_cost = _token_cost(item["input_tokens"], item["output_tokens"], price, item["cache_read_tokens"])
             entry.cost = round((entry.cost or 0.0) + item_cost, 6)
             if bucket.cost is not None:
                 bucket.cost = round(bucket.cost + item_cost, 6)
             if total_cost is not None:
                 total_cost = round(total_cost + item_cost, 6)
+    total_batch_items = len(window_items)
 
     # Missing usage stays unknown even if a later known bucket or legacy row
     # shares this model. Do not restore its quote by treating None as zero.

@@ -190,8 +190,10 @@ def test_thread_token_usage_adds_batch_items_as_subagent_work(monkeypatch: pytes
     batch_repo = MagicMock()
     batch_repo.list_item_token_usage = AsyncMock(
         return_value=[
-            {"model_name": "model-a", "at": None, "input_tokens": 300, "output_tokens": 100, "total_tokens": 400},
-            {"model_name": None, "at": None, "input_tokens": 8, "output_tokens": 2, "total_tokens": 10},
+            {"item_id": "item-1", "model_name": "model-a", "at": None, "input_tokens": 200, "output_tokens": 60, "total_tokens": 260, "cache_read_tokens": 0},
+            # The same item's retry: one item, two attempts.
+            {"item_id": "item-1", "model_name": "model-a", "at": None, "input_tokens": 100, "output_tokens": 40, "total_tokens": 140, "cache_read_tokens": 0},
+            {"item_id": "item-2", "model_name": None, "at": None, "input_tokens": 8, "output_tokens": 2, "total_tokens": 10, "cache_read_tokens": 0},
         ]
     )
     app.state.subagent_batch_repo = batch_repo

@@ -553,7 +553,12 @@ async def test_failed_finalize_keeps_the_attempts_token_usage(monkeypatch) -> No
     assert len(repository.calls) == 2
     retry = repository.calls[1]
     assert retry["succeeded"] is False
-    assert retry["token_usage"] == {"input_tokens": 30, "output_tokens": 15, "total_tokens": 45}
+    assert retry["token_usage"] == {
+        "input_tokens": 30,
+        "output_tokens": 15,
+        "total_tokens": 45,
+        "by_model": {"model-a": {"input_tokens": 30, "output_tokens": 15, "total_tokens": 45}},
+    }
     assert retry["model_name"] == "model-a"
 
 
@@ -1298,3 +1303,25 @@ async def test_terminal_item_cleanup_fence_budget_does_not_renew_forever(monkeyp
         execution_done.set()
         await asyncio.gather(*workers, return_exceptions=True)
         registry.cleanup("execution-1")
+
+
+def test_usage_keeps_each_models_tokens_and_cache_hits() -> None:
+    usage = service_module._usage(
+        [
+            {"model_name": "provider-a", "input_tokens": 100, "output_tokens": 10, "total_tokens": 110, "cache_read_tokens": 70},
+            {"model_name": None, "input_tokens": 5, "output_tokens": 1, "total_tokens": 6},
+            {"model_name": "provider-a", "input_tokens": 20, "output_tokens": 2, "total_tokens": 22},
+        ],
+        "model-a",
+    )
+    assert usage == {
+        "input_tokens": 125,
+        "output_tokens": 13,
+        "total_tokens": 138,
+        "cache_read_tokens": 70,
+        "by_model": {
+            "provider-a": {"input_tokens": 120, "output_tokens": 12, "total_tokens": 132, "cache_read_tokens": 70},
+            "model-a": {"input_tokens": 5, "output_tokens": 1, "total_tokens": 6},
+        },
+    }
+    assert service_module._usage([], "model-a") is None

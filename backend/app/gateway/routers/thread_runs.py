@@ -2072,7 +2072,7 @@ async def _add_batch_item_usage(request: Request, agg: dict[str, Any], thread_id
         agg["by_caller"]["subagent"] = agg["by_caller"].get("subagent", 0) + item["total_tokens"]
         entry = agg["by_model"].setdefault(item["model_name"] or "unknown", {"tokens": 0, "runs": 0})
         entry["tokens"] = entry.get("tokens", 0) + item["total_tokens"]
-    agg["total_batch_items"] = len(items)
+    agg["total_batch_items"] = len({item["item_id"] for item in items})
     return agg
 
 
