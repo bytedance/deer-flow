@@ -717,8 +717,8 @@ This section accumulates work toward the **2.3.0** milestone
   ([#8557])
 
 - **projects:** Project names, shelf document names and shelf summaries are folded to a single line
-  in the rendered `<project>` block and shelf index, so a line boundary (`\n`, ` `, and the
-  other `str.splitlines` separators) inside member-settable untrusted text can no longer push
+  in the rendered `<project>` block and shelf index, so a line boundary (`\n`, Unicode line separator
+  `U+2028`, or any other `str.splitlines` separator) inside member-settable untrusted text can no longer push
   attacker-chosen lines into the framework block or forge an extra `- id=…` index entry. Attribute
   escaping alone left line boundaries intact. ([#8521])
 
