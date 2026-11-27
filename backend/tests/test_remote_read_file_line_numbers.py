@@ -15,6 +15,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.read_file_contract import READ_FILE_TRUNCATION_PREFIX, count_file_lines
@@ -99,3 +101,31 @@ def test_split_file_lines_agrees_with_count_file_lines(content):
     from deerflow.sandbox.read_file_contract import split_file_lines
 
     assert len(split_file_lines(content)) == count_file_lines(content)
+
+
+@settings(max_examples=3000, deadline=None)
+@given(
+    content=st.lists(st.sampled_from(["a", "\n", "\r", "\r\n", "\r\r", "\r\r\n", " "]), max_size=30).map("".join),
+    start_line=st.none() | st.integers(-2, 12),
+    end_line=st.none() | st.integers(-2, 12),
+)
+def test_slice_file_lines_equals_joining_the_split_lines(content, start_line, end_line):
+    # slice_file_lines copies only the selected lines; it must return what
+    # slicing the full split_file_lines list returns, with LocalSandbox's clamping.
+    from deerflow.sandbox.read_file_contract import slice_file_lines, split_file_lines
+
+    lines = split_file_lines(content)
+    start = max(start_line or 1, 1)
+    end = max(end_line, 0) if end_line is not None else len(lines)
+
+    assert slice_file_lines(content, start_line, end_line) == "\n".join(lines[start - 1 : end])
+
+
+def test_slice_file_lines_finds_lines_beyond_one_counting_block():
+    from deerflow.sandbox.read_file_contract import slice_file_lines
+
+    content = "".join(f"{n}\r\n" for n in range(1, 200_001))
+
+    assert slice_file_lines(content, 150_000, 150_002) == "150000\n150001\n150002"
+    assert slice_file_lines(content, 200_000, None) == "200000"
+    assert slice_file_lines(content, 200_001, None) == ""

@@ -310,7 +310,14 @@ def find_grep_matches(
     line_summary_length: int = DEFAULT_LINE_SUMMARY_LENGTH,
     relative_prefix: str = "",
     user_data: bool = False,
+    display_line: Callable[[str], str] | None = None,
 ) -> tuple[list[GrepMatch], bool]:
+    """Search text files under ``root``.
+
+    ``display_line`` rewrites a matched line for the caller before it is
+    shortened to ``line_summary_length``; the pattern still matches the stored
+    text. Rewriting after shortening could leave a cut-off fragment behind.
+    """
     matches: list[GrepMatch] = []
     truncated = False
     root = root.resolve()
@@ -391,7 +398,7 @@ def find_grep_matches(
                             GrepMatch(
                                 path=str(file_path),
                                 line_number=line_number,
-                                line=truncate_line(line, line_summary_length),
+                                line=truncate_line(display_line(line) if display_line is not None else line, line_summary_length),
                             )
                         )
                         if len(matches) >= max_results:

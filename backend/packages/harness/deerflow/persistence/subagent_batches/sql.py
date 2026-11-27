@@ -60,6 +60,27 @@ _ITEM_PUBLIC_FIELDS = (
 _ITEM_TIMESTAMP_FIELDS = ("started_at", "completed_at", "created_at", "updated_at")
 
 
+def _accumulate_token_usage(stored: dict[str, Any] | None, attempt: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Add one attempt's token counts to the item's stored total.
+
+    An item can run several attempts (automatic retries, a manual retry), and
+    each one spends tokens. Replacing the stored value would keep only the last
+    attempt; an attempt without usage (e.g. the exception path) keeps it as is.
+    """
+    if not attempt:
+        return stored
+    if not stored:
+        return dict(attempt)
+    total = dict(stored)
+    for key, value in attempt.items():
+        if isinstance(value, int) and not isinstance(value, bool):
+            previous = total.get(key)
+            total[key] = (previous if isinstance(previous, int) and not isinstance(previous, bool) else 0) + value
+        else:
+            total[key] = value
+    return total
+
+
 class SubagentBatchRepository:
     """Durable batch/item state with lease-based multi-worker claiming."""
 
@@ -675,7 +696,7 @@ class SubagentBatchRepository:
                 "lease_expires_at": None,
                 "model_name": model_name,
                 "stop_reason": stop_reason,
-                "token_usage": token_usage,
+                "token_usage": _accumulate_token_usage(item.token_usage, token_usage),
                 "updated_at": completed_at,
                 "acceptance_verdict": None,
                 "result_artifact": None,
@@ -768,26 +789,23 @@ class SubagentBatchRepository:
             elif action == "cancel" and batch.status not in BATCH_TERMINAL_STATUSES:
                 batch.status = "cancelled"
                 batch.completed_at = now
-                items = list(
-                    (
-                        await session.execute(
-                            select(SubagentBatchItemRow)
-                            .where(
-                                SubagentBatchItemRow.batch_id == batch_id,
-                                SubagentBatchItemRow.status.not_in(ITEM_TERMINAL_STATUSES),
-                            )
-                            .with_for_update()
-                        )
-                    ).scalars()
+                await session.execute(
+                    update(SubagentBatchItemRow)
+                    .where(
+                        SubagentBatchItemRow.batch_id == batch_id,
+                        SubagentBatchItemRow.status.not_in(ITEM_TERMINAL_STATUSES),
+                    )
+                    .values(
+                        status="cancelled",
+                        error="Cancelled by user",
+                        cancel_requested_at=now,
+                        completed_at=now,
+                        updated_at=now,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                    )
+                    .execution_options(synchronize_session=False)
                 )
-                for item in items:
-                    item.cancel_requested_at = now
-                    item.updated_at = now
-                    item.status = "cancelled"
-                    item.error = "Cancelled by user"
-                    item.lease_owner = None
-                    item.lease_expires_at = None
-                    item.completed_at = now
             batch.updated_at = now
             await session.commit()
             return await self._with_counts(session, batch)

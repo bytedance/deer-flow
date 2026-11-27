@@ -862,6 +862,18 @@ def _memory_language_preference(messages: list[Any]) -> str:
     return ""
 
 
+def _imported_history_note(messages: list[Any]) -> str:
+    # Set by the host on queued copies; DeerMem only reads the flag.
+    if any((getattr(message, "additional_kwargs", {}) or {}).get("deerflow_follows_imported_history") for message in messages):
+        return (
+            "Note: this conversation continues a copy of another person's conversation, which is not shown here. "
+            "When the assistant repeats or summarizes details from that copy (a name, employer, role, health details, "
+            "preferences or standing instructions), they belong to the other person. Never record them as facts about "
+            "the user; record only what the user says about themselves."
+        )
+    return ""
+
+
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
@@ -1428,12 +1440,12 @@ class MemoryUpdater:
             "consolidation_section": consolidation_section,
         }
         prompt = load_prompt_messages("memory_update", variables, agent_name=agent_name, prompts_dir=self._prompts_dir)
-        language_preference = _memory_language_preference(messages)
-        if language_preference:
-            # Per-run preference is data, not part of the cached system text.
+        # Per-run notes are data, not part of the cached system text.
+        notes = "\n\n".join(note for note in (_memory_language_preference(messages), _imported_history_note(messages)) if note)
+        if notes:
             for index, message in enumerate(prompt):
                 if message.type == "human":
-                    prompt[index] = message.model_copy(update={"content": f"{language_preference}\n\n{message.content}"})
+                    prompt[index] = message.model_copy(update={"content": f"{notes}\n\n{message.content}"})
                     break
         if config.prompt_prepend or config.prompt_append:
             # Extend trusted instructions only, after formatting the original

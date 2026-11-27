@@ -32,7 +32,7 @@ from app.channels.message_bus import InboundMessage, InboundMessageType, Message
 from app.gateway.github.identity import extract_target, resolve_thread_id
 from app.gateway.github.prompts import build_prompt
 from app.gateway.github.registry import build_github_agent_registry, lookup_agents
-from app.gateway.github.triggers import event_should_fire
+from app.gateway.github.triggers import event_should_fire, is_actor_authorized
 from deerflow.config.agents_config import GitHubAgentConfig, GitHubTriggerConfig
 
 logger = logging.getLogger(__name__)
@@ -240,7 +240,8 @@ async def fanout_event(
     fired: list[str] = []
     skipped: list[dict[str, str]] = []
 
-    sender_login = (payload.get("sender") or {}).get("login")
+    raw_sender = payload.get("sender")
+    sender_login = raw_sender.get("login") if isinstance(raw_sender, dict) and isinstance(raw_sender.get("login"), str) else None
 
     # 3. Redundant review-comment fan-out filter — see
     #    :func:`_is_redundant_review_comment`. Whether the PAYLOAD has the
@@ -361,7 +362,7 @@ async def fanout_event(
         #    useful for operator debugging (PR #4131 review, Minor finding,
         #    willem-bd).
         review_trigger = review_trigger_by_binding.get((match.user_id, agent.name))
-        if is_redundant_review_comment and review_trigger is not None and not review_trigger.require_mention:
+        if is_redundant_review_comment and review_trigger is not None and not review_trigger.require_mention and (not fire or is_actor_authorized(event, payload, review_trigger)[0]):
             skip_reason = reason if not fire else "redundant_review_comment"
             logger.info(
                 "github_fanout: agent=%s skipped (reason=%s, repo=%s#%s, delivery=%s)",

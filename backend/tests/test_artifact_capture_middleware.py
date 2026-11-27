@@ -350,6 +350,64 @@ class TestCapture:
         third = middleware.before_model(third_state, _runtime("t"))
         assert third is None or "tool_artifacts" not in (third or {})
 
+    def test_ignores_stored_rows_without_a_usable_handle(self):
+        """A checkpoint row the reducer tolerates must not abort every later model call."""
+        middleware = ArtifactCaptureMiddleware()
+        handle = generate_handle("thread_1", "call_1", 0)
+        entry = {
+            "handle": handle,
+            "artifact_type": "file",
+            "real_ref": "/mnt/user-data/outputs/report.md",
+            "display_name": "report.md",
+            "tool_name": "write_file",
+            "mime_type": None,
+            "consumed_by": [],
+        }
+        state = {
+            "tool_artifacts": [
+                {"display_name": "legacy.md"},
+                {"handle": None},
+                {"handle": 7},
+                {"handle": ""},
+                {"handle": [handle]},
+                {"handle": {"legacy": handle}},
+                entry,
+            ],
+            "messages": [
+                AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"path": handle}, "id": "call_2", "type": "tool_call"}]),
+            ],
+        }
+
+        out = middleware.before_model(state, _runtime())
+
+        assert out is not None
+        assert out["tool_artifacts"] == [{**entry, "consumed_by": ["call_2"]}]
+
+    def test_treats_a_non_list_consumed_by_as_empty(self):
+        """Only a list can be extended; a caller-written string must not become a char list."""
+        middleware = ArtifactCaptureMiddleware()
+        handle = generate_handle("thread_1", "call_1", 0)
+        entry = {
+            "handle": handle,
+            "artifact_type": "file",
+            "real_ref": "/mnt/user-data/outputs/report.md",
+            "display_name": "report.md",
+            "tool_name": "write_file",
+            "mime_type": None,
+            "consumed_by": "stale-value",
+        }
+        state = {
+            "tool_artifacts": [entry],
+            "messages": [
+                AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"path": handle}, "id": "call_2", "type": "tool_call"}]),
+            ],
+        }
+
+        out = middleware.before_model(state, _runtime())
+
+        assert out is not None
+        assert out["tool_artifacts"][0]["consumed_by"] == ["call_2"]
+
     def test_capture_and_consumption_updates_concatenate(self):
         """Both a fresh capture and a consumption update in one before_model call must survive.
 

@@ -10611,6 +10611,17 @@ class TestChannelService:
 
         _run(go())
 
+    def test_feishu_requires_configured_connection_repository_before_start(self, tmp_path, monkeypatch):
+        from app.channels.service import ChannelService
+
+        config = SimpleNamespace(channel_connections=SimpleNamespace(enabled=True))
+        service = ChannelService(app_config=config, store=JsonChannelStore(tmp_path / "store.json"))
+        service._running = True
+        loader = MagicMock()
+        monkeypatch.setattr("deerflow.reflection.resolve_class", loader)
+        assert _run(service._start_channel("feishu", {})) is False
+        loader.assert_not_called()
+
     def test_connection_repo_is_forwarded_to_manager(self):
         from app.channels.service import ChannelService
 

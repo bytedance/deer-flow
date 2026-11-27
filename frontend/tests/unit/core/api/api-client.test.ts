@@ -1495,3 +1495,93 @@ test.each(["initial", "join"] as const)(
     expect(sessionStorage.setItem).not.toHaveBeenCalled();
   },
 );
+
+test("sends the Gateway session with every LangGraph request", async () => {
+  // A direct Gateway URL is cross-origin, and the browser drops the session
+  // cookie unless the request asks for credentials. The SDK never does, so
+  // every request (including stream recovery GETs) must get it from the hook.
+  const encoder = new TextEncoder();
+  let interruptStream: (() => void) | undefined;
+  const interruptedBody = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(
+        encoder.encode("id: 1-0\nevent: custom\ndata: {}\n\n"),
+      );
+      interruptStream = () => {
+        controller.error(new TypeError("connection interrupted"));
+      };
+    },
+  });
+  const requests: Array<{
+    method: string;
+    path: string;
+    credentials: RequestCredentials | undefined;
+    csrf: string | null;
+  }> = [];
+  const fetchFn = rs.fn(async (url: string | URL, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    const path = new URL(url).pathname.replace("/mock/api", "");
+    requests.push({
+      method,
+      path,
+      credentials: init?.credentials,
+      csrf: new Headers(init?.headers).get("X-CSRF-Token"),
+    });
+    if (path === "/threads/t-session/runs/stream") {
+      return new Response(interruptedBody, {
+        status: 200,
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Content-Location": "/threads/t-session/runs/r-session",
+          Location: "/threads/t-session/runs/r-session/stream",
+        },
+      });
+    }
+    if (path.endsWith("/stream")) {
+      return makeSSEResponse("id: 2-0\nevent: end\ndata: null\n\n");
+    }
+    if (path === "/threads/t-session/runs/r-session") {
+      return Response.json({ run_id: "r-session", status: "running" });
+    }
+    return Response.json([]);
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage: makeSessionStorage(),
+  });
+  rs.stubGlobal("document", { cookie: "csrf_token=csrf-session" });
+  rs.stubGlobal("fetch", fetchFn);
+  rs.stubGlobal("setTimeout", (callback: () => void) => {
+    callback();
+    return 0;
+  });
+
+  const client = getAPIClient(true);
+  await client.threads.search({ limit: 1 });
+  await client.threads.getHistory("t-session");
+  for await (const entry of client.runs.stream("t-session", "lead_agent", {
+    input: { messages: [] },
+  })) {
+    if ("id" in entry && entry.id === "1-0") {
+      interruptStream?.();
+    }
+  }
+  for await (const entry of client.runs.joinStream("t-session", "r-session")) {
+    void entry;
+  }
+  await client.runs.cancel("t-session", "r-session");
+
+  expect(requests.map(({ method, path }) => `${method} ${path}`)).toEqual([
+    "POST /threads/search",
+    "POST /threads/t-session/history",
+    "POST /threads/t-session/runs/stream",
+    "GET /threads/t-session/runs/r-session/stream",
+    "GET /threads/t-session/runs/r-session",
+    "GET /threads/t-session/runs/r-session/stream",
+    "POST /threads/t-session/runs/r-session/cancel",
+  ]);
+  for (const request of requests) {
+    expect(request.credentials).toBe("include");
+    expect(request.csrf).toBe(request.method === "GET" ? null : "csrf-session");
+  }
+});

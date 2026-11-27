@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
+import { cleanup, render, screen } from "@testing-library/react";
+import { createElement } from "react";
 
+import { ShareMarkdown } from "@/components/shares/share-markdown";
 import { forkShare, readShare, shareArtifactURL } from "@/core/shares/api";
 import { resolveShareArtifact, sharedLink } from "@/core/shares/links";
 
@@ -11,10 +14,65 @@ const artifact = {
 };
 const token = "x".repeat(43);
 afterEach(() => {
+  cleanup();
   rs.restoreAllMocks();
 });
 
 describe("share boundaries", () => {
+  it("keeps image URL suffixes while refusing external and private images", async () => {
+    render(
+      createElement(ShareMarkdown, {
+        token,
+        artifacts: [artifact],
+        content:
+          "![detail](sandbox:/mnt/user-data/outputs/charts/a%20b.svg?v=2&download=summary#detail) ![tracking](https://tracker.example/pixel.svg) ![private](/api/threads/private/artifacts/a.svg) ![missing](missing.svg)",
+      }),
+    );
+    expect((await screen.findByAltText("detail")).getAttribute("src")).toBe(
+      shareArtifactURL(token, artifact.path) + "?v=2#detail",
+    );
+    expect(screen.queryAllByRole("img")).toHaveLength(1);
+  });
+
+  it.each([
+    ["?download=summary#detail", "#detail"],
+    ["?download=1", ""],
+    [
+      "?v=a%20b&%64ownload=1&download=false&v=%2f#detail?download=1",
+      "?v=a%20b&v=%2f#detail?download=1",
+    ],
+    ["?label=download%3D1#detail", "?label=download%3D1#detail"],
+  ])(
+    "keeps copied link queries separate from download controls (%s)",
+    (query, suffix) => {
+      expect(sharedLink(`charts/a%20b.svg${query}`, token, [artifact])).toBe(
+        shareArtifactURL(token, artifact.path) + suffix,
+      );
+    },
+  );
+
+  it("resolves URL suffixes separately from encoded filename punctuation", () => {
+    const punctuated = { ...artifact, path: "charts/a#b?.svg" };
+    for (const suffix of ["#page=3", "?v=2", "?v=2#section"]) {
+      const href = `charts/a%20b.svg${suffix}`;
+      expect(resolveShareArtifact(href, [artifact])).toEqual(artifact);
+      expect(sharedLink(href, token, [artifact])).toBe(
+        shareArtifactURL(token, artifact.path) + suffix,
+      );
+    }
+    expect(
+      resolveShareArtifact("charts/a%23b%3F.svg#section", [punctuated]),
+    ).toEqual(punctuated);
+    expect(
+      resolveShareArtifact("../../private.svg#section", [artifact]),
+    ).toBeUndefined();
+    expect(
+      resolveShareArtifact("/api/threads/private/artifacts/a.svg#section", [
+        artifact,
+      ]),
+    ).toBeUndefined();
+  });
+
   it("only resolves copied outputs, including relative markdown references", () => {
     expect(
       resolveShareArtifact("sandbox:/mnt/user-data/outputs/charts/a%20b.svg", [

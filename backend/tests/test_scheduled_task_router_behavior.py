@@ -23,6 +23,7 @@ from deerflow.persistence.engine import close_engine, get_session_factory, init_
 from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
 from deerflow.persistence.scheduled_task_runs.finalization import AGENT_STOP_LAST_ERROR_PREFIX
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 
 
 @pytest.fixture(autouse=True)
@@ -148,13 +149,6 @@ class _Repo:
             self.active_status = None
         self.items.pop(task_id, None)
         return "deleted"
-
-    async def delete(self, task_id: str, *, user_id: str):
-        item = await self.get(task_id, user_id=user_id)
-        if item is None:
-            return False
-        self.items.pop(task_id, None)
-        return True
 
     async def list_by_task(self, task_id: str):
         return []
@@ -1099,6 +1093,40 @@ def _create_request(**overrides):
     return scheduled_tasks.ScheduledTaskCreateRequest(**kwargs)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("options", [{}, {"subagent_enabled": False}, {"subagent_enabled": True}])
+async def test_delegation_setting_create_patch_and_get(tmp_path, monkeypatch, options):
+    config = DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path))
+    await init_engine_from_config(config)
+    try:
+        repo = ScheduledTaskRepository(get_session_factory())
+        task = await _call_create(_create_request(**options), repo=repo)
+        assert task["subagent_enabled"] is options.get("subagent_enabled", False)
+        task_id = task["id"]
+
+        for enabled in (True, False):
+            body = scheduled_tasks.ScheduledTaskUpdateRequest(subagent_enabled=enabled)
+            assert (await _call_update(repo, task_id, body))["subagent_enabled"] is enabled
+            for unchanged in (
+                scheduled_tasks.ScheduledTaskUpdateRequest(title="Updated title"),
+                scheduled_tasks.ScheduledTaskUpdateRequest(subagent_enabled=None),
+            ):
+                assert (await _call_update(repo, task_id, unchanged))["subagent_enabled"] is enabled
+
+        await _call_update(repo, task_id, scheduled_tasks.ScheduledTaskUpdateRequest(subagent_enabled=True))
+    finally:
+        await close_engine()
+
+    await init_engine_from_config(config)
+    try:
+        monkeypatch.setattr(scheduled_tasks, "get_scheduled_task_repo", lambda _: ScheduledTaskRepository(get_session_factory()))
+        monkeypatch.setattr(scheduled_tasks, "get_optional_user_from_request", AsyncMock(return_value=SimpleNamespace(id="user-1")))
+        response = await call_unwrapped(scheduled_tasks.get_scheduled_task, task_id=task_id, request=SimpleNamespace())
+        assert response["subagent_enabled"] is True
+    finally:
+        await close_engine()
+
+
 async def _seed_task(repo: _Repo | ScheduledTaskRepository, **overrides):
     kwargs = {
         "task_id": "task-1",
@@ -1540,6 +1568,76 @@ def _when(body):
 _CREATE = {"title": "Checklist", "prompt": "Check release-checklist.md.\nList the unchecked items.", "schedule_type": "interval", "schedule_spec": {"every_seconds": 3600}, "timezone": "UTC"}
 
 
+@pytest.fixture
+def fixed_schedule_clock(monkeypatch):
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 22, tzinfo=UTC)
+
+    monkeypatch.setattr(scheduled_tasks, "datetime", FixedDatetime)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("clock", "utc_clock"),
+    [
+        ("09:30:00+08", "01:30:00"),
+        ("09:30:00,5+08", "01:30:00.500000"),
+        ("09:30.5+08", "01:30:00.500000"),
+        ("09:30:30+08:00:30", "01:30:00"),
+    ],
+)
+async def test_once_api_stores_explicit_instants_in_utc(http, fixed_schedule_clock, clock, utc_clock):
+    expected = f"2026-12-12T{utc_clock}+00:00"
+    fields = {"schedule_type": "once", "schedule_spec": {"run_at": f"2026-12-12T{clock}"}, "timezone": "Asia/Shanghai"}
+    response = await http.client.post("/api/scheduled-tasks", json={**_CREATE, **fields})
+    assert response.status_code == 200, response.text
+    task = response.json()
+    assert task["schedule_spec"]["run_at"] == task["next_run_at"] == expected
+    async with http.sf() as session:
+        assert (await session.get(ScheduledTaskRow, task["id"])).schedule_spec["run_at"] == expected
+    moved = await http.client.patch(f"/api/scheduled-tasks/{task['id']}", json={"timezone": "UTC"})
+    assert moved.json()["next_run_at"] == expected
+
+
+@pytest.mark.asyncio
+async def test_rescheduled_wall_time_follows_the_task_zone(http, fixed_schedule_clock):
+    task = await _seed(http.repo)
+    url = f"/api/scheduled-tasks/{task['id']}"
+    local = "2026-12-12T09:30:00.123456"
+    response = await http.client.patch(url, json={"schedule_type": "once", "schedule_spec": {"run_at": "2026-12-12T09:30,123456"}, "timezone": "Asia/Shanghai"})
+    assert response.status_code == 200, response.text
+    assert response.json()["schedule_spec"]["run_at"] == local
+    assert response.json()["next_run_at"] == "2026-12-12T01:30:00.123456+00:00"
+    async with http.sf() as session:
+        assert (await session.get(ScheduledTaskRow, task["id"])).schedule_spec["run_at"] == local
+    moved = await http.client.patch(url, json={"timezone": "UTC"})
+    assert moved.json()["next_run_at"] == local + "+00:00"
+
+
+@pytest.mark.asyncio
+async def test_legacy_once_reads_work_without_a_next_run_or_a_backfill(http):
+    raw = "20261212T093000+08"
+    expected = "2026-12-12T01:30:00+00:00"
+    for task_id, value in [("old", raw), ("invalid", "unparseable")]:
+        await _seed(http.repo, task_id=task_id)
+        async with http.sf.begin() as session:
+            row = await session.get(ScheduledTaskRow, task_id)
+            row.schedule_type = "once"
+            row.schedule_spec = {"run_at": value}
+            row.status = "completed"
+            row.next_run_at = None
+    url = "/api/scheduled-tasks/old"
+    listed = (await http.client.get("/api/scheduled-tasks")).json()
+    assert {task["id"]: task["schedule_spec"]["run_at"] for task in listed} == {"old": expected, "invalid": "unparseable"}
+    for response in [await http.client.get(url), await http.client.patch(url, json={"title": "Renamed"})]:
+        assert response.json()["schedule_spec"]["run_at"] == expected
+        assert response.json()["next_run_at"] is None
+    async with http.sf() as session:
+        assert (await session.get(ScheduledTaskRow, "old")).schedule_spec["run_at"] == raw
+
+
 @pytest.mark.asyncio
 async def test_resume_recomputes_a_past_interval_run_from_now(http):
     await _seed(http.repo, next_run_at=datetime.now(UTC) - timedelta(hours=5))
@@ -1749,13 +1847,7 @@ async def test_naive_end_at_is_wall_clock_time_in_the_task_timezone(http):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("operation", "field"), [("create", "run_at"), ("update", "run_at"), ("create", "end_at"), ("update", "end_at"), ("resume", "end_at")])
-async def test_http_rejects_nonexistent_local_time_without_writing(http, monkeypatch, operation, field):
-    class FixedDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return cls(2026, 10, 22, tzinfo=UTC)
-
-    monkeypatch.setattr(scheduled_tasks, "datetime", FixedDatetime)
+async def test_http_rejects_nonexistent_local_time_without_writing(http, fixed_schedule_clock, operation, field):
     wall_time = "2027-03-14T02:30:00"
     fields = {"schedule_type": "once", "schedule_spec": {"run_at": wall_time}} if field == "run_at" else {"end_at": wall_time}
     if operation == "create":
@@ -1847,12 +1939,14 @@ def test_is_scheduler_running_reads_the_service_of_this_process():
 
 @pytest.mark.asyncio
 async def test_trigger_reports_outcome_thread_and_an_already_waiting_run(http):
-    await _seed(http.repo, next_run_at=datetime.now(UTC) + timedelta(hours=1))
+    await _seed(http.repo, next_run_at=datetime.now(UTC) + timedelta(hours=1), subagent_enabled=True)
     launched = await http.client.post("/api/scheduled-tasks/task-l/trigger")
     assert launched.status_code == 200, launched.text
     body = launched.json()
     assert (body["id"], body["triggered"], body["outcome"], body["existing"]) == ("task-l", True, "launched", False)
     assert body["thread_id"] == http.launches[0]["thread_id"]
+    assert http.launches[0]["subagent_enabled"] is True
+    assert http.launches[0]["owner_user_id"] == OWNER
     await _seed(http.repo, "task-q", next_run_at=datetime.now(UTC) + timedelta(hours=1))
     async with http.sf() as session:
         session.add(occurrence("waiting", "task-q", seq=1, status="queued", accounted=False, thread_id="thread-waiting"))

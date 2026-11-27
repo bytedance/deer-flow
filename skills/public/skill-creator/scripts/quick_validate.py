@@ -41,7 +41,9 @@ def validate_skill(skill_path):
             return False, "Frontmatter must be a YAML dictionary"
         # YAML permits non-string keys; downstream validation expects strings.
         frontmatter = {str(key): value for key, value in frontmatter.items()}
-    except yaml.YAMLError as e:
+    except (yaml.YAMLError, ValueError, AttributeError) as e:
+        # PyYAML's timestamp constructor raises ValueError/AttributeError for
+        # an explicit date-like value it cannot build, not a YAMLError.
         return False, f"Invalid YAML in frontmatter: {e}"
 
     # Define allowed properties. Keep this in sync with the runtime schema in

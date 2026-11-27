@@ -162,10 +162,7 @@ async function expectComposerHeightsEqual(page: Page) {
 
 async function expectSidecarModelPinnedToSubmit(page: Page) {
   const metrics = await page.evaluate(() => {
-    const getComposerMetrics = (
-      placeholderPattern: RegExp,
-      submitLabel: string,
-    ) => {
+    const getComposerMetrics = (placeholderPattern: RegExp) => {
       const textarea = Array.from(document.querySelectorAll("textarea")).find(
         (element) =>
           placeholderPattern.test(element.getAttribute("placeholder") ?? ""),
@@ -189,7 +186,7 @@ async function expectSidecarModelPinnedToSubmit(page: Page) {
       const model = buttons.find(
         (button) => button.label === "DeepSeek V4 Pro",
       );
-      const submit = buttons.find((button) => button.label === submitLabel);
+      const submit = buttons.find((button) => button.label === "Send");
 
       return {
         formLeft: Math.round(formBox.left),
@@ -207,8 +204,8 @@ async function expectSidecarModelPinnedToSubmit(page: Page) {
     };
 
     return {
-      main: getComposerMetrics(/how can i assist you/i, "Submit"),
-      sidecar: getComposerMetrics(/deeper follow-up/i, "Send"),
+      main: getComposerMetrics(/how can i assist you/i),
+      sidecar: getComposerMetrics(/deeper follow-up/i),
     };
   });
 

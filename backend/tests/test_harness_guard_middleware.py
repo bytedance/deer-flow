@@ -4,6 +4,8 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 
@@ -282,6 +284,90 @@ class TestHarnessGuardMiddleware:
         assert isinstance(res, ToolMessage)
         assert res.status == "error"
         assert "WRITE BLOCKED" in res.content
+
+    def test_str_replace_across_mixed_endings_is_verified(self):
+        """A ranged-read old_str spanning CRLF and LF lines is spliced and checked too."""
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(write_verify_syntax=True, block_on_syntax_error=True))
+        mixed_file = "def foo():\r\n    x = 1\n    return x\r\n"
+        req = _make_request(
+            "str_replace",
+            {"path": "module.py", "old_str": "def foo():\n    x = 1\n    return x", "new_str": "def foo(:\n    return 1"},
+        )
+
+        def dummy_handler(r):
+            return ToolMessage(content="Replaced", tool_call_id=r.tool_call["id"], name="str_replace")
+
+        with patch(
+            "deerflow.agents.middlewares.harness_guard_middleware.read_current_file_content",
+            return_value=mixed_file,
+        ):
+            res = middleware.wrap_tool_call(req, dummy_handler)
+
+        assert isinstance(res, ToolMessage)
+        assert res.status == "error"
+        assert "WRITE BLOCKED" in res.content
+
+    def test_an_empty_old_str_is_not_checked_as_an_insertion(self):
+        """str_replace makes no change for an empty old_str, so nothing is spliced in front of the file."""
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(write_verify_syntax=True, block_on_syntax_error=True))
+        req = _make_request("str_replace", {"path": "module.py", "old_str": "", "new_str": "def broken(:"})
+
+        def dummy_handler(r):
+            return ToolMessage(content="OK", tool_call_id=r.tool_call["id"], name="str_replace")
+
+        with patch(
+            "deerflow.agents.middlewares.harness_guard_middleware.read_current_file_content",
+            return_value="x = 1\r\n",
+        ):
+            res = middleware.wrap_tool_call(req, dummy_handler)
+
+        assert res.content == "OK"
+
+    @settings(max_examples=200, deadline=None)
+    @given(
+        content=st.lists(st.sampled_from(["x = 1", "y", "\r\n", "\n", "\r"]), max_size=12).map("".join),
+        data=st.data(),
+        new_str=st.lists(st.sampled_from(["z", "\n", "\r\n"]), max_size=3).map("".join),
+        replace_all=st.booleans(),
+    )
+    def test_str_replace_check_sees_the_bytes_str_replace_writes(self, tmp_path_factory, content, data, new_str, replace_all):
+        """The syntax check runs on the same splice that str_replace writes, for any mix of endings."""
+        from deerflow.sandbox.local.local_sandbox import LocalSandbox
+        from deerflow.sandbox.tools import str_replace_tool
+
+        start = data.draw(st.integers(0, len(content)))
+        # A snippet as stored, or as a ranged read shows it (CRLF read as LF).
+        old_str = data.draw(st.sampled_from([content, content.replace("\r\n", "\n")]))[start : data.draw(st.integers(start, len(content)))]
+        root = tmp_path_factory.mktemp("guard")
+        (root / "outputs").mkdir()
+        target = root / "outputs" / "module.py"
+        target.write_bytes(content.encode())
+        runtime = MagicMock()
+        runtime.context = {"thread_id": "t-1"}
+        runtime.state = {"sandbox": {"sandbox_id": "local:t-1"}, "thread_data": {"workspace_path": str(root), "uploads_path": str(root), "outputs_path": str(root / "outputs")}}
+        args = {"path": "/mnt/user-data/outputs/module.py", "old_str": old_str, "new_str": new_str, "replace_all": replace_all}
+        request = ToolCallRequest(tool_call={"name": "str_replace", "args": args, "id": "call-1"}, tool=None, state={"messages": []}, runtime=runtime)
+        checked: list[str] = []
+
+        def record(path, text):
+            checked.append(text)
+            return None
+
+        def handler(req):
+            return ToolMessage(content=str_replace_tool.func(runtime=runtime, description="d", **req.tool_call["args"]), tool_call_id="call-1", name="str_replace")
+
+        with (
+            patch("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda _runtime: LocalSandbox("t-1")),
+            patch("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda _runtime: None),
+            patch("deerflow.agents.middlewares.harness_guard_middleware.verify_content_syntax", record),
+        ):
+            result = HarnessGuardMiddleware(HarnessGuardConfig(write_verify_syntax=True, block_on_syntax_error=True)).wrap_tool_call(request, handler)
+
+        if result.content == "OK" and old_str:
+            # checked[0] is the file as read, checked[1] the splice.
+            assert checked == [content, target.read_bytes().decode()]
+        else:
+            assert target.read_bytes() == content.encode()
 
     def test_file_backed_progressive_repair_python(self, tmp_path):
         """Start with two Python syntax errors (missing colons).

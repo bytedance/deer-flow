@@ -25,11 +25,11 @@ The landing-page case studies open as allowlisted, read-only showcases without r
 
 - [**LLM Space**](https://github.com/deer-flow/llm-space) - Meet our secret weapon behind DeerFlow — one desktop tool to prototype agent ideas, inspect each harness step, replay failures, and benchmark performance.
 
-## Coding Plan from ByteDance Volcengine
+## BytePlus Agent Plan
 
-- We strongly recommend using Doubao-Seed-2.0-Code, DeepSeek v3.2 and Kimi 2.5 to run DeerFlow
-- [Learn more](https://www.byteplus.com/en/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
-- [中国大陆地区的开发者请点击这里](https://www.volcengine.com/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
+- One key for LLMs, Seedream images/slides & Seedance 2.5 video
+- [BytePlus Agent Plan](https://www.byteplus.com/en/activity/agentplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
+- [中国大陆地区请点击这里](https://www.volcengine.com/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
 
 ## InfoQuest
 
@@ -114,12 +114,13 @@ Each guide is the full reference for its topic. Open the one you need.
 | Docker, local development, upgrades, production deployment | [Running the Application](docs/guide/deployment.md) |
 | Workspace file tools, isolated shell providers, uploads and outputs | [Sandbox](docs/guide/sandbox.md) |
 | boxd machines, bounded output copies and cleanup retries | [boxd sandbox provider](backend/packages/harness/deerflow/community/boxd_sandbox/README.md) |
+| BytePlus veFaaS cloud sandboxes, SigV4 control plane and optional TOS mounts | [veFaaS sandbox provider](backend/packages/harness/deerflow/community/vefaas_sandbox/README.md) |
 | Skills, built-in tools, script workflows, Claude Code integration | [Skills & Tools](docs/guide/skills-and-tools.md) |
-| MCP servers | [MCP Server](docs/guide/mcp.md) |
-| Sub-agents, task delegation and optional SQLite checkpoint history | [Sub-Agents](docs/guide/subagents.md), [Tool restrictions](docs/guide/subagents.md#tool-restrictions) |
+| MCP servers and model-specific image handling | [MCP Server](docs/guide/mcp.md), [Image results](backend/docs/MCP_SERVER.md#image-results-and-model-capabilities) |
+| Sub-agents, task delegation and optional SQLite checkpoint history | [Sub-Agents](docs/guide/subagents.md), [Inspect one thread's child history](docs/guide/subagents.md#inspect-one-threads-child-history), [Tool restrictions](docs/guide/subagents.md#tool-restrictions) |
 | Agent teams, SQLite/PostgreSQL persistence and shutdown behavior | [Agent teams extension](examples/deerflow-extension-agent-teams/README.md) |
 | Long-term memory | [Long-Term Memory](docs/guide/memory.md) |
-| Session goals, context compaction, task notes, evidence-based decisions | [Context, Goals and Agent Decisions](docs/guide/context.md) |
+| Session goals, context compaction, todo counters, task notes, evidence-based decisions | [Context, Goals and Agent Decisions](docs/guide/context.md) |
 | Private knowledge retrieval (RAGFlow) | [Private Knowledge Retrieval](docs/guide/knowledge-retrieval.md) |
 | Agentic browser control | [Agentic Browser Control](docs/guide/browser-control.md) |
 | Projects, instructions, document shelf | [Projects](docs/guide/projects.md) |
@@ -147,7 +148,7 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 - [Install.md](Install.md) - Setup instructions written for coding agents
 - [Configuration Reference](backend/docs/CONFIGURATION.md) - Every `config.yaml` option
 - [Backend Architecture](backend/README.md) - Backend architecture and API reference
-- [Conversation Sharing](docs/guide/sharing.md) - Expiring read-only snapshots, artifact previews and workspace copies
+- [Conversation Sharing](docs/guide/sharing.md) - Expiring snapshots, file links and previews, and workspace copies
 - [Architecture Overview](docs/ARCHITECTURE.md) - How the services fit together
 - [Contributing Guide](CONTRIBUTING.md) - Development environment, workflow and tests
 - [Changelog](CHANGELOG.md) - Release notes
@@ -155,6 +156,8 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 ## ⚠️ Security Notice
 
 DeerFlow can execute commands and read and write files. It is designed to run in a local trusted environment, and a Gateway admin account is equivalent to code execution on the host. Before you deploy it on a server or expose it to a network, read the full [Security Notice](docs/guide/security.md) and [SECURITY.md](SECURITY.md).
+
+Runtime tool approval is disabled by default. The Gateway warns at startup when it is disabled. See [Skills & Tools](docs/guide/skills-and-tools.md) for configuration.
 
 ## Contributing
 

@@ -35,6 +35,7 @@ Design invariants:
 """
 
 import asyncio
+import errno
 import hashlib
 import logging
 import posixpath
@@ -85,6 +86,7 @@ _ELIDED_PAYLOAD_TEMPLATE = "[payload elided: {chars} chars; this {tool_name} cal
 _UNINSPECTABLE_CONTENT_PREFIX = "Error:"
 
 _BLOCK_MESSAGE = "Error: {tool_name} blocked — {path} already exists ({line_desc}) and you have not read its current version. Any write invalidates earlier reads, so re-read before every modification. {read_hint}"
+_TOO_LARGE_MESSAGE = "Error: {tool_name} blocked — {path} already exists and is too large to read, so its current version cannot be checked ({detail}). Inspect or change it with bash instead."
 
 
 # Per-(scope, path) locks serializing gate check + tool execution. Same
@@ -347,6 +349,7 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         path = self._requested_path(request)
         if path is None:
             return None
+        tool_name = str(tool_call.get("name", "write"))
         try:
             current = self._content_reader(request.runtime, path)
         except FileNotFoundError:
@@ -354,7 +357,13 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             return None
         except SandboxAuthorizationError:
             raise
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, OSError) and exc.errno == errno.EFBIG:
+                # The file exists but is over the read limit, so read_file can
+                # never stamp a mark for it: failing open here would let
+                # write_file replace it unread.
+                detail = exc.strerror or str(exc)
+                return self._blocked_result(tool_call, path, _TOO_LARGE_MESSAGE.format(tool_name=tool_name, path=path, detail=detail))
             logger.warning("read-before-write gate could not inspect %r; allowing the write (fail-open)", path, exc_info=True)
             return None
         if current.startswith(_UNINSPECTABLE_CONTENT_PREFIX):
@@ -366,7 +375,6 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         norm_path = _normalize_mark_path(path)
         if self._latest_mark_hash(request.state, norm_path) == _content_hash(current):
             return None
-        tool_name = str(tool_call.get("name", "write"))
         # count_file_lines matches LocalSandbox.read_file line numbering and the
         # truncation-marker formula in _truncate_read_file_output, so the number
         # reported here agrees with start_line/end_line the model can pass back.
@@ -378,13 +386,18 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         else:
             start = max(1, line_count - 29)
             read_hint = f"Call read_file on it first (e.g. start_line={start}, end_line={line_count}), check what is already there, then retry."
-        blocked = ToolMessage(
-            content=_BLOCK_MESSAGE.format(tool_name=tool_name, path=path, line_desc=line_desc, read_hint=read_hint),
+        return self._blocked_result(tool_call, path, _BLOCK_MESSAGE.format(tool_name=tool_name, path=path, line_desc=line_desc, read_hint=read_hint))
+
+    @staticmethod
+    def _blocked_result(tool_call: dict[str, Any], path: str, content: str) -> ToolMessage:
+        tool_name = str(tool_call.get("name", "write"))
+        return ToolMessage(
+            content=content,
             tool_call_id=str(tool_call.get("id", "")),
             name=tool_name,
             status="error",
             additional_kwargs={
-                WRITE_BLOCK_KEY: {"path": norm_path, "tool": tool_name},
+                WRITE_BLOCK_KEY: {"path": _normalize_mark_path(path), "tool": tool_name},
                 # Pre-stamp gate metadata so normalize_tool_result's text heuristics
                 # cannot misclassify a numeric line count (e.g. 401, 403, 500) as an
                 # HTTP error code.  normalize_tool_message returns early when an
@@ -398,7 +411,6 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
                 },
             },
         )
-        return blocked
 
     @staticmethod
     def _requested_path(request: ToolCallRequest) -> str | None:

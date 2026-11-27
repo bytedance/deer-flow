@@ -2,14 +2,13 @@ import asyncio
 import json
 import logging
 import tempfile
-import threading
-from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
-from contextlib import contextmanager, suppress
+from collections.abc import AsyncGenerator, Callable, Coroutine
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, BinaryIO, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.datastructures import FormData, Headers, UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
@@ -45,6 +44,7 @@ from deerflow.skills import Skill
 from deerflow.skills.diagnostics import SkillLoadDiagnostic
 from deerflow.skills.export import SkillExportError, build_skill_export, export_manifest
 from deerflow.skills.installer import SkillAlreadyExistsError, SkillSecurityScanError
+from deerflow.skills.mutation_lock import custom_skill_mutation
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.security_static_scanner import (
     StaticFinding,
@@ -59,12 +59,6 @@ from deerflow.utils.file_io import await_drained
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None  # type: ignore[assignment]
-    import msvcrt
 
 router = APIRouter(prefix="/api", tags=["skills"])
 
@@ -166,6 +160,13 @@ class CustomSkillHistoryResponse(BaseModel):
 class SkillRollbackRequest(BaseModel):
     history_index: int = Field(default=-1, description="History entry index to restore from, defaulting to the latest change.")
 
+    @field_validator("history_index", mode="before")
+    @classmethod
+    def reject_boolean_history_index(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("Boolean values are invalid for history_index")
+        return value
+
 
 # Custom-skill mutations (edit, delete, rollback) each span three steps —
 # read the content being replaced, write the new content, append the history
@@ -176,75 +177,8 @@ class SkillRollbackRequest(BaseModel):
 # mutation's steps inside one worker-thread function does not make them a
 # critical section — two requests can both be inside their own workers — so
 # the cooperating mutation paths share a lock around the whole sequence.
-#
-# The lock is scoped to the owning user's storage: the
-# critical section includes write_custom_skill's projection rebuild, which
-# copies that user's whole skill tree (including a large linked package) and
-# waits on the user's projection lock. A process-wide lock would therefore
-# queue every other user's edit, rollback, and delete behind one user's slow
-# filesystem work, even though their skill trees, histories, and projection
-# roots are disjoint. Keying on the resolved root — not the user_id string,
-# and not one lock per storage instance — keeps a single lock per user when a
-# hot-reloaded config or a later request builds a fresh storage object.
-_custom_skill_mutation_locks: dict[str, threading.Lock] = {}
-_custom_skill_mutation_locks_guard = threading.Lock()
-
-
-def _custom_skill_mutation_lock(storage: SkillStorage) -> threading.Lock:
-    """Return the process-local part of the owning user's mutation lock."""
-    scope = _custom_skill_mutation_scope(storage)
-    with _custom_skill_mutation_locks_guard:
-        return _custom_skill_mutation_locks.setdefault(scope, threading.Lock())
-
-
-def _custom_skill_mutation_scope(storage: SkillStorage) -> str:
-    """The storage scope whose custom-skill mutations must serialize together.
-
-    User-scoped storage reports the canonical root its mutations touch, so two
-    users never share a lock while two storage objects for one user always do.
-    Legacy local storage uses its global custom root. Non-filesystem test
-    doubles have one process-local scope.
-    """
-    get_user_custom_root = getattr(storage, "get_user_custom_root", None)
-    if callable(get_user_custom_root):
-        return str(Path(get_user_custom_root()).resolve())
-    get_skills_root_path = getattr(storage, "get_skills_root_path", None)
-    if callable(get_skills_root_path):
-        return str((Path(get_skills_root_path()) / SkillCategory.CUSTOM.value).resolve())
-    return "global"
-
-
-@contextmanager
-def _custom_skill_mutation(storage: SkillStorage) -> Iterator[None]:
-    """Hold read → write → history across threads and peer Gateway processes.
-
-    Use a stable sidecar outside the skill tree, distinct from projection's
-    lock: write/delete acquire the projection lock while this one is held.
-    Acquiring that same file lock twice would deadlock on POSIX. Both locks
-    are acquired and released in the drained mutation worker, off the loop.
-    """
-    with _custom_skill_mutation_lock(storage):
-        scope = _custom_skill_mutation_scope(storage)
-        if scope == "global":
-            yield
-            return
-        root = Path(scope)
-        lock_path = root.parent / f".{root.name}.mutation.lock"
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with lock_path.open("a", encoding="utf-8") as lock_file:
-            if fcntl is not None:
-                fcntl.flock(lock_file, fcntl.LOCK_EX)
-            else:  # pragma: no cover - Windows
-                lock_file.seek(0)
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
-            try:
-                yield
-            finally:
-                if fcntl is not None:
-                    fcntl.flock(lock_file, fcntl.LOCK_UN)
-                else:  # pragma: no cover - Windows
-                    lock_file.seek(0)
-                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+# That lock is deerflow.skills.mutation_lock.custom_skill_mutation, which the
+# agent's skill_manage tool holds as well.
 
 
 def _skill_to_response(skill: Skill) -> SkillResponse:
@@ -805,7 +739,7 @@ async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, r
                 # what this mutation actually overwrites, or the overwritten
                 # revision silently drops out of the history chain and becomes
                 # unreachable by rollback.
-                with _custom_skill_mutation(storage):
+                with custom_skill_mutation(storage):
                     prev_content = storage.read_custom_skill(skill_name)
                     storage.write_custom_skill(skill_name, SKILL_MD_FILE, body.content)
                     storage.append_history(
@@ -858,7 +792,7 @@ async def delete_custom_skill(skill_name: str, request: Request, config: AppConf
             # joins the owning user's mutation lock so it cannot interleave with
             # a concurrent edit or rollback's read → write → append sequence.
             def _delete_and_record() -> None:
-                with _custom_skill_mutation(storage):
+                with custom_skill_mutation(storage):
                     storage.delete_custom_skill(
                         skill_name,
                         history_meta={
@@ -981,7 +915,7 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
                 # path): the recorded prev_content must be what this rollback
                 # actually overwrites, which requires that no concurrent mutation
                 # can land between the predecessor read and the write.
-                with _custom_skill_mutation(storage):
+                with custom_skill_mutation(storage):
                     current_content = _read_current_content()
                     storage.write_custom_skill(skill_name, SKILL_MD_FILE, target_content)
                     storage.append_history(

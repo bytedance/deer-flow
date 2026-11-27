@@ -58,6 +58,24 @@ def parse_body_size_bytes(block: str) -> int:
     return int(value) * _SIZE_MULTIPLIERS[unit.lower()]
 
 
+_MULTIPART_BOUNDARY = "----deerflow-upload-boundary"
+_MULTIPART_PART_HEADERS = (f'--{_MULTIPART_BOUNDARY}\r\nContent-Disposition: form-data; name="files"; filename="upload.bin"\r\nContent-Type: application/octet-stream\r\n\r\n').encode()
+_MULTIPART_CLOSING = f"--{_MULTIPART_BOUNDARY}--\r\n".encode()
+_MULTIPART_FILENAME_SLACK_BYTES = 64 * 1024
+
+
+def multipart_body_size_floor(content_bytes: int, part_count: int) -> int:
+    """A representative multipart body for *content_bytes* over *part_count* files.
+
+    Includes the part headers and closing boundary plus generous slack for
+    longer filenames. A proxy ceiling at or below this value can reject a valid
+    request before Gateway sees it.
+    """
+    assert part_count > 0
+    framing = part_count * len(_MULTIPART_PART_HEADERS) + len(_MULTIPART_CLOSING)
+    return content_bytes + framing + _MULTIPART_FILENAME_SLACK_BYTES
+
+
 def parse_read_timeout_seconds(block: str) -> int:
     # Anchored to the start of a line so a commented-out directive does not count.
     match = re.search(r"^\s*proxy_read_timeout\s+(\d+)([smh]?)\s*;", block, re.M)
