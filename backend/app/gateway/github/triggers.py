@@ -72,24 +72,14 @@ def _comment_body(event: str, payload: dict[str, Any]) -> str:
 
 
 def _author_login(event: str, payload: dict[str, Any]) -> str | None:
-    """Login of the human who triggered the event, for ``allow_authors``."""
-    # Object authors need not be the actor on edits, labels, or dismissals.
-    # Only fall back to the authored object when the payload has no sender.
-    if "sender" in payload and payload["sender"] is not None:
-        sender = payload["sender"]
-        if not isinstance(sender, dict):
-            return None
-        sender_login = sender.get("login")
-        if isinstance(sender_login, str) and sender_login.strip():
-            return sender_login.strip()
+    """Login of the webhook ``sender`` who triggered the event."""
+    del event
+    sender = payload.get("sender")
+    if not isinstance(sender, dict):
         return None
-    authored = _authored_object(event, payload)
-    if authored is None:
-        return None
-    user = authored.get("user")
-    login = user.get("login") if isinstance(user, dict) else None
-    if isinstance(login, str) and login.strip():
-        return login.strip()
+    sender_login = sender.get("login")
+    if isinstance(sender_login, str) and sender_login.strip():
+        return sender_login.strip()
     return None
 
 
@@ -111,23 +101,22 @@ def _author_association(event: str, payload: dict[str, Any]) -> str | None:
     """Return the GitHub ``author_association`` attributable to the actor.
 
     GitHub attaches ``author_association`` to the authored object rather than
-    ``sender``. When ``sender`` is present, only accept the object's
-    association if ``sender.login`` matches the object's ``user.login``
-    (case-insensitively), so a different actor editing or labeling an owner's
-    issue/PR/comment never inherits the owner's association.
+    ``sender``. Require a valid ``sender.login`` and only accept the object's
+    association when ``sender.login`` matches the object's ``user.login``
+    (case-insensitively), so missing/null senders fail closed and a different
+    actor editing or labeling an owner's issue/PR/comment never inherits the
+    owner's association.
     """
     authored = _authored_object(event, payload)
     if authored is None:
         return None
-    if "sender" in payload and payload["sender"] is not None:
-        sender = payload["sender"]
-        sender_login = sender.get("login") if isinstance(sender, dict) else None
-        authored_user = authored.get("user")
-        authored_login = authored_user.get("login") if isinstance(authored_user, dict) else None
-        if not isinstance(sender_login, str) or not sender_login.strip() or not isinstance(authored_login, str) or not authored_login.strip():
-            return None
-        if sender_login.strip().lower() != authored_login.strip().lower():
-            return None
+    sender_login = _author_login(event, payload)
+    authored_user = authored.get("user")
+    authored_login = authored_user.get("login") if isinstance(authored_user, dict) else None
+    if not sender_login or not isinstance(authored_login, str) or not authored_login.strip():
+        return None
+    if sender_login.lower() != authored_login.strip().lower():
+        return None
     raw = authored.get("author_association")
     if not isinstance(raw, str):
         return None
@@ -183,12 +172,12 @@ def _resolved_trigger(
 
     default = DEFAULT_TRIGGERS.get(event)
     if default is None:
-        return override
+        return override.model_copy(deep=True)
 
     # Field-wise merge: take fields the binding explicitly set,
     # backfill the rest from the per-event default.
     explicit = override.model_dump(exclude_unset=True)
-    merged = default.model_copy(update=explicit)
+    merged = default.model_copy(update=explicit, deep=True)
     return merged
 
 

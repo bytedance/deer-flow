@@ -230,6 +230,7 @@ async def test_self_event_skips_the_owning_agent_only(base_dir: Path) -> None:
                                 "require_mention": True,
                                 "mention_login": "coding-llm-gateway-ai",
                                 "allow_authors": ["llm-gateway-ai[bot]"],
+                                "allow_authors_bypass_mention": False,
                             }
                         },
                     }
@@ -283,6 +284,7 @@ async def test_third_party_bot_events_are_not_skipped(base_dir: Path) -> None:
                                 "require_mention": True,
                                 "mention_login": "llm-gateway-ai",
                                 "allow_authors": ["Copilot"],
+                                "allow_authors_bypass_mention": False,
                             }
                         },
                     }

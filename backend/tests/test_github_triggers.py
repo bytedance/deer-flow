@@ -328,6 +328,7 @@ def test_issues_allow_authors_bypasses_mention() -> None:
             "action": "opened",
             "issue": {"number": 1, "user": {"login": "zhfeng"}, "body": "no mention here"},
             "repository": {"full_name": "a/b"},
+            "sender": {"login": "zhfeng"},
         },
         trigger,
         BOT,
@@ -543,7 +544,7 @@ def test_sender_mismatch_does_not_inherit_object_author_association(event: str, 
     assert "unauthorized_author" in reason
 
 
-@pytest.mark.parametrize("malformed_sender", [{}, {"login": ""}, {"login": "   "}, "not-a-dict"])
+@pytest.mark.parametrize("malformed_sender", [None, {}, {"login": ""}, {"login": "   "}, "not-a-dict"])
 def test_malformed_sender_fails_closed_even_when_object_is_owner(malformed_sender: object) -> None:
     trigger = _resolve("issue_comment")
     payload = {
@@ -556,6 +557,27 @@ def test_malformed_sender_fails_closed_even_when_object_is_owner(malformed_sende
     fire, reason = event_should_fire("issue_comment", payload, trigger, BOT)
     assert fire is False
     assert "unauthorized_author" in reason
+
+
+def test_missing_sender_fails_closed_even_when_object_is_owner_or_allowlisted() -> None:
+    trigger = _resolve("issue_comment", GitHubTriggerConfig(require_mention=True, allow_authors=["repo-owner"]))
+    payload = {
+        "action": "created",
+        "issue": {"number": 1},
+        "comment": {"body": f"@{BOT} hi", "user": {"login": "repo-owner"}, "author_association": "OWNER"},
+        "repository": {"full_name": "a/b"},
+    }
+    fire, reason = event_should_fire("issue_comment", payload, trigger, BOT)
+    assert fire is False
+    assert "unauthorized_author" in reason
+
+
+def test_resolved_trigger_deep_copies_default_lists() -> None:
+    first = _resolve("issue_comment")
+    second = _resolve("issue_comment")
+    first.allow_author_associations.append("NONE")
+    assert second.allow_author_associations == ["OWNER", "MEMBER", "COLLABORATOR"]
+    assert DEFAULT_TRIGGERS["issue_comment"].allow_author_associations == ["OWNER", "MEMBER", "COLLABORATOR"]  # type: ignore[union-attr]
 
 
 def test_empty_allow_author_associations_requires_explicit_allow_authors() -> None:
