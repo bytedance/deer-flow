@@ -51,7 +51,8 @@ message's run starts, keeping the original names when available. If publication
 fails, **Send again** reuses the staged files. Removing the message discards them.
 Managed worker updates accept text only. Native subagents pause at a safe boundary
 while the main Agent handles the update; active tool calls finish first. Stop
-keeps the Goal, while explicitly replacing the work can clear it. Unapplied
+keeps the Goal. Replacing the work clears its Goal and old todos. A plan saved
+while the run is paused is preserved when the run resumes. Unapplied
 messages survive database-backed Gateway restarts and require **Send again**;
 interrupted child side effects are not replayed automatically. Existing execution
 limits still apply.
