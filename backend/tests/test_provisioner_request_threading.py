@@ -272,6 +272,63 @@ def test_bash_capacity_already_exists_race_reads_winning_pod(monkeypatch, provis
     assert core.created_pods == []
 
 
+def test_lost_pod_race_rollback_keeps_the_winning_pod(monkeypatch, provisioner_module):
+    """Pod-409 plus Service-non-409 is a lost race, not a failed create.
+
+    The Pod belongs to the replica that won the race and may already be serving
+    commands, so this request's rollback must leave it alone (#8699).
+    """
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    # The concurrent creator's Pod is already registered in the cluster.
+    core.pod_shell_capacities["sandbox-race"] = 10
+    deleted_pods: list[str] = []
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: None)
+    monkeypatch.setattr(core, "create_namespaced_pod", MagicMock(side_effect=ApiException(status=409)))
+    monkeypatch.setattr(
+        core,
+        "create_namespaced_service",
+        MagicMock(side_effect=ApiException(status=503, reason="admission webhook timeout")),
+    )
+    monkeypatch.setattr(core, "delete_namespaced_pod", lambda name, _namespace: deleted_pods.append(name))
+
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-race"))
+
+    assert error.value.status_code == 500
+    assert "Service creation failed" in error.value.detail
+    assert deleted_pods == []
+    assert core.pod_shell_capacities["sandbox-race"] == 10
+
+
+def test_service_failure_rolls_back_the_pod_this_request_created(monkeypatch, provisioner_module):
+    """A Pod this request created is still rolled back when the Service fails."""
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    deleted_pods: list[str] = []
+    real_delete = core.delete_namespaced_pod
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        core,
+        "create_namespaced_service",
+        MagicMock(side_effect=ApiException(status=503, reason="quota exceeded")),
+    )
+
+    def delete_pod(name: str, namespace: str) -> None:
+        deleted_pods.append(name)
+        real_delete(name, namespace)
+
+    monkeypatch.setattr(core, "delete_namespaced_pod", delete_pod)
+
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-orphan"))
+
+    assert error.value.status_code == 500
+    assert deleted_pods == ["sandbox-sandbox-orphan"]
+    assert "sandbox-orphan" not in core.pod_shell_capacities
+    assert "sandbox-orphan" not in core.service_sandboxes
+
+
 def test_broker_request_without_image_cannot_mount_credentials(monkeypatch, provisioner_module):
     core = _RecordingCoreV1(event_loop_thread_id=-1)
     monkeypatch.setattr(provisioner_module, "core_v1", core)
