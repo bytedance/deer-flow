@@ -1481,6 +1481,34 @@ def test_resolve_runtime_option_precedence():
     assert lead_agent_module._resolve_runtime_option({}, "thinking_enabled", None, False) is False
 
 
+@pytest.mark.parametrize("explicit_effort", [False, True])
+def test_ultra_mode_defaults_respect_the_custom_lead(explicit_effort):
+    from app.gateway.services import merge_run_context_overrides
+
+    config = {}
+    fields = ["thinking_enabled"] if explicit_effort else ["thinking_enabled", "reasoning_effort"]
+    merge_run_context_overrides(config, {"mode": "ultra", "mode_default_fields": fields, "thinking_enabled": True, "reasoning_effort": "high", "is_plan_mode": True, "subagent_enabled": True})
+    cfg = lead_agent_module._get_runtime_config(config)
+    resolve = lead_agent_module._resolve_runtime_option
+    assert cfg["subagent_enabled"] is cfg["is_plan_mode"] is True
+    assert resolve(cfg, "thinking_enabled", False, True) is False
+    assert resolve(cfg, "reasoning_effort", "low", None) == ("high" if explicit_effort else "low")
+    assert resolve(cfg, "thinking_enabled", None, False) is True
+    assert resolve(cfg, "reasoning_effort", None, None) == "high"
+    merge_run_context_overrides(config, {"thinking_enabled": False, "reasoning_effort": "high"})
+    explicit = lead_agent_module._get_runtime_config(config)
+    assert resolve(explicit, "thinking_enabled", True, True) is False
+    assert resolve(explicit, "reasoning_effort", "low", None) == "high"
+
+
+def test_web_mode_defaults_cannot_downgrade_an_explicit_configurable_value():
+    from app.gateway.services import merge_run_context_overrides
+
+    config = {"configurable": {"thinking_enabled": False}}
+    merge_run_context_overrides(config, {"mode_default_fields": ["thinking_enabled"], "thinking_enabled": True})
+    assert lead_agent_module._resolve_runtime_option(lead_agent_module._get_runtime_config(config), "thinking_enabled", True, True) is False
+
+
 def _make_agent_config(**kwargs):
     from deerflow.config.agents_config import AgentConfig
 
