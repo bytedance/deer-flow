@@ -18,7 +18,7 @@ from deerflow.config.memory_config import get_memory_config
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, resolve_trace_id
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, without_imported_history
+from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, ORIGINAL_USER_CONTENT_KEY, own_messages_for_memory
 
 if TYPE_CHECKING:
     from deerflow.config.memory_config import MemoryConfig
@@ -210,7 +210,7 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
 
         # History copied from another person's conversation is context, not
         # something this user said; leaving it out here covers every backend.
-        messages = without_imported_history(state.get("messages", []))
+        messages = own_messages_for_memory(state.get("messages", []), state.get(IMPORTED_HISTORY_CHANNEL))
         if not messages:
             logger.debug("No own messages in state, skipping memory update")
             return None

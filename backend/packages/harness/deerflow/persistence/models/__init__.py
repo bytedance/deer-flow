@@ -24,11 +24,12 @@ from deerflow.persistence.channel_connections.model import (
 from deerflow.persistence.channel_leases.model import ChannelLeaseRow
 from deerflow.persistence.channel_runtime_configs.model import ChannelRuntimeConfigRow
 from deerflow.persistence.channel_thread_bindings.model import ChannelThreadBindingRow
-from deerflow.persistence.coordination.model import CoordinationArtifactRow, CoordinationAssignmentRow, CoordinationExecutionRow, CoordinationInputRow, CoordinationTaskRow
+from deerflow.persistence.coordination.model import CoordinationArtifactRow, CoordinationAssignmentRow, CoordinationExecutionRow, CoordinationGrantRow, CoordinationInputRow, CoordinationTaskRow
 from deerflow.persistence.extension_leases.model import ExtensionExecutionLeaseRow
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.login_throttle.model import LoginThrottleRow
 from deerflow.persistence.managed_subagents.model import ManagedSubagentRow
+from deerflow.persistence.mcp_agent_grants.model import McpAgentGrantRow
 from deerflow.persistence.mcp_oauth_tokens.model import McpOAuthTokenRow
 from deerflow.persistence.mcp_tasks.model import McpTaskRow
 from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
@@ -65,10 +66,12 @@ __all__ = [
     "CoordinationArtifactRow",
     "CoordinationAssignmentRow",
     "CoordinationExecutionRow",
+    "CoordinationGrantRow",
     "CoordinationInputRow",
     "CoordinationTaskRow",
     "FeedbackRow",
     "LoginThrottleRow",
+    "McpAgentGrantRow",
     "McpOAuthTokenRow",
     "McpTaskRow",
     "ManagedSubagentRow",

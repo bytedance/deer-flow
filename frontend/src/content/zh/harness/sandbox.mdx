@@ -16,19 +16,15 @@ import { Callout, Tabs } from "nextra/components";
 
 ## 沙箱模式
 
-DeerFlow 支持四种沙箱模式，选择适合你部署的一种：
+DeerFlow 支持五种沙箱模式，选择适合你部署的一种：
 
 ### LocalSandbox（默认）
 
-命令直接在主机机器的文件系统上运行，没有容器隔离。
-
-- **适合**：受信任的单用户本地开发工作流。
-- **风险**：Agent 可以访问主机文件系统。默认使用 `allow_host_bash: false` 防止任意命令执行。
+本地提供器通过专用文件工具处理工作区文件。
 
 ```yaml
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
-  allow_host_bash: false # 默认；仅对完全受信任的工作流设置为 true
 ```
 
 ### 基于容器的 AIO 沙箱
@@ -112,6 +108,49 @@ sandbox:
   会被自动重映射到云端 VM 的 `home_dir`（默认 `/home/user`）。
   原本读写 `/mnt/user-data/...` 的工具无需任何改动即可正常工作。
 </Callout>
+
+### BytePlus veFaaS 云端沙箱
+
+命令在 [BytePlus 函数服务（veFaaS）](https://www.byteplus.com/en/product/vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) Serverless 云端沙箱中运行，使用 `all-in-one-sandbox` 镜像（参见 [veFaaS 文档](https://docs.byteplus.com/en/docs/vefaas/what-is-vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)）。DeerFlow 直接基于 `httpx` 通过 veFaaS OpenAPI（`Version=2024-06-06`，SigV4 签名）管理控制面，无需额外安装云厂商 SDK，数据面复用 `AioSandbox` 客户端。
+
+- **适合**：Serverless 生产部署、多租户云端工作负载、希望降低冷启动耗时（支持**推测预热 `prewarm`**、**镜像预热 `precache_images`**、**空闲暂停/自动唤醒 `pause_on_idle`**），以及需要通过**线程级快照 `snapshot_on_idle`** 或 **TOS 对象存储挂载**持久化工作区的团队。
+- **取舍**：需要准备 BytePlus veFaaS 沙箱应用与 SigV4 访问密钥；多 Worker Gateway 共享同一个 veFaaS 应用时必须启用 `ownership.type: redis`。
+
+```yaml
+sandbox:
+  use: deerflow.community.vefaas_sandbox:VeFaaSSandboxProvider
+  # 可选：在首轮模型推理期间并行预热沙箱
+  # prewarm: true
+  vefaas:
+    region: ap-southeast-1
+    endpoint: https://vefaas.ap-southeast-1.byteplusapi.com
+    function_id: $BYTEPLUS_VEFAAS_SANDBOX_APP_ID
+    sandbox_base_url: $BYTEPLUS_VEFAAS_SANDBOX_BASE_URL
+    access_key_env: BYTEPLUS_ACCESS_KEY_ID
+    secret_key_env: BYTEPLUS_SECRET_ACCESS_KEY
+    cpu_milli: 1000
+    memory_mb: 2048
+    timeout_minutes: 60
+    # 可选：快速唤醒、快照与镜像预热配置
+    # pause_on_idle: true
+    # snapshot_on_idle: true
+    # snapshot_retention_days: 7
+    # max_snapshots_per_sandbox: 3
+    # precache_images:
+    #   - cr-ap-southeast-1.cr.bytepluses.com/namespace/all-in-one-sandbox:latest
+    # precache_on_startup: true
+    tos_mount:
+      enabled: false
+      bucket: $BYTEPLUS_TOS_BUCKET
+      prefix: deerflow-user-data
+  replicas: 3
+  idle_timeout: 600
+  # 多 Worker Gateway 共享同一 veFaaS 应用时必填：
+  # ownership:
+  #   type: redis
+```
+
+无需安装额外 Python SDK。完整参数说明、快照保留策略与 TOS 挂载细节见仓库中的 `backend/packages/harness/deerflow/community/vefaas_sandbox/README.md`。
 
 ### Provisioner 管理的沙箱（Kubernetes）
 
@@ -201,14 +240,7 @@ sandbox:
 
 ### LocalSandbox
 
-`LocalSandbox` 直接在主机上运行命令。默认情况下，`bash` 工具**被禁用**以防止任意主机命令执行。仅对完全受信任的单用户工作流启用它：
-
-```yaml
-sandbox:
-  allow_host_bash: true # 危险：授予 Agent 对你机器的 Shell 访问权限
-```
-
-即使没有 `bash`，Agent 也可以通过专用文件工具读写文件。
+本地提供器用于工作区文件操作。运行 Bash 命令需要使用隔离沙箱。
 
 ### 容器沙箱
 

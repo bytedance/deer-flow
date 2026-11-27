@@ -17,19 +17,15 @@ The sandbox gives the Lead Agent a controlled environment where it can read file
 
 ## Sandbox modes
 
-DeerFlow supports four sandbox modes. Choose the one that fits your deployment:
+DeerFlow supports five sandbox modes. Choose the one that fits your deployment:
 
 ### LocalSandbox (default)
 
-Commands run directly on the host machine's filesystem. There is no container isolation.
-
-- **Best for**: trusted, single-user local development workflows.
-- **Risk**: the agent has access to the host filesystem. Use `allow_host_bash: false` (default) to prevent arbitrary command execution.
+The local provider serves workspace file operations through dedicated tools.
 
 ```yaml
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
-  allow_host_bash: false # default; set to true only for fully trusted workflows
 ```
 
 ### Container-based AIO Sandbox
@@ -122,6 +118,49 @@ Get an API key at [e2b.dev/dashboard](https://e2b.dev/dashboard) and either set 
   that read or write under `/mnt/user-data/...` continue to work transparently.
 </Callout>
 
+### BytePlus veFaaS Cloud Sandbox
+
+Commands run in serverless [BytePlus Function Service (veFaaS)](https://www.byteplus.com/en/product/vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) cloud sandboxes running the `all-in-one-sandbox` image (see the [veFaaS documentation](https://docs.byteplus.com/en/docs/vefaas/what-is-vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)). DeerFlow manages the sandbox lifecycle over the veFaaS OpenAPI (`Version=2024-06-06`, SigV4) with no extra cloud SDK dependency and reuses the `AioSandbox` HTTP data plane.
+
+- **Best for**: serverless production deployments, multi-tenant cloud workloads, teams wanting fast cold-start mitigation (**speculative prewarm**, **image precaching**, **pause/resume**), and persistent workspaces via **thread-scoped snapshots** or optional **TOS object storage mounts**.
+- **Trade-off**: requires a BytePlus veFaaS Sandbox Application and SigV4 access keys. Multi-worker gateways sharing one veFaaS app require `ownership.type: redis`.
+
+```yaml
+sandbox:
+  use: deerflow.community.vefaas_sandbox:VeFaaSSandboxProvider
+  # Optional: overlap sandbox creation with the first model turn
+  # prewarm: true
+  vefaas:
+    region: ap-southeast-1
+    endpoint: https://vefaas.ap-southeast-1.byteplusapi.com
+    function_id: $BYTEPLUS_VEFAAS_SANDBOX_APP_ID
+    sandbox_base_url: $BYTEPLUS_VEFAAS_SANDBOX_BASE_URL
+    access_key_env: BYTEPLUS_ACCESS_KEY_ID
+    secret_key_env: BYTEPLUS_SECRET_ACCESS_KEY
+    cpu_milli: 1000
+    memory_mb: 2048
+    timeout_minutes: 60
+    # Optional fast-resume, snapshot & image precache settings:
+    # pause_on_idle: true
+    # snapshot_on_idle: true
+    # snapshot_retention_days: 7
+    # max_snapshots_per_sandbox: 3
+    # precache_images:
+    #   - cr-ap-southeast-1.cr.bytepluses.com/namespace/all-in-one-sandbox:latest
+    # precache_on_startup: true
+    tos_mount:
+      enabled: false
+      bucket: $BYTEPLUS_TOS_BUCKET
+      prefix: deerflow-user-data
+  replicas: 3
+  idle_timeout: 600
+  # Required for multi-worker gateways sharing one veFaaS app:
+  # ownership:
+  #   type: redis
+```
+
+No extra Python SDK is needed — the provider uses `httpx` and `agent-sandbox` directly. See `backend/packages/harness/deerflow/community/vefaas_sandbox/README.md` in the repository for the full option reference, snapshot retention guidance, and TOS mount details.
+
 ### Provisioner-managed Sandbox (Kubernetes)
 
 Each sandbox gets a dedicated Pod in a Kubernetes cluster, managed by the provisioner service. This provides the strongest isolation and is recommended for production environments with multiple concurrent users.
@@ -213,14 +252,7 @@ Set to `0` to disable truncation.
 
 ### LocalSandbox
 
-The `LocalSandbox` runs commands directly on the host. By default, the `bash` tool is **disabled** to prevent arbitrary host command execution. Enable it only for fully trusted, single-user workflows:
-
-```yaml
-sandbox:
-  allow_host_bash: true # Dangerous: grants the agent shell access to your machine
-```
-
-Even without `bash`, the agent can still read and write files through the dedicated file tools.
+Use the local provider for workspace file operations. Bash requires an isolated provider.
 
 ### Container sandbox
 

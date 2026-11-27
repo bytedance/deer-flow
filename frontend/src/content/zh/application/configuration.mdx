@@ -174,14 +174,28 @@ models:
 # 本地开发（默认）
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
-  allow_host_bash: false
 
 # 基于容器（推荐用于多用户）
 sandbox:
   use: deerflow.community.aio_sandbox:AioSandboxProvider
   replicas: 3
   idle_timeout: 600
+
+# BytePlus veFaaS 云端沙箱（Serverless，支持预热、暂停/唤醒、快照与 TOS 挂载）
+# sandbox:
+#   use: deerflow.community.vefaas_sandbox:VeFaaSSandboxProvider
+#   vefaas:
+#     region: ap-southeast-1
+#     endpoint: https://vefaas.ap-southeast-1.byteplusapi.com
+#     function_id: $BYTEPLUS_VEFAAS_SANDBOX_APP_ID
+#     sandbox_base_url: $BYTEPLUS_VEFAAS_SANDBOX_BASE_URL
+#     access_key_env: BYTEPLUS_ACCESS_KEY_ID
+#     secret_key_env: BYTEPLUS_SECRET_ACCESS_KEY
+#   replicas: 3
+#   idle_timeout: 600
 ```
+
+无服务器云端沙箱支持 [BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)（支持推测预热、空闲暂停/唤醒、快照、镜像预热与 TOS 挂载），完整配置见[沙箱指南](/docs/harness/sandbox)。
 
 ### 工具
 

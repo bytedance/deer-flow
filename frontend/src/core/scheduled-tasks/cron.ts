@@ -624,12 +624,24 @@ export function onceRunAtInstant(runAt: string, timezone: string): string {
   if (!value || /(?:Z|[+-]\d{2}(?::?\d{2})?)$/i.test(value)) {
     return value;
   }
-  const local = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/.exec(value);
+  const local =
+    /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::([0-5]\d))?([.,]\d+)?$/.exec(
+      value,
+    );
   if (!local) {
     return value;
   }
   try {
-    return zonedLocalToUtcIso(`${local[1]}T${local[2]}`, timezone || "UTC");
+    const minute = zonedLocalToUtcIso(
+      `${local[1]}T${local[2]}`,
+      timezone || "UTC",
+    );
+    // Offset selection uses the wall minute; retain the stored sub-minute
+    // precision rather than rounding API/chat-created execution times down.
+    return minute.replace(
+      /:00\+00:00$/,
+      `:${local[3] ?? "00"}${local[4]?.replace(",", ".") ?? ""}+00:00`,
+    );
   } catch {
     return value;
   }

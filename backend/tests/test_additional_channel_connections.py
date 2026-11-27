@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 from app.channels.base import Channel
 from app.channels.commands import extract_connect_code
 from app.channels.message_bus import InboundMessage, MessageBus, OutboundMessage
+from deerflow.persistence.engine import close_engine
 
 
 class _StubChannel(Channel):
@@ -131,7 +132,7 @@ def test_feishu_connect_command_binds_identity(tmp_path):
         assert connections[0]["external_account_id"] == "ou-user-1"
         assert connections[0]["workspace_id"] == "oc-chat-1"
         channel._reply_card.assert_awaited_once_with("om-message-1", "Feishu connected to DeerFlow.")
-        await repo.close()
+        await close_engine()
 
     anyio.run(go)
 
@@ -180,7 +181,7 @@ def test_feishu_connect_replies_follow_the_code_owner_language(tmp_path, monkeyp
             ("om-2", "Feishu connection code is invalid or expired."),
         ]
         assert lookups == [("deerflow-user-1", repo.session_factory)]
-        await repo.close()
+        await close_engine()
 
     anyio.run(go)
 
@@ -216,7 +217,7 @@ def test_dingtalk_connect_command_binds_identity(tmp_path):
         assert connections[0]["external_account_name"] == "Alice"
         assert connections[0]["workspace_id"] == "cid-group-1"
         channel._send_connection_reply.assert_awaited_once()
-        await repo.close()
+        await close_engine()
 
     anyio.run(go)
 
@@ -249,7 +250,7 @@ def test_wechat_connect_command_binds_identity(tmp_path):
         assert connections[0]["external_account_id"] == "wx-user-1"
         assert connections[0]["workspace_id"] == "wx-user-1"
         channel._send_connection_reply.assert_awaited_once_with("wx-user-1", "ctx-1", "WeChat connected to DeerFlow.")
-        await repo.close()
+        await close_engine()
 
     anyio.run(go)
 
@@ -284,7 +285,7 @@ def test_wecom_connect_command_binds_identity(tmp_path):
         assert connections[0]["external_account_id"] == "wecom-user-1"
         assert connections[0]["workspace_id"] == "bot-1"
         channel._ws_client.reply.assert_awaited_once_with(frame, {"msgtype": "text", "text": {"content": "WeCom connected to DeerFlow."}})
-        await repo.close()
+        await close_engine()
 
     anyio.run(go)
 
@@ -372,6 +373,6 @@ def test_additional_channels_attach_owner_identity(tmp_path):
                 }[channel.name]
             )
 
-        await repo.close()
+        await close_engine()
 
     anyio.run(go)

@@ -40,16 +40,35 @@ an optional `project_id` to create its thread in an existing project.
 POST /api/coordination/tasks
 Content-Type: application/json
 
-{"request_id":"review-27","objective":"Review the report","assistant_id":"lead_agent"}
+{
+  "request_id": "review-27",
+  "objective": "Review the report",
+  "assistant_id": "lead_agent",
+  "run": {"recursion_limit": 400, "thinking_enabled": true, "is_plan_mode": false}
+}
 ```
 
+The optional `run` object accepts a positive integer `recursion_limit` and
+boolean `thinking_enabled` and `is_plan_mode` flags. Omit any field to use the
+normal run default. Each admission caps the requested recursion limit at the
+Gateway's current `max_recursion_limit`. The task view shows the requested
+settings in `task.run_settings`, or `null` when the task uses defaults.
+Settings are saved at creation and apply to every turn, including follow-ups,
+approval responses, and restart recovery. Reusing a create request ID with
+changed settings returns HTTP 409.
+
 The response includes the task, its assignment (agent and thread), and the
-latest execution. Replaying the request reuses the worker. Read the same
-view with `GET /api/coordination/tasks/{task_id}`. Add a follow-up with
+latest execution. After the task has admitted a Run, replaying the same create
+request returns the saved task view and its current `authorization_required`
+value, even if the Worker grant has expired. Read the same view with
+`GET /api/coordination/tasks/{task_id}`. Add a follow-up with
 `POST /api/coordination/tasks/{task_id}/inputs` and a JSON object containing
-`request_id` and `content`. A text message sent to the worker thread uses
-the same queue. Streaming and wait callers observe the run that consumes
-their message. An interrupted graph requires an explicit resume command.
+`request_id` and `content`. The owner can replay an accepted input with the same
+ID and content to get its original receipt after task closure or grant expiry.
+This applies to the task input and managed Run input endpoints. New inputs need
+a valid Worker grant. A text message sent to the worker thread uses the same
+queue. Streaming and wait callers observe the run that consumes their message.
+An interrupted graph requires an explicit resume command.
 
 The task owner can poll `GET /api/coordination/tasks/{task_id}/inputs`
 to read the inbox in sequence order. Pass the last seen `sequence` as
@@ -92,7 +111,61 @@ through them. Files presented under the same path in different turns
 have separate IDs and URLs. The task detail's `execution.artifacts` lists
 deliveries produced by that execution.
 
-Worker observation uses the initiating session's process-local run handle.
-The task, frozen inputs, native run IDs and artifact contents survive a Gateway
-restart. Automatic reauthorization and restart reconciliation are tracked in
-the next stage of [RFC #8345](https://github.com/bytedance/deer-flow/issues/8345).
+## Authorization and restart recovery
+
+Dispatch saves a task-scoped grant alongside the first Worker assignment. The
+grant expires after 24 hours. The Gateway revalidates the owner's account,
+session version, permissions and current grant on each host operation.
+Grant replacement and Run admission share the task tree lock.
+
+The Gateway can also mint a grant for an authenticated IM adapter after looking
+up the sender's current channel connection. Disconnecting or replacing the
+binding invalidates the grant. The adapter entry point runs inside the Gateway.
+IM commands and delivery are covered by a later stage of
+[RFC #8345](https://github.com/bytedance/deer-flow/issues/8345).
+
+On startup and periodically, the Gateway reconciles open tasks with grants.
+It observes live Runs, records results from committed terminal Run evidence,
+and retries frozen admissions with their original idempotency key. A Run
+interrupted by Gateway shutdown can continue from a pending checkpoint written
+by that Run. When the checkpoint is missing, the Gateway settles the execution
+from the Run's durable outcome. Pending approvals still require an
+explicit response. Recovery also continues work already fenced for cancellation.
+
+The task view reports `authorization_required` when an open task lacks a
+valid grant or its current permissions no longer cover the work. Recovery
+waits for permission to return and can then continue with the same grant if
+it remains valid. Older tasks created before the migration need a grant.
+An authorized owner can renew with `PUT /api/coordination/tasks/{task_id}/authorization`
+or revoke with `DELETE /api/coordination/tasks/{task_id}/authorization`.
+The Grant table stores only authority metadata and the binding generation.
+
+## Coordinator tasks
+
+Send `"coordinator": true` when creating a Task that needs decomposition.
+The Gateway starts a planning Run with two model tools. `inspect_task` reads
+the root and recent child statuses. `submit_task_decision` commits up to eight
+child tasks in dependency order. The planner uses the default configured
+model. The requested assistant is the default Worker for the plan.
+The planner applies the configured PII redaction to user text before each
+model call. Planned child Tasks inherit the root's saved Worker run settings.
+Each planning step retries once after a temporary provider error or a malformed
+tool call. A second failure ends that planning step with an error.
+
+The Gateway binds the decision to the planner's Run, the root revision and
+the covered input sequence. It checks the root and the current grant under
+the same tree lock used by cancellation. An accepted decision records the
+child IDs and their Worker assignments together. A retry of that decision
+reuses those IDs. A change to an accepted decision returns a conflict.
+
+The Gateway admits a queued child when its prerequisites succeed. It freezes
+the visible prerequisite reply text into the dependent Worker's input. An
+unsuccessful prerequisite prevents admission and settles its dependents as
+failed. Children share the root's revocable authorization.
+
+The parent task view lists child IDs, statuses, result references and artifact
+endpoints, including children from earlier plans. Only the current plan's
+children determine the root outcome. After restart, the
+Gateway continues from the saved decision or retries a planner interrupted
+before it committed. A replay reuses the original input message IDs. Later
+input stays in the same Task's inbox.

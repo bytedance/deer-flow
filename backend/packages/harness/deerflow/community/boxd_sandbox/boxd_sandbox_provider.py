@@ -157,8 +157,7 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
         self._shutdown_lock = threading.Lock()
         self._accepting = True
         self._acquires = 0
-        # Keyed by object identity: a replacement can reuse the logical id
-        # while an older machine still needs deletion.
+        # Keyed by object identity, including wrappers for failed creates.
         self._pending_closes: dict[int, BoxdSandbox] = {}
         self._closing: set[int] = set()
         # Callers that received each active sandbox and have not released it.
@@ -282,17 +281,18 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
     # ── Identity ─────────────────────────────────────────────────────────
 
     @staticmethod
-    def _sandbox_id(thread_id: str, user_id: str) -> str:
-        return derive_sandbox_scope_token(user_id=user_id, thread_id=thread_id)
+    def _scope_from_sandbox_id(sandbox_id: str) -> str:
+        # Local IDs append the machine generation to the stable scope token.
+        return sandbox_id.partition("-")[0]
 
     @staticmethod
     def _thread_key(thread_id: str, user_id: str | None) -> tuple[str, str]:
         return (user_id or "", thread_id)
 
-    def _machine_name(self, sandbox_id: str) -> str:
+    def _machine_name(self, scope_id: str) -> str:
         # Names are unique per owner and are not free again the moment a
         # machine is deleted, so each generation gets a random suffix.
-        return f"{self._config['name_prefix']}{sandbox_id}-{uuid.uuid4().hex[:6]}"
+        return f"{self._config['name_prefix']}{scope_id}-{uuid.uuid4().hex[:6]}"
 
     # ── Warm pool plumbing ───────────────────────────────────────────────
 
@@ -338,22 +338,19 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
         for sandbox in pending:
             self._close_quietly(sandbox, context="retry deletion")
 
-    def _invalidate_sandbox(self, sandbox_id: str, reason: str, *, expected_sandbox: BoxdSandbox | None = None) -> None:
+    def _invalidate_sandbox(self, sandbox_id: str, reason: str) -> None:
         """Deregister a sandbox whose machine is gone, and finish its cleanup."""
+        scope_id = self._scope_from_sandbox_id(sandbox_id)
         with self._lock:
-            active = self._sandboxes.get(sandbox_id)
-            warm_entry = self._warm_pool.get(sandbox_id)
-            current = active or (warm_entry[0] if warm_entry is not None else None)
-            if expected_sandbox is not None and current is not expected_sandbox:
-                logger.debug("Ignoring late terminal failure from replaced boxd sandbox %s: %s", sandbox_id, reason)
-                return
-            self._sandboxes.pop(sandbox_id, None)
-            self._claims.pop(sandbox_id, None)
-            self._warm_pool.pop(sandbox_id, None)
-            for key in [k for k, sid in self._thread_sandboxes.items() if sid == sandbox_id]:
-                self._thread_sandboxes.pop(key, None)
+            current = self._sandboxes.pop(sandbox_id, None)
             if current is None:
-                return
+                warm_entry = self._warm_pool.get(scope_id)
+                if warm_entry is None or warm_entry[0].id != sandbox_id:
+                    return
+                current, _ = self._warm_pool.pop(scope_id)
+            self._claims.pop(sandbox_id, None)
+            for key in [key for key, value in self._thread_sandboxes.items() if value == sandbox_id]:
+                self._thread_sandboxes.pop(key, None)
             self._pending_closes[id(current)] = current
         logger.warning("Invalidating boxd sandbox %s: %s", sandbox_id, reason)
         self._close_quietly(current, context="terminal failure")
@@ -378,11 +375,11 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
     def _acquire(self, thread_id: str | None, user_id: str | None, ticket: _AcquireTicket | None = None) -> str:
         with self._acquiring():
             if thread_id is None:
-                sandbox_id = str(uuid.uuid4())[:8]
-                sandbox_id = self._publish_sandbox(self._create_sandbox(sandbox_id, thread_id=None, user_id=user_id))
+                scope_id = uuid.uuid4().hex[:8]
+                sandbox_id = self._publish_sandbox(self._create_sandbox(scope_id, thread_id=None, user_id=user_id))
             else:
                 key = self._thread_key(thread_id, user_id)
-                scope_id = self._sandbox_id(thread_id, user_id or "")
+                scope_id = derive_sandbox_scope_token(user_id=user_id or "", thread_id=thread_id)
                 with self._acquire_serializer.hold(scope_id):
                     sandbox_id = self._acquire_scope_locked(key, scope_id, thread_id=thread_id, user_id=user_id)
         if ticket is not None:
@@ -418,16 +415,7 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
     def _drop_claim(self, sandbox_id: str) -> None:
         """Give back the claim of a caller that never received ``sandbox_id``."""
         try:
-            with self._acquire_serializer.hold(sandbox_id):
-                with self._lock:
-                    if sandbox_id not in self._sandboxes:
-                        return
-                    remaining = self._claims.get(sandbox_id, 1) - 1
-                    self._claims[sandbox_id] = remaining
-                    if remaining > 0:
-                        return
-                logger.info("Releasing boxd sandbox %s: every caller that acquired it was cancelled", sandbox_id)
-                self._release_scope_locked(sandbox_id)
+            self.release(sandbox_id)
         except AcquireSerializerClosed:
             pass  # reset/shutdown owns the sandbox now
         except Exception:
@@ -446,7 +434,7 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
         self._close_quietly(sandbox, context="acquired after provider retirement")
         raise RuntimeError("boxd provider retired or shut down during acquire")
 
-    def _acquire_scope_locked(self, key: tuple[str, str], sandbox_id: str, *, thread_id: str, user_id: str | None) -> str:
+    def _acquire_scope_locked(self, key: tuple[str, str], scope_id: str, *, thread_id: str, user_id: str | None) -> str:
         with self._lock:
             if not self._accepting:
                 raise RuntimeError("boxd provider is retired or shutting down")
@@ -455,7 +443,7 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
                 self._claims[existing] = self._claims.get(existing, 0) + 1
                 return existing
 
-        reclaimed = self._reclaim_warm_pool(sandbox_id)
+        reclaimed = self._reclaim_warm_pool(scope_id)
         if reclaimed is not None:
             with self._lock:
                 if not self._accepting:
@@ -463,18 +451,19 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
                 self._thread_sandboxes[key] = reclaimed
             return reclaimed
 
-        sandbox = self._create_sandbox(sandbox_id, thread_id=thread_id, user_id=user_id)
+        sandbox = self._create_sandbox(scope_id, thread_id=thread_id, user_id=user_id)
         return self._publish_sandbox(sandbox, key)
 
-    def _create_sandbox(self, sandbox_id: str, *, thread_id: str | None, user_id: str | None) -> BoxdSandbox:
+    def _create_sandbox(self, scope_id: str, *, thread_id: str | None, user_id: str | None) -> BoxdSandbox:
+        generation = uuid.uuid4().hex
+        sandbox_id = f"{scope_id}-{generation}"
         replicas, total = self._replica_count()
         if total >= replicas:
             evicted = self._evict_oldest_warm()
             self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
 
         client = self._get_client()
-        generation = uuid.uuid4().hex
-        labels = {**self._config["labels"], _LABEL_APP: "sandbox", _LABEL_SCOPE: sandbox_id, _LABEL_GENERATION: generation}
+        labels = {**self._config["labels"], _LABEL_APP: "sandbox", _LABEL_SCOPE: scope_id, _LABEL_GENERATION: generation}
         create_kwargs: dict[str, Any] = {
             "org": self._config["org"],
             # The agent runs untrusted code: an isolated machine joins no
@@ -486,7 +475,7 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
             if self._config[name] is not None:
                 create_kwargs[name] = self._config[name]
         try:
-            machine = client.machines.create(self._machine_name(sandbox_id), **create_kwargs)
+            machine = client.machines.create(self._machine_name(scope_id), **create_kwargs)
         except BaseException:
             self._delete_generation(client, generation, sandbox_id)
             raise
@@ -508,7 +497,7 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
             # Never hand out a half-prepared machine, and never leave one running.
             self._close_quietly(sandbox, context="preparation failure")
             raise
-        sandbox._on_terminal_failure = lambda failed_id, reason: self._invalidate_sandbox(failed_id, reason, expected_sandbox=sandbox)
+        sandbox._on_terminal_failure = self._invalidate_sandbox
         logger.info("Created boxd sandbox %s (machine %s)", sandbox_id, machine.id)
         return sandbox
 
@@ -674,7 +663,7 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
         Holds the same scope serializer as acquire and release, so no other
         lifecycle step sees a half-written skills tree.
         """
-        with self._acquire_serializer.hold(sandbox_id):
+        with self._acquire_serializer.hold(self._scope_from_sandbox_id(sandbox_id)):
             with self._lock:
                 sandbox = self._sandboxes.get(sandbox_id)
             if sandbox is None:
@@ -683,31 +672,31 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
 
     # ── Reuse ────────────────────────────────────────────────────────────
 
-    def _reclaim_warm_pool(self, sandbox_id: str) -> str | None:
+    def _reclaim_warm_pool(self, scope_id: str) -> str | None:
         with self._lock:
-            warm_entry = self._warm_pool.get(sandbox_id)
+            warm_entry = self._warm_pool.get(scope_id)
         if warm_entry is None:
             return None
         sandbox = warm_entry[0]
         if not sandbox.ping():
             with self._lock:
-                removed = self._warm_pool.pop(sandbox_id, None)
+                removed = self._warm_pool.pop(scope_id, None)
             if removed is not None:
-                self._destroy_warm_entry(sandbox_id, removed[0], reason="health_check_failed")
+                self._destroy_warm_entry(scope_id, removed[0], reason="health_check_failed")
             return None
         with self._lock:
-            removed = self._warm_pool.pop(sandbox_id, None)
+            removed = self._warm_pool.pop(scope_id, None)
             if removed is None:
                 return None
             admitted = self._accepting
             if admitted:
-                self._sandboxes[sandbox_id] = removed[0]
-                self._claims[sandbox_id] = 1
+                self._sandboxes[sandbox.id] = sandbox
+                self._claims[sandbox.id] = 1
         if not admitted:
             self._close_quietly(removed[0], context="reclaimed after provider retirement")
             raise RuntimeError("boxd provider retired or shut down during acquire")
-        logger.info("Reclaimed warm boxd sandbox %s", sandbox_id)
-        return sandbox_id
+        logger.info("Reclaimed warm boxd sandbox %s", sandbox.id)
+        return sandbox.id
 
     def get(self, sandbox_id: str) -> Sandbox | None:
         with self._lock:
@@ -726,7 +715,7 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
             if sandbox_id not in self._sandboxes:
                 return
         try:
-            with self._acquire_serializer.hold(sandbox_id):
+            with self._acquire_serializer.hold(self._scope_from_sandbox_id(sandbox_id)):
                 self._release_scope_locked(sandbox_id)
         except AcquireSerializerClosed:
             # reset/shutdown closed the serializer after the check above.
@@ -738,9 +727,17 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
     def _release_scope_locked(self, sandbox_id: str) -> None:
         with self._lock:
             sandbox = self._sandboxes.get(sandbox_id)
+            if sandbox is None:
+                return
+            # Overlapping turns can hold several claims on one machine. Only the
+            # LAST release parks it: mirroring outputs and re-entering the warm
+            # pool while another claimant is mid-turn hands its files to a
+            # stranger (#8382).
+            remaining = self._claims.get(sandbox_id, 1) - 1
+            if remaining > 0:
+                self._claims[sandbox_id] = remaining
+                return
             scope = next((key for key, value in self._thread_sandboxes.items() if value == sandbox_id), None)
-        if sandbox is None:
-            return
         if scope is not None and scope[0]:
             try:
                 self._sync_outputs_to_host(sandbox, user_id=scope[0], thread_id=scope[1])
@@ -759,7 +756,7 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
             if close_now:
                 self._pending_closes[id(sandbox)] = sandbox
             else:
-                self._warm_pool[sandbox_id] = (sandbox, time.monotonic())
+                self._warm_pool[self._scope_from_sandbox_id(sandbox_id)] = (sandbox, time.monotonic())
         if close_now:
             self._close_quietly(sandbox, context="released during shutdown")
         else:
@@ -901,8 +898,9 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
             self._accepting = False
             now = time.monotonic()
             for sandbox_id, sandbox in self._sandboxes.items():
-                self._warm_pool.setdefault(sandbox_id, (sandbox, now))
+                self._warm_pool.setdefault(self._scope_from_sandbox_id(sandbox_id), (sandbox, now))
             self._sandboxes.clear()
+            self._claims.clear()
             self._thread_sandboxes.clear()
             self._acquire_serializer.close()
 

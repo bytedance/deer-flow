@@ -27,11 +27,11 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 - [**LLM Space**](https://github.com/deer-flow/llm-space) - 认识 DeerFlow 背后的秘密武器——一款桌面工具，用于原型化 agent 想法、检查 harness 的每个步骤、回放失败用例并基准测试性能。
 
-## 字节跳动火山引擎方舟 Coding Plan
+## BytePlus Agent Plan 与火山引擎方舟 Coding Plan
 
-- 我们推荐使用 Doubao-Seed-2.0-Code、DeepSeek v3.2 和 Kimi 2.5 运行 DeerFlow
-- [现在就加入 Coding Plan](https://www.volcengine.com/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
-- [海外地区的开发者请点击这里](https://www.byteplus.com/en/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
+- **BytePlus Agent Plan（个人版 & 企业版）**：一把 API Key 打通 DeerFlow 全链路——旗舰对话模型（`dola-seed-2.1-turbo`、`deepseek-v4-pro`、`deepseek-v4.1-flash`）、**Seedream 5.0/5.5** 生图与 PPT 视觉生成（`image-generation` / `ppt-generation`），以及 **Seedance 2.5** 原生音画同步视频生成（`video-generation`，Large / Max / 企业共享包可用），统一以透明的 AFP（Agent Fuel Points）计量。
+- [了解 BytePlus Agent Plan](https://www.byteplus.com/en/activity/agentplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) · [控制台](https://console.byteplus.com/ark/region:ap-southeast-1/subscription/agent-plan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) · [个人版文档](https://console.byteplus.com/ark/region:ap-southeast-1/docs/agent-plan-personal-plan-overview?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) · [企业版文档](https://console.byteplus.com/ark/region:ap-southeast-1/docs/agent-plan-enterprise-plan-overview?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
+- [中国大陆地区的开发者请点击这里（火山引擎 Coding Plan）](https://www.volcengine.com/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
 
 ## InfoQuest
 
@@ -50,7 +50,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
   - [官网](#官网)
   - [姐妹项目](#姐妹项目)
-  - [字节跳动火山引擎方舟 Coding Plan](#字节跳动火山引擎方舟-coding-plan)
+  - [BytePlus Agent Plan 与火山引擎方舟 Coding Plan](#byteplus-agent-plan-与火山引擎方舟-coding-plan)
   - [InfoQuest](#infoquest)
   - [目录](#目录)
   - [一句话交给 Coding Agent 安装](#一句话交给-coding-agent-安装)
@@ -414,10 +414,12 @@ DeerFlow 的内置自定义事件同时通过两种 LangGraph 流式接口提供
 ### 进阶配置
 #### Sandbox 模式
 
-DeerFlow 支持多种 sandbox 执行方式：
-- **本地执行**（直接在宿主机上运行 sandbox 代码）
+DeerFlow 支持多种沙箱模式。
+
+- **本地工作区**（通过工作区文件工具访问已配置的挂载）
 - **Docker 执行**（在隔离的 Docker 容器里运行 sandbox 代码）
 - **Docker + Kubernetes 执行**（通过 provisioner 服务在 Kubernetes Pod 中运行 sandbox 代码）
+- **BytePlus veFaaS 云端沙箱**（基于 [BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) Serverless AIO 沙箱，支持推测预热、空闲暂停/自动唤醒、线程级快照、镜像预热与可选 TOS 挂载，详见 [veFaaS Sandbox Provider](backend/packages/harness/deerflow/community/vefaas_sandbox/README.md)）
 
 Docker 开发时，服务启动行为会遵循 `config.yaml` 里的 sandbox 模式。在 Local / Docker 模式下，不会启动 `provisioner`。
 
@@ -880,12 +882,12 @@ lead agent 只会在委派具有明确净收益时动态拉起 sub-agents，例�
 
 DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电脑”。
 
-每个任务都运行在隔离的 Docker 容器里，里面有完整的文件系统，包括 skills、workspace、uploads、outputs。agent 可以读写和编辑文件，可以执行 bash 命令和代码，也可以查看图片。整个过程都在 sandbox 内完成，可审计、会隔离，不会在不同 session 之间互相污染。
+沙箱的运行方式取决于配置。本地工作区使用专用文件工具，Docker 模式在隔离的容器中运行，Kubernetes 模式通过 provisioner 服务在 Pod 中运行。Agent 可以在沙箱中访问 skills、workspace、uploads、outputs，读写和编辑文件，也可以查看图片。需要执行 Bash 命令或通过 Shell 运行代码时，请选择提供 Shell 的隔离沙箱。各模式的配置方式见[沙箱指南](docs/guide/sandbox.md#sandbox-mode)。
 
 这就是“带工具的聊天机器人”和“真正有执行环境的 agent”之间的差别。
 
 ```text
-# sandbox 容器内的路径
+# 沙箱中的虚拟路径
 /mnt/user-data/
 ├── uploads/          ← 你的文件
 ├── workspace/        ← agents 的工作目录

@@ -50,7 +50,9 @@ transport, so they check the payload that DeerFlow sends.
   settings after merging templates and caller options, and clear the selected
   adapter's retry aliases first.
 - **`Retry-After` goes through `utils.retry_after`.** HTTP dates are read as UTC,
-  a past date means zero, and the delay is bounded.
+  a past date means zero, and the delay is bounded. `retry_after_hint_ms` reads
+  both header spellings and fractional seconds once, so every provider retry
+  loop parses the same hint.
 - **HTTP 429 hints extend the opted-in group's admission schedule**, including
   on the last middleware attempt. Shorter hints never shorten a pause. Keep
   FIFO, cancellation and deadlines intact; unrelated groups stay independent.

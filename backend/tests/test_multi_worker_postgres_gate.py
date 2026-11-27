@@ -24,6 +24,7 @@ from app.gateway.deps import (
     _validate_agent_storage,
     _validate_login_throttle_storage,
     _validate_memory_retrieval_index,
+    _validate_provisioner_environment,
     credentials_key_consumers,
     langgraph_runtime,
 )
@@ -975,6 +976,83 @@ async def test_langgraph_runtime_enforces_the_credentials_key_before_persistence
     ):
         startup_config = _with_channel_connections(_cluster_ready(deployment_multi_instance=True))
         with pytest.raises(SystemExit, match=CREDENTIALS_KEY_ENV_VAR):
+            async with langgraph_runtime(FastAPI(), startup_config):
+                pass
+
+    init_engine_from_config.assert_not_called()
+    make_stream_bridge.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# sandbox.environment for provisioner sandboxes
+# ---------------------------------------------------------------------------
+
+
+def _provisioner_config(environment: dict[str, str] | None, *, use: str = "deerflow.community.aio_sandbox:AioSandboxProvider", provisioner_url: str | None = "http://provisioner:8002"):
+    config = _cluster_ready()
+    config.sandbox = SimpleNamespace(use=use, environment=environment or {}, provisioner_url=provisioner_url)
+    return config
+
+
+def test_provisioner_environment_is_rejected_while_startup_config_is_validated():
+    """The provider is built lazily, so a config the provisioner refuses must fail before /health/ready.
+
+    It used to pass startup and only break the first sandbox create, which the
+    upload handler reported as a 400 against a request that was fine.
+    """
+    with pytest.raises(SystemExit) as exc_info:
+        _validate_provisioner_environment(_provisioner_config({f"OPERATOR_{index}": "true" for index in range(33)}))
+    msg = str(exc_info.value)
+    assert "sandbox.environment carries 33 entries; the provisioner applies at most 32" in msg
+    assert "config.yaml" in msg, "must point at the file an operator edits"
+
+
+@pytest.mark.parametrize(
+    ("environment", "message"),
+    [
+        ({"DISABLE JUPYTER": "true"}, "must match"),
+        ({"DISABLE_VNC": "x" * 1025}, "exceeds 1024 characters"),
+        ({"DISABLE_VNC": "true\x00"}, "NUL byte"),
+    ],
+)
+def test_provisioner_environment_rejects_the_names_and_values_the_provisioner_refuses(environment, message):
+    with pytest.raises(SystemExit, match=message):
+        _validate_provisioner_environment(_provisioner_config(environment))
+
+
+def test_provisioner_environment_counts_only_entries_the_operator_sends():
+    """The provider's own capacity keys travel in dedicated fields and never spend the 32 entries."""
+    operator = {f"OPERATOR_{index}": "true" for index in range(32)}
+    _validate_provisioner_environment(_provisioner_config({**operator, "AIO_BASH_MAX_SESSIONS": "50", "MAX_SHELL_SESSIONS": "13"}))
+
+
+@pytest.mark.parametrize(
+    ("use", "provisioner_url"),
+    [
+        ("deerflow.community.aio_sandbox:AioSandboxProvider", None),
+        ("deerflow.sandbox.local:LocalSandboxProvider", "http://provisioner:8002"),
+    ],
+    ids=["no-provisioner", "local-backend"],
+)
+def test_provisioner_environment_is_not_checked_without_a_provisioner_backend(use, provisioner_url):
+    """Nothing forwards this map to a provisioner, so its limits do not apply."""
+    _validate_provisioner_environment(_provisioner_config({f"OPERATOR_{index}": "true" for index in range(33)}, use=use, provisioner_url=provisioner_url))
+
+
+@pytest.mark.asyncio
+async def test_langgraph_runtime_validates_the_provisioner_environment_before_persistence_setup():
+    init_engine_from_config = AsyncMock(name="init_engine_from_config")
+
+    @asynccontextmanager
+    async def _noop_stream_bridge(_config):
+        yield MagicMock()
+
+    with (
+        patch("deerflow.persistence.engine.init_engine_from_config", init_engine_from_config),
+        patch("deerflow.runtime.make_stream_bridge", side_effect=_noop_stream_bridge) as make_stream_bridge,
+    ):
+        startup_config = _provisioner_config({f"OPERATOR_{index}": "true" for index in range(33)})
+        with pytest.raises(SystemExit, match="sandbox.environment carries 33 entries"):
             async with langgraph_runtime(FastAPI(), startup_config):
                 pass
 

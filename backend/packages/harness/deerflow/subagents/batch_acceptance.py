@@ -31,6 +31,7 @@ async def check_batch_acceptance(
     from deerflow.authz.sandbox_authz import authorize_sandbox_execution_async
     from deerflow.sandbox.lease import SANDBOX_LEASE_OWNER_CONTEXT_KEY, acquire_sandbox_client_lease, run_sync_lifecycle_operation
     from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+    from deerflow.sandbox.tools import _SANDBOX_AUTHORIZATION_CHECKED
 
     criteria = await run_sync_lifecycle_operation(normalize_acceptance_criteria, criteria)
     if not criteria:
@@ -52,7 +53,15 @@ async def check_batch_acceptance(
             runtime.state["sandbox"] = {"sandbox_id": lease.sandbox_id}
             context[SANDBOX_LEASE_OWNER_CONTEXT_KEY] = lease.owner_id
         # Drain blocking reads before releasing the holder, including shutdown.
-        return await run_sync_lifecycle_operation(check_acceptance_criteria, criteria, runtime=runtime, thread_data=thread_data, bash_executions=bash_executions)
+        # The sandbox:execute decision above was made on this event loop; carry
+        # it into the worker (context variables propagate into the offload) so
+        # neither the leaf gate nor the content read's re-authorization
+        # reconstructs a loop-affine provider off-loop.
+        token = _SANDBOX_AUTHORIZATION_CHECKED.set(True)
+        try:
+            return await run_sync_lifecycle_operation(check_acceptance_criteria, criteria, runtime=runtime, thread_data=thread_data, bash_executions=bash_executions, admission_denied=False)
+        finally:
+            _SANDBOX_AUTHORIZATION_CHECKED.reset(token)
     finally:
         if lease is not None:
             await lease.release()

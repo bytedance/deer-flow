@@ -434,3 +434,80 @@ async def test_only_effective_file_checks_request_sandbox_access(env, monkeypatc
     assert all(leaf["family"] == "undecidable" for leaf in verdict["leaves"])
     authorize.assert_not_awaited()
     acquire.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allow", [True, False])
+@pytest.mark.parametrize("exists", [True, False])
+async def test_loop_affine_provider_batch_verdicts(env, monkeypatch, tmp_path, allow, exists):
+    """A provider constructible only on a running event loop must not turn
+    authorized metadata-only verdicts into UNVERIFIED (or leak them on deny):
+    the admission decision rides into the worker, which never reconstructs it."""
+    import sys
+    from types import ModuleType
+
+    from deerflow.authz.provider import AuthzDecision
+    from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
+
+    provider_module = ModuleType("loop_affine_batch_test_provider")
+    constructed_on = []
+
+    class LoopAffineProvider:
+        name = "loop-affine"
+
+        def __init__(self):
+            self.loop = asyncio.get_running_loop()
+            constructed_on.append(self.loop)
+
+        def authorize(self, request):
+            return AuthzDecision(allow=allow)
+
+        async def aauthorize(self, request):
+            assert asyncio.get_running_loop() is self.loop
+            return AuthzDecision(allow=allow)
+
+        def filter_resources(self, principal, resource_type, candidates):
+            return list(candidates)
+
+    provider_module.LoopAffineProvider = LoopAffineProvider
+    monkeypatch.setitem(sys.modules, provider_module.__name__, provider_module)
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+    from deerflow.config.model_config import ModelConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.config.skills_config import SkillsConfig
+
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    config = AppConfig(
+        models=[ModelConfig(name="gpt-4", model="gpt-4", use="langchain_openai:ChatOpenAI")],
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+        skills=SkillsConfig(path=str(skills_root)),
+        authorization=AuthorizationConfig(
+            enabled=True,
+            fail_closed=True,
+            default_role="user",
+            provider=AuthorizationProviderConfig(use=f"{provider_module.__name__}:LoopAffineProvider"),
+        ),
+    )
+    set_app_config(config)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    env.service._app_config = config
+    if exists:
+        (env.paths.sandbox_outputs_dir("thread-1", user_id="user-1") / "report.md").write_text("Actual report", encoding="utf-8")
+
+    batch = await _submit(env, ["file:../outputs/report.md exists"])
+    await _execute(env)
+    item = (await env.repo.list_items(batch["id"], user_id="user-1"))[0]
+    assert item["status"] == "succeeded"
+    # The admission decision is constructed on the owning loop. (The local
+    # provider's skills projection may also touch the provider; that existing
+    # path swallows its own failures and is not the acceptance gate.)
+    assert asyncio.get_running_loop() in constructed_on
+    if allow:
+        leaf = item["acceptance_verdict"]["leaves"][0]
+        assert (leaf["checked"], leaf["holds"]) == (True, exists)
+        if not exists:
+            assert leaf["detail"] == "file does not exist"
+    else:
+        assert item["acceptance_verdict"] is None
+    reset_app_config()

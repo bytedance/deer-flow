@@ -128,6 +128,44 @@ function setup(history = false) {
 }
 
 describe("SubtaskCard message synchronization", () => {
+  // The collapsed header explains the subagent's latest tool call from the
+  // live `task_running` message. Its args are the subagent model's output, so
+  // a non-string description must fall back instead of reaching JSX.
+  it("explains the running tool call only from string args", () => {
+    const view = setup();
+    const running = (name: string, args: Record<string, unknown>) =>
+      act(() => {
+        view.publish({
+          id: "task-1",
+          status: "in_progress",
+          latestMessage: {
+            type: "ai",
+            id: `child-${name}-${JSON.stringify(args)}`,
+            content: "",
+            tool_calls: [{ id: "call-1", name, args }],
+          },
+        });
+      });
+
+    for (const description of [
+      { text: "Roadmap" },
+      [{ type: "text", text: { content: "Roadmap" } }],
+      42,
+    ]) {
+      running("notion_create_database", { description });
+      expect(
+        screen.getByText('Use "notion_create_database" tool'),
+      ).toBeTruthy();
+      expect(screen.queryByText(/Roadmap|42/)).toBeNull();
+    }
+
+    running("web_search", { query: { text: "Roadmap" } });
+    expect(screen.getByText('Use "web_search" tool')).toBeTruthy();
+
+    running("notion_create_database", { description: "Create the roadmap" });
+    expect(screen.getByText("Create the roadmap")).toBeTruthy();
+  });
+
   it.each([false, true])(
     "renders forwarded evidence on completion/replay (replay=%s)",
     async (replay) => {
