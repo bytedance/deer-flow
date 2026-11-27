@@ -623,6 +623,55 @@ def test_a_stale_build_does_not_land_after_a_config_change(monkeypatch) -> None:
     assert manager_module._memory_model_armed_signature is None
 
 
+def test_a_later_lookup_cannot_reopen_the_one_time_rearm(monkeypatch) -> None:
+    """An A -> B -> A catalog sequence must not let a build started under A
+    replace the client a later lookup already installed under B: the first
+    installed extraction model stays until the manager is reset.
+    """
+    import threading
+
+    from deerflow.agents.memory import manager as manager_module
+
+    set_memory_config(MemoryConfig(manager_class=f"{__name__}:_HostLlmRecordingBackend"))
+    signature_a = _model_signature("catalog-a")
+    signature_b = _model_signature("catalog-b")
+    _patch_model_set(monkeypatch, signature_a)
+    manager = get_memory_manager()
+
+    # Make the recording backend track its own state the way DeerMem does:
+    # once a client is installed it no longer needs the host fallback.
+    monkeypatch.setattr(type(manager), "needs_host_model", lambda self: not self._refreshed)
+
+    building = threading.Event()
+    release = threading.Event()
+
+    def _slow_build(app_config=None):
+        building.set()
+        assert release.wait(5), "the test never released the builder"
+        return object()
+
+    monkeypatch.setattr(manager_module, "_build_host_llm", _slow_build)
+    results: list = []
+    worker = threading.Thread(target=lambda: results.append(get_memory_manager()))
+    worker.start()
+    try:
+        assert building.wait(5), "the builder never started"
+        # A later lookup arms the same backend under B while A's build is paused.
+        _patch_model_set(monkeypatch, signature_b)
+        monkeypatch.setattr(manager_module, "_build_host_llm", lambda app_config=None: "client-b")
+        assert get_memory_manager() is manager
+        assert manager._refreshed == ["client-b"]
+        # The catalog rolls back to A before the paused build completes.
+        _patch_model_set(monkeypatch, signature_a)
+    finally:
+        release.set()
+        worker.join(10)
+
+    assert results == [manager]
+    assert manager._refreshed == ["client-b"], "the first installed client must win"
+    assert manager_module._memory_model_armed_signature == signature_b
+
+
 def test_two_threads_arm_the_same_model_set_once(monkeypatch) -> None:
     """Concurrent first lookups may each build a client, but exactly one install
     lands: the revalidation under the lock skips the duplicate."""
@@ -772,6 +821,26 @@ def test_the_client_is_built_from_the_snapshot_that_was_digested(monkeypatch) ->
     assert handed == [snapshot], "the build must receive the config the digest was computed from"
     assert len(manager._refreshed) == 1
     assert manager_module._memory_model_armed_signature == manager_module._model_set_signature(snapshot)
+
+
+def test_build_host_llm_forwards_the_snapshot_to_the_factory(monkeypatch) -> None:
+    """The refresh hands the digested snapshot to the builder, but the builder
+    must hand that same object to the factory.
+
+    Every other case stubs ``_build_host_llm``, so dropping ``app_config`` there
+    would keep them green while an A -> B -> A catalog installs B's client under
+    A's digest again.
+    """
+    import deerflow.models as models_module
+    from deerflow.agents.memory import manager as manager_module
+
+    seen: list = []
+    monkeypatch.setattr(models_module, "create_chat_model", lambda **kwargs: seen.append(kwargs) or object())
+    snapshot = object()
+
+    manager_module._build_host_llm(snapshot)
+
+    assert seen == [{"name": None, "app_config": snapshot}]
 
 
 def test_a_retired_manager_cannot_publish_a_failure_deadline(monkeypatch) -> None:

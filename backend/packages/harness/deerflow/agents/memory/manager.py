@@ -595,8 +595,10 @@ class MemoryManager(BaseModel):
         and must still recover once that entry is repaired.
 
         Must stay cheap: a field check, no I/O. It runs on the memory path while
-        a stateful backend still lacks a model. Default ``False``: a backend that
-        owns its model never reads the merged config for this.
+        a stateful backend still lacks a model, and again under ``_manager_lock``
+        before publishing a re-armed client, so it must not take that lock.
+        Default ``False``: a backend that owns its model never reads the merged
+        config for this.
         """
         return False
 
@@ -1257,6 +1259,13 @@ def _refresh_llm_for_reloaded_models(manager: MemoryManager) -> None:
             # The backend was retired (reset / runtime switch) while this client
             # was being built; installing it would close the re-arm gate for the
             # manager that replaced it.
+            return
+        if not manager.needs_host_model():
+            # Another lookup armed this backend while we were building. An
+            # A -> B -> A catalog rollback is enough: B's client is current, and
+            # signature A no longer compares as a duplicate. Re-checking the
+            # cheap capability hook here keeps the first installed model until
+            # reset instead of reopening the one-time re-arm for a stale build.
             return
         if _memory_model_armed_signature == signature:
             # Another thread armed this same model set while we were building.
