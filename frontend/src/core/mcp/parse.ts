@@ -40,11 +40,13 @@ function isWrappedServerMap(value: Record<string, unknown>): value is Record<
   const nonempty = (value: unknown) =>
     typeof value === "string" && value.trim().length > 0;
   // A configured sibling is evidence of a wrapped map, even when a mistyped
-  // sibling happens to be named command, url or type. Credential maps are data.
+  // sibling happens to be named command, url or type. Credential maps and
+  // presentation metadata are data, rather than sibling server definitions.
   const hasServerSibling = Object.entries(config).some(
     ([key, value]) =>
       key !== "env" &&
       key !== "headers" &&
+      key !== "presentation" &&
       isPlainObject(value) &&
       (nonempty(value.command) || nonempty(value.url)),
   );

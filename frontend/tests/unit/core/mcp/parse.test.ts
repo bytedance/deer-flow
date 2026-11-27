@@ -154,11 +154,24 @@ describe("parseMCPServerDefinition", () => {
     { type: "sse", url: "https://example.test/mcp" },
     { transport: "http", url: "https://example.test/mcp" },
     { command: "npx", env: { command: "value" }, headers: { url: "value" } },
+    {
+      type: "http",
+      url: "https://example.test/mcp",
+      presentation: { url: "https://docs.example.test" },
+    },
+    {
+      command: "npx",
+      presentation: {
+        command: "display-label",
+        url: "https://docs.example.test",
+      },
+    },
   ])("keeps a coherent bare transport configuration (%j)", (config) => {
-    expect(
-      parseMCPServerDefinition(JSON.stringify({ mcpServers: config }))
-        .mcpServers,
-    ).toMatchObject(config);
+    const parsed = parseMCPServerDefinition(
+      JSON.stringify({ mcpServers: config }),
+    );
+    expect(Object.keys(parsed)).toEqual(["mcpServers"]);
+    expect(parsed.mcpServers).toMatchObject(config);
   });
 
   it("rejects blank input", () => {

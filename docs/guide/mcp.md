@@ -6,6 +6,8 @@ A bare server named `mcpServers` is supported when it identifies its transport
 with a nonempty command for stdio, or a supported remote transport and nonempty
 URL. Configured sibling servers keep the definition in the wrapped-map error
 path even when an invalid entry is named `command`, `url`, or `type`.
+Display-only `presentation` metadata is preserved and does not participate in
+that decision, even when it contains a URL or a command-like display field.
 
 Tool steps mark explicit execution failures. Scheduled-task steps show completed
 operations only after a valid response, rather than when the request is issued.
