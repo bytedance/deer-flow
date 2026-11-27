@@ -563,9 +563,10 @@ def test_home_root_label_follows_the_addressed_path(provider, user_data_tree):
     assert any(m.path.replace("\\", "/").endswith("skills/public/demo/trace.log") for m in matches)
 
     # The same skills tree addressed through the home path keeps the repository
-    # filter. (A generic home-root search still shows the uploads logs: the
-    # explicit-glob rule wins in either root type, so scope to the skills tree.)
-    assert provider.sandbox.glob(str(home / "skills"), "**/*.log")[0] == []
+    # filter. The pattern must not name a data-looking file: an explicit
+    # ``*.log`` wins in either root type (pinned by the checkout case), which
+    # is also why a generic home-root search would show the uploads logs.
+    assert provider.sandbox.glob(str(home / "skills"), "**/trace.*")[0] == []
     assert provider.sandbox.grep(str(home / "skills"), "FATAL")[0] == []
 
 
