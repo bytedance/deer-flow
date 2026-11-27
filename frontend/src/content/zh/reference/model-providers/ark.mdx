@@ -17,7 +17,7 @@ description: BytePlus Agent Plan（个人版 / 企业版）与火山方舟 Codin
 
 ### 快速配置（`make setup`）
 
-执行 `make setup` 并选择 **BytePlus Agent Plan**，向导会自动配置主模型并将 `BYTEPLUS_AGENTPLAN_API_KEY` 注入 `sandbox.environment`，一次配置即可打通对话、生图（`image-generation`）、PPT 视觉生成（`ppt-generation`）与视频生成（`video-generation`）。
+执行 `make setup` 并选择 **BytePlus Agent Plan**，向导会配置主模型，并明确询问是否将 `BYTEPLUS_AGENTPLAN_API_KEY` 共享到 `sandbox.environment`（默认否）；勾选共享后即可复用同一把 Key 打通生图（`image-generation`）、PPT 视觉生成（`ppt-generation`）与视频生成（`video-generation`）。
 
 ### 手动配置 `config.yaml`
 

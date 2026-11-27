@@ -876,17 +876,29 @@ def test_resolve_falls_back_to_byteplus_agentplan(monkeypatch):
     )
 
 
+def _make_test_image(fmt: str = "PNG", size: tuple[int, int] = (8, 6)) -> bytes:
+    from io import BytesIO
+    from PIL import Image
+
+    buf = BytesIO()
+    mode = "RGBA" if fmt == "PNG" else "RGB"
+    color = (20, 120, 220, 255) if mode == "RGBA" else (20, 120, 220)
+    Image.new(mode, size, color).save(buf, format=fmt)
+    return buf.getvalue()
+
+
 @pytest.mark.parametrize(
     "alias", ["byteplus", "byteplus_agentplan", "byteplus-agentplan", "seedream"]
 )
 def test_byteplus_agentplan_generation_writes_base64(monkeypatch, tmp_path, alias):
     monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", alias)
     monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    jpeg_bytes = _make_test_image("JPEG")
     captured = {}
 
     def fake_post(url, headers=None, json=None, **kwargs):
         captured.update(url=url, headers=headers, json=json, kwargs=kwargs)
-        return FakeResp({"data": [{"b64_json": base64.b64encode(b"seedream-img").decode()}]})
+        return FakeResp({"data": [{"b64_json": base64.b64encode(jpeg_bytes).decode()}]})
 
     monkeypatch.setattr(img.requests, "post", fake_post)
     structured_prompt = (
@@ -909,17 +921,18 @@ def test_byteplus_agentplan_generation_writes_base64(monkeypatch, tmp_path, alia
         "output_format": "jpeg",
         "watermark": False,
     }
-    assert output_file.read_bytes() == b"seedream-img"
+    assert output_file.read_bytes() == jpeg_bytes
     assert "Successfully generated image" in result
 
 
 def test_byteplus_agentplan_aspect_ratio_21_9_and_unmapped_rejected(monkeypatch, tmp_path):
     monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    png_bytes = _make_test_image("PNG")
     captured = []
 
     def fake_post(url, headers=None, json=None, **kwargs):
         captured.append(json)
-        return FakeResp({"data": [{"b64_json": base64.b64encode(b"wide-img").decode()}]})
+        return FakeResp({"data": [{"b64_json": base64.b64encode(png_bytes).decode()}]})
 
     monkeypatch.setattr(img.requests, "post", fake_post)
     prompt_file = tmp_path / "prompt.txt"
@@ -935,13 +948,8 @@ def test_byteplus_agentplan_aspect_ratio_21_9_and_unmapped_rejected(monkeypatch,
 
 
 def test_byteplus_agentplan_converts_mismatched_png_for_jpg_slide_chain(monkeypatch, tmp_path):
-    from io import BytesIO
-    from PIL import Image
-
     monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
-    png_buf = BytesIO()
-    Image.new("RGBA", (8, 6), (20, 120, 220, 255)).save(png_buf, format="PNG")
-    png_bytes = png_buf.getvalue()
+    png_bytes = _make_test_image("PNG")
     assert png_bytes.startswith(b"\x89PNG\r\n\x1a\n")
 
     posts = []
@@ -968,16 +976,48 @@ def test_byteplus_agentplan_converts_mismatched_png_for_jpg_slide_chain(monkeypa
     assert base64.b64decode(ref_data_url.split(",", 1)[1]).startswith(b"\xff\xd8\xff")
 
 
+@pytest.mark.parametrize(
+    "bad_bytes",
+    [
+        b"<html>not an image</html>",
+        _make_test_image("JPEG", size=(64, 64))[:120],
+    ],
+    ids=["non-image-payload", "truncated-jpeg"],
+)
+def test_byteplus_agentplan_rejects_corrupt_or_truncated_image_and_preserves_slide(
+    monkeypatch, tmp_path, bad_bytes
+):
+    monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
+    monkeypatch.setattr(
+        img.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp(
+            {"data": [{"b64_json": base64.b64encode(bad_bytes).decode()}]}
+        ),
+    )
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("slide update", encoding="utf-8")
+    existing_slide = _make_test_image("JPEG")
+    slide_path = tmp_path / "slide-01.jpg"
+    slide_path.write_bytes(existing_slide)
+
+    with pytest.raises(ValueError, match="invalid or corrupted image data"):
+        img.generate_image(str(prompt_file), [], str(slide_path), "16:9")
+
+    assert slide_path.read_bytes() == existing_slide
+
+
 def test_byteplus_agentplan_single_and_multi_reference_images_and_overrides(monkeypatch, tmp_path):
     monkeypatch.setenv("BYTEPLUS_AGENTPLAN_API_KEY", "bp-key")
     monkeypatch.setenv("BYTEPLUS_AGENTPLAN_BASE_URL", "https://plan.example/api/plan/v3/")
     monkeypatch.setenv("BYTEPLUS_AGENTPLAN_IMAGE_MODEL", "dola-seedream-5.5")
     monkeypatch.setenv("BYTEPLUS_AGENTPLAN_IMAGE_SIZE", "2K")
+    png_bytes = _make_test_image("PNG")
     posts = []
 
     def fake_post(url, headers=None, json=None, **kwargs):
         posts.append((url, json))
-        return FakeResp({"data": [{"b64_json": base64.b64encode(b"ok").decode()}]})
+        return FakeResp({"data": [{"b64_json": base64.b64encode(png_bytes).decode()}]})
 
     monkeypatch.setattr(img.requests, "post", fake_post)
     prompt_file = tmp_path / "prompt.txt"

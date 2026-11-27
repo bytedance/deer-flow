@@ -185,38 +185,54 @@ def _detect_image_format(image_bytes: bytes) -> str | None:
     return None
 
 
-def _convert_image_for_output(image_bytes: bytes, output_file: str) -> bytes:
-    """Convert recognized image bytes when the provider codec mismatches output_file."""
-    target_formats = {
-        ".jpg": "JPEG",
-        ".jpeg": "JPEG",
-        ".png": "PNG",
-        ".webp": "WEBP",
-    }
-    target = target_formats.get(os.path.splitext(output_file)[1].lower())
-    actual = _detect_image_format(image_bytes)
-    if not target or not actual or actual == target:
-        return image_bytes
+def _validate_and_prepare_image(image_bytes: bytes, output_file: str) -> bytes:
+    """Validate decoded image bytes and convert format to match ``output_file``.
 
+    Runs both container verification (``verify``) and full pixel decoding
+    (``load``) before ``output_file`` is opened so non-image payloads and
+    truncated/corrupted responses never overwrite an existing file.
+    """
     from io import BytesIO
-    from PIL import Image  # lazy import: keeps module importable without Pillow
+    from PIL import Image, ImageFile  # lazy import: keeps module importable without Pillow
 
-    with Image.open(BytesIO(image_bytes)) as img:
-        if target == "JPEG":
-            if img.mode in {"RGBA", "LA"} or (
-                img.mode == "P" and "transparency" in img.info
-            ):
-                rgba = img.convert("RGBA")
-                background = Image.new("RGB", rgba.size, (255, 255, 255))
-                background.paste(rgba, mask=rgba.getchannel("A"))
-                converted = background
+    previous_truncated = ImageFile.LOAD_TRUNCATED_IMAGES
+    ImageFile.LOAD_TRUNCATED_IMAGES = False
+    try:
+        with Image.open(BytesIO(image_bytes)) as img:
+            actual = (img.format or "").upper()
+            img.verify()
+        with Image.open(BytesIO(image_bytes)) as img:
+            img.load()
+            target_formats = {
+                ".jpg": "JPEG",
+                ".jpeg": "JPEG",
+                ".png": "PNG",
+                ".webp": "WEBP",
+            }
+            target = target_formats.get(os.path.splitext(output_file)[1].lower())
+            if not target or actual == target:
+                return image_bytes
+            if target == "JPEG":
+                if img.mode in {"RGBA", "LA"} or (
+                    img.mode == "P" and "transparency" in img.info
+                ):
+                    rgba = img.convert("RGBA")
+                    background = Image.new("RGB", rgba.size, (255, 255, 255))
+                    background.paste(rgba, mask=rgba.getchannel("A"))
+                    converted = background
+                else:
+                    converted = img.convert("RGB")
             else:
-                converted = img.convert("RGB")
-        else:
-            converted = img
-        buffer = BytesIO()
-        converted.save(buffer, format=target)
-        return buffer.getvalue()
+                converted = img
+            buffer = BytesIO()
+            converted.save(buffer, format=target)
+            return buffer.getvalue()
+    except Exception as exc:
+        raise ValueError(
+            f"Provider returned invalid or corrupted image data: {exc}"
+        ) from exc
+    finally:
+        ImageFile.LOAD_TRUNCATED_IMAGES = previous_truncated
 
 
 def _to_data_url(image_path: str) -> str:
@@ -485,7 +501,7 @@ def _write_openai_image(
         raise ValueError("Provider returned an empty image")
 
     if convert_to_extension:
-        image_bytes = _convert_image_for_output(image_bytes, output_file)
+        image_bytes = _validate_and_prepare_image(image_bytes, output_file)
 
     _ensure_output_dir(output_file)
     with open(output_file, "wb") as f:

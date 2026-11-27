@@ -674,6 +674,55 @@ class TestLLMStep:
         assert result.provider.extra_config["supports_thinking"] is False
         assert "when_thinking_enabled" not in result.provider.extra_config
 
+    def test_byteplus_agentplan_sandbox_sharing_is_opt_in(self, monkeypatch):
+        provider = next(p for p in LLM_PROVIDERS if p.name == "byteplus_agentplan")
+        asked: list[tuple[str, bool]] = []
+
+        monkeypatch.setattr(llm_step, "LLM_PROVIDERS", [provider])
+        monkeypatch.setattr(llm_step, "ask_choice", lambda *_args, **_kwargs: 0)
+        monkeypatch.setattr(llm_step, "ask_secret", lambda _prompt: "bp-secret")
+        monkeypatch.setattr(llm_step, "print_header", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(llm_step, "print_info", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(llm_step, "print_success", lambda *_args, **_kwargs: None)
+
+        def decline(prompt, default=True):
+            asked.append((prompt, default))
+            return False
+
+        monkeypatch.setattr(llm_step, "ask_yes_no", decline)
+        declined = llm_step.run_llm_step()
+
+        assert asked == [("Share BYTEPLUS_AGENTPLAN_API_KEY with sandboxes?", False)]
+        assert declined.sandbox_env_vars == ()
+        declined_cfg = yaml.safe_load(
+            build_minimal_config(
+                provider_use=declined.provider.use,
+                model_name=declined.model_name,
+                display_name=declined.provider.display_name,
+                api_key_field=declined.provider.api_key_field,
+                env_var=declined.provider.env_var,
+                extra_model_config=declined.provider.extra_config_for(declined.model_name),
+                sandbox_env_vars=declined.sandbox_env_vars or None,
+            )
+        )
+        assert "environment" not in declined_cfg["sandbox"]
+
+        monkeypatch.setattr(llm_step, "ask_yes_no", lambda *_args, **_kwargs: True)
+        accepted = llm_step.run_llm_step()
+        assert accepted.sandbox_env_vars == ("BYTEPLUS_AGENTPLAN_API_KEY",)
+        accepted_cfg = yaml.safe_load(
+            build_minimal_config(
+                provider_use=accepted.provider.use,
+                model_name=accepted.model_name,
+                display_name=accepted.provider.display_name,
+                api_key_field=accepted.provider.api_key_field,
+                env_var=accepted.provider.env_var,
+                extra_model_config=accepted.provider.extra_config_for(accepted.model_name),
+                sandbox_env_vars=accepted.sandbox_env_vars or None,
+            )
+        )
+        assert accepted_cfg["sandbox"]["environment"]["BYTEPLUS_AGENTPLAN_API_KEY"] == "$BYTEPLUS_AGENTPLAN_API_KEY"
+
 
 class TestChannelsStep:
     def test_returns_selected_channel_keys(self, monkeypatch):

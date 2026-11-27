@@ -17,7 +17,7 @@ description: Integration guide for BytePlus Agent Plan (Personal & Enterprise) a
 
 ### Quick Setup (`make setup`)
 
-Run `make setup` and choose **BytePlus Agent Plan**. The wizard automatically writes both your LLM model profile and `sandbox.environment.BYTEPLUS_AGENTPLAN_API_KEY`, enabling `image-generation` (Seedream), `ppt-generation`, and `video-generation` (Seedance 2.5) with one key.
+Run `make setup` and choose **BytePlus Agent Plan**. The wizard writes your LLM model profile and asks whether to also share `BYTEPLUS_AGENTPLAN_API_KEY` with `sandbox.environment` (default: No) so `image-generation` (Seedream), `ppt-generation`, and `video-generation` (Seedance 2.5) can reuse the same key inside sandboxes.
 
 ### Manual `config.yaml` Configuration
 
