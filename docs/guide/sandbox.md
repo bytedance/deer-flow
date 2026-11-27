@@ -115,14 +115,14 @@ generated outputs back to thread storage with the same alias and path checks.
 See its [configuration](../../backend/docs/CONFIGURATION.md#sandbox).
 
 The optional [BytePlus veFaaS Cloud Sandbox provider](../../backend/packages/harness/deerflow/community/vefaas_sandbox/README.md)
-runs each user/thread scope in a serverless [BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas)
+runs each user/thread scope in a serverless [BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
 AIO sandbox over the veFaaS OpenAPI (`Version=2024-06-06`, SigV4) with no extra
 cloud SDK dependency. It supports per-agent skill isolation, optional
 thread-scoped TOS mounts or automatic output mirroring on release, speculative
 `sandbox.prewarm`, opt-in idle pause/resume, thread-scoped snapshots with
 retention pruning, and asynchronous image precaching. Multi-worker gateways
 sharing one veFaaS sandbox application should enable `sandbox.ownership.type: redis`.
-See the [veFaaS documentation](https://docs.byteplus.com/en/docs/vefaas/what-is-vefaas)
+See the [veFaaS documentation](https://docs.byteplus.com/en/docs/vefaas/what-is-vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
 and [provider README](../../backend/packages/harness/deerflow/community/vefaas_sandbox/README.md)
 for setup and snapshot retention guidance.
 
