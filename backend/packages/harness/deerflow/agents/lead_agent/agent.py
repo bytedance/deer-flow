@@ -1124,14 +1124,6 @@ def _assemble_lead_agent(
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
-    # thinking / reasoning precedence: explicit request > custom agent > mode preset > runtime
-    # default (issue #4336). See ``_resolve_runtime_option`` for the falsy-vs-unset
-    # handling.
-    agent_thinking = getattr(agent_config, "thinking_enabled", None) if agent_config else None
-    agent_reasoning = getattr(agent_config, "reasoning_effort", None) if agent_config else None
-    thinking_enabled = bool(_resolve_runtime_option(cfg, "thinking_enabled", agent_thinking, True))
-    reasoning_effort = _resolve_runtime_option(cfg, "reasoning_effort", agent_reasoning, None)
-
     # Per-agent sampling overrides (temperature / max_tokens) layered on top of
     # the resolved model profile (issue #4336). None when the agent set none.
     agent_model_settings = getattr(agent_config, "model_settings", None) if agent_config else None
@@ -1164,6 +1156,10 @@ def _assemble_lead_agent(
     # unsupported model turns it off, and a restricted effort vocabulary maps
     # the generic value onto the provider's own.
     reasoning_contract = resolve_reasoning_contract(model_config)
+    # Only an explicit request to disable thinking should reach a required model's rejection policy.
+    inherited_thinking = True if reasoning_contract.thinking_required else getattr(agent_config, "thinking_enabled", None)
+    thinking_enabled = bool(_resolve_runtime_option(cfg, "thinking_enabled", inherited_thinking, True))
+    reasoning_effort = _resolve_runtime_option(cfg, "reasoning_effort", getattr(agent_config, "reasoning_effort", None), None)
     resolved_reasoning = resolve_reasoning_request(reasoning_contract, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort)
     if "thinking_unsupported" in resolved_reasoning.adjustments:
         logger.warning(f"Thinking mode is enabled but model '{model_name}' does not support it; fallback to non-thinking mode.")
