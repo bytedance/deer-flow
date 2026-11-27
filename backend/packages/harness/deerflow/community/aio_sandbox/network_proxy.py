@@ -16,6 +16,7 @@ import json
 import os
 import socket
 import sqlite3
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -25,6 +26,18 @@ MAX_HEADER_BYTES = 65_536
 POLICY_DB = Path(os.environ.get("DEERFLOW_POLICY_DB", "/tmp/deerflow-network-policy.sqlite3"))
 RELAY_AUTH_HEADER = "X-DeerFlow-Relay-Token"
 RELAY_TOKEN_ENV = "DEERFLOW_RELAY_TOKEN"
+# The policy database lives on the proxy container's read-only root filesystem,
+# whose only writable space is a 16 MiB /tmp tmpfs. Events are kept bounded so a
+# sandbox that requests many unique hosts cannot fill that tmpfs and break
+# denial recording and approval handling for the rest of its lifetime. At the
+# real row size (roughly 140 bytes) this holds the database well under 1 MiB.
+MAX_EVENTS = 4000
+# The request line has no token-length limit of its own, so a method can be
+# nearly MAX_HEADER_BYTES long. Persisting it verbatim would let a few hundred
+# rows fill the tmpfs long before MAX_EVENTS is reached. The longest standard
+# method is CONNECT (7 characters); anything longer is kept only as a prefix
+# for the approval card.
+MAX_METHOD_CHARS = 16
 
 
 class _InvalidHttpRequest(ValueError):
@@ -54,10 +67,15 @@ def _connect_db() -> sqlite3.Connection:
             method TEXT NOT NULL,
             created_at REAL NOT NULL,
             surfaced INTEGER NOT NULL DEFAULT 0,
-            decision TEXT
+            decision TEXT,
+            decided_at REAL
         )
         """
     )
+    # Databases created before decided_at existed keep their rows; retention
+    # falls back to created_at for them.
+    if "decided_at" not in {row[1] for row in db.execute("PRAGMA table_info(events)")}:
+        db.execute("ALTER TABLE events ADD COLUMN decided_at REAL")
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS grants (
@@ -89,11 +107,44 @@ def domain_matches(host: str, rule: str) -> bool:
     return host == rule
 
 
+def _embedded_ipv4(address: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
+    """Return the IPv4 address an IPv6 spelling carries, if any.
+
+    Mirrors the embedded-IPv4 unwrapping in
+    ``deerflow.community.url_safety._is_public_url_host``, plus the
+    IPv4-translated prefix that url_safety rejects via is_reserved. The proxy
+    module is copied into a sidecar as a single file, so it cannot import
+    that module (which pulls pydantic).
+    """
+    embedded = address.ipv4_mapped or address.sixtofour
+    if embedded is None and address in ipaddress.ip_network("64:ff9b::/96"):
+        embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+    if embedded is None and address in ipaddress.ip_network("::ffff:0:0:0/96"):
+        embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+    if embedded is None and 1 < int(address) < 1 << 32:
+        embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+    return embedded
+
+
 def address_is_public(address: str, *, allow_synthetic_dns: bool = False) -> bool:
     try:
         parsed = ipaddress.ip_address(address.split("%", 1)[0])
     except ValueError:
         return False
+    if isinstance(parsed, ipaddress.IPv6Address):
+        # The RFC 8215 local-use translation prefix must never egress. CPython
+        # classifies it as non-global only from 3.12.4 (gh-113171), and the
+        # sidecar image can pin an older interpreter, so reject it explicitly
+        # instead of relying on the interpreter's classification.
+        if parsed in ipaddress.ip_network("64:ff9b:1::/48"):
+            return False
+        embedded = _embedded_ipv4(parsed)
+        # NAT64 (64:ff9b::/96) and IPv4-compatible (::a.b.c.d) spellings report
+        # is_global, so the flags below cannot catch a loopback, private or
+        # metadata address carried inside them. Screen the IPv4 the spelling
+        # actually reaches.
+        if embedded is not None and not address_is_public(str(embedded), allow_synthetic_dns=allow_synthetic_dns):
+            return False
     if parsed.is_global and not parsed.is_multicast and not getattr(parsed, "is_site_local", False):
         return True
     # Docker Desktop's DNS inhibition layer maps public names into the
@@ -136,8 +187,69 @@ def policy_allows(host: str, port: int, now: float | None = None) -> bool:
     return _is_granted(host, port, now)
 
 
+def _prune_events(db: sqlite3.Connection) -> None:
+    """Bound the size of the events table so it cannot fill the /tmp tmpfs.
+
+    Runs inside the caller's write transaction, so it adds no extra lock
+    acquisition against the Gateway's CLI reads of the same database.
+
+    Rows fall into three classes, each pruned in its own step:
+
+    * Superseded rows are noise. ``pending_events`` supersedes every unsurfaced
+      row it does not surface, so a flood of unique hosts collapses into one
+      card plus a batch of superseded rows. ``decide`` already reports ``False``
+      for a superseded request, so dropping them up front changes no outcome.
+      This is what keeps the flood from crowding out real, still-undecided
+      denials.
+    * Decided rows are history. The newest ``MAX_EVENTS`` are kept, ordered by
+      when the decision was applied (``decided_at``), not when the destination
+      was denied: an old card answered just now must survive a resumed run
+      re-applying its decision. Pending approvals reserve capacity first, so a
+      full history trims itself rather than evicting an unsurfaced denial and
+      reversing the oldest-first order ``pending_events`` surfaces cards in.
+    * If the table is still over ``MAX_EVENTS`` after trimming history, drop
+      unsurfaced undecided rows oldest first. They have no open approval card.
+
+    A row that has been surfaced but not yet decided is the card a user is
+    looking at. It is never deleted -- removing it would leave their decision
+    pointing at a request_id that no longer resolves, and enough of them to
+    matter requires one poll per tool call.
+
+    Pruning runs before the insert so an already-full database recovers instead
+    of failing on every subsequent write.
+    """
+    total = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    if total <= MAX_EVENTS:
+        return
+    db.execute("DELETE FROM events WHERE decision = 'superseded'")
+    # Pending approvals reserve capacity: trim resolved history to the room
+    # they leave, so a full history trims itself instead of evicting an
+    # unsurfaced denial and reversing the oldest-first order pending_events
+    # surfaces cards in.
+    pending = db.execute("SELECT COUNT(*) FROM events WHERE decision IS NULL").fetchone()[0]
+    keep_decided = max(MAX_EVENTS - pending, 0)
+    # History is ordered by when the decision was applied, so an old card
+    # answered just now survives a resumed run re-applying its decision. The
+    # most recent decision is always kept, even when pending rows alone fill
+    # the cap: deleting a just-applied decision would make its replay fail.
+    db.execute(
+        "DELETE FROM events WHERE decision IS NOT NULL AND request_id NOT IN (SELECT request_id FROM events WHERE decision IS NOT NULL ORDER BY COALESCE(decided_at, created_at) DESC LIMIT ?)",
+        (max(keep_decided, 1),),
+    )
+    overflow = db.execute("SELECT COUNT(*) FROM events").fetchone()[0] - MAX_EVENTS
+    if overflow > 0:
+        db.execute(
+            "DELETE FROM events WHERE request_id IN ( SELECT request_id FROM events WHERE surfaced = 0 AND decision IS NULL ORDER BY created_at LIMIT ?)",
+            (overflow,),
+        )
+
+
 def record_denial(host: str, port: int, method: str) -> str:
     now = time.time()
+    # Truncate before persisting so the row-count cap also bounds bytes: an
+    # oversized method stored verbatim could fill the tmpfs in a few hundred
+    # rows. The denial response itself is unaffected.
+    method = method[:MAX_METHOD_CHARS]
     with _connect_db() as db:
         # Serialize the read-before-insert deduplication so simultaneous proxy
         # requests cannot create multiple approval cards for one destination.
@@ -148,6 +260,10 @@ def record_denial(host: str, port: int, method: str) -> str:
         ).fetchone()
         if recent is not None:
             return str(recent[0])
+        # Prune after the deduplication lookup, before the insert: pruning first
+        # could drop the row this request should have matched, and pruning before
+        # the insert still lets an already-full database recover.
+        _prune_events(db)
         request_id = str(uuid.uuid4())
         db.execute(
             "INSERT INTO events(request_id, host, port, method, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -171,7 +287,7 @@ def pending_events() -> list[dict[str, object]]:
             # One Human Input card makes one destination decision. Close any
             # sibling denials from the same tool call so a later retry records
             # a fresh event instead of leaving an invisible surfaced request.
-            db.execute("UPDATE events SET decision = 'superseded' WHERE surfaced = 0 AND decision IS NULL")
+            db.execute("UPDATE events SET decision = 'superseded', decided_at = ? WHERE surfaced = 0 AND decision IS NULL", (time.time(),))
     if row is None:
         return []
     return [{"request_id": row[0], "host": row[1], "port": row[2], "method": row[3], "created_at": row[4]}]
@@ -181,7 +297,7 @@ def deny_pending_events() -> int:
     """Atomically deny every event that has not been surfaced to a user."""
     with _connect_db() as db:
         db.execute("BEGIN IMMEDIATE")
-        result = db.execute("UPDATE events SET surfaced = 1, decision = 'deny' WHERE surfaced = 0 AND decision IS NULL")
+        result = db.execute("UPDATE events SET surfaced = 1, decision = 'deny', decided_at = ? WHERE surfaced = 0 AND decision IS NULL", (time.time(),))
         return max(result.rowcount, 0)
 
 
@@ -205,7 +321,7 @@ def decide(request_id: str, decision: str, ttl: int) -> bool:
             )
         elif decision != "deny":
             return False
-        db.execute("UPDATE events SET decision = ? WHERE request_id = ?", (decision, request_id))
+        db.execute("UPDATE events SET decision = ?, decided_at = ? WHERE request_id = ?", (decision, time.time(), request_id))
         return True
 
 
@@ -521,12 +637,29 @@ async def handle_proxy(reader: asyncio.StreamReader, writer: asyncio.StreamWrite
     else:
         await _reject(writer, "403 Forbidden", "IP-literal destinations are not allowed by sandbox network policy")
         return
-    if not policy_allows(host, port):
+    try:
+        allowed = policy_allows(host, port)
+    except sqlite3.Error as exc:
+        # The policy lookup reads grants and may rewrite an expired one, so it
+        # can fail when the tmpfs holding the database is full. Fail closed
+        # without recording: a transient lookup failure must not create an
+        # approval card for a destination that may already hold a grant, since
+        # answering it with "Allow temporarily" would replace a sandbox-lifetime
+        # grant with an expiring one.
+        print(f"network policy lookup for {host}:{port} failed: {exc}", file=sys.stderr)
+        await _reject(writer, "403 Forbidden", f"Sandbox network policy denied {host}:{port}")
+        return
+    if not allowed:
+        detail = ""
         if os.environ.get("DEERFLOW_RECORD_DENIALS") == "1":
-            request_id = record_denial(host, port, method)
-            detail = f" (request {request_id})"
-        else:
-            detail = ""
+            # Recording is best effort. An exception escaping this handler would
+            # close the connection without a response, so a sandbox would see a
+            # reset where the policy meant a clean denial. sqlite3 errors are not
+            # OSError subclasses, so catch them explicitly.
+            try:
+                detail = f" (request {record_denial(host, port, method)})"
+            except sqlite3.Error as exc:
+                print(f"network policy denial for {host}:{port} was not recorded: {exc}", file=sys.stderr)
         await _reject(writer, "403 Forbidden", f"Sandbox network policy denied {host}:{port}{detail}")
         return
     resolved = await resolve_public(host, port)

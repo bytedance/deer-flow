@@ -124,17 +124,14 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
   --aspect-ratio 16:9
 ```
 
-4. **Continue for all remaining slides**, always referencing the previous slide:
+4. **Continue for all remaining slides**. Use the previous slide as a reference only after the script reports that it generated that slide. A failed attempt can leave an older image at the same path.
 
 ```bash
-# Slide 3 references slide 2
 python /mnt/skills/public/image-generation/scripts/generate.py \
   --prompt-file /mnt/user-data/workspace/slide-03-prompt.json \
   --reference-images /mnt/user-data/outputs/slide-02.jpg \
   --output-file /mnt/user-data/outputs/slide-03.jpg \
-  --aspect-ratio 16:9
-
-# Slide 4 references slide 3
+  --aspect-ratio 16:9 &&
 python /mnt/skills/public/image-generation/scripts/generate.py \
   --prompt-file /mnt/user-data/workspace/slide-04-prompt.json \
   --reference-images /mnt/user-data/outputs/slide-03.jpg \

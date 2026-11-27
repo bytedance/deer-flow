@@ -6,6 +6,7 @@ DeerFlow supports multiple sandbox execution modes:
 - **Local Workspace** (files through workspace tools and configured mounts)
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
+- **Cloud Sandboxes** (serverless remote providers including [BytePlus veFaaS](../../backend/packages/harness/deerflow/community/vefaas_sandbox/README.md), E2B, OpenSandbox, boxd, and Tenki)
 
 When a provider returns a structured exit code, Bash tool status follows that
 code, including timeout failures. Providers that return plain text, including
@@ -112,6 +113,18 @@ runs each user/thread scope in an isolated boxd machine. A new machine receives
 the thread's files and skills before it is handed out, and release copies
 generated outputs back to thread storage with the same alias and path checks.
 See its [configuration](../../backend/docs/CONFIGURATION.md#sandbox).
+
+The optional [BytePlus veFaaS Cloud Sandbox provider](../../backend/packages/harness/deerflow/community/vefaas_sandbox/README.md)
+runs each user/thread scope in a serverless [BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas)
+AIO sandbox over the veFaaS OpenAPI (`Version=2024-06-06`, SigV4) with no extra
+cloud SDK dependency. It supports per-agent skill isolation, optional
+thread-scoped TOS mounts or automatic output mirroring on release, speculative
+`sandbox.prewarm`, opt-in idle pause/resume, thread-scoped snapshots with
+retention pruning, and asynchronous image precaching. Multi-worker gateways
+sharing one veFaaS sandbox application should enable `sandbox.ownership.type: redis`.
+See the [veFaaS documentation](https://docs.byteplus.com/en/docs/vefaas/what-is-vefaas)
+and [provider README](../../backend/packages/harness/deerflow/community/vefaas_sandbox/README.md)
+for setup and snapshot retention guidance.
 
 The [sandbox benchmark](../../backend/scripts/benchmark/sandbox/README.md#opensandbox)
 also supports OpenSandbox cold acquisition, warm reuse and concurrent scopes,
@@ -460,7 +473,7 @@ This remains a best-effort scan, not an atomic filesystem snapshot.
 When you reopen the destination conversation, the Artifacts sidebar restores
 files from confirmed handoffs.
 
-Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. Long artifact lists scroll within the panel on desktop and in the mobile drawer, keeping every file reachable. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. A delayed background read cannot replace a successfully saved revision in the editor; cancelled preview and full-file reads also abort their HTTP requests. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
+Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. The file card lists only the string paths in the call's `filepaths`, so a malformed entry does not hide the valid files. When the backend rejects a call, for example because a path is outside `/mnt/user-data/outputs`, neither the file card nor the artifact panel lists its paths. Long artifact lists scroll within the panel on desktop and in the mobile drawer, keeping every file reachable. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. A delayed background read cannot replace a successfully saved revision in the editor; cancelled preview and full-file reads also abort their HTTP requests. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
 
 Unsaved artifact edits survive switching chats, workspace pages, or visiting the
 home page and returning in the same browser tab. Drafts stay in memory for the

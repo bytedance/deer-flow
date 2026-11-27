@@ -128,7 +128,12 @@ class RunStore(abc.ABC):
         """
         raise NotImplementedError("Run inputs are unavailable in this store")
 
-    async def list_input_runs(self, thread_id, *, user_id=None, limit=10):
+    async def list_input_runs(self, thread_id, *, user_id=None, limit=10, ignore_scope_case=False):
+        """List runs with input receipts, newest first. None removes the limit.
+
+        Filesystem reconciliation can ignore ASCII case in path identifiers to
+        preserve receipts that alias the same directory on some volumes.
+        """
         raise NotImplementedError("Run inputs are unavailable in this store")
 
     async def active_input_run(self, thread_id, *, user_id=None):

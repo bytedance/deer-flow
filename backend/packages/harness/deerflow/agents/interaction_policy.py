@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from deerflow.subagents.config import SubagentConfig
 
 ASK_CLARIFICATION_TOOL_NAME = "ask_clarification"
 
@@ -65,6 +68,16 @@ class RunInteractionPolicy:
         if self.allows_clarification:
             return frozenset()
         return frozenset({ASK_CLARIFICATION_TOOL_NAME})
+
+    def apply_to_subagent(self, config: SubagentConfig) -> SubagentConfig:
+        """Snapshot unattended guidance and tool restrictions for child execution."""
+        if self.allows_clarification:
+            return config
+        return replace(
+            config,
+            system_prompt="\n\n".join(filter(None, (self.clarification_system, config.system_prompt))),
+            disallowed_tools=list(dict.fromkeys([*(config.disallowed_tools or []), *sorted(self.disabled_tool_names)])),
+        )
 
     @property
     def thinking_guidance(self) -> str:

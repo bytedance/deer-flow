@@ -99,6 +99,29 @@ def test_strip_duplicate_title_heading_variants(syspath):
     assert strip_duplicate_title_heading("正文没有标题", "摘要") == "正文没有标题"
     # A heading that does not restate the title is content, not a duplicate.
     assert strip_duplicate_title_heading("# 其他标题\n正文", "摘要") == "# 其他标题\n正文"
+    assert strip_duplicate_title_heading("# C\n正文", "C#") == "# C\n正文"
+    assert strip_duplicate_title_heading("# C#\n正文", "C#") == "正文"
+    assert strip_duplicate_title_heading("# C#\n正文", "C") == "# C#\n正文"
+    assert strip_duplicate_title_heading("# C# ###\n正文", "C#") == "正文"
+    assert strip_duplicate_title_heading("# A B\n正文", "A B") == "正文"
+
+
+@pytest.mark.parametrize(
+    ("title", "opening", "body"),
+    [
+        ("C#", "# C", "# C\n正文"),
+        ("Issue 42", "### # Issue 42", "### # Issue 42\n正文"),
+        ("#42", "# # 42", "正文"),
+        ("Issue 42", "### Issue 42 # ###", "### Issue 42 # ###\n正文"),
+    ],
+)
+def test_assembly_handles_literal_hashes_in_headings(load, title, opening, body):
+    handle = handler(load())
+    save(handle, 1, title, f"{opening}\n正文")
+
+    result = assemble(handle)
+
+    assert result.artifact["document"] == f"## {title}\n\n{body}\n"
 
 
 def test_assemble_document_counts_stripped_bodies(syspath):

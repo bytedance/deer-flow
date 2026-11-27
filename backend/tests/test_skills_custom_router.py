@@ -158,6 +158,49 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
     assert refresh_calls == [("refresh", "default")]
 
 
+@pytest.mark.parametrize("endpoint", ["thread", "upload"])
+@pytest.mark.parametrize("static_enabled", [True, False])
+@pytest.mark.parametrize("invalid_member", ["directory", "crc"])
+def test_install_skill_archive_with_invalid_member_returns_400(monkeypatch, tmp_path, endpoint, static_enabled, invalid_member):
+    skills_root = tmp_path / "skills"
+    (skills_root / "custom").mkdir(parents=True)
+    archive = tmp_path / "dir-skill.skill"
+    with zipfile.ZipFile(archive, "w") as zf:
+        if invalid_member == "directory":
+            zf.writestr("dir-skill/SKILL.md/notes.md", "# Notes\n")
+        else:
+            zf.writestr("dir-skill/SKILL.md", _skill_content("dir-skill"))
+            zf.writestr("dir-skill/references/guide.md", b"a" * 8192 + b"corruption-marker")
+    if invalid_member == "crc":
+        data = archive.read_bytes()
+        assert data.count(b"corruption-marker") == 1
+        archive.write_bytes(data.replace(b"corruption-marker", b"corruption-MARKER", 1))
+        with zipfile.ZipFile(archive) as zf:
+            assert zf.testzip() == "dir-skill/references/guide.md"
+
+    from deerflow.config.paths import Paths
+
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    storage = UserScopedSkillStorage("default", host_path=str(skills_root), app_config=SimpleNamespace(skill_scan=SimpleNamespace(enabled=static_enabled)))
+    monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: storage)
+    monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
+
+    app = _make_test_app(SimpleNamespace())
+    with TestClient(app) as client:
+        if endpoint == "thread":
+            response = client.post("/api/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/dir-skill.skill"})
+        else:
+            response = client.post("/api/skills/install/upload", files={"archive": (archive.name, archive.read_bytes(), "application/zip")})
+
+    # Invalid packages stay client errors for either endpoint and scan setting.
+    assert response.status_code == 400
+    assert response.json()["detail"] == ("Invalid skill: SKILL.md must be a file" if invalid_member == "directory" else "File is not a valid ZIP archive")
+    assert not _user_custom_dir(tmp_path, "default").joinpath("dir-skill").exists()
+
+
 def test_upload_skill_archive_installs_without_thread_workspace(monkeypatch, tmp_path):
     installed_paths: list[Path] = []
     refresh_calls: list[str] = []

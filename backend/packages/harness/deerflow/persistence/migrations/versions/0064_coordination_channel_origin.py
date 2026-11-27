@@ -4,8 +4,8 @@ import sqlalchemy as sa
 
 from deerflow.persistence.migrations._helpers import safe_add_column, safe_drop_column
 
-revision = "0063_coordination_channel_origin"
-down_revision = "0062_mcp_agent_grants"
+revision = "0064_coordination_channel_origin"
+down_revision = "0063_scheduled_task_subagents"
 branch_labels = None
 depends_on = None
 

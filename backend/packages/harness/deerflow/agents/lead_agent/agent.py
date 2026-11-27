@@ -168,14 +168,10 @@ def _subagent_release_policy(
 
 
 def _resolve_runtime_option(cfg: dict, key: str, agent_value, default):
-    """Resolve a runtime option with ``request > agent config > default`` precedence.
-
-    ``key in cfg`` (not ``cfg.get(key)``) distinguishes "request omitted the
-    field" from "request set it to a falsy value", so a request-supplied
-    ``thinking_enabled: false`` is honored instead of falling through to the
-    agent default. ``agent_value`` is used only when it is not ``None`` (a
-    custom agent's unset field means "do not override" — issue #4336).
-    """
+    """Resolve lead reasoning: explicit request, agent setting, mode preset, runtime default."""
+    mode_fields = cfg.get("mode_default_fields")
+    if agent_value is not None and isinstance(mode_fields, list) and key in mode_fields:
+        return agent_value
     if key in cfg:
         return cfg[key]
     if agent_value is not None:
@@ -1018,12 +1014,16 @@ def _assemble_lead_agent(
     skill_storage: SkillStorage | None = None,
 ) -> LeadAgentAssembly:
     # Lazy import to avoid circular dependency
+    from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
+
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent, update_agent
+    from deerflow.tools.builtins.batch_task_tool import restrict_batch_continuation
     from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
     from deerflow.tools.conversation import CONVERSATION_READER_CONTEXT_KEY
 
     cfg = _get_runtime_config(config)
+    batch_continuation_available = cfg.get(AGENT_RUNS_CONTEXT_KEY) is not None
     resolved_app_config = app_config
     mode = (config.get("configurable", {}) or {}).get(
         INTERNAL_CHECKPOINT_MODE_KEY,
@@ -1128,14 +1128,6 @@ def _assemble_lead_agent(
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
-    # thinking / reasoning precedence: request > custom agent default > runtime
-    # default (issue #4336). See ``_resolve_runtime_option`` for the falsy-vs-unset
-    # handling.
-    agent_thinking = getattr(agent_config, "thinking_enabled", None) if agent_config else None
-    agent_reasoning = getattr(agent_config, "reasoning_effort", None) if agent_config else None
-    thinking_enabled = bool(_resolve_runtime_option(cfg, "thinking_enabled", agent_thinking, True))
-    reasoning_effort = _resolve_runtime_option(cfg, "reasoning_effort", agent_reasoning, None)
-
     # Per-agent sampling overrides (temperature / max_tokens) layered on top of
     # the resolved model profile (issue #4336). None when the agent set none.
     agent_model_settings = getattr(agent_config, "model_settings", None) if agent_config else None
@@ -1168,6 +1160,10 @@ def _assemble_lead_agent(
     # unsupported model turns it off, and a restricted effort vocabulary maps
     # the generic value onto the provider's own.
     reasoning_contract = resolve_reasoning_contract(model_config)
+    # Only an explicit request to disable thinking should reach a required model's rejection policy.
+    inherited_thinking = True if reasoning_contract.thinking_required else getattr(agent_config, "thinking_enabled", None)
+    thinking_enabled = bool(_resolve_runtime_option(cfg, "thinking_enabled", inherited_thinking, True))
+    reasoning_effort = _resolve_runtime_option(cfg, "reasoning_effort", getattr(agent_config, "reasoning_effort", None), None)
     resolved_reasoning = resolve_reasoning_request(reasoning_contract, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort)
     if "thinking_unsupported" in resolved_reasoning.adjustments:
         logger.warning(f"Thinking mode is enabled but model '{model_name}' does not support it; fallback to non-thinking mode.")
@@ -1252,7 +1248,7 @@ def _assemble_lead_agent(
         )
         chat_model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False)
         raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config, chat_model=chat_model) + [setup_agent]
-        configured_tools = raw_tools
+        configured_tools = restrict_batch_continuation(raw_tools, available=batch_continuation_available)
         configured_tools = [tool for tool in configured_tools if tool.name not in interaction_policy.disabled_tool_names]
         authorization_candidates = [*configured_tools]
         if skill_setup.describe_skill_tool:
@@ -1423,7 +1419,7 @@ def _assemble_lead_agent(
             raise ValueError("A child model selection requires enabled subagents and a configured model name.")
         authorize_selected_model(selected_child_model, context=cfg, app_config=resolved_app_config)
         raw_tools = bind_selected_task_model(raw_tools, selected_child_model)
-    configured_tools = raw_tools + extra_tools
+    configured_tools = restrict_batch_continuation(raw_tools, available=batch_continuation_available) + extra_tools
     configured_tools = [tool for tool in configured_tools if tool.name not in interaction_policy.disabled_tool_names]
     authorization_candidates = [*configured_tools]
     if skill_setup.describe_skill_tool:

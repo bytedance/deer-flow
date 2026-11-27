@@ -56,6 +56,8 @@ and leading-zero identifiers while importing cell values into DuckDB. See the
 [data-analysis setup instructions](../../skills/public/data-analysis/SKILL.md)
 for the additional dependencies. Legacy `.xls` and CSV input do not require
 DuckDB extensions and can be analyzed offline with an empty extension cache.
+CSV paths passed to `--files` select individual files. For example, quote
+`'orders[1].csv'` in the shell to import that file even beside `orders1.csv`.
 The `.xlsx` reader continues to use the spatial extension. Legacy workbooks that
 cannot be opened are reported and skipped while other input files continue;
 analysis fails if no tables can be loaded.
@@ -188,9 +190,12 @@ validated or converted, and provider-specific format restrictions still apply.
 
 The [image-generation skill](../../skills/public/image-generation/SKILL.md#output-handling)
 decodes Gemini base64 image data before opening the output file,
-preserving an existing image when decoding fails. With the legacy MiniMax
-`/v1/image_generation` endpoint, a decode failure can still erase an existing
-output image. Use a fresh `--output-file` path to keep the previous image.
+preserving an existing image when decoding fails. For OpenAI-compatible providers,
+the CLI rejects an empty download or empty data URL before creating the output
+directory or opening the file. If a MiniMax prompt exceeds 1500 characters, the CLI
+reports the limit on stderr and exits with status 1 before contacting the provider.
+With the legacy MiniMax `/v1/image_generation` endpoint, a decode failure can still
+erase an existing output image. Use a fresh `--output-file` path to keep the previous image.
 
 The [music-generation skill](../../skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
 
@@ -305,7 +310,9 @@ The built-in `image-generation` skill supports Gemini, MiniMax, and
 OpenAI-compatible Images APIs. Select the latter with
 `IMAGE_GENERATION_PROVIDER=openai`, then configure
 `IMAGE_GENERATION_API_KEY`, `IMAGE_GENERATION_BASE_URL`, and
-`IMAGE_GENERATION_MODEL`. Run the skill's script in an isolated sandbox such as
+`IMAGE_GENERATION_MODEL`. If the explicitly selected provider's API key is missing,
+the CLI reports the missing key on stderr and exits with status 1.
+Run the skill's script in an isolated sandbox such as
 Docker/AIO, the Kubernetes provisioner, or E2B, and pass the variables through
 `sandbox.environment`. Sandbox commands do not inherit API keys from the Gateway
 process.
@@ -451,6 +458,8 @@ cd backend
 uv run python -m deerflow.skills.review.cli ../skills/public/data-analysis --format text --fail-on error --fail-on-incomplete
 ```
 
+Invalid YAML dates or timestamps in frontmatter produce a `structure.invalid-frontmatter` blocker in the review report. Quote a date-like metadata value if it is intended as literal text.
+
 Public-skill CI waivers are exact, expiring exceptions in `.github/skill-review-waivers.v1.json`. Because only the trusted base manifest can suppress a finding, a file-changing pull request can be preauthorized safely by first merging a manifest-only change that lists the reviewed future full-file SHA-256 in `preapproved_file_sha256s`; the file change can then land in a later pull request.
 
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. The bundled DDG, Brave, Tavily, SearXNG, and Serper search providers accept an optional `time_range` of `day`, `week`, `month`, or `year`; omitting it preserves existing search behavior. For DDG recency searches, DeerFlow excludes DDGS backends that ignore time limits. Swap anything. Add anything.
@@ -510,8 +519,8 @@ repeatedly starting a missing toolchain. A non-zero extraction exit falls back
 only for that document, because malformed or oversized input can fail while
 the toolchain remains healthy. The fallback keeps resolved article links in
 the returned Markdown.
-When extraction returns a whole document, the fallback uses the source HTML
-body consistently with or without a source URL. Calls without a source URL
+When extraction returns a whole document, the fallback parses the source HTML
+and uses its body with or without a source URL. Calls without a source URL
 retain relative link destinations and do not repeat the document title.
 Only explicit document-level wrappers trigger that fallback. An inline SVG
 chart's title or a document-tag example in a comment or script leaves the

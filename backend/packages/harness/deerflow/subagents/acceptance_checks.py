@@ -57,12 +57,11 @@ to the runtime hard gate so the model never conflates deterministic
 execution evidence with task acceptance.
 
 All functions are pure (sandbox IO only through the injected reader/prober);
-the async caller offloads the whole check with ``asyncio.to_thread``.
+the async caller offloads the whole check and drains it on cancellation.
 """
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import binascii
 import csv
@@ -461,7 +460,12 @@ def _probe_file_size(runtime: Any, resolved: str, thread_data: Mapping[str, Any]
     try:
         from deerflow.sandbox.tools import _resolve_local_read_path, ensure_sandbox_initialized, is_local_sandbox
 
+        sandbox = None if is_local_sandbox(runtime) else ensure_sandbox_initialized(runtime)
         if is_local_sandbox(runtime):
+            # Lazy acquisition followed a lexical scope check. Apply the
+            # same canonical scope check as for an initialized local sandbox.
+            if sandbox is not None and _resolve_scoped_path(resolved, thread_data, resolve_symlinks=True) is None:
+                return None
             host_path = _resolve_local_read_path(resolved, thread_data)
             if host_path == resolved:
                 # A mount-mapped virtual path: only the provider's mount
@@ -469,7 +473,7 @@ def _probe_file_size(runtime: Any, resolved: str, thread_data: Mapping[str, Any]
                 return None
             stat_result = os.stat(host_path)
             return stat_result.st_size if stat.S_ISREG(stat_result.st_mode) else None
-        sandbox = ensure_sandbox_initialized(runtime)
+        assert sandbox is not None
         root = "/".join(resolved.split("/")[:4])  # the /mnt/user-data/{workspace|outputs} mount root
         output = sandbox.execute_command(
             f"/usr/bin/env -i /bin/sh -c {shlex.quote(_SIZE_PROBE_INNER_SCRIPT)} probe {shlex.quote(resolved)} {shlex.quote(root)}",
@@ -805,23 +809,19 @@ def _check_file_leaf(
     if family == "file_csv_columns" and csv_columns is None:
         base["detail"] = "csv-columns requires a nonempty JSON array of unique nonempty strings"
         return base
+    if admission_denied is True:
+        base["detail"] = "sandbox access denied; file unverified"
+        return base
     local = is_local_sandbox(runtime)
-    if local:
-        if admission_denied is True:
-            # The async entry point already denied sandbox:execute on the
-            # event loop that owns loop-affine providers; do not reconstruct
-            # the provider in this worker thread.
+    if local and admission_denied is None:
+        from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
+
+        # Authorize before canonicalization or metadata probes.
+        try:
+            authorize_sandbox_execution(context=getattr(runtime, "context", None) or {}, app_config=safe_app_config())
+        except SandboxError:
             base["detail"] = "sandbox access denied; file unverified"
             return base
-        if admission_denied is None:
-            from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
-
-            # Authorize before canonicalization or metadata probes can disclose file existence or size.
-            try:
-                authorize_sandbox_execution(context=getattr(runtime, "context", None) or {}, app_config=safe_app_config())
-            except SandboxError:
-                base["detail"] = "sandbox access denied; file unverified"
-                return base
 
     # Symlink escapes are a local-sandbox concern (host-visible links); remote
     # providers resolve paths inside the sandbox where the parent cannot
@@ -2200,13 +2200,13 @@ def check_acceptance_criteria(
     """Check each decidable criterion against recorded execution evidence.
 
     Returns ``None`` when no usable criterion exists (caller stamps nothing).
-    Synchronous: the async call site offloads via ``asyncio.to_thread`` —
-    ``content_reader`` performs sandbox IO. The shared normalizer keeps the
+    The async call site offloads the synchronous sandbox IO and drains it
+    before cleanup. The shared normalizer keeps the
     checked list identical to the persisted and delegated list.
 
     ``admission_denied`` carries a ``sandbox:execute`` decision already made
     by an async entry point (``check_acceptance_criteria_async``): ``True``
-    denies every local file leaf without probing, ``False`` skips the worker
+    denies every file leaf without probing, ``False`` skips the worker
     gate, and ``None`` (default) runs the live gate per leaf. The worker never
     reconstructs a loop-affine authorization provider off the event loop.
     """
@@ -2270,20 +2270,21 @@ async def check_acceptance_criteria_async(
     Custom authorization providers may create loop-affine clients in
     ``__init__``, so the admission decision must be made here — before the
     checklist is offloaded to a worker — not reconstructed inside the worker.
-    A denied decision travels with the offloaded call and degrades every local
-    file leaf to UNVERIFIED without probing; the worker performs no second
-    provider construction.
+    The decision applies even when the sandbox kind is unknown before lazy
+    acquisition. Drain the checklist before the parent releases its sandbox.
     """
     from deerflow.authz.sandbox_authz import authorize_sandbox_execution_async, safe_app_config_async
     from deerflow.sandbox.exceptions import SandboxError
-    from deerflow.sandbox.tools import _SANDBOX_AUTHORIZATION_CHECKED, is_local_sandbox
+    from deerflow.sandbox.lease import run_sync_lifecycle_operation
+    from deerflow.sandbox.tools import _SANDBOX_AUTHORIZATION_CHECKED
 
     criteria = normalize_acceptance_criteria(acceptance_criteria)
     if not criteria:
         return None
 
     admission_denied: bool | None = None
-    if is_local_sandbox(runtime) and any(parse_file_criterion(criterion) is not None for criterion in criteria):
+    token = None
+    if any(parse_file_criterion(criterion) is not None for criterion in criteria):
         try:
             await authorize_sandbox_execution_async(
                 context=getattr(runtime, "context", None) or {},
@@ -2293,33 +2294,20 @@ async def check_acceptance_criteria_async(
             admission_denied = True
         else:
             admission_denied = False
+            token = _SANDBOX_AUTHORIZATION_CHECKED.set(True)
 
-    if admission_denied is False:
-        # Carry the allow decision into the worker: the content read's own
-        # re-authorization (ensure_sandbox_initialized) must not reconstruct a
-        # loop-affine provider off the loop. Context variables propagate into
-        # asyncio.to_thread workers, same handoff as sandbox tool scopes.
-        token = _SANDBOX_AUTHORIZATION_CHECKED.set(True)
-        try:
-            return await asyncio.to_thread(
-                check_acceptance_criteria,
-                criteria,
-                runtime=runtime,
-                thread_data=thread_data,
-                bash_executions=bash_executions,
-                admission_denied=False,
-            )
-        finally:
+    try:
+        return await run_sync_lifecycle_operation(
+            check_acceptance_criteria,
+            criteria,
+            runtime=runtime,
+            thread_data=thread_data,
+            bash_executions=bash_executions,
+            admission_denied=admission_denied,
+        )
+    finally:
+        if token is not None:
             _SANDBOX_AUTHORIZATION_CHECKED.reset(token)
-
-    return await asyncio.to_thread(
-        check_acceptance_criteria,
-        criteria,
-        runtime=runtime,
-        thread_data=thread_data,
-        bash_executions=bash_executions,
-        admission_denied=admission_denied,
-    )
 
 
 def validate_acceptance_verdict(value: object) -> AcceptanceVerdict | None:
