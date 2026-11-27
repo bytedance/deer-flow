@@ -12,6 +12,10 @@ Runs each DeerFlow thread sandbox on **BytePlus Function Service (veFaaS) Cloud 
 If shutdown overlaps an output mirror, it reports incomplete cleanup and keeps
 the sandbox available for the copy. Retry shutdown after release finishes.
 
+Uploaded skills are locked with `chmod -R -- a-w`, which is best-effort against
+`bash` under the shared `AioSandbox` container identity (often `root`); hard
+blocking is enforced by the `write_file`/`str_replace` tool guard.
+
 ## Configuration
 
 ```yaml
