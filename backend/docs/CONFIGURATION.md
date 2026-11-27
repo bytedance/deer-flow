@@ -272,6 +272,16 @@ models:
     temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
     supports_vision: true
 
+  - name: minimax-m3.1-flash
+    display_name: MiniMax M3.1 Flash
+    use: langchain_openai:ChatOpenAI
+    model: MiniMax-M3.1-Flash
+    api_key: $MINIMAX_API_KEY
+    base_url: https://api.minimax.io/v1
+    max_tokens: 4096
+    temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
+    supports_vision: true  # Thinking is always on (like M2.7); thinking.type=disabled is rejected
+
   - name: minimax-m2.7
     display_name: MiniMax M2.7
     use: langchain_openai:ChatOpenAI
