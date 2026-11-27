@@ -80,6 +80,7 @@ hook directory, so they never run a developer's or CI's Git hooks.
 - **One extension snapshot per run.** The run worker loads the extension set once
   and passes that same object to the task store and to delegated subagents, so a
   run never mixes two extension generations.
+- **Model request headers are host-owned.** `model_headers.py` inserts one middleware innermost (lead and subagent chains) and merges provider headers into `model_settings`. Providers are advisory: a failing or malformed one is skipped, never failing the model call.
 - **The assembly descriptor is the record of what was built.** It fingerprints the
   resolved model, prompt hash, tool list, middleware order and policies. A wrapper
   that hides a contribution's policy parameters makes two different assemblies

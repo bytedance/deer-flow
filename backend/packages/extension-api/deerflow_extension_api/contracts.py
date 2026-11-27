@@ -237,6 +237,73 @@ class MiddlewareContributor(Protocol):
         return ()
 
 
+# --- Model request headers --------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ModelRequestView:
+    """Read-only snapshot of the final model request, for header providers.
+
+    The host builds one view per provider attempt, after every
+    request-transforming middleware has run, so ``messages``, ``system_message``
+    and ``tools`` are what the provider is about to receive. Message and tool
+    objects are the host's live values: read them, never mutate them.
+    ``state`` is detached and deeply read-only.
+    """
+
+    #: Resolved model name reported by the chat model (``model_name`` / ``model``).
+    model_name: str | None = None
+    #: The live chat model instance (read-only use).
+    model: Any = field(default=None, compare=False, repr=False)
+    #: Messages excluding the system message.
+    messages: Sequence[Any] = field(default=(), compare=False, repr=False)
+    system_message: Any = field(default=None, compare=False, repr=False)
+    tools: Sequence[Any] = field(default=(), compare=False, repr=False)
+    #: Detached snapshot of the agent state for this call.
+    state: Mapping[str, Any] = field(default_factory=dict, compare=False, repr=False)
+    runtime: Any = field(default=None, compare=False, repr=False)
+
+    @property
+    def message_count(self) -> int:
+        """Number of non-system input messages in this request."""
+        return len(self.messages)
+
+    @property
+    def system_present(self) -> bool:
+        """Whether the request carries a system message."""
+        return self.system_message is not None
+
+    @property
+    def tool_names(self) -> tuple[str, ...]:
+        """Tool names bound to this request, in binding order."""
+        names: list[str] = []
+        for tool in self.tools:
+            name = getattr(tool, "name", None)
+            if name is None and isinstance(tool, dict):
+                name = tool.get("name") or (tool.get("function") or {}).get("name")
+            names.append(str(name or type(tool).__name__))
+        return tuple(names)
+
+
+class ModelHeadersProvider(Protocol):
+    """Supply HTTP transport headers for the final provider request.
+
+    The host calls this inline on the event loop right before the model call,
+    once per provider attempt (a retry re-enters it), and merges the returned
+    mapping into the request's ``extra_headers``. Only headers are accepted: a
+    provider cannot change messages, tools or any other request field, and the
+    request body stays byte-identical apart from the SDK's header handling.
+
+    Return ``None`` for "no headers for this request". Implementations must be
+    fast and must not perform blocking I/O. A provider that raises, or returns
+    values that are not ``str``, is skipped with a warning and the model call
+    proceeds (headers are advisory).
+    """
+
+    def provide_model_headers(self, view: ModelRequestView) -> Mapping[str, str] | None:
+        return None
+
+
 # --- Extension services ----------------------------------------------------
 
 
@@ -299,6 +366,15 @@ class ExtensionRegistry(Protocol):
         return False
 
     def middlewares(self, contributor: MiddlewareContributor) -> None:
+        return None
+
+    def model_headers(self, provider: ModelHeadersProvider) -> None:
+        """Register a provider of transport headers for main-line model requests.
+
+        Applied to every model call in the lead-agent and subagent chains, at
+        the final request, so per-call facts (message count, tools, state) are
+        available. Headers only; ``None`` from a provider means "no headers".
+        """
         return None
 
     def task_lifecycle(self, contributor: TaskLifecycleContributor) -> None:

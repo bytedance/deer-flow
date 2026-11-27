@@ -163,7 +163,7 @@ LangChain 要求中间件名称唯一，并把它用作追踪标识和图节点 
 
 ## 常见误区
 
-- **以为能修改调用。** 本版本的包装钩子只能观察。需要改写请求的行为请用 `extensions.middlewares`（见[自定义与扩展](/docs/harness/customization)），它不套包装器，但要接受它是受信任的配置而不是契约。
+- **以为能修改调用。** 本版本的包装钩子只能观察。需要改写请求的行为请用 `extensions.middlewares`（见[自定义与扩展](/docs/harness/customization)），它不套包装器，但要接受它是受信任的配置而不是契约。要逐请求添加 HTTP 传输头，请用 `registry.model_headers()`（见[模型请求头](/docs/harness/extensions/reference#模型请求头)），不要用包装钩子。
 - **只实现 `wrap_tool_call`。** Gateway 运行走异步路径，只有同步实现的中间件在那里什么也看不到。
 - **在 `contribute_middlewares()` 里做重活。** 每次组装 Agent 都会调用它。昂贵的客户端请在 `install()` 中构建一次，或在应用存储里惰性创建。
 - **依赖具体锚点。** 按你需要的保证选择放置位置，而不是按它今天恰好挨着哪个中间件。

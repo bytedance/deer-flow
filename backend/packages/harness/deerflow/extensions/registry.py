@@ -20,6 +20,7 @@ from deerflow_extension_api import (
     ExtensionData,
     ExtensionService,
     MiddlewareContributor,
+    ModelHeadersProvider,
     SystemModelCallObserver,
     TaskLifecycleContributor,
 )
@@ -41,6 +42,7 @@ class LoadedExtensions:
 
     app_store: ExtensionData
     middleware_contributors: tuple[tuple[str, MiddlewareContributor], ...] = ()
+    model_headers: tuple[tuple[str, ModelHeadersProvider], ...] = ()
     task_lifecycle: tuple[tuple[str, TaskLifecycleContributor], ...] = ()
     system_model_observers: tuple[tuple[str, SystemModelCallObserver], ...] = ()
     agent_assembly_observers: tuple[tuple[str, AgentAssemblyObserver], ...] = ()
@@ -63,6 +65,7 @@ class LoadedExtensions:
     # Precomputed attributes, not methods: hook sites read one attribute to
     # short-circuit, so the zero-extension path constructs nothing.
     has_middleware_contributors: bool = False
+    has_model_headers: bool = False
     has_task_lifecycle: bool = False
     has_system_model_observers: bool = False
     has_agent_assembly_observers: bool = False
@@ -80,6 +83,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
 
     def __init__(self) -> None:
         self._middlewares: list[_Entry] = []
+        self._model_headers: list[_Entry] = []
         self._task_lifecycle: list[_Entry] = []
         self._system_model_observers: list[_Entry] = []
         self._agent_assembly_observers: list[_Entry] = []
@@ -162,6 +166,9 @@ class ExtensionRegistry(ExtensionRegistryContract):
     def middlewares(self, contributor: MiddlewareContributor) -> None:
         self._middlewares.append((self._source(), contributor))
 
+    def model_headers(self, provider: ModelHeadersProvider) -> None:
+        self._model_headers.append((self._source(), provider))
+
     def knowledge_provider(self, name: str, provider: Any) -> bool:
         from deerflow.knowledge.providers import validate_provider
 
@@ -209,6 +216,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         """
         for bucket in (
             self._middlewares,
+            self._model_headers,
             self._task_lifecycle,
             self._system_model_observers,
             self._agent_assembly_observers,
@@ -225,6 +233,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         """Snapshot bucket lengths so one install() can be undone positionally."""
         return (
             len(self._middlewares),
+            len(self._model_headers),
             len(self._task_lifecycle),
             len(self._system_model_observers),
             len(self._agent_assembly_observers),
@@ -246,6 +255,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         for bucket, size in zip(
             (
                 self._middlewares,
+                self._model_headers,
                 self._task_lifecycle,
                 self._system_model_observers,
                 self._agent_assembly_observers,
@@ -265,6 +275,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         return LoadedExtensions(
             app_store=ExtensionData("app"),
             middleware_contributors=tuple(self._middlewares),
+            model_headers=tuple(self._model_headers),
             task_lifecycle=tuple(self._task_lifecycle),
             system_model_observers=tuple(self._system_model_observers),
             agent_assembly_observers=tuple(self._agent_assembly_observers),
@@ -275,6 +286,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             knowledge_providers=tuple(self._knowledge_providers),
             workspace_search_providers=tuple(self._workspace_search_providers),
             has_middleware_contributors=bool(self._middlewares),
+            has_model_headers=bool(self._model_headers),
             has_task_lifecycle=bool(self._task_lifecycle),
             has_system_model_observers=bool(self._system_model_observers),
             has_agent_assembly_observers=bool(self._agent_assembly_observers),

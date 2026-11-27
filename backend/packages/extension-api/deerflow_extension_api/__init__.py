@@ -36,6 +36,8 @@ from deerflow_extension_api.contracts import (
     ExtensionService,
     HostPolicySnapshot,
     MiddlewareContributor,
+    ModelHeadersProvider,
+    ModelRequestView,
     ReadOnlyDict,
     SystemModelCallObserver,
     SystemModelRequest,
@@ -104,7 +106,7 @@ from deerflow_extension_api.state import ExtensionData
 
 #: Contract version. Before 1.0, minors may break and patches are additive.
 #: From 1.0 on, bump the major for breaking changes.
-API_VERSION = "0.2.13"
+API_VERSION = "0.2.14"
 
 __all__ = [
     "AGENT_RUNS_CONTEXT_KEY",
@@ -176,6 +178,8 @@ __all__ = [
     "InvalidRunEvidenceCursor",
     "MessageProvenance",
     "MiddlewareContributor",
+    "ModelHeadersProvider",
+    "ModelRequestView",
     "ReadOnlyDict",
     "MiddlewareDescriptor",
     "MiddlewarePlacement",

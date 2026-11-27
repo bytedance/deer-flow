@@ -41,6 +41,7 @@ A `runtime_checkable` Protocol: the write-only surface passed to `install()`. Ev
 | Method                                                     | Returns | Registers                                                                                |
 | ---------------------------------------------------------- | ------- | ---------------------------------------------------------------------------------------- |
 | `middlewares(contributor: MiddlewareContributor)`          | `None`  | A middleware contributor                                                                 |
+| `model_headers(provider: ModelHeadersProvider)`            | `None`  | Transport headers for main-line model requests (lead and subagent chains)                |
 | `task_lifecycle(contributor: TaskLifecycleContributor)`    | `None`  | Start and stop hooks for lead runs and subagents                                        |
 | `system_model_observer(observer: SystemModelCallObserver)` | `None`  | An observer of DeerFlow-owned model calls                                                |
 | `agent_assembly_observer(observer: AgentAssemblyObserver)` | `None`  | An observer of assembled agents                                                          |
@@ -105,6 +106,54 @@ Frozen dataclass: the limits the host enforces, projected so extensions do not d
 | `budget_warn_fraction`  | `float \| None` | `None`  |
 | `budget_hard_fraction`  | `float \| None` | `None`  |
 | `max_subagents_per_run` | `int \| None`   | `None`  |
+
+## Model request headers
+
+### `ModelHeadersProvider`
+
+```python
+class ModelHeadersProvider(Protocol):
+    def provide_model_headers(
+        self, view: ModelRequestView
+    ) -> Mapping[str, str] | None: ...
+```
+
+Supplies HTTP transport headers for the final provider request. The host calls it inline on the event loop right before the model call, once per provider attempt (a retry re-enters it), and merges the returned mapping into the request's `extra_headers`. This is the supported way to put per-request headers on the wire: a middleware contribution cannot rewrite the request, and `extensions.middlewares` shaping is trusted configuration rather than a contract.
+
+- **Headers only.** A provider cannot change messages, tools, the system prompt or any other request field; the body stays byte-identical apart from the SDK's header handling.
+- **Every main-line call in both chains.** It applies to lead-agent and subagent model requests. It is not called for DeerFlow-owned auxiliary calls (titles, summaries, goal, memory), which bypass the agent model chain.
+- **Later providers win.** Providers run in registration order; a header set by an earlier provider is overridden by a later one, and both are merged over any `extra_headers` an upstream middleware set.
+- **Advisory and fail-open.** A provider that raises, returns a non-mapping, or returns a pair whose key or value is not a string is skipped with a warning, and the model call proceeds. Implementations must be fast and must not perform blocking I/O.
+- **Retries reuse the view.** The same logical call re-enters the provider on each retry; return the same headers for the same request.
+
+### `ModelRequestView`
+
+```python
+@dataclass(frozen=True)
+class ModelRequestView:
+    model_name: str | None = None
+    model: Any = None
+    messages: Sequence[Any] = ()
+    system_message: Any = None
+    tools: Sequence[Any] = ()
+    state: Mapping[str, Any] = field(default_factory=dict)
+    runtime: Any = None
+```
+
+A read-only snapshot of the request the provider is about to receive, built after every request-transforming middleware has run.
+
+| Member | Type | Meaning |
+| --- | --- | --- |
+| `model_name` | `str \| None` | Resolved model name (`model_name` / `model` / `model_id`) |
+| `model` | `Any` | The live chat model instance; read it, never mutate it |
+| `messages` | `Sequence[Any]` | Input messages, excluding the system message |
+| `system_message` | `Any` | The system message, or `None` |
+| `tools` | `Sequence[Any]` | Tools bound to this request |
+| `state` | `Mapping[str, Any]` | Detached, deeply read-only agent state |
+| `runtime` | `Any` | The LangGraph runtime for this call |
+| `message_count` | `int` (property) | `len(messages)` |
+| `system_present` | `bool` (property) | Whether a system message is present |
+| `tool_names` | `tuple[str, ...]` (property) | Tool names in binding order |
 
 ## State
 
@@ -554,5 +603,6 @@ The host's contract version as a dotted string, such as `"0.2.10"`. Always equal
 | 0.2.8 | [#6920](https://github.com/bytedance/deer-flow/pull/6920), [#5645](https://github.com/bytedance/deer-flow/pull/5645), [#7075](https://github.com/bytedance/deer-flow/pull/7075) | `AgentRuns.configuration_evidence()`, `read_artifact()`, `configuration_revision()`, and `ActionContext.interaction` (#6920). Completed-run evidence and host-owned updates of existing custom skills: `ExtensionRuntimeDeps.completed_run_evidence` and `skill_mutations`, with `CompletedRunEvidenceReader`, `CompletedRunSnapshot`, `CompletedRunEvent`, `CompletedRunEventPage`, `EvidenceLimits`, `SkillMutationService`, `MutationCapabilities`, `Proposal`, `ProposalBundle`, `BundleFile`, `Operation`, `AssessmentRef`, `AssetRevision`, `HostCheckResult`, `SkillRevisionView`, and the shared `HostCapabilityError` (#5645). The `durable` argument of `configuration_revision()` (#7075) |
 | 0.2.9 | [#7138](https://github.com/bytedance/deer-flow/pull/7138) | `ExecutionFence`, and the `execution_fence` argument of `AgentRuns.start()` and `cancel()` |
 | 0.2.10 | [#7729](https://github.com/bytedance/deer-flow/pull/7729), [#7831](https://github.com/bytedance/deer-flow/pull/7831) | `AgentRuns.send_input()`, `list_inputs()`, `authorize_control()`, `dispatch_input()` (#7729). `CompactionEvent.task_id`, `run_id`, `thread_id`; compaction observers receive the live task store, and every task store carries its `TaskInfo` (#7831) |
+| 0.2.14 | this PR | Model request headers: `ExtensionRegistry.model_headers()` with `ModelHeadersProvider` and `ModelRequestView` |
 
 No release has removed a public name.
