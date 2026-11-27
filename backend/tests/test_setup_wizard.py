@@ -66,7 +66,8 @@ class TestProviders:
         assert provider.env_var == "NVIDIA_API_KEY"
         assert provider.default_model == "nvidia/nemotron-3.5-super-vl-120b-a12b"
         assert provider.extra_config["base_url"] == "https://integrate.api.nvidia.com/v1"
-        assert provider.extra_config["supports_vision"] is True
+        assert provider.extra_config_for(provider.default_model)["supports_vision"] is True
+        assert provider.extra_config_for("meta/llama-3.1-8b-instruct")["supports_vision"] is False
         assert provider.base_url_prompt == "NVIDIA NIM base URL"
         assert provider.model_prompt == "Exact model ID served by your NIM endpoint"
 
@@ -535,6 +536,7 @@ class TestLLMStep:
         model = yaml.safe_load(config_path.read_text())["models"][0]
         assert model["base_url"] == ("http://localhost:8000/v1" if override else "https://integrate.api.nvidia.com/v1")
         assert model["model"] == ("my-nim-model" if override else "nvidia/nemotron-3.5-super-vl-120b-a12b")
+        assert model["supports_vision"] is (not override)
 
     @pytest.mark.parametrize("override", [False, True])
     def test_rapid_mlx_keyless_config(self, monkeypatch, tmp_path, override):
