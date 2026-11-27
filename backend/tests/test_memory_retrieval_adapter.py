@@ -576,6 +576,27 @@ def test_search_propagates_a_corrupt_index(tmp_path: Path) -> None:
         engine.close()
 
 
+@pytest.mark.parametrize("column", ["城市", "123abc"])
+def test_unknown_non_ascii_or_digit_column_still_downgrades_to_the_tokenized_retry(tmp_path: Path, column: str) -> None:
+    """A query column that no index schema can contain is a query error, not drift.
+
+    The reported name is not restricted to ASCII identifiers, so a query such as
+    ``城市:上海 OR 天气`` must still fall back to the tokenized OR query and find
+    the stored fact. Classifying it as schema drift raises instead, the advanced
+    retry is skipped, and the caller's substring fallback searches the entire
+    expression as a literal.
+    """
+    engine = FTS5Retrieval(tmp_path / "facts.sqlite3")
+    try:
+        engine.index_fact("zh-weather", "上海天气不错", scope_user='"alice"', scope_agent='"agent-a"')
+
+        results = engine.search(f"{column}:上海 OR 天气", scope_user='"alice"', scope_agent='"agent-a"')
+
+        assert [item["id"] for item in results] == ["zh-weather"]
+    finally:
+        engine.close()
+
+
 def test_fts5_search_falls_back_to_substring_when_the_index_raises(tmp_path: Path) -> None:
     """An index error must degrade to canonical Markdown facts, not to ``[]``."""
     manager = DeerMem(backend_config={"storage_path": str(tmp_path), "token_counting": "char"})

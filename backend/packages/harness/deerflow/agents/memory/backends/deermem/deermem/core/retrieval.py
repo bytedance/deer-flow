@@ -148,7 +148,12 @@ _INDEX_SCHEMA_COLUMNS = frozenset(
         "fact_json",
     }
 )
-_NO_SUCH_COLUMN_RE = re.compile(r"no such column: (?:[^.\s]+\.)*([A-Za-z_][A-Za-z0-9_]*)")
+# The reported name is not limited to ASCII identifiers: SQLite echoes whatever
+# the query wrote, so ``城市:上海`` reports ``no such column: 城市`` and
+# ``123abc:term`` reports a digit-leading name. Capture the whole name after any
+# table qualifier and let the schema set -- not the character set -- decide
+# whether this is drift or a malformed query.
+_NO_SUCH_COLUMN_RE = re.compile(r"no such column: (?:[^.\s]+\.)*(.+?)\s*$")
 
 
 def _missing_column(error: sqlite3.OperationalError) -> str | None:
