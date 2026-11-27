@@ -11,7 +11,10 @@ MINIMAX_DEFAULT_HOST = "https://api.minimaxi.com"
 GEMINI_API_HOST = "generativelanguage.googleapis.com"
 BYTEPLUS_AGENTPLAN_DEFAULT_BASE_URL = "https://ark.ap-southeast.bytepluses.com/api/plan/v3"
 BYTEPLUS_AGENTPLAN_DEFAULT_VIDEO_MODEL = "dreamina-seedance-2.5"
-BYTEPLUS_AGENTPLAN_CONSOLE_URL = "https://console.byteplus.com/ark/region:ap-southeast-1/subscription/agent-plan"
+BYTEPLUS_AGENTPLAN_CONSOLE_URL = (
+    "https://console.byteplus.com/ark/region:ap-southeast-1/subscription/agent-plan"
+    "?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow"
+)
 BYTEPLUS_AGENTPLAN_SUPPORTED_RATIOS = frozenset({"9:16", "16:9", "1:1", "4:3", "3:4", "21:9", "adaptive"})
 BYTEPLUS_AGENTPLAN_TOS_ENDPOINTS = {
     "tos-ap-southeast-1.volces.com",

@@ -181,7 +181,7 @@ Auto-selected by environment variables (CLI unchanged):
 
 BytePlus Agent Plan settings:
 
-- `BYTEPLUS_AGENTPLAN_API_KEY` (required; subscribe or upgrade at https://console.byteplus.com/ark/region:ap-southeast-1/subscription/agent-plan — Seedance 2.5 video generation is included in **Large**, **Max**, and **Enterprise Shared Package** tiers).
+- `BYTEPLUS_AGENTPLAN_API_KEY` (required; subscribe or upgrade at https://console.byteplus.com/ark/region:ap-southeast-1/subscription/agent-plan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow — Seedance 2.5 video generation is included in **Large**, **Max**, and **Enterprise Shared Package** tiers).
 - `BYTEPLUS_AGENTPLAN_BASE_URL` (default `https://ark.ap-southeast.bytepluses.com/api/plan/v3`).
 - `BYTEPLUS_AGENTPLAN_VIDEO_MODEL` (default `dreamina-seedance-2.5`; set `dreamina-seedance-2.5-flash` for faster/lower-AFP drafts).
 - `BYTEPLUS_AGENTPLAN_VIDEO_RESOLUTION` (optional, e.g. `480p`, `720p`, `1080p`).
