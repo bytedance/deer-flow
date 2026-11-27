@@ -50,20 +50,27 @@ def _timeout(settings: dict) -> float:
     return float(value)
 
 
-def _build_router(provider: str):
+def _build_router(provider: str, *, warm_defaults: bool = True):
     """Import WebRouter and build its backends with their HTTP clients (blocking: TLS setup)."""
     try:
         from web_router import AsyncWebRouter
     except ImportError as e:
         raise _NotInstalledError(_NOT_INSTALLED) from e
     router = AsyncWebRouter(provider)
-    router.warmup()
+    if warm_defaults:
+        router.warmup()
     return router
 
 
-async def _open_router(provider: str):
+def _warm_extract(router, provider: str) -> None:
+    backend = router.get_extract_provider(provider)
+    if callable(warm := getattr(backend, "warm", None)):
+        warm(asynchronous=True)
+
+
+async def _open_router(provider: str, *, warm_defaults: bool = True):
     """Build the router off the event loop and close it if construction is cancelled."""
-    construction = asyncio.create_task(asyncio.to_thread(_build_router, provider))
+    construction = asyncio.create_task(asyncio.to_thread(_build_router, provider, warm_defaults=warm_defaults))
     try:
         return await asyncio.shield(construction)
     except asyncio.CancelledError:
@@ -171,12 +178,17 @@ async def web_fetch_tool(url: str) -> str:
     if target_error:
         return target_error
     settings = await asyncio.to_thread(_tool_settings, "web_fetch")
+    provider = _provider(settings)
+    qualified = ":" in provider
     try:
-        router = await _open_router(_provider(settings))
+        router = await _open_router(provider, warm_defaults=not qualified)
         try:
             from web_router import UnsupportedFormatError
 
-            extract_kwargs = {"provider": _provider(settings), "timeout": _timeout(settings), "data_apis": False}
+            # The SDK warms the unqualified default; an explicit pin has a separate cache entry.
+            if qualified:
+                await await_drained(asyncio.to_thread(_warm_extract, router, provider))
+            extract_kwargs = {"provider": provider, "timeout": _timeout(settings), "data_apis": False}
             try:
                 response = await router.extract(url, format="markdown", **extract_kwargs)
             except UnsupportedFormatError:
