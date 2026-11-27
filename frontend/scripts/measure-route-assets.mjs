@@ -36,6 +36,23 @@ export function createBuildEnvironment(
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const frontendDir = path.resolve(scriptDir, "..");
+const nextBin = path.join(
+  frontendDir,
+  "node_modules",
+  "next",
+  "dist",
+  "bin",
+  "next",
+);
+
+/**
+ * Arguments for the bundled Next.js CLI, run through `process.execPath`.
+ * Native Windows cannot spawn pnpm's `.cmd` shim (`ENOENT`), so this skips the
+ * `pnpm exec` hop the same way `dev.mjs` does.
+ */
+export function nextCliArgs(args) {
+  return [nextBin, ...args];
+}
 
 export function extractAssetPaths(html) {
   const assets = { css: [], js: [] };
@@ -158,22 +175,12 @@ async function measureRoute(baseUrl, route) {
 
 async function measureBuild(routes, staticWebsiteOnly) {
   const env = createBuildEnvironment(staticWebsiteOnly);
-  await run("pnpm", ["exec", "next", "build"], {
-    env,
-  });
+  await run(process.execPath, nextCliArgs(["build"]), { env });
 
   const port = await getFreePort();
   const server = spawn(
-    "pnpm",
-    [
-      "exec",
-      "next",
-      "start",
-      "--hostname",
-      "127.0.0.1",
-      "--port",
-      String(port),
-    ],
+    process.execPath,
+    nextCliArgs(["start", "--hostname", "127.0.0.1", "--port", String(port)]),
     {
       cwd: frontendDir,
       env,
