@@ -1248,6 +1248,18 @@ class TestAdaptMarkdownForDingtalk:
         result = _adapt_markdown_for_dingtalk(text)
         assert "> **python**\n> print(1)\n" in result
 
+    @pytest.mark.parametrize("sentence", ["Use ```example```.", "```example```.", "Run ``` x ```-"])
+    def test_punctuated_inline_triple_backticks_leave_next_block_intact(self, sentence):
+        result = _adapt_markdown_for_dingtalk(f"{sentence}\n\n```python\nprint(1)\n```\nAfter")
+        assert "```" not in result
+        assert result.endswith("\n\n> **python**\n> print(1)\n\nAfter")
+
+    @pytest.mark.parametrize("lead", ["- ", "12) ", "> ", "   "])
+    def test_fence_after_list_or_quote_marker_is_converted(self, lead):
+        result = _adapt_markdown_for_dingtalk(f"{lead}```c#\nint x = 1;\n```")
+        assert result.startswith(f"{lead}> **c#**\n")
+        assert "```" not in result
+
     @pytest.mark.parametrize(("opener", "lang"), [('```c# title="demo"', "c#"), ("```python 3", "python")])
     def test_fenced_code_block_with_info_after_language(self, opener, lang):
         result = _adapt_markdown_for_dingtalk(f"{opener}\nint x = 1;\n```")

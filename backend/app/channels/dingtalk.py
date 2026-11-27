@@ -113,9 +113,14 @@ def _extract_text_from_rich_text(rich_text_list: list) -> str:
 
 
 # Language tags such as c#, c++ and objective-c contain non-word characters,
-# and other info text may follow the tag (```python 3). That text is accepted
-# only after a tag, so an inline ```code``` span cannot open a block.
-_FENCED_CODE_BLOCK_RE = re.compile(r"```(?:([\w#+.-]+)[^`\n]*)?\n(.*?)```", re.DOTALL)
+# and other info text may follow the tag (```python 3). A fence opens only at
+# the start of a line, after indentation, list markers or quote markers:
+# otherwise the closing backticks of an inline ```code``` span followed by
+# punctuation would read as an opener and swallow the next block.
+_FENCED_CODE_BLOCK_RE = re.compile(
+    r"^(?P<lead>(?:[ \t]*(?:[-*+]|\d+[.)]|>)(?=[ \t]))*[ \t]*)```(?:(?P<lang>[\w#+.-]+)[^`\n]*)?\n(?P<code>.*?)```",
+    re.DOTALL | re.MULTILINE,
+)
 # Match complete backtick runs of equal length so shorter runs stay inside the code.
 _INLINE_CODE_RE = re.compile(r"(?<!`)(?P<delimiter>`+)(?!`)(?P<code>[^\n]+?)(?<!`)(?P=delimiter)(?!`)")
 _HORIZONTAL_RULE_RE = re.compile(r"^-{3,}$", re.MULTILINE)
@@ -171,11 +176,11 @@ def _adapt_markdown_for_dingtalk(text: str) -> str:
     """Adapt markdown for DingTalk's limited sampleMarkdown renderer."""
 
     def _code_block_to_quote(match: re.Match) -> str:
-        lang = match.group(1)
-        code = match.group(2).rstrip("\n")
+        lang = match.group("lang")
+        code = match.group("code").rstrip("\n")
         prefix = f"> **{lang}**\n" if lang else ""
         quoted_lines = "\n".join(f"> {line}" for line in code.split("\n"))
-        return f"{prefix}{quoted_lines}\n"
+        return f"{match.group('lead')}{prefix}{quoted_lines}\n"
 
     def _inline_code_to_bold(match: re.Match) -> str:
         code = match.group("code")
