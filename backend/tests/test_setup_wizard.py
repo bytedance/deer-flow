@@ -68,6 +68,7 @@ class TestProviders:
         assert provider.extra_config["base_url"] == "https://integrate.api.nvidia.com/v1"
         assert provider.extra_config["supports_vision"] is True
         assert provider.base_url_prompt == "NVIDIA NIM base URL"
+        assert provider.model_prompt == "Exact model ID served by your NIM endpoint"
 
     def test_zai_glm_flash_declares_the_reasoning_contract(self):
         """GLM-5.3-Flash cannot disable thinking and only accepts low/high/max (issue #5073).
@@ -497,6 +498,44 @@ class TestThinkingSupport:
 
 
 class TestLLMStep:
+    @pytest.mark.parametrize("override", [False, True])
+    def test_nvidia_nim_self_hosted_config(self, monkeypatch, tmp_path, override):
+        provider_index = next(i for i, p in enumerate(LLM_PROVIDERS) if p.name == "nvidia")
+        monkeypatch.setattr(llm_step, "ask_choice", lambda *_args, **_kwargs: provider_index)
+        prompts = []
+
+        def ask_text(prompt, default="", **_kwargs):
+            prompts.append((prompt, default))
+            if override:
+                return "http://localhost:8000/v1" if len(prompts) == 1 else "my-nim-model"
+            return default
+
+        monkeypatch.setattr(llm_step, "ask_text", ask_text)
+        monkeypatch.setattr(llm_step, "ask_secret", lambda _prompt: "key")
+        result = llm_step.run_llm_step()
+
+        assert prompts == [
+            ("NVIDIA NIM base URL", "https://integrate.api.nvidia.com/v1"),
+            (
+                "Exact model ID served by your NIM endpoint",
+                "nvidia/nemotron-3.5-super-vl-120b-a12b",
+            ),
+        ]
+        config_path = tmp_path / "config.yaml"
+        write_config_yaml(
+            config_path,
+            provider_use=result.provider.use,
+            model_name=result.model_name,
+            display_name=result.provider.display_name,
+            api_key_field=result.provider.api_key_field,
+            env_var=result.provider.env_var,
+            extra_model_config=result.provider.extra_config_for(result.model_name),
+            base_url=result.base_url,
+        )
+        model = yaml.safe_load(config_path.read_text())["models"][0]
+        assert model["base_url"] == ("http://localhost:8000/v1" if override else "https://integrate.api.nvidia.com/v1")
+        assert model["model"] == ("my-nim-model" if override else "nvidia/nemotron-3.5-super-vl-120b-a12b")
+
     @pytest.mark.parametrize("override", [False, True])
     def test_rapid_mlx_keyless_config(self, monkeypatch, tmp_path, override):
         provider_index = next(i for i, p in enumerate(LLM_PROVIDERS) if p.name == "rapid_mlx")

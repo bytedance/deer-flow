@@ -537,6 +537,7 @@ LLM_PROVIDERS: list[LLMProvider] = [
             "supports_vision": True,
         },
         base_url_prompt="NVIDIA NIM base URL",
+        model_prompt="Exact model ID served by your NIM endpoint",
     ),
     LLMProvider(
         name="api_route",
