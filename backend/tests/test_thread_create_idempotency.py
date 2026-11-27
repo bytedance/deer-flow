@@ -305,37 +305,55 @@ async def test_retry_preserves_checkpoint_published_before_reservation(thread_st
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("thread_store", ["sqlite"], indirect=True)
-@pytest.mark.parametrize("heartbeat", [True, False], ids=["heartbeat-cancels-read", "before-next-heartbeat"])
-async def test_create_losing_lease_preserves_peer_checkpoint(thread_store, heartbeat, monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("pause_at", "heartbeat"),
+    [("read", True), ("read", False), ("seed", True)],
+    ids=["heartbeat-cancels-read", "before-next-heartbeat", "heartbeat-before-seed-starts"],
+)
+async def test_create_losing_lease_preserves_peer_checkpoint(thread_store, pause_at, heartbeat, monkeypatch, tmp_path):
     thread_id = "expired-seed"
     sessions = get_session_factory()
     runs = RunRepository(sessions)
     ownership = RunOwnershipConfig(heartbeat_enabled=True)
     owner = RunManager(store=runs, worker_id="creator", run_ownership_config=ownership)
     peer = RunManager(store=runs, worker_id="peer", run_ownership_config=ownership)
-    reading, resume, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    paused, resume, read_cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "checkpoints.db")) as saver:
-        get_tuple = saver.aget_tuple
+        if pause_at == "read":
+            get_tuple = saver.aget_tuple
 
-        async def pause_reserved_read(config):
-            head = await get_tuple(config)
-            if await runs.list_inflight():
-                reading.set()
-                try:
+            async def pause_reserved_read(config):
+                head = await get_tuple(config)
+                if await runs.list_inflight():
+                    paused.set()
+                    try:
+                        await resume.wait()
+                    except asyncio.CancelledError:
+                        read_cancelled.set()
+                        raise
+                return head
+
+            monkeypatch.setattr(saver, "aget_tuple", pause_reserved_read)
+        else:
+            drain = threads.await_drained
+
+            async def defer_seed(seed):
+                async def queued_seed():
+                    # Let the peer take over after admission but before the seed coroutine runs.
+                    paused.set()
                     await resume.wait()
-                except asyncio.CancelledError:
-                    cancelled.set()
-                    raise
-            return head
+                    await seed
 
-        monkeypatch.setattr(saver, "aget_tuple", pause_reserved_read)
+                await drain(queued_seed())
+
+            monkeypatch.setattr(threads, "await_drained", defer_seed)
         app = app_for(thread_store, saver)
         app.state.run_manager = owner
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             post = asyncio.create_task(client.post("/api/threads", json={"thread_id": thread_id}))
             try:
-                await asyncio.wait_for(reading.wait(), 5)
+                await asyncio.wait_for(paused.wait(), 5)
                 [operation] = await runs.list_inflight()
                 async with sessions.begin() as session:
                     row = await session.get(RunRow, operation["run_id"])
@@ -350,9 +368,9 @@ async def test_create_losing_lease_preserves_peer_checkpoint(thread_store, heart
                         await owner._renew_leases()
                     resume.set()
                     response = await asyncio.wait_for(post, 5)
-                assert [row.checkpoint["id"] async for row in saver.alist(config)] == [progress["id"]]
                 assert response.status_code == 409
-                assert cancelled.is_set() == heartbeat
+                assert [row.checkpoint["id"] async for row in saver.alist(config)] == [progress["id"]]
+                assert read_cancelled.is_set() == (pause_at == "read" and heartbeat)
             finally:
                 resume.set()
                 post.cancel()

@@ -1061,7 +1061,14 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
             # A peer can recover an expired lease before the next local heartbeat.
             if not await run_manager.owns_active_admission(reservation):
                 raise ConflictError(f"Thread {thread_id} reservation lease was lost")
-            await await_drained(write_initial_thread_checkpoint(checkpointer, config, initial_metadata=initial_metadata, created_at=coerce_iso(current.get("created_at"))))
+
+            async def write_seed_if_owned() -> None:
+                # The lease can be revoked while await_drained's child is queued.
+                if reservation.ownership_lost or reservation.abort_event.is_set():
+                    raise ConflictError(f"Thread {thread_id} reservation lease was lost")
+                await write_initial_thread_checkpoint(checkpointer, config, initial_metadata=initial_metadata, created_at=coerce_iso(current.get("created_at")))
+
+            await await_drained(write_seed_if_owned())
             logger.info("Thread checkpoint ready: %s", sanitize_log_param(thread_id))
             return _existing_thread_response(thread_id, current)
     except ConflictError as exc:
