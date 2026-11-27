@@ -3085,6 +3085,11 @@ def test_list_dir_preserves_trailing_space_in_filename(sandbox):
     assert sandbox.list_dir("/test") == ["/test/notes.txt ", "/test/sub"]
 
 
+def test_read_file_respects_explicit_failure_envelope(sandbox):
+    sandbox._client.file.read_file.return_value = SimpleNamespace(success=False, message="read unavailable", data=SimpleNamespace(content=""))
+    assert sandbox.read_file("/test/log") == "Error: read unavailable"
+
+
 def _sdk_file_read_validation_error() -> Exception:
     """The exact exception the SDK raises for a server failure envelope.
 

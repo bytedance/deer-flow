@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
 from deerflow.sandbox.download import download_limit
-from deerflow.sandbox.read_file_contract import split_file_lines
+from deerflow.sandbox.read_file_contract import confirmed_file_text, split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
@@ -360,7 +360,7 @@ class BoxdSandbox(Sandbox):
             logger.error("read_file %s failed: %s", path, e)
             return f"Error: {e}"
         if start_line is None and end_line is None:
-            return content
+            return confirmed_file_text(content)
         lines = split_file_lines(content)
         # Clamp like LocalSandbox.read_file: a negative start must not wrap
         # around through negative-index slicing.

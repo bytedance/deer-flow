@@ -1,5 +1,6 @@
 """Result changes distinguish useful repeated calls from stalled tool loops."""
 
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -17,6 +18,8 @@ from deerflow.agents.middlewares.read_before_write_middleware import READ_MARK_K
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 from deerflow.agents.thread_state import ThreadState
+from deerflow.sandbox import tools as sandbox_tools
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 
 
 class _ScriptedModel(FakeMessagesListChatModel):
@@ -49,48 +52,44 @@ def _warnings(model):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_mode", [False, True])
 @pytest.mark.parametrize("ranged_read", [False, True])
-async def test_read_modify_reread_keeps_making_progress(tmp_path, async_mode, ranged_read):
+async def test_read_modify_reread_keeps_making_progress(tmp_path, monkeypatch, async_mode, ranged_read):
+    path = "/mnt/user-data/outputs/report.md"
     report = tmp_path / "report.md"
     report.write_text("Report\nv1\n", encoding="utf-8", newline="\n")
-    edits = []
+    sandbox = LocalSandbox("editing", path_mappings=[PathMapping("/mnt/user-data/outputs", str(tmp_path))])
 
-    @tool
-    def read_file(path: str, start_line: int = 1, end_line: int | None = None) -> str:
-        """Read the requested lines of the temporary report."""
-        return "".join(Path(path).read_text(encoding="utf-8").splitlines(keepends=True)[start_line - 1 : end_line])
+    async def initialize_async(runtime):
+        return sandbox
 
-    @tool
-    def str_replace(path: str, old_str: str, new_str: str) -> str:
-        """Apply one edit to the temporary report."""
-        target = Path(path)
-        content = target.read_text(encoding="utf-8")
-        assert old_str in content
-        target.write_text(content.replace(old_str, new_str), encoding="utf-8", newline="\n")
-        edits.append(new_str)
-        return "Successfully replaced the requested text."
+    monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda runtime: sandbox)
+    monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized_async", initialize_async)
+    monkeypatch.setattr(sandbox_tools, "get_app_config", lambda: SimpleNamespace(sandbox=SimpleNamespace(read_file_output_max_chars=50000)))
 
     responses = []
     for version in range(1, 7):
-        read_args = {"path": str(report), **({"start_line": 1, "end_line": 1} if ranged_read else {})}
+        read_args = {"path": path, **({"start_line": 1, "end_line": 1} if ranged_read else {})}
         responses.append(AIMessage(content="", tool_calls=[_call("read_file", read_args)]))
-        responses.append(AIMessage(content="", tool_calls=[_call("str_replace", {"path": str(report), "old_str": f"v{version}", "new_str": f"v{version + 1}"})]))
+        responses.append(AIMessage(content="", tool_calls=[_call("str_replace", {"path": path, "old_str": f"v{version}", "new_str": f"v{version + 1}"})]))
     responses.append(AIMessage(content="Done."))
     model = _ScriptedModel(responses=responses)
-    loop = LoopDetectionMiddleware()
-    gate = ReadBeforeWriteMiddleware(content_reader=lambda _runtime, path: Path(path).read_text(encoding="utf-8"))
-    graph = create_agent(model=model, tools=[read_file, str_replace], middleware=[gate, loop])
+    graph = create_agent(
+        model=model,
+        tools=[sandbox_tools.read_file_tool, sandbox_tools.str_replace_tool],
+        middleware=[ReadBeforeWriteMiddleware(), LoopDetectionMiddleware()],
+    )
     context = {"thread_id": "editing", "run_id": "editing"}
 
     result = await _invoke(graph, async_mode, context)
 
-    assert edits == [f"v{version}" for version in range(2, 8)]
     assert report.read_text(encoding="utf-8") == "Report\nv7\n"
     tool_results = [message for message in result["messages"] if isinstance(message, ToolMessage)]
+    assert [message.content for message in tool_results if message.name == "str_replace"] == ["OK"] * 6
     reads = [message for message in tool_results if message.name == "read_file"]
-    assert len({message.additional_kwargs[READ_MARK_KEY]["hash"] for message in reads}) == 6
+    expected_marks = [{"path": path, "hash": hashlib.sha256(f"Report\nv{version}\n".encode()).hexdigest()} for version in range(1, 7)]
+    assert [message.additional_kwargs[READ_MARK_KEY] for message in reads] == expected_marks
     if ranged_read:
-        # The visible first line stays identical; the full-file version changes.
-        assert {message.content for message in reads} == {"Report\n"}
+        # The visible first line stays identical while the underlying file changes.
+        assert {message.content for message in reads} == {"Report"}
     assert all(message.status == "success" for message in tool_results)
     assert result["messages"][-1].content == "Done."
     assert not _warnings(model)
