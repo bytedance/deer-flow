@@ -20,6 +20,7 @@ import copy
 import gc
 import inspect
 import logging
+import math
 import os
 import sys
 import threading
@@ -1128,6 +1129,27 @@ async def _drain_run_finalization(task: asyncio.Task[None], *, on_host_cancel: C
         raise deferred
 
 
+def _run_error_frame(message: str, exc: BaseException) -> dict[str, object]:
+    """Build the run ``error`` event, keeping a structured error's retry fields.
+
+    Errors such as ``SandboxCapacityExceededError`` carry a machine-readable
+    ``details`` dict. Clients get its code and retry hint as fields instead of
+    parsing them out of the message.
+    """
+    frame: dict[str, object] = {"message": message, "name": type(exc).__name__}
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict) and isinstance(details.get("code"), str):
+        frame["code"] = details["code"]
+        if isinstance(details.get("retryable"), bool):
+            frame["retryable"] = details["retryable"]
+        retry_after = details.get("retry_after_seconds")
+        # A NaN or infinite hint would be written as a bare token the SDK
+        # rejects, losing the whole frame; omit it and keep the rest.
+        if isinstance(retry_after, int | float) and not isinstance(retry_after, bool) and math.isfinite(retry_after):
+            frame["retry_after_seconds"] = retry_after
+    return frame
+
+
 @run_producer_context
 async def run_agent(
     bridge: StreamBridge,
@@ -1225,7 +1247,7 @@ async def run_agent(
     # the verdict alone.
     goal_participated = False
     produced_output_paths: list[str] | None = None
-    terminal_error_frame: dict[str, str] | None = None
+    terminal_error_frame: dict[str, object] | None = None
     # Journal construction moved ahead of preflight so every terminal run can
     # emit a receipt. Completion persistence keeps its prior boundary: before
     # #4272 the journal did not exist until preflight had succeeded, so early
@@ -2226,10 +2248,7 @@ async def run_agent(
         if cancel_action is not None:
             await _finish_cancellation(cancel_action, restore_checkpoint=not checkpoint_resume_rejected)
         elif not record.ownership_lost:
-            error_frame = {
-                "message": error_msg,
-                "name": type(exc).__name__,
-            }
+            error_frame = _run_error_frame(error_msg, exc)
             if record.status not in (RunStatus.pending, RunStatus.running) and getattr(record, "terminal_status_persisted", True):
                 await bridge.publish(
                     run_id,

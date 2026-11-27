@@ -2101,11 +2101,21 @@ function getHttpStatus(error: unknown): number | undefined {
   return undefined;
 }
 
-function getStreamErrorToastMessage(
+export function getStreamErrorToastMessage(
   error: unknown,
   t: Translations,
   showApprovalErrors = false,
 ): string {
+  // The run's error event names the exception; a full sandbox pool is
+  // temporary, so say so instead of showing the provider's raw text.
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    (Reflect.get(error, "name") === "SandboxCapacityExceededError" ||
+      Reflect.get(error, "code") === "SANDBOX_CAPACITY_EXCEEDED")
+  ) {
+    return t.conversation.sandboxBusy;
+  }
   const status = getHttpStatus(error);
   if (status !== undefined && status >= 500 && status < 600) {
     console.warn("Chat stream request failed:", getStreamErrorMessage(error));

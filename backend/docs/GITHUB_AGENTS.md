@@ -6,6 +6,7 @@ This guide covers setup and the architecture of that pipeline:
 
 - Per-agent bindings (`config.yaml` → `github:` block)
 - Webhook → fan-out → `InboundMessage` dispatch
+- Author authorization (`allow_authors` and `allow_author_associations`)
 - Mention-handle precedence for `require_mention` triggers
 - `preferred_thread_id = UUID5(repo, number, agent_name)` thread determinism
 - [Configuring GitHub tools for webhook runs](#github-tool-setup)
@@ -138,6 +139,17 @@ graph LR
 ```
 
 Whitespace-only values at every level are treated as unset, so the chain falls through cleanly. The `_is_self_event` gate uses the same precedence (with the agent's whole `bindings[*].triggers[*].mention_login` aggregated across all bindings, plus an `agent.name` fallback) so the self-loop gate and the mention gate stay coherent.
+
+## Author Authorization
+
+Webhook HMAC verification only proves that a delivery came from GitHub; it does not authorize the GitHub account that triggered the event. Because each matched agent executes in its DeerFlow owner's bucket (`owner_user_id`), `event_should_fire()` enforces a fail-closed author gate on every user-authored event (`issue_comment`, `pull_request_review_comment`, `pull_request_review`, `issues`, `pull_request`):
+
+- **`allow_authors`** (default `[]`): GitHub logins (case-insensitive) explicitly authorized to trigger the agent. Use this for specific humans or third-party bots (for example `Copilot` or `coderabbitai[bot]`).
+- **`allow_authors_bypass_mention`** (default `true`): Controls whether `allow_authors` matches skip `require_mention`. Set to `false` when using `allow_authors` strictly as an authorization allowlist that must still `@mention` the bot.
+- **`allow_author_associations`** (default `["OWNER", "MEMBER", "COLLABORATOR"]`): GitHub `author_association` values authorized when the actor is not listed in `allow_authors`. Association-authorized actors remain subject to `require_mention` when enabled.
+- **Sender binding**: Every user-authored delivery must carry a valid `sender.login`. Because GitHub attaches `author_association` to the authored object (`comment`, `issue`, `pull_request`, `review`), the dispatcher accepts that association only when `sender.login` matches the object's `user.login` (case-insensitively), failing closed when `sender` is missing or `null` and preventing another actor on edit or update deliveries from inheriting the original author's association.
+- **Fail-closed default**: External associations (`NONE`, `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, `FIRST_TIMER`, `MANNEQUIN`) and missing or unattributable associations are rejected with `unauthorized_author` even when the body mentions `@bot`.
+- **Stricter scoping in large organizations**: On organization-owned repositories, GitHub reports `MEMBER` (not `OWNER`) for internal org admins and maintainers, while `COLLABORATOR` only covers outside collaborators. When org-wide read-only members should not trigger the agent, set `allow_author_associations: []` paired with an explicit `allow_authors` list (and `allow_authors_bypass_mention: false` if `@mention` should still be required), adding `"COLLABORATOR"` only when outside collaborators should also be permitted.
 
 ## GitHub Tool Setup
 
