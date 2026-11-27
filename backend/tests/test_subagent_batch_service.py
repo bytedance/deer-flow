@@ -318,7 +318,7 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(
     )
 
     execution_spec = dict(_request().execution_spec)
-    execution_spec.update(parent_thinking_enabled=False, parent_reasoning_effort="high")
+    execution_spec.update(parent_thinking_enabled=False, parent_reasoning_effort="deep", parent_effort_aliases={"high": "deep"})
     if thread_incarnation is not _MISSING:
         execution_spec[THREAD_INCARNATION_CONTEXT_KEY] = thread_incarnation
 
@@ -391,7 +391,8 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(
     assert repository.finalized["result"] == "done"
     assert executor_kwargs["execution_capacity"] is execution_capacity
     assert executor_kwargs["parent_thinking_enabled"] is False
-    assert executor_kwargs["parent_reasoning_effort"] == "high"
+    assert executor_kwargs["parent_reasoning_effort"] == "deep"
+    assert executor_kwargs["parent_effort_aliases"] == {"high": "deep"}
     assert executor_kwargs["knowledge_scope"] == {
         "version": 1,
         "mode": "selected",

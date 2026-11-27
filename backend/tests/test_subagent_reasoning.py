@@ -52,6 +52,18 @@ def test_cross_model_effort_translates_through_declared_generic_alias():
     assert request.reasoning_effort == "large"
 
 
+def test_queued_effort_uses_submission_aliases_after_parent_reconfiguration():
+    parent = profile("parent", values=["lite", "deep"], aliases={"medium": "deep"})
+    child = profile(values=["small", "large"], aliases={"high": "large"}, default="small")
+    request = resolve(
+        child=child,
+        parent_model_config=parent,
+        parent_reasoning_effort="deep",
+        parent_effort_aliases={"high": "deep"},
+    )
+    assert request.reasoning_effort == "large"
+
+
 @pytest.mark.parametrize("parent", [None, SimpleNamespace(name="parent", supports_reasoning_effort=True)])
 def test_unmapped_provider_effort_does_not_leak_to_legacy_child(parent):
     child = SimpleNamespace(name="child", supports_thinking=True, supports_reasoning_effort=True)

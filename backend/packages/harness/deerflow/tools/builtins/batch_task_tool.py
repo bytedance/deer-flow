@@ -276,6 +276,8 @@ async def batch_task(
         "is_internal": context.get("is_internal") is True,
         "authz_attributes": normalize_authz_attributes(context.get("authz_attributes")),
     }
+    if isinstance(effort_aliases := metadata.get("reasoning_effort_aliases"), dict):
+        execution_spec["parent_effort_aliases"] = dict(effort_aliases)
     if THREAD_INCARNATION_CONTEXT_KEY in context:
         execution_spec[THREAD_INCARNATION_CONTEXT_KEY] = context[THREAD_INCARNATION_CONTEXT_KEY]
     if KNOWLEDGE_SCOPE_RUNTIME_KEY in context:

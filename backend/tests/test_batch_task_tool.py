@@ -106,6 +106,8 @@ async def test_batch_task_is_explicit_idempotent_submission(
 
     runtime = _runtime(thread_incarnation)
     runtime.context["non_interactive"] = True
+    runtime.config["metadata"]["reasoning_effort"] = "deep"
+    runtime.config["metadata"]["reasoning_effort_aliases"] = {"high": "deep"}
     command = await tool_module.batch_task.coroutine(
         runtime=runtime,
         title="Process records",
@@ -124,7 +126,8 @@ async def test_batch_task_is_explicit_idempotent_submission(
     assert request.submission_key == "run-1:call-1"
     assert request.execution_spec["mcp_plugins"] == ["stable-plugin"]
     assert request.execution_spec["parent_thinking_enabled"] is False
-    assert request.execution_spec["parent_reasoning_effort"] == "high"
+    assert request.execution_spec["parent_reasoning_effort"] == "deep"
+    assert request.execution_spec["parent_effort_aliases"] == {"high": "deep"}
     assert "ask_clarification" in request.execution_spec["subagent_config"]["disallowed_tools"]
     assert request.user_id == "user-1"
     assert [item["key"] for item in request.items] == ["record-1", "record-2"]

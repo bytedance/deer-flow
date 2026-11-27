@@ -186,6 +186,25 @@ test("switching models uses the child capability contract", async ({
   });
 });
 
+test("switching models discards an incompatible effort without pinning a default", async ({
+  page,
+}) => {
+  const { dialog, requests } = await openEditor(page, {
+    reasoning_effort: "old-provider-value",
+  });
+  await choose(page, "Model", "Reasoning model");
+  await expect(
+    dialog.getByRole("combobox", { name: "Effort override", exact: true }),
+  ).toHaveText("Use selected defaults");
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(requests[0]).toMatchObject({
+    model: "reasoner",
+    reasoning_source: "inherit",
+    reasoning_effort: null,
+  });
+});
+
 test("explicit Off is valid for a model without thinking support", async ({
   page,
 }) => {

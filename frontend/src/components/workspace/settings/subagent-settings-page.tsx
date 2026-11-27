@@ -312,7 +312,9 @@ function SubagentEditor({
           ? null
           : current.thinking,
       effort: model
-        ? (resolveReasoningEffort(model, current.effort ?? undefined) ?? null)
+        ? (resolveReasoningEffort(model, current.effort ?? undefined, {
+            fallbackToDefault: false,
+          }) ?? null)
         : current.effort,
     }));
   }

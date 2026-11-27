@@ -78,12 +78,13 @@ export function getReasoningEffortOptions(
  * - `undefined` stays `undefined` (the Gateway applies the contract default).
  * - Legacy profiles keep only their advertised generic values. A remembered
  *   contract-only value is dropped when the user switches models.
- * - Declared contracts keep accepted values, map generic values through the
- *   contract's aliases, and otherwise fall back to the contract default.
+ * - Declared contracts keep accepted values and map generic values through
+ *   aliases. Pass `fallbackToDefault: false` when reconciling a saved override.
  */
 export function resolveReasoningEffort(
   model: Model | null | undefined,
   requested: ReasoningEffortValue | undefined,
+  { fallbackToDefault = true } = {},
 ): ReasoningEffortValue | undefined {
   if (requested === undefined) {
     return undefined;
@@ -101,11 +102,10 @@ export function resolveReasoningEffort(
   if (effort.values.includes(requested)) {
     return requested;
   }
-  const alias = effort.aliases[requested];
-  if (alias !== undefined) {
-    return alias;
+  if (Object.hasOwn(effort.aliases, requested)) {
+    return effort.aliases[requested];
   }
-  return effort.default ?? undefined;
+  return fallbackToDefault ? (effort.default ?? undefined) : undefined;
 }
 
 /**

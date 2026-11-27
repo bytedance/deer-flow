@@ -416,6 +416,8 @@ subagents:
 
 When models differ, inherited thinking adapts to the child model's capabilities. Effort is inherited only when the child accepts the value or it can be translated through an unambiguous generic alias declared by the parent. Otherwise the child uses its own effort default. Delegation using the same legacy model profile preserves provider-specific effort values. Explicit overrides still follow the normal model validation policy, including rejection of an explicit Off request when a required-thinking profile uses `on_disable_request: reject`.
 
+The inherited effort reflects the caller's model factory settings, including provider templates. Durable batches retain the caller's effort and alias mapping from submission, so later edits to the caller's aliases do not change how queued items or retries interpret that effort. Changing a worker's model in Settings keeps a compatible override and clears an incompatible one so the selected default source still applies.
+
 For example, independent read-only research can run concurrently when the wall-clock savings outweigh duplicated discovery and synthesis cost, while a repository refactor with shared files and sequential test feedback remains with the lead agent. When `max_concurrent_subagents` is `1`, parallel and multi-batch routing guidance is disabled; delegation remains available only for material specialist or context-isolation benefit.
 
 ## Tool restrictions

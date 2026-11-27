@@ -420,6 +420,7 @@ class TestAgentConstruction:
             (True, None, "unsupported", False, None, "thinking_unsupported", {}),
             (True, "unknown", "optional", True, "lite", "effort_unsupported_value", {}),
             (True, "high", "legacy", True, "high", None, {}),
+            (True, "high", "legacy-template", True, "medium", None, {}),
             (True, None, "legacy-unsupported", False, None, None, {}),
             (None, None, "optional", True, "deep", None, {"parent_thinking_enabled": True, "parent_reasoning_effort": "high"}),
             (False, None, "optional", False, "deep", None, {"parent_thinking_enabled": True, "parent_reasoning_effort": "high"}),
@@ -435,12 +436,14 @@ class TestAgentConstruction:
 
         factory = importlib.import_module("deerflow.models.factory")
         profile_settings = {}
-        if mode in {"legacy", "legacy-unsupported"}:
+        if mode in {"legacy", "legacy-template", "legacy-unsupported"}:
             profile_settings = {
-                "supports_thinking": mode == "legacy",
+                "supports_thinking": mode != "legacy-unsupported",
                 "supports_reasoning_effort": True,
                 "when_thinking_enabled": {"extra_body": {"thinking": {"type": "enabled"}}},
             }
+            if mode == "legacy-template":
+                profile_settings["when_thinking_enabled"]["reasoning_effort"] = "medium"
         else:
             reasoning = {"thinking": mode, "dialect": "openai_extra_body"}
             if mode != "unsupported":
