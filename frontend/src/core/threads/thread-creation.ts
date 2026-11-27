@@ -1,3 +1,5 @@
+import { markRunError } from "./run-error";
+
 /**
  * Which send asked for the thread the SDK created.
  *
@@ -73,17 +75,28 @@ export function withThreadCreationTagging<T extends CreateClient>(
   }
   const create = threads.create.bind(threads);
   threads.create = async (payload, ...rest) => {
-    const created = (await create(payload, ...rest)) as {
-      thread_id?: unknown;
-    } | null;
     const requested = payload?.threadId;
-    if (
-      typeof requested === "string" &&
-      typeof created?.thread_id === "string"
-    ) {
-      markThreadCreation(created.thread_id, requested);
+    try {
+      const created = (await create(payload, ...rest)) as {
+        thread_id?: unknown;
+      } | null;
+      if (
+        typeof requested === "string" &&
+        typeof created?.thread_id === "string"
+      ) {
+        markThreadCreation(created.thread_id, requested);
+      }
+      return created;
+    } catch (error) {
+      // A refused create reaches `onError` without run metadata, so the hook
+      // can only settle it by the submission that asked for the thread. Tag it
+      // here; otherwise the fallback rejects whichever send is mounted now, and
+      // an older create failure rejects a newer send (#8092 review).
+      if (typeof requested === "string") {
+        markRunError(error, requested);
+      }
+      throw error;
     }
-    return created;
   };
   taggedClients.add(client);
   return client;

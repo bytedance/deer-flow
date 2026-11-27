@@ -1,6 +1,4 @@
 import type { AIMessage, Message, Run } from "@langchain/langgraph-sdk";
-import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
-import { useStream } from "@langchain/langgraph-sdk/react";
 import {
   type QueryClient,
   type InfiniteData,
@@ -21,6 +19,8 @@ import {
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
+import { useStream } from "@langchain/langgraph-sdk/react";
 
 import { getAPIClient } from "../api";
 import { GatewayApiError } from "../api/errors";
@@ -67,7 +67,8 @@ import {
   searchThreadsByArchive,
   type ThreadMetadataPatch,
 } from "./api";
-import { isHistoryError, withHistoryErrorTagging } from "./history-error";
+import { taggedThreadClient } from "./client";
+import { isHistoryError } from "./history-error";
 import {
   dedupeMessagesByIdentity,
   insertByTrustedSeq,
@@ -77,7 +78,7 @@ import {
   messageIdentity,
   trustedMessageSeq,
 } from "./message-order";
-import { runErrorThreadId, withRunErrorTagging } from "./run-error";
+import { runErrorThreadId } from "./run-error";
 import {
   fetchRunInputState,
   fetchRunInputs,
@@ -89,10 +90,7 @@ import {
   hasRenderedThreadStateUpdate,
   reduceThreadStateUpdates,
 } from "./stream-state";
-import {
-  takeRequestedThreadId,
-  withThreadCreationTagging,
-} from "./thread-creation";
+import { takeRequestedThreadId } from "./thread-creation";
 import {
   buildThreadsSearchQueryOptions,
   DEFAULT_THREAD_SEARCH_PARAMS,
@@ -2662,13 +2660,7 @@ export function useThreadStream({
   // Tagged so `onError` can tell a failed history fetch from a refused run:
   // the SDK reports both without run metadata, but only the refusal means the
   // send never became a turn.
-  const streamClient = useMemo(
-    () =>
-      withThreadCreationTagging(
-        withRunErrorTagging(withHistoryErrorTagging(getAPIClient(isMock))),
-      ),
-    [isMock],
-  );
+  const streamClient = useMemo(() => taggedThreadClient(isMock), [isMock]);
 
   const thread = useStream<AgentThreadState>({
     client: streamClient,
@@ -2990,8 +2982,13 @@ export function useThreadStream({
     },
     onFinish(state, run) {
       // A stream that finished without an explicit run metadata frame still
-      // created its run; the send must not stay pending forever.
-      acceptPendingSend(run?.thread_id);
+      // created its run; the send must not stay pending forever. An unnamed
+      // frame settles nothing, so fall back to the send's own identity: the
+      // stream that just finished is the one this hook submitted.
+      const settling = pendingSendRef.current;
+      acceptPendingSend(
+        run?.thread_id ?? settling?.serverThreadId ?? settling?.threadId,
+      );
       settlePendingApproval(false);
       if (run) {
         completedRunIdsRef.current.add(run.run_id);
@@ -3473,14 +3470,21 @@ export function useThreadStream({
       // same conversation whose acceptance never arrived: their one-time state
       // is already stale, while other conversations' attempts stay tracked.
       for (const superseded of releasedSendsRef.current) {
-        if (superseded.threadId === threadId) {
+        if (
+          superseded.threadId === threadId ||
+          superseded.serverThreadId === threadId
+        ) {
           // Drop its binding slot too, or the next created thread binds to a
           // send that can no longer be retired.
           forgetUnboundSend(superseded);
         }
       }
+      // A new-chat send binds a server thread after the SDK creates it; it
+      // belongs to that conversation too, so its acceptance must not reach the
+      // released attempt and retire a draft whose run never started.
       releasedSendsRef.current = releasedSendsRef.current.filter(
-        (send) => send.threadId !== threadId,
+        (send) =>
+          send.threadId !== threadId && send.serverThreadId !== threadId,
       );
 
       const text = message.text.trim();

@@ -21,6 +21,7 @@ type StreamCallbacks = {
   onCreated?: (meta: { thread_id: string; run_id: string }) => void;
   onMetadataEvent?: (data: unknown) => void;
   onError?: (error: unknown, run?: unknown) => void;
+  onFinish?: (state: { values: unknown }, run?: unknown) => void;
   onThreadId?: (threadId: string) => void;
 };
 
@@ -39,6 +40,7 @@ rs.mock("@langchain/langgraph-sdk/react", () => ({
       onCreated: options.onCreated,
       onMetadataEvent: options.onMetadataEvent,
       onError: options.onError,
+      onFinish: options.onFinish,
       onThreadId: options.onThreadId,
     };
     return {
@@ -854,4 +856,96 @@ test("accepts a frame that names the submitted id after the SDK created another 
   });
 
   expect(onSent).toHaveBeenCalledTimes(1);
+});
+
+test("settles a send whose stream finishes without run metadata", async () => {
+  stubUploadFetch(async () => {
+    throw new Error("no upload expected");
+  });
+  const { result } = await renderThreadStream("thread-1");
+  const onSent = rs.fn();
+  let send: Promise<unknown> | undefined;
+  act(() => {
+    send = result.current.sendMessage(
+      "thread-1",
+      { text: "Hello", files: [] },
+      undefined,
+      { onSent },
+    );
+  });
+  await flushFrames();
+
+  // The SDK can finish a stream that created its run without reporting that
+  // run; an empty frame id must still settle this hook's own send, or the
+  // composer stays locked for every later send on this instance.
+  await act(async () => {
+    mocks.callbacks.onFinish?.({ values: { messages: [] } }, undefined);
+  });
+  await act(async () => {
+    await send;
+  });
+  expect(onSent).toHaveBeenCalledTimes(1);
+
+  act(() => {
+    void result.current.sendMessage("thread-1", { text: "Again", files: [] });
+  });
+  await flushFrames();
+  expect(mocks.events.filter((event) => event === "submit")).toHaveLength(2);
+});
+
+test("drops a released new-chat send when its server thread is used again", async () => {
+  stubUploadFetch(async () => {
+    throw new Error("no upload expected");
+  });
+  const { result, rerender } = await renderThreadStream(null);
+  const onSentA = rs.fn();
+  const onSentB = rs.fn();
+
+  // A is a new chat: the page submits a placeholder and the SDK reports the
+  // thread it created.
+  let sendA: Promise<unknown> | undefined;
+  act(() => {
+    sendA = result.current.sendMessage(
+      "placeholder-a",
+      { text: "Hello from A", files: [] },
+      undefined,
+      { onSent: onSentA },
+    );
+  });
+  await flushFrames();
+  await act(async () => {
+    mocks.callbacks.onThreadId?.("server-a");
+  });
+
+  // Navigate away before A's run is accepted.
+  rerender({ threadId: "thread-other" });
+  await flushFrames();
+  await act(async () => {
+    await sendA;
+  });
+  expect(onSentA).not.toHaveBeenCalled();
+
+  // B continues the same conversation A was bound to. A's attempt superseded
+  // B on this conversation, so B's acceptance must not retire A's draft.
+  rerender({ threadId: "server-a" });
+  await flushFrames();
+  let sendB: Promise<unknown> | undefined;
+  act(() => {
+    sendB = result.current.sendMessage(
+      "server-a",
+      { text: "Hello from B", files: [] },
+      undefined,
+      { onSent: onSentB },
+    );
+  });
+  await flushFrames();
+  await act(async () => {
+    mocks.callbacks.onCreated?.({ thread_id: "server-a", run_id: "run-b" });
+  });
+  await act(async () => {
+    await sendB;
+  });
+
+  expect(onSentA).not.toHaveBeenCalled();
+  expect(onSentB).toHaveBeenCalledTimes(1);
 });
