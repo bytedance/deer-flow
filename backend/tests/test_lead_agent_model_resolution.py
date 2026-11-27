@@ -1509,6 +1509,33 @@ def test_web_mode_defaults_cannot_downgrade_an_explicit_configurable_value():
     assert lead_agent_module._resolve_runtime_option(lead_agent_module._get_runtime_config(config), "thinking_enabled", True, True) is False
 
 
+def test_switching_to_required_thinking_only_rejects_explicit_off(model_control_assembly, monkeypatch):
+    from app.gateway.services import merge_run_context_overrides
+    from deerflow.models.reasoning import ReasoningPolicyError
+
+    _, _, _, model_factory = model_control_assembly
+    optional = _make_model("optional", supports_thinking=True)
+    required = ModelConfig(name="required", model="required", use="langchain_openai:ChatOpenAI", reasoning={"thinking": "required", "on_disable_request": "reject"})
+    app_config = _make_app_config([optional, required])
+    agent = AgentConfig(name="dispatcher", model="optional", thinking_enabled=False)
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda *args, **kwargs: agent)
+
+    def assemble(name, **reasoning):
+        config = {}
+        merge_run_context_overrides(config, {"agent_name": "dispatcher", "mode": "ultra", "subagent_enabled": True, "model_name": name, "model_selection_requested": name, **reasoning})
+        lead_agent_module._make_lead_agent(config, app_config=app_config)
+        return config["metadata"]["thinking_enabled"]
+
+    preset = {"thinking_enabled": True, "mode_default_fields": ["thinking_enabled"]}
+    assert assemble("optional", **preset) is False
+    assert assemble("required", **preset) is True
+    assert model_factory.call_args.kwargs["thinking_enabled"] is True
+    model_factory.reset_mock()
+    with pytest.raises(ReasoningPolicyError):
+        assemble("required", thinking_enabled=False)
+    model_factory.assert_not_called()
+
+
 def _make_agent_config(**kwargs):
     from deerflow.config.agents_config import AgentConfig
 
@@ -1580,10 +1607,11 @@ def test_request_thinking_overrides_agent_default(monkeypatch):
 
 
 @pytest.mark.parametrize("mcp_plugins", [None, [], ["installed-plugin"]])
-def test_empty_allowed_subagents_disables_requested_delegation(monkeypatch, mcp_plugins):
+@pytest.mark.parametrize("allowed, enabled", [([], False), (["planner"], True)])
+def test_scheduled_delegation_respects_agent_allowlist(monkeypatch, mcp_plugins, allowed, enabled):
     """A request switch cannot widen an explicit Custom Agent hard deny."""
     app_config = _make_app_config([_make_model("agent-model", supports_thinking=False)])
-    agent_config = _make_agent_config(model="agent-model", allowed_subagents=[])
+    agent_config = _make_agent_config(model="agent-model", allowed_subagents=allowed)
     agent_config.mcp_plugins = mcp_plugins
 
     import deerflow.tools as tools_module
@@ -1599,6 +1627,8 @@ def test_empty_allowed_subagents_disables_requested_delegation(monkeypatch, mcp_
         "context": {
             "agent_name": "researcher",
             "subagent_enabled": True,
+            "non_interactive": True,
+            "user_id": "owner",
         }
     }
     lead_agent_module._make_lead_agent(config, app_config=app_config)
@@ -1607,14 +1637,14 @@ def test_empty_allowed_subagents_disables_requested_delegation(monkeypatch, mcp_
         model_name="agent-model",
         groups=None,
         mcp_plugins=mcp_plugins,
-        subagent_enabled=False,
+        subagent_enabled=enabled,
         include_conversation_reader=False,
         app_config=app_config,
         chat_model=ANY,
     )
-    assert config["context"]["subagent_enabled"] is False
-    assert config["configurable"]["subagent_enabled"] is False
-    assert config["metadata"]["allowed_subagents"] == []
+    assert config["context"]["subagent_enabled"] is enabled
+    assert config["configurable"]["subagent_enabled"] is enabled
+    assert config["metadata"]["allowed_subagents"] == allowed
     assert config["metadata"]["mcp_plugins"] == mcp_plugins
 
 

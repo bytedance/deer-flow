@@ -13,6 +13,7 @@ import {
 } from "@/core/streamdown/fences";
 
 import { modelControlDisplayText } from "./model-control";
+import { isErrorToolMessage } from "./tool-error";
 import { indexToolResults } from "./tool-result";
 
 interface GenericMessageGroup<T = string> {
@@ -1089,20 +1090,64 @@ export function isClarificationToolMessage(message: Message) {
   return message.type === "tool" && message.name === "ask_clarification";
 }
 
-export function extractPresentFilesFromMessage(message: Message) {
+/**
+ * The files an assistant message presents through `present_files`.
+ *
+ * `results` are the tool results that message owns, such as its group's
+ * messages or `indexToolResults(messages).get(index)`. The backend rejects the
+ * whole call when any path is outside the thread's outputs directory, so a call
+ * with an error result presents nothing. A call without a result yet, while
+ * the run streams, keeps its paths.
+ */
+export function extractPresentFilesFromMessage(
+  message: Message,
+  results: readonly Message[],
+) {
   if (message.type !== "ai" || !hasPresentFiles(message)) {
     return [];
   }
   const files: string[] = [];
   for (const toolCall of message.tool_calls ?? []) {
     if (
-      toolCall.name === "present_files" &&
-      Array.isArray(toolCall.args.filepaths)
+      toolCall.name !== "present_files" ||
+      isRejectedToolCall(toolCall.id, results)
     ) {
-      files.push(...(toolCall.args.filepaths as string[]));
+      continue;
+    }
+    // The args are the model's output, and the file list splits each path,
+    // so keep only string entries; one bad entry must not hide the others.
+    const filepaths = (toolCall.args as Record<string, unknown> | null)
+      ?.filepaths;
+    if (!Array.isArray(filepaths)) {
+      continue;
+    }
+    // Append one by one: spreading a saved list of any length into `push`
+    // can exceed the engine's argument limit and fail the whole thread.
+    for (const filepath of filepaths) {
+      if (typeof filepath === "string") {
+        files.push(filepath);
+      }
     }
   }
   return files;
+}
+
+function isRejectedToolCall(
+  toolCallId: string | undefined,
+  results: readonly Message[],
+) {
+  if (!toolCallId) {
+    return false;
+  }
+  return results.some(
+    (result) =>
+      result.type === "tool" &&
+      result.tool_call_id === toolCallId &&
+      // History saved before results carried a status marks the error only
+      // by this prefix, which is also the backend's legacy error rule.
+      (isErrorToolMessage(result) ||
+        extractTextFromMessage(result).startsWith("Error:")),
+  );
 }
 
 export function hasSubagent(message: AIMessage) {

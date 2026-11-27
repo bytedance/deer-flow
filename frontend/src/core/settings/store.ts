@@ -1,3 +1,6 @@
+import { getReasoningCapabilities } from "@/core/models/reasoning";
+import type { Model } from "@/core/models/types";
+
 import {
   DEFAULT_LOCAL_SETTINGS,
   LOCAL_SETTINGS_KEY,
@@ -209,16 +212,14 @@ export function getThreadModelSnapshot(threadId: string): string | undefined {
   return threadModelNames.get(threadId);
 }
 
-/** Remember which chat explicitly picked the current effort. The account still owns the value. */
 export function getThreadEffortOverride(
   threadId?: string | null,
-  currentEffort?: string,
 ): string | undefined {
-  if (!threadId || !currentEffort) return undefined;
-  const selected = threadEfforts.has(threadId)
+  if (!threadId) return undefined;
+  const effort = threadEfforts.has(threadId)
     ? threadEfforts.get(threadId)
     : safeLocalStorage.getItem(THREAD_EFFORT_KEY_PREFIX + threadId);
-  return selected === currentEffort ? currentEffort : undefined;
+  return effort?.length ? effort : undefined;
 }
 
 function rememberThreadEffortChoice(
@@ -232,6 +233,25 @@ function rememberThreadEffortChoice(
       : safeLocalStorage.setItem(key, effort);
   if (saved) threadEfforts.delete(threadId);
   else threadEfforts.set(threadId, effort);
+}
+
+/** Another chat may have resolved the shared model before this one sees the catalog. */
+export function reconcileThreadEffort(
+  threadId: string,
+  previousModel: string | undefined,
+  model: Model,
+) {
+  if (!previousModel) return;
+  const effort = getThreadEffortOverride(threadId);
+  if (!effort) return;
+  const options = getReasoningCapabilities(model).effort;
+  const supported =
+    options &&
+    (options.values.includes(effort) || Object.hasOwn(options.aliases, effort));
+  if (previousModel !== model.name || !supported) {
+    rememberThreadEffortChoice(threadId, undefined);
+    emitChange();
+  }
 }
 
 export const updateLocalSettings: LocalSettingsSetter = (key, value) => {

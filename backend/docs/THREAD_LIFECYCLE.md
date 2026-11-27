@@ -38,6 +38,15 @@ remains in thread state and replaces the source turn in history. Only a failed,
 timed-out or cancelled attempt restores the pre-edit checkpoint; once the pause is
 answered, the resume run is an ordinary run and its failure keeps the edit.
 
+A branch reserves the child thread and creates its ownership record before
+writing its replay base and head. The gateway checks the child reservation
+before each write, including each step of rollback. If a peer takes over,
+the old request drains the write already in progress and returns HTTP 409
+when it detects the loss. If a checkpoint write fails while the gateway still
+holds the reservation, it removes the child checkpoints before removing the
+ownership row. If cleanup stops early, the owner can delete the incomplete
+branch through the regular thread deletion endpoint.
+
 ### Chat archive
 
 `POST /api/threads/search` accepts an optional strict boolean `archived`: omitted

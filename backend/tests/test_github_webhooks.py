@@ -505,6 +505,22 @@ def test_invalid_json_body_returns_400(client: TestClient) -> None:
     assert "Invalid JSON" in response.json()["detail"]
 
 
+def test_non_object_json_body_returns_400(client: TestClient) -> None:
+    body = b"[1, 2, 3]"
+    response = client.post(
+        "/api/webhooks/github",
+        content=body,
+        headers={
+            "X-GitHub-Event": "issue_comment",
+            "X-GitHub-Delivery": DELIVERY_ID,
+            "X-Hub-Signature-256": _signature(body),
+            "Content-Type": "application/json",
+        },
+    )
+    assert response.status_code == 400
+    assert "Invalid JSON" in response.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # CSRF middleware exemption
 # ---------------------------------------------------------------------------
@@ -909,3 +925,97 @@ def test_summarise_event_unknown_event_falls_back() -> None:
     result = github_webhooks._summarise_event("deployment_status", {"action": "success", "repository": {"full_name": "a/b"}})
     assert "deployment_status" in result
     assert "success" in result
+
+
+def test_webhook_issue_comment_blocks_external_mention_and_allows_owner(
+    client: TestClient,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_channel_service,
+) -> None:
+    import yaml
+
+    from app.gateway.github.registry import _invalidate_cache
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr(paths_module, "_paths", None)
+    _invalidate_cache()
+
+    agent_dir = tmp_path / "users" / "repo-owner" / "agents" / "reviewer"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "reviewer",
+                "github": {
+                    "bot_login": "deerflow-bot",
+                    "bindings": [
+                        {
+                            "repo": "acme/public-repo",
+                            "triggers": {"issue_comment": {"require_mention": True}},
+                        }
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    external_body = json.dumps(
+        {
+            "action": "created",
+            "issue": {"number": 9},
+            "comment": {
+                "body": "@deerflow-bot run command",
+                "user": {"login": "stranger"},
+                "author_association": "NONE",
+            },
+            "repository": {"full_name": "acme/public-repo"},
+            "sender": {"login": "stranger"},
+        }
+    ).encode()
+    external_resp = client.post(
+        "/api/webhooks/github",
+        content=external_body,
+        headers={
+            "X-GitHub-Event": "issue_comment",
+            "X-GitHub-Delivery": "del-external-1",
+            "X-Hub-Signature-256": _signature(external_body),
+            "Content-Type": "application/json",
+        },
+    )
+    assert external_resp.status_code == 200
+    external_dispatch = external_resp.json()["dispatch"]
+    assert external_dispatch["matched_agents"] == ["reviewer"]
+    assert external_dispatch["fired_agents"] == []
+    assert "unauthorized_author" in external_dispatch["skipped"][0]["reason"]
+    assert _stub_channel_service.bus.inbound_queue.empty()
+
+    owner_body = json.dumps(
+        {
+            "action": "created",
+            "issue": {"number": 9},
+            "comment": {
+                "body": "@deerflow-bot summarize this issue",
+                "user": {"login": "repo-owner"},
+                "author_association": "OWNER",
+            },
+            "repository": {"full_name": "acme/public-repo"},
+            "sender": {"login": "repo-owner"},
+        }
+    ).encode()
+    owner_resp = client.post(
+        "/api/webhooks/github",
+        content=owner_body,
+        headers={
+            "X-GitHub-Event": "issue_comment",
+            "X-GitHub-Delivery": "del-owner-1",
+            "X-Hub-Signature-256": _signature(owner_body),
+            "Content-Type": "application/json",
+        },
+    )
+    assert owner_resp.status_code == 200
+    owner_dispatch = owner_resp.json()["dispatch"]
+    assert owner_dispatch["fired_agents"] == ["reviewer"]
+    assert not _stub_channel_service.bus.inbound_queue.empty()

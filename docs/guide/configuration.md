@@ -180,24 +180,39 @@ fences, including unclosed fences, in complete and streamed replies.
    only, and does not include `.env`, raw conversation messages, or user file
    contents. Subprocess diagnostics are captured as UTF-8, with Python helpers
    emitting UTF-8 even on non-UTF-8 hosts and escaping unencodable characters.
-   Thread manifests follow the local launcher's runtime paths: checkout `.env`
-   values override shell exports, and a project-root override alone still uses
-   `backend/.deer-flow` first. Simple variable references such as
-   `DEER_FLOW_HOME="$PWD/backend/.deer-flow"` use the checkout as `PWD`;
-   single-quoted references remain literal. If the checkout `.env` cannot be read or decoded
-   as UTF-8, thread diagnostics retain shell exports and default storage paths. For standalone Gateway launches using `backend/.env`
-   or `DEER_FLOW_ENV_FILE`, export the effective `DEER_FLOW_HOME` when collecting
-   the bundle and ensure the checkout `.env` does not override it.
    Doctor's internal tool probes also decode UTF-8 with replacement for invalid
    bytes so the remaining diagnostic output stays available.
 
-   When a thread manifest is requested, a nonempty `DEER_FLOW_HOME` selects the
-   runtime data directory instead of stale checkout data. External data paths
-   appear as `{DEER_FLOW_HOME}` in the report; file contents remain excluded.
-   Runtime path settings also come from the checkout `.env`, with shell exports
-   taking precedence. Relative paths resolve from the checkout as in `make dev`.
-   Without an explicit home, a configured `DEER_FLOW_PROJECT_ROOT` selects its
-   `.deer-flow` directory; external paths use that variable name in the report.
+   Thread manifests are opt-in. `make support-bundle` passes only
+   `--include-doctor`, so following the recipe above produces a bundle without
+   `thread-summary.json`. With the affected thread id set, request the manifest
+   from the checkout root:
+
+   ```bash
+   cd backend && uv run python ../scripts/support_bundle.py \
+     --thread-id "$THREAD_ID" --include-doctor
+   ```
+
+   For thread manifests, runtime path assignments in the checkout `.env`
+   override shell exports, even when the assigned value is empty. For the
+   bundle, relative paths resolve from the checkout. Simple references such as
+   `DEER_FLOW_HOME="$PWD/backend/.deer-flow"` use the checkout as `PWD`.
+   Single-quoted references remain literal. If the checkout `.env` cannot be
+   read or decoded as UTF-8, the bundle uses shell exports and default paths.
+
+   A nonempty `DEER_FLOW_HOME` is the only runtime root searched. With only
+   `DEER_FLOW_PROJECT_ROOT` set, the bundle searches the local launcher's
+   `backend/.deer-flow` first, then the configured project's `.deer-flow`.
+   When both values are empty or unset, it searches the checkout's
+   `.deer-flow` first, then `backend/.deer-flow`. For configured roots outside
+   the checkout, the report shows `{DEER_FLOW_HOME}` or
+   `{DEER_FLOW_PROJECT_ROOT}/.deer-flow` in place of the absolute directory.
+
+   A standalone Gateway resolves a relative `DEER_FLOW_HOME` against its own
+   working directory, which the bundle does not share. When the Gateway reads
+   runtime paths from `backend/.env` or `DEER_FLOW_ENV_FILE`, export the
+   absolute path of the data directory it is using before collecting the
+   bundle, and make sure the checkout `.env` does not override it.
 
    > **Advanced / manual configuration**: If you prefer to edit `config.yaml` directly, run `make config` instead to copy the full template. Optional dependency auto-detection accepts UTF-8 configuration files with or without a byte-order mark (BOM). It checks an existing `DEER_FLOW_CONFIG_PATH` first, then `DEER_FLOW_PROJECT_ROOT/config.yaml`, before the checkout's default locations. Local startup also accepts the project-root configuration when the checkout has no `config.yaml`. See `config.example.yaml` for the complete reference including CLI-backed providers (Codex CLI, Claude Code OAuth), OpenRouter, Responses API, subagent runtime caps such as `subagents.max_total_per_run`, and more.
 
