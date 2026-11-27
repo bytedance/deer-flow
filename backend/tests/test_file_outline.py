@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.uploads.companions import register_companion
 from deerflow.utils.file_outline import MAX_OUTLINE_ENTRIES, extract_outline, extract_outline_for_file
 
@@ -517,3 +518,35 @@ def test_exact_fit_preview_stops_before_following_content(tmp_path: Path) -> Non
     # budget stops the preview, just like reaching its five-line limit.
     assert extract_outline_for_file(document) == ([], ["Z" * 2000])
     assert document.read_text(encoding="utf-8") == original
+
+
+# Outline line numbers agree with `LocalSandbox.read_file` line numbering (#8737).
+# A lone CR is content because `read_file` ends lines only at LF.
+ROOMS_MD = b"# Cedar\nCapacity: 24\rNotes: art classes.\rNotes: staff reset furniture.\n# Maple\nCapacity: 18\n# Birch\nCapacity: 30\n# Willow\nCapacity: 8\n"
+
+
+def test_outline_line_numbers_use_lf_like_read_file(tmp_path: Path) -> None:
+    document = tmp_path / "rooms.md"
+    document.write_bytes(ROOMS_MD)
+
+    assert extract_outline(document) == [
+        {"title": "Cedar", "line": 1},
+        {"title": "Maple", "line": 3},
+        {"title": "Birch", "line": 5},
+        {"title": "Willow", "line": 7},
+    ]
+
+
+def test_maple_outline_range_reads_maple_section(tmp_path: Path) -> None:
+    document = tmp_path / "rooms.md"
+    document.write_bytes(ROOMS_MD)
+    outline = extract_outline(document)
+    index = next(i for i, entry in enumerate(outline) if entry["title"] == "Maple")
+
+    section = LocalSandbox("t").read_file(
+        str(document),
+        start_line=outline[index]["line"],
+        end_line=outline[index + 1]["line"] - 1,
+    )
+
+    assert section == "# Maple\nCapacity: 18"

@@ -133,7 +133,10 @@ def extract_outline(md_path: Path) -> list[dict]:
     fence_length = 0
     in_html_comment = False
     try:
-        with md_path.open(encoding="utf-8-sig") as f:
+        # Number lines the way LocalSandbox.read_file does: only "\n" ends a
+        # line, so a lone "\r" stays inside its line and outline ranges read
+        # back the same text.
+        with md_path.open(encoding="utf-8-sig", newline="\n") as f:
             for lineno, line in enumerate(f, 1):
                 if in_html_comment:
                     in_html_comment = "-->" not in line
