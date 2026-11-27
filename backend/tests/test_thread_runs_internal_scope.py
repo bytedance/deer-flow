@@ -1332,3 +1332,44 @@ def test_ownerless_internal_caller_reads_and_paginates_legacy_null_owner_runs_sq
             params={"limit": 2, "before_created_at": p1["next_before_created_at"], "before_run_id": p1["next_before_run_id"]},
         ).json()
         assert [r["run_id"] for r in p2["data"]] == [expected_ids[2]] and p2["has_more"] is False
+
+
+@pytest.mark.no_auto_user
+def test_ownerless_internal_caller_pages_past_unreadable_default_owned_sql_row(db_event_store: DbRunEventStore) -> None:
+    """An unreadable in-scope row must not shorten the lookahead and drop older default/legacy runs."""
+    from sqlalchemy import update
+
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=None))
+    run_store = RunRepository(get_session_factory())
+
+    async def _seed() -> None:
+        await run_store.put("run-sql-legacy-3", thread_id=THREAD_ID, user_id=None, status="success")
+        await asyncio.sleep(0.02)
+        await run_store.put("run-sql-default-2", thread_id=THREAD_ID, user_id="default", status="success")
+        await asyncio.sleep(0.02)
+        await run_store.put("run-sql-legacy-1", thread_id=THREAD_ID, user_id=None, status="success")
+        await asyncio.sleep(0.02)
+        await run_store.put("run-sql-default-corrupt", thread_id=THREAD_ID, user_id="default", status="success")
+        async with get_session_factory()() as session:
+            await session.execute(update(RunRow).where(RunRow.run_id == "run-sql-default-corrupt").values(status="corrupt-status"))
+            await session.commit()
+
+    anyio.run(_seed)
+
+    client = _make_app(user=_internal_user(None), auth_source=AUTH_SOURCE_INTERNAL, run_store=run_store, event_store=db_event_store, thread_store=thread_store)
+    expected_ids = ["run-sql-legacy-1", "run-sql-default-2", "run-sql-legacy-3"]
+
+    with client:
+        assert [r["run_id"] for r in client.get(f"/api/threads/{THREAD_ID}/runs").json()] == expected_ids
+
+        p1 = client.get(f"/api/threads/{THREAD_ID}/runs/page", params={"limit": 2}).json()
+        assert [r["run_id"] for r in p1["data"]] == expected_ids[:2]
+        assert p1["has_more"] is True and p1["next_before_run_id"] == "run-sql-default-2"
+
+        p2 = client.get(
+            f"/api/threads/{THREAD_ID}/runs/page",
+            params={"limit": 2, "before_created_at": p1["next_before_created_at"], "before_run_id": p1["next_before_run_id"]},
+        ).json()
+        assert [r["run_id"] for r in p2["data"]] == [expected_ids[2]]
+        assert p2["has_more"] is False and p2["next_before_run_id"] is None

@@ -1785,6 +1785,32 @@ async def test_list_by_thread_filters_in_memory_records_by_user_id():
     assert {r.run_id for r in await mgr.list_by_thread("thread-1")} == {live_u1.run_id, live_u2.run_id, "store-u1", "store-u2"}
 
 
+@pytest.mark.anyio
+async def test_list_by_thread_refills_past_unreadable_store_rows():
+    """Skipped unreadable store rows must refill using the raw store cursor, even at batch end."""
+    store = MemoryRunStore()
+    mgr = RunManager(store=store)
+
+    # Seed an older in-memory record plus store rows where an unreadable row sits
+    # right at the end of the first batch (position 3 for limit=3).
+    older_live = await mgr.create("thread-1", user_id="default")
+    older_live.created_at = older_live.updated_at = "2026-01-01T00:00:01+00:00"
+    store._runs[older_live.run_id]["created_at"] = store._runs[older_live.run_id]["updated_at"] = "2026-01-01T00:00:01+00:00"
+
+    for run_id, ts, status, uid in (
+        ("r-readable-old", "2026-01-01T00:00:02+00:00", "success", None),
+        ("r-corrupt-boundary", "2026-01-01T00:00:03+00:00", "corrupt-status", "default"),
+        ("r-readable-mid", "2026-01-01T00:00:04+00:00", "success", "default"),
+        ("r-corrupt-head", "2026-01-01T00:00:05+00:00", "corrupt-status", "default"),
+        ("r-readable-top", "2026-01-01T00:00:06+00:00", "success", None),
+    ):
+        await store.put(run_id, thread_id="thread-1", user_id=uid, status=status)
+        store._runs[run_id]["created_at"] = store._runs[run_id]["updated_at"] = ts
+
+    page = await mgr.list_by_thread("thread-1", user_id="default", allow_legacy_default=True, limit=3)
+    assert [r.run_id for r in page] == ["r-readable-top", "r-readable-mid", "r-readable-old"]
+
+
 # ---------------------------------------------------------------------------
 # Per-thread index (thread_id -> run_ids): keeps per-thread queries
 # O(runs-in-thread) instead of scanning every in-memory run, and stays
