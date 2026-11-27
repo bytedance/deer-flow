@@ -185,3 +185,20 @@ def test_managed_definitions_cache_serializes_concurrent_first_load(monkeypatch)
     assert all("planner" in names for names in results)
     assert store.signature_calls == 1
     assert store.list_calls == 1
+
+
+def test_mcp_selection_follows_definition_and_override_precedence(monkeypatch):
+    managed = _managed("planner").model_copy(update={"mcp_plugins": ["planner-id"]})
+    monkeypatch.setattr(registry, "_managed_definitions", lambda **_: [managed])
+    raw = {
+        "custom_agents": {"custom": {"description": "Custom", "system_prompt": "Work.", "mcp_plugins": ["custom-id"]}},
+        "agents": {"general-purpose": {"mcp_plugins": []}, "custom": {"mcp_plugins": None}, "planner": {"mcp_plugins": ["override-id"]}},
+    }
+    config = SubagentsAppConfig.model_validate(raw)
+    config = SubagentsAppConfig.model_validate_json(config.model_dump_json())
+
+    assert registry.get_subagent_config("general-purpose", app_config=config).mcp_plugins == []
+    assert registry.get_subagent_config("custom", app_config=config).mcp_plugins == ["custom-id"]
+    assert registry.get_subagent_config("planner", app_config=config).mcp_plugins == ["override-id"]
+    assert registry.get_subagent_config("planner", app_config=SubagentsAppConfig()).mcp_plugins == ["planner-id"]
+    assert registry.BUILTIN_SUBAGENTS["general-purpose"].mcp_plugins is None

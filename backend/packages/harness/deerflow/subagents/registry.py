@@ -48,6 +48,7 @@ def _build_custom_subagent_config(name: str, *, app_config: Any | None = None) -
         tools=custom.tools,
         disallowed_tools=custom.disallowed_tools,
         skills=custom.skills,
+        mcp_plugins=custom.mcp_plugins,
         model=custom.model,
         thinking_enabled=custom.thinking_enabled,
         reasoning_effort=custom.reasoning_effort,
@@ -98,6 +99,7 @@ def _build_managed_subagent_config(name: str, *, app_config: Any | None = None) 
             tools=definition.tools,
             disallowed_tools=definition.disallowed_tools,
             skills=definition.skills,
+            mcp_plugins=definition.mcp_plugins,
             model=definition.model,
             thinking_enabled=definition.thinking_enabled,
             reasoning_effort=definition.reasoning_effort,
@@ -114,7 +116,7 @@ def get_subagent_config(name: str, *, app_config: Any | None = None) -> Subagent
     1. Built-in subagents (general-purpose, bash)
     2. Custom subagents from config.yaml custom_agents section
     3. Enabled administrator-managed subagents
-    4. Per-agent overrides from config.yaml agents section (timeout, max_turns, model, thinking_enabled, reasoning_effort, skills)
+    4. Per-agent overrides from config.yaml agents section (timeout, max_turns, model, thinking_enabled, reasoning_effort, skills, mcp_plugins)
 
     Args:
         name: The name of the subagent.
@@ -146,6 +148,8 @@ def get_subagent_config(name: str, *, app_config: Any | None = None) -> Subagent
         overlay = agent_override.prompt_overlay
         if overlay.prepend or overlay.append:
             overrides["prompt_overlay"] = overlay
+        if agent_override.mcp_plugins is not None:
+            overrides["mcp_plugins"] = agent_override.mcp_plugins
 
     # Timeout: per-agent override > global default (builtins only) > config's own value
     if agent_override is not None and agent_override.timeout_seconds is not None:

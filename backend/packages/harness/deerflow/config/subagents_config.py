@@ -110,6 +110,10 @@ class SubagentOverrideConfig(BaseModel):
         default=None,
         description="Whether to enable thinking/reasoning for this subagent (None = no override)",
     )
+    mcp_plugins: list[str] | None = Field(
+        default=None,
+        description="MCP installation selection (None leaves the underlying selection unchanged, [] selects none)",
+    )
     reasoning_effort: str | None = Field(
         default=None,
         description="Reasoning effort accepted or mapped by the selected model (None = use its default)",
@@ -157,6 +161,10 @@ class CustomSubagentConfig(BaseModel):
     thinking_enabled: bool | None = Field(
         default=None,
         description="Whether to enable thinking/reasoning for this subagent (None = no override)",
+    )
+    mcp_plugins: list[str] | None = Field(
+        default=None,
+        description="MCP installation selection (None inherits the parent selection, [] selects none)",
     )
     reasoning_effort: str | None = Field(
         default=None,

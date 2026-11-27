@@ -186,6 +186,16 @@ the scopes and permissions below.
 
 A denied scope answers `403` with `Permission denied: <scope>`. The user
 profile (`/api/user-profile`), agent import and export stay session-only.
+Managed subagent creates and updates accept `mcp_plugins`. On update, omitting
+the field keeps its saved value. Use `null` to inherit the lead selection,
+`[]` to select no MCP installations, or a list of deployment MCP installation
+IDs from `GET /api/capabilities/installations/mcp`. Disabled installations can
+be saved and contribute tools only while enabled. Unknown, personal, or
+ambiguous installation IDs return HTTP 422 when submitted. Unrelated updates
+retain a saved reference if its installation is later removed.
+`GET /api/subagents` reports each definition's selection as `mcp_plugins` and
+any configured list override in `config_overrides.mcp_plugins`.
+
 `subagents:write` is the only scope that carries admin capability, and only on
 the three managed-subagent write routes: an admin's token holding it still
 gets `403` on every other admin route.

@@ -81,7 +81,7 @@ def sql_store(tmp_path, request):
 def test_crud_and_signature(request, store_fixture):
     store = request.getfixturevalue(store_fixture)
     empty_signature = store.signature()
-    definition = _definition(thinking_enabled=True, reasoning_effort="xhigh")
+    definition = _definition(thinking_enabled=True, reasoning_effort="xhigh", mcp_plugins=["deployment-id"])
 
     store.create(definition)
     assert store.get("RESEARCHER") == definition
@@ -89,12 +89,15 @@ def test_crud_and_signature(request, store_fixture):
     created_signature = store.signature()
     assert created_signature != empty_signature
 
-    updated = definition.model_copy(update={"enabled": False, "max_turns": 75})
+    updated = definition.model_copy(update={"enabled": False, "max_turns": 75, "mcp_plugins": []})
     store.update(updated)
     assert store.get("researcher").enabled is False
     assert store.get("researcher").max_turns == 75
     assert store.get("researcher").thinking_enabled is True
     assert store.get("researcher").reasoning_effort == "xhigh"
+    assert store.get("researcher").mcp_plugins == []
+    store.update(updated.model_copy(update={"mcp_plugins": None}))
+    assert store.get("researcher").mcp_plugins is None
     updated_signature = store.signature()
     assert updated_signature != created_signature
 
@@ -120,6 +123,7 @@ def test_legacy_definition_without_reasoning_fields_keeps_defaults(request, stor
     definition = store.get("researcher")
     assert definition.thinking_enabled is None
     assert definition.reasoning_effort is None
+    assert definition.mcp_plugins is None
     assert store.list() == [definition]
 
 

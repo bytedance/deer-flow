@@ -76,10 +76,13 @@ def test_batch_schema_advertises_continuation_only_with_run_capability():
         (_MISSING, False),
     ],
 )
+@pytest.mark.parametrize(("child_plugins", "expected_plugins"), [(None, ["stable-plugin"]), ([], []), (["child-id"], ["child-id"])])
 async def test_batch_task_is_explicit_idempotent_submission(
     monkeypatch,
     thread_incarnation,
     expected_present,
+    child_plugins,
+    expected_plugins,
 ) -> None:
     submitter = AsyncMock()
     submitter.submit.return_value = {
@@ -99,6 +102,7 @@ async def test_batch_task_is_explicit_idempotent_submission(
         lambda *_args, **_kwargs: SubagentConfig(
             name="general-purpose",
             description="General purpose",
+            mcp_plugins=child_plugins,
         ),
     )
 
@@ -120,7 +124,7 @@ async def test_batch_task_is_explicit_idempotent_submission(
     message = _message(command)
     request = submitter.submit.await_args.args[0]
     assert request.submission_key == "run-1:call-1"
-    assert request.execution_spec["mcp_plugins"] == ["stable-plugin"]
+    assert request.execution_spec["mcp_plugins"] == expected_plugins
     assert "ask_clarification" in request.execution_spec["subagent_config"]["disallowed_tools"]
     assert request.user_id == "user-1"
     assert [item["key"] for item in request.items] == ["record-1", "record-2"]

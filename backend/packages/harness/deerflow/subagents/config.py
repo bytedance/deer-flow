@@ -24,6 +24,7 @@ class SubagentConfig:
                 disabled for this subagent. Skill bodies load lazily at runtime;
                 allowed-tools is compatibility metadata only and never restricts
                 this subagent's tools.
+        mcp_plugins: MCP installation IDs; None inherits the parent selection.
         model: Model to use - 'inherit' uses parent's model.
         thinking_enabled: Whether to enable thinking/reasoning for this subagent.
                 None means use default (False).
@@ -54,6 +55,7 @@ class SubagentConfig:
     max_turns: int = 50
     timeout_seconds: int = 900
     prompt_overlay: PromptOverlay = field(default_factory=PromptOverlay)
+    mcp_plugins: list[str] | None = None
 
 
 def _default_model_name(app_config: "AppConfig") -> str:

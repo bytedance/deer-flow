@@ -190,8 +190,9 @@ to the existing skill-name selection. A selection never enables a disabled tool
 or grants access to another user's account.
 
 The lead Agent filters tools by their MCP source metadata. Ordinary delegated
-and durable batch tasks carry the selection in their execution metadata. Each
-Agent run gets a filtered list without altering the shared MCP tool cache.
+and durable batch tasks inherit the lead selection by default and can select
+their own installation IDs through [subagent configuration](guide/subagents.md#mcp-tool-selection).
+Each run gets a filtered list without altering the shared MCP tool cache.
 The settings dialog omits unchanged plugin and skill selections on save, so an
 unrelated edit does not overwrite a concurrent capability selection.
 Existing skill policy, user-scoped MCP authentication, and tool execution guards
