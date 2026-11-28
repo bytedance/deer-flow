@@ -72,6 +72,15 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **chat:** A first message whose run request is rejected no longer loses the
+  draft. The composer keeps the text (and its stored draft survives a reload)
+  and the new-chat welcome layout comes back. `thread.submit` alone no longer
+  counts as delivered: the send resolves only once the Gateway accepted the
+  run, so one-time composer state is retired at acceptance instead of at
+  dispatch. The empty session Gateway admission may have created for that
+  rejected send is left in place; identifying it safely needs a backend
+  conditional delete. ([#8092](https://github.com/bytedance/deer-flow/pull/8092))
+
 - **agents:** A todo list revised after the last `write_todos` call (for
   example an approved plan edited on resume) is shown to the model again
   instead of being silently skipped, and a stale injected reminder is

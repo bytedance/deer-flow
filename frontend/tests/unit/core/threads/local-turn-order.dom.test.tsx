@@ -21,12 +21,18 @@ const streamMockState = rs.hoisted(() => ({
     | ((data: unknown, options: { mutate: (updater: unknown) => void }) => void)
     | undefined,
   onCustomEvent: undefined as ((event: unknown) => void) | undefined,
+  onCreated: undefined as
+    | ((meta: { thread_id: string; run_id: string }) => void)
+    | undefined,
   stop: rs.fn(async () => undefined),
-  submit: rs.fn(async () => undefined),
+  submit: rs.fn(
+    async (_values?: unknown, _options?: { threadId?: string }) => undefined,
+  ),
 }));
 
 rs.mock("@langchain/langgraph-sdk/react", () => ({
   useStream: (options: {
+    onCreated?: (meta: { thread_id: string; run_id: string }) => void;
     onFinish?: (state: { values: { messages: Message[] } }) => void;
     onError?: (error: unknown) => void;
     onUpdateEvent?: (
@@ -35,6 +41,7 @@ rs.mock("@langchain/langgraph-sdk/react", () => ({
     ) => void;
     onCustomEvent?: (event: unknown) => void;
   }) => {
+    streamMockState.onCreated = options.onCreated;
     streamMockState.onFinish = options.onFinish;
     streamMockState.onError = options.onError;
     streamMockState.onUpdateEvent = options.onUpdateEvent;
@@ -159,12 +166,23 @@ async function flushFrames() {
 beforeEach(() => {
   streamMockState.isLoading = false;
   streamMockState.messages = [];
+  streamMockState.onCreated = undefined;
   streamMockState.onFinish = undefined;
   streamMockState.onError = undefined;
   streamMockState.onUpdateEvent = undefined;
   streamMockState.onCustomEvent = undefined;
   streamMockState.stop.mockClear();
-  streamMockState.submit.mockClear();
+  streamMockState.submit.mockReset();
+  // The SDK creates the run after `thread.submit` returns: report acceptance
+  // so the hook's send promise settles as it does against the real Gateway.
+  streamMockState.submit.mockImplementation(
+    async (_values: unknown, options?: { threadId?: string }) => {
+      streamMockState.onCreated?.({
+        thread_id: options?.threadId ?? "thread-1",
+        run_id: "run-accepted",
+      });
+    },
+  );
 });
 
 afterEach(() => {

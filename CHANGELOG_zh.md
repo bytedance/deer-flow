@@ -33,6 +33,12 @@
 
 ### 修复
 
+- **对话：** 新会话首条消息的运行请求被拒绝时，不再丢失草稿。
+  输入框保留文字（刷新后草稿仍在），新会话欢迎态恢复。`thread.submit` 本身不再等同于发送成功：
+  只有 Gateway 接受了这次运行，发送才会 resolve，因此一次性的输入框状态在确认接收时才清理，
+  而不是在派发时清理。仅为这次被拒发送而由 Gateway 准入创建的 0 消息会话会保留下来；
+  要安全识别并删除它，需要后端提供条件删除。([#8092])
+
 - **调度器：** 定时任务发往 IM 的通知不再把不带密钥词形态的凭证原样发出。URL 中的账号信息
   （`postgres://admin:hunter2@host`）以及 `Authorization`、`Cookie` 请求头的值
   （`Authorization: Bearer ...`）此前会完整进入消息；现在替换为 `[redacted]`，协议名和句子
@@ -12919,6 +12925,8 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8046]: https://github.com/bytedance/deer-flow/pull/8046
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8092]: https://github.com/bytedance/deer-flow/pull/8092
+
 [#8087]: https://github.com/bytedance/deer-flow/pull/8087
 [#8118]: https://github.com/bytedance/deer-flow/pull/8118
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
