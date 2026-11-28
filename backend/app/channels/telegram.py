@@ -490,8 +490,8 @@ class TelegramChannel(Channel):
             except Exception as exc:
                 if self._is_not_modified(exc):
                     return True
-                if self._is_retry_after(exc) and attempt == 0:
-                    await asyncio.sleep(self._retry_after_seconds(exc))
+                if attempt == 0 and (wait := self._bounded_retry_after_seconds(exc)) is not None:
+                    await asyncio.sleep(wait)
                     continue
                 logger.warning("[Telegram] final edit failed in chat=%s: %s", chat_id, exc)
                 return False
@@ -521,8 +521,8 @@ class TelegramChannel(Channel):
                 await bot.do_api_request("editMessageText", api_kwargs=data)
                 return True
             except Exception as exc:
-                if self._is_retry_after(exc) and attempt == 0:
-                    await asyncio.sleep(self._retry_after_seconds(exc))
+                if attempt == 0 and (wait := self._bounded_retry_after_seconds(exc)) is not None:
+                    await asyncio.sleep(wait)
                     continue
                 if isinstance(exc, (BadRequest, EndPointNotFound)):
                     logger.warning("[Telegram] Rich Message rejected in chat=%s; falling back to plain text: %s", chat_id, exc)
@@ -990,15 +990,24 @@ class TelegramChannel(Channel):
         Final edits have their own retry path.
         """
         delay = super()._outbound_retry_delay(attempt, exc)
-        if not self._is_retry_after(exc):
+        hint = self._bounded_retry_after_seconds(exc)
+        if hint is None:
             return delay
+        return max(delay, hint)
+
+    @classmethod
+    def _bounded_retry_after_seconds(cls, exc: Exception) -> float | None:
+        if not cls._is_retry_after(exc):
+            return None
+        if isinstance(getattr(exc, "retry_after", None), bool):
+            return None
         try:
-            hint = self._retry_after_seconds(exc)
+            hint = cls._retry_after_seconds(exc)
         except (TypeError, ValueError, OverflowError):
-            return delay
+            return None
         if not math.isfinite(hint):
-            return delay
-        return max(delay, min(hint, TELEGRAM_MAX_OUTBOUND_RETRY_DELAY_SECONDS))
+            return None
+        return max(0.0, min(hint, TELEGRAM_MAX_OUTBOUND_RETRY_DELAY_SECONDS))
 
     @staticmethod
     def _is_retry_after(exc: Exception) -> bool:
