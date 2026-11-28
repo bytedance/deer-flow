@@ -35,6 +35,7 @@ class FakeAioSandbox:
         self.commands: list[str] = []
         self.uploaded_files: dict[str, bytes] = {}
         self.remote_outputs: dict[str, bytes] = {}
+        self.downloads: list[str] = []
         self.closed = False
         self.fail_upload_script = False
         self.fail_bootstrap = False
@@ -66,6 +67,7 @@ class FakeAioSandbox:
         self.uploaded_files[path] = content
 
     def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
+        self.downloads.append(path)
         data = self.remote_outputs[path]
         if max_bytes is not None and len(data) > max_bytes:
             raise ValueError("download exceeded max_bytes")

@@ -936,6 +936,137 @@ class TestVeFaaSSandboxProviderLifecycle:
         finally:
             provider.shutdown()
 
+    @pytest.mark.parametrize(
+        "names",
+        [
+            ("Report.txt", "report.txt"),
+            ("Charts/report.txt", "charts/report.txt"),
+            ("Charts/first.txt", "charts/second.txt"),
+            ("nested/Report.txt", "nested/report.txt"),
+            ("Charts", "charts/report.txt"),
+            ("Résumé.txt", "résumé.txt"),
+            ("résumé.txt", "re\u0301sume\u0301.txt"),
+        ],
+    )
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_release_skips_ambiguous_remote_output_names(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture, names: tuple[str, ...], reverse: bool) -> None:
+        from deerflow.config.paths import get_paths
+
+        provider, _server, aio_instances = _install_provider(monkeypatch, tmp_path)
+        try:
+            sandbox_id = provider.acquire("alias-thread", user_id="alias-user")
+            remote = aio_instances[0]
+            names = names[::-1] if reverse else names
+            remote.remote_outputs.update({f"/mnt/user-data/outputs/{name}": f"content {index}".encode() for index, name in enumerate(names)})
+            remote.remote_outputs["/mnt/user-data/outputs/safe.txt"] = b"unambiguous report"
+
+            provider.release(sandbox_id)
+
+            outputs = get_paths().sandbox_outputs_dir("alias-thread", user_id="alias-user")
+            assert sorted(path.relative_to(outputs).as_posix() for path in outputs.rglob("*") if path.is_file()) == ["safe.txt"]
+            assert (outputs / "safe.txt").read_bytes() == b"unambiguous report"
+            assert remote.downloads == ["/mnt/user-data/outputs/safe.txt"]
+            assert "ambiguous" in caplog.text
+            assert sandbox_id in provider._warm_pool
+        finally:
+            provider.shutdown()
+
+    def test_release_preflight_covers_output_names_beyond_the_file_cap(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        from deerflow.config.paths import get_paths
+
+        provider, _server, aio_instances = _install_provider(monkeypatch, tmp_path)
+        try:
+            sandbox_id = provider.acquire("alias-cap-thread", user_id="alias-cap-user")
+            remote = aio_instances[0]
+            remote.remote_outputs.update(
+                {
+                    "/mnt/user-data/outputs/Report.txt": b"upper report",
+                    "/mnt/user-data/outputs/a-safe.txt": b"safe report",
+                    "/mnt/user-data/outputs/report.txt": b"lower report",
+                }
+            )
+            monkeypatch.setattr(provider_mod, "_MAX_SYNC_FILES", 2)
+
+            provider.release(sandbox_id)
+
+            outputs = get_paths().sandbox_outputs_dir("alias-cap-thread", user_id="alias-cap-user")
+            assert sorted(path.name for path in outputs.iterdir()) == ["a-safe.txt"]
+            assert remote.downloads == ["/mnt/user-data/outputs/a-safe.txt"]
+        finally:
+            provider.shutdown()
+
+    @pytest.mark.parametrize(
+        "names",
+        [
+            ("Report.txt", "report.txt"),
+            ("Charts/old.txt", "charts/new.txt"),
+            ("Résumé.txt", "résumé.txt"),
+            ("résumé.txt", "re\u0301sume\u0301.txt"),
+        ],
+    )
+    def test_release_preserves_an_existing_host_output_alias(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, names: tuple[str, str]) -> None:
+        from deerflow.config.paths import get_paths
+
+        provider, _server, aio_instances = _install_provider(monkeypatch, tmp_path)
+        try:
+            sandbox_id = provider.acquire("host-alias-thread", user_id="host-alias-user")
+            remote = aio_instances[0]
+            existing, incoming = names
+            outputs = get_paths().sandbox_outputs_dir("host-alias-thread", user_id="host-alias-user")
+            previous = outputs / existing
+            previous.parent.mkdir(parents=True)
+            previous.write_bytes(b"previous complete report")
+            remote.remote_outputs[f"/mnt/user-data/outputs/{incoming}"] = b"different remote report"
+            remote.remote_outputs["/mnt/user-data/outputs/safe.txt"] = b"safe report"
+
+            provider.release(sandbox_id)
+
+            assert previous.read_bytes() == b"previous complete report"
+            assert sorted(path.relative_to(outputs).as_posix() for path in outputs.rglob("*") if path.is_file()) == sorted([existing, "safe.txt"])
+            assert remote.downloads == ["/mnt/user-data/outputs/safe.txt"]
+        finally:
+            provider.shutdown()
+
+    def test_release_rejects_an_alias_planted_during_download(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        from deerflow.config.paths import get_paths
+
+        provider, _server, aio_instances = _install_provider(monkeypatch, tmp_path)
+        try:
+            sandbox_id = provider.acquire("planted-thread", user_id="planted-user")
+            remote = aio_instances[0]
+            outputs = get_paths().sandbox_outputs_dir("planted-thread", user_id="planted-user")
+            remote.remote_outputs["/mnt/user-data/outputs/Report.txt"] = b"remote report"
+            original_download = remote.download_file
+
+            def plant_alias(path: str, *, max_bytes: int | None = None) -> bytes:
+                (outputs / "report.txt").write_bytes(b"other complete report")
+                return original_download(path, max_bytes=max_bytes)
+
+            monkeypatch.setattr(remote, "download_file", plant_alias)
+            provider.release(sandbox_id)
+
+            assert (outputs / "report.txt").read_bytes() == b"other complete report"
+            assert sorted(path.name for path in outputs.iterdir()) == ["report.txt"]
+        finally:
+            provider.shutdown()
+
+    def test_release_keeps_distinct_remote_output_names_in_the_same_directory(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        from deerflow.config.paths import get_paths
+
+        provider, _server, aio_instances = _install_provider(monkeypatch, tmp_path)
+        try:
+            sandbox_id = provider.acquire("distinct-thread", user_id="distinct-user")
+            remote = aio_instances[0]
+            remote.remote_outputs.update({"/mnt/user-data/outputs/Charts/first.txt": b"first", "/mnt/user-data/outputs/Charts/second.txt": b"second"})
+
+            provider.release(sandbox_id)
+
+            outputs = get_paths().sandbox_outputs_dir("distinct-thread", user_id="distinct-user")
+            assert (outputs / "Charts" / "first.txt").read_bytes() == b"first"
+            assert (outputs / "Charts" / "second.txt").read_bytes() == b"second"
+        finally:
+            provider.shutdown()
+
     def test_recycling_release_remains_visible_to_concurrent_shutdown(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         provider, server, aio_instances = _install_provider(monkeypatch, tmp_path)
         provider._client_override = None
