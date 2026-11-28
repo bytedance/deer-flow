@@ -5,6 +5,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+from support.nginx_conf import NGINX_CONFIGS, extract_location_block
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -12,29 +15,8 @@ def _read(path: str) -> str:
     return (REPO_ROOT / path).read_text(encoding="utf-8")
 
 
-def _extract_nginx_location_block(content: str, location: str) -> str:
-    needle = f"location {location} {{"
-    start = content.find(needle)
-    assert start != -1, f"missing nginx {needle}"
-
-    brace_start = content.find("{", start)
-    assert brace_start != -1, f"missing nginx block opener for {needle}"
-
-    depth = 0
-    for index in range(brace_start, len(content)):
-        char = content[index]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return content[start : index + 1]
-
-    raise AssertionError(f"missing nginx block closer for {needle}")
-
-
 def _assert_frontend_upgrade_header_is_conditional(content: str) -> None:
-    frontend_block = _extract_nginx_location_block(content, "/")
+    frontend_block = extract_location_block(content, "/")
 
     assert "map $http_upgrade $connection_upgrade" in content
     assert "proxy_set_header Upgrade $http_upgrade;" in frontend_block
@@ -135,6 +117,13 @@ def test_nginx_routes_official_langgraph_prefix_to_gateway_api():
         assert "proxy_pass http://langgraph" not in content
         assert "rewrite ^/api/langgraph/(.*) /api/$1 break;" in content
         assert "proxy_pass http://gateway" in content or "proxy_pass http://$gateway_upstream" in content
+
+
+@pytest.mark.parametrize("path", NGINX_CONFIGS)
+def test_nginx_keeps_the_provisioner_internal(path: str):
+    config = _read(path)
+    assert not re.search(r"^\s*(?:proxy_pass|set|server)\s+[^;#\n]*provisioner", config, re.M)
+    assert re.search(r"^\s*proxy_pass http://\$?gateway(?:_upstream)?;", extract_location_block(config, "/api/"), re.M)
 
 
 def test_nginx_defers_cors_to_gateway_allowlist():
