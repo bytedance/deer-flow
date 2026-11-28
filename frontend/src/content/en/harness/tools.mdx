@@ -429,6 +429,29 @@ Independent image results via Brave Image Search. Requires a [Brave Search API](
   </Tabs.Tab>
 </Tabs>
 
+### Apify Actor tools
+
+With an Apify API token, the agent can use any Actor in [Apify Store](https://apify.com/store), for example an Instagram, Google Maps or e-commerce scraper. `apify_actor_discover` searches the Store or returns an Actor's input schema, `apify_actor_start` starts a run, and `apify_actor_await` waits for the run and returns its results. The agent can start several runs before awaiting them, to scrape in parallel. The `apify-scraper` skill routes common platforms to known Actors. [Create an API token for DeerFlow](https://console.apify.com/settings/integrations?createApiToken=true&for=DeerFlow&utm_source=deerflow&utm_medium=integrations) and copy it right after creating it, because it is shown only once.
+
+```yaml
+tools:
+  - name: apify_actor_discover
+    group: web
+    use: deerflow.community.apify.tools:apify_actor_discover_tool
+  - name: apify_actor_start
+    group: web
+    use: deerflow.community.apify.tools:apify_actor_start_tool
+    max_total_charge_usd: 1.0 # cost cap per run in USD
+    # max_paid_items: 1000 # results a pay-per-result Actor can charge for
+  - name: apify_actor_await
+    group: web
+    use: deerflow.community.apify.tools:apify_actor_await_tool
+    timeout_secs: 300
+    max_items: 50
+```
+
+Actor runs spend Apify credits. `max_total_charge_usd` caps what one run can cost. Pay-per-result Actors charge per result instead, and `max_paid_items` limits those. Without these limits, a run is limited only by the Apify account's monthly usage limit. `config.example.yaml` lists every option.
+
 ## Tool groups
 
 Tool groups let you organize tools into named sets and restrict which groups a custom agent can access.

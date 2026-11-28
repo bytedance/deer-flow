@@ -1403,6 +1403,33 @@ tools:
   #   # render: auto                  # auto | never (plain HTTP only) | always (cloud browser)
   #   # api_key: $UNBROWSE_API_KEY
 
+  # Apify Actor tools (require APIFY_API_TOKEN): find, start and await any Actor in Apify Store,
+  # for example an Instagram, Google Maps or e-commerce scraper. Start several runs, then await
+  # each, to scrape in parallel. The apify-scraper skill routes common platforms to known Actors.
+  # Actor runs spend Apify credits. max_total_charge_usd caps what one run can cost; without it a
+  # run is limited only by the Apify account's monthly usage limit. Pay-per-result Actors charge
+  # per result instead: max_paid_items limits those. Results and start errors pass through the
+  # tool-result sanitization middleware like other remote content.
+  # Create an API token for DeerFlow in Apify Console and copy it right after creating it, because it is shown only once:
+  # https://console.apify.com/settings/integrations?createApiToken=true&for=DeerFlow&utm_source=deerflow&utm_medium=integrations
+  # - name: apify_actor_discover
+  #   group: web
+  #   use: deerflow.community.apify.tools:apify_actor_discover_tool
+  #   max_results: 10                 # Store search results
+  # - name: apify_actor_start
+  #   group: web
+  #   use: deerflow.community.apify.tools:apify_actor_start_tool
+  #   # timeout_secs: 300             # Actor run timeout on Apify (default: the Actor's own)
+  #   # memory_mbytes: 1024           # Run memory, a power of 2 (default: the Actor's own)
+  #   max_total_charge_usd: 1.0       # Cost cap per run in USD; Apify aborts the run when it is reached
+  #   # max_paid_items: 1000          # Results a pay-per-result Actor may charge for in one run
+  # - name: apify_actor_await
+  #   group: web
+  #   use: deerflow.community.apify.tools:apify_actor_await_tool
+  #   poll_interval_secs: 5           # Seconds between run status checks
+  #   timeout_secs: 300               # Local wait; the run keeps going on Apify and await can be called again
+  #   max_items: 50                   # Dataset items returned to the agent
+
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation
   - name: image_search

@@ -32,6 +32,7 @@ import pytest
 from blockbuster import BlockingError
 
 # Import every module up front: importing on the loop is itself blocking IO.
+from deerflow.community.apify import tools as apify_tools
 from deerflow.community.browser_automation import tools as browser_tools
 from deerflow.community.browserless import tools as browserless_tools
 from deerflow.community.crawl4ai import tools as crawl4ai_tools
@@ -128,6 +129,9 @@ def _with_runtime(tool: Any, **kwargs: Any) -> Callable[[Path], Any]:
 # (module, entry point, config reads per call). Browser navigation also screens
 # the URL through ``validate_browser_url`` in a worker, which reads its policy.
 _CASES = [
+    pytest.param(apify_tools, _call(apify_tools.apify_actor_discover_tool, query="q"), 1, id="apify-actor_discover"),
+    pytest.param(apify_tools, _call(apify_tools.apify_actor_start_tool, actor_id="o/a", run_input="{}"), 1, id="apify-actor_start"),
+    pytest.param(apify_tools, _call(apify_tools.apify_actor_await_tool, run_id="r", dataset_id="d"), 1, id="apify-actor_await"),
     pytest.param(jina_tools, _call(jina_tools.web_fetch_tool, url=_HOSTED_URL), 1, id="jina_ai-web_fetch"),
     pytest.param(crawl4ai_tools, _call(crawl4ai_tools.web_fetch_tool, url=_URL), 1, id="crawl4ai-web_fetch"),
     pytest.param(browserless_tools, _call(browserless_tools.web_fetch_tool, url=_URL), 1, id="browserless-web_fetch"),

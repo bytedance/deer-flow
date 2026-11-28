@@ -417,6 +417,29 @@ tools:
   </Tabs.Tab>
 </Tabs>
 
+### Apify Actor 工具
+
+配置 Apify API Token 后，Agent 可以使用 [Apify Store](https://apify.com/store) 中的任意 Actor，例如 Instagram、Google 地图或电商爬虫。`apify_actor_discover` 搜索 Store 或返回某个 Actor 的输入 schema，`apify_actor_start` 启动一次运行，`apify_actor_await` 等待运行完成并返回结果。Agent 可以先启动多个运行再逐一等待，从而并行抓取。`apify-scraper` 技能会把常见平台路由到已知的 Actor。[为 DeerFlow 创建一个 API Token](https://console.apify.com/settings/integrations?createApiToken=true&for=DeerFlow&utm_source=deerflow&utm_medium=integrations)，并在创建后立即复制，因为它只显示一次。
+
+```yaml
+tools:
+  - name: apify_actor_discover
+    group: web
+    use: deerflow.community.apify.tools:apify_actor_discover_tool
+  - name: apify_actor_start
+    group: web
+    use: deerflow.community.apify.tools:apify_actor_start_tool
+    max_total_charge_usd: 1.0 # 每次运行的费用上限（美元）
+    # max_paid_items: 1000 # 按结果计费的 Actor 可计费的结果数上限
+  - name: apify_actor_await
+    group: web
+    use: deerflow.community.apify.tools:apify_actor_await_tool
+    timeout_secs: 300
+    max_items: 50
+```
+
+Actor 运行会消耗 Apify 额度。`max_total_charge_usd` 限制单次运行的费用。按结果计费的 Actor 按结果收费，由 `max_paid_items` 限制。未设置这些上限时，运行只受 Apify 账户每月用量上限的约束。所有选项见 `config.example.yaml`。
+
 ## 工具组
 
 工具组允许你将工具组织为命名集合，并限制自定义 Agent 可以访问哪些组：

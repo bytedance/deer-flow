@@ -1450,6 +1450,42 @@ API checks for both thinking modes, export `DEEPSEEK_API_KEY` and run from
 DEER_FLOW_RUN_LIVE_TESTS=1 uv run pytest tests/test_deepseek_search_live.py -q
 ```
 
+#### Apify Actor tools
+
+Three tools let the agent use any Actor in Apify Store, for example an
+Instagram, Google Maps or e-commerce scraper: `apify_actor_discover` searches the
+Store or returns an Actor's input schema, `apify_actor_start` starts a run and
+returns at once, and `apify_actor_await` waits for the run and returns up to
+`max_items` dataset items. The agent starts several runs, then awaits each, to
+scrape in parallel. The `apify-scraper` skill routes common platforms to known
+Actors. When the Actor tools are not enabled, the skill sends the agent to its
+other tools, such as `web_search`, `web_fetch` or MCP tools, and the answer
+mentions Apify only when the user asked for it.
+The tools read `APIFY_API_TOKEN` or the tool's `api_key`; `config.example.yaml`
+lists their options.
+
+Actor runs spend Apify credits, and `apify_actor_start` has two cost limits.
+`max_total_charge_usd` caps what one run can cost: Apify aborts the run when its
+Actor charges and platform usage reach the cap. `config.example.yaml` sets it to
+1.0. Some Actors require a higher minimum, and Apify then rejects the run with an
+error that names it. Pay-per-result Actors charge per result instead, which the
+cap does not cover: `max_paid_items` limits how many results such a run can
+charge for. Without these settings, a run is limited only by the Apify account's
+monthly usage limit. Both must be positive: Apify reads 0 as no limit, so the
+tool refuses to start a run when either is 0 or cannot be read. `timeout_secs`
+and `memory_mbytes` set the run's limits on Apify.
+
+When `apify_actor_await` reaches its own `timeout_secs`, the run keeps going on
+Apify and the agent can call await again. That result reports the run's status
+message and item count rather than an error, so loop detection lets the agent
+keep waiting on a run that makes progress. When several waits in a row show the
+same status message and item count, loop detection stops the agent as for any
+repeated call, even if the Actor is still working and saves its results only at
+the end. Results of all three tools can hold third-party content (scraped data,
+Store text, and Apify's error text when a run cannot start), so the tool-result
+sanitization and PII redaction middlewares treat them like `web_fetch` output. Offline tests
+use HTTPX mock transports and need no token.
+
 **Built-in Tools**:
 - `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, DeepSeek, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
 - `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Tavily, Unbrowse)
@@ -2381,6 +2417,7 @@ models:
 - `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`
+- `APIFY_API_TOKEN` - [Apify](https://apify.com) API token for the `apify_actor_*` tools. Create one for DeerFlow in [Apify Console](https://console.apify.com/settings/integrations?createApiToken=true&for=DeerFlow&utm_source=deerflow&utm_medium=integrations) and copy it right after creating it, because it is shown only once.
 - `SPECSTREAM_API_KEY` - [SpecStream](https://specstream.ai) key for `web_search` and `web_fetch`
 - `UNBROWSE_API_KEY` - [Unbrowse](https://unbrowse.ai) key for `web_fetch`
 - `YDC_API_KEY` - You.com Search API key for `web_search` (optional: without it the provider uses You.com's keyless free-tier endpoint)

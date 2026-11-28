@@ -38,6 +38,7 @@ URL_USERINFO_ERROR = "base_url must not contain username or password information
 ENV_TEMPLATE_PLACEHOLDERS = frozenset(
     {
         "your-anthropic-auth-token",
+        "your-apify-api-token",
         "your-boxd-api-key",
         "your-byteplus-access-key-id",
         "your-byteplus-agentplan-api-key",

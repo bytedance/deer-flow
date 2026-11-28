@@ -11,6 +11,12 @@ This section accumulates work toward the **2.3.0** milestone
 ([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
 
 ### Added
+- **community:** Apify Actor tools. `apify_actor_discover`, `apify_actor_start`
+  and `apify_actor_await`, with the `apify-scraper` skill, let the agent find,
+  run and await any Apify Store Actor, several in parallel, to collect
+  structured data from sites such as Instagram or Google Maps.
+  ([#2608](https://github.com/bytedance/deer-flow/pull/2608))
+
 - **crawl4ai:** `web_fetch` accepts an optional `max_chars` output cap (default
   4096). A page cut at the cap ends with a note giving the kept and total
   length. ([#8553](https://github.com/bytedance/deer-flow/pull/8553))
