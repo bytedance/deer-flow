@@ -39,14 +39,21 @@ class MemoryStreamBridge(StreamBridge):
         self._maxsize = max(1, queue_maxsize)
         self._streams: dict[str, _RunStream] = {}
         self._counters: dict[str, int] = {}
+        self._closing = False
+        self._active_closes = 0
 
     # -- helpers ---------------------------------------------------------------
 
     def _get_or_create_stream(self, run_id: str) -> _RunStream:
-        if run_id not in self._streams:
-            self._streams[run_id] = _RunStream()
-            self._counters[run_id] = 0
-        return self._streams[run_id]
+        stream = self._streams.get(run_id)
+        if stream is not None:
+            return stream
+        if self._closing:
+            raise RuntimeError("Stream bridge is closing")
+        stream = _RunStream()
+        self._streams[run_id] = stream
+        self._counters[run_id] = 0
+        return stream
 
     def _next_id(self, run_id: str) -> str:
         self._counters[run_id] = self._counters.get(run_id, 0) + 1
@@ -117,9 +124,13 @@ class MemoryStreamBridge(StreamBridge):
     # -- StreamBridge API ------------------------------------------------------
 
     async def publish(self, run_id: str, event: str, data: Any) -> None:
+        if self._closing:
+            raise RuntimeError("Stream bridge is closing")
         data = deepcopy(data)
         stream = self._get_or_create_stream(run_id)
         async with stream.condition:
+            if self._closing:
+                raise RuntimeError("Stream bridge is closing")
             # Cleanup or END may win the Condition after this producer captures the generation.
             if stream.retired or stream.ended:
                 return
@@ -133,8 +144,12 @@ class MemoryStreamBridge(StreamBridge):
             stream.condition.notify_all()
 
     async def publish_end(self, run_id: str) -> None:
+        if self._closing:
+            raise RuntimeError("Stream bridge is closing")
         stream = self._get_or_create_stream(run_id)
         async with stream.condition:
+            if self._closing:
+                raise RuntimeError("Stream bridge is closing")
             if stream.retired or stream.ended:
                 return
             stream.ended = True
@@ -150,6 +165,8 @@ class MemoryStreamBridge(StreamBridge):
         heartbeat_interval = self._resolve_heartbeat_interval(heartbeat_interval)
         stream = self._get_or_create_stream(run_id)
         async with stream.condition:
+            if self._closing and not stream.retired:
+                raise RuntimeError("Stream bridge is closing")
             start = self._resolve_start_offset(stream, last_event_id)
             if isinstance(start, StreamGap):
                 gap = start
@@ -222,5 +239,16 @@ class MemoryStreamBridge(StreamBridge):
             stream.condition.notify_all()
 
     async def close(self) -> None:
-        for run_id in tuple(self._streams):
-            await self.cleanup(run_id)
+        # Fence admission while draining, but keep the bridge reusable after
+        # close returns: callers may create a fresh generation for a later run.
+        # A cancelled close releases the fence so a later close can retry.
+        # Overlapping closes own independent drain references. One cancelled or
+        # faster close must not reopen admission while another drain is active.
+        self._active_closes += 1
+        self._closing = True
+        try:
+            for run_id in tuple(self._streams):
+                await self.cleanup(run_id)
+        finally:
+            self._active_closes -= 1
+            self._closing = self._active_closes > 0

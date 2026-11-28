@@ -422,3 +422,205 @@ async def test_publish_after_end_is_ignored_without_consuming_an_event_id():
         assert replay[-1] is END_SENTINEL
     finally:
         await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_publish_queued_before_close_is_rejected_after_admission_closes():
+    bridge = MemoryStreamBridge()
+    run_id = "writer-queued-before-close"
+    await bridge.publish(run_id, "before", {})
+    stream = bridge._streams[run_id]
+
+    async with stream.condition:
+        pending = asyncio.create_task(bridge.publish(run_id, "late", {}))
+        await asyncio.sleep(0)
+        closing = asyncio.create_task(bridge.close())
+        await asyncio.sleep(0)
+        assert bridge._closing
+
+    with pytest.raises(RuntimeError, match="closing"):
+        await pending
+    await closing
+    assert not bridge._closing
+    assert stream.events == []
+    assert not await bridge.stream_exists(run_id)
+
+
+@pytest.mark.asyncio
+async def test_overlapping_close_keeps_admission_fenced_until_every_drain_exits(monkeypatch):
+    bridge = MemoryStreamBridge()
+    run_id = "overlapping-close"
+    await bridge.publish(run_id, "before", {})
+    condition = bridge._streams[run_id].condition
+    real_acquire = condition.acquire
+    first_waiting = asyncio.Event()
+    second_waiting = asyncio.Event()
+    close_tasks = []
+
+    async def observe_acquire():
+        current = asyncio.current_task()
+        if current is close_tasks[0]:
+            first_waiting.set()
+        elif current is close_tasks[1]:
+            second_waiting.set()
+        return await real_acquire()
+
+    try:
+        async with condition:
+            monkeypatch.setattr(condition, "acquire", observe_acquire)
+            close_tasks.append(asyncio.create_task(bridge.close()))
+            await asyncio.wait_for(first_waiting.wait(), 1)
+            close_tasks.append(asyncio.create_task(bridge.close()))
+            await asyncio.wait_for(second_waiting.wait(), 1)
+
+            close_tasks[1].cancel()
+            await asyncio.gather(close_tasks[1], return_exceptions=True)
+            assert bridge._closing
+
+            with pytest.raises(RuntimeError, match="closing"):
+                await bridge.publish("new-run-during-drain", "late", {})
+
+        await asyncio.wait_for(close_tasks[0], 1)
+        assert not bridge._closing
+        await bridge.publish("new-run-after-drain", "fresh", {})
+        assert await bridge.stream_exists("new-run-after-drain")
+    finally:
+        for task in close_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*close_tasks, return_exceptions=True)
+        await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_close_preserves_retirement_gap_while_later_run_is_still_draining(monkeypatch):
+    bridge = MemoryStreamBridge(queue_maxsize=1)
+    first_run = "close-gap-first"
+    second_run = "close-gap-second"
+    live_run = "close-gap-live"
+    await bridge.publish(first_run, "before", {})
+    await bridge.publish(second_run, "before", {})
+    await bridge.publish(live_run, "before", {})
+    await bridge.publish(live_run, "after", {})
+    first_stream = bridge.subscribe(first_run)
+    first_condition = bridge._streams[first_run].condition
+    second_condition = bridge._streams[second_run].condition
+
+    close_queued_on_first = asyncio.Event()
+    subscriber_queued_on_first = asyncio.Event()
+    close_queued_on_second = asyncio.Event()
+    close_task = None
+    subscriber_task = None
+    real_first_acquire = first_condition.acquire
+    real_second_acquire = second_condition.acquire
+
+    async def observe_first_acquire():
+        current = asyncio.current_task()
+        if current is close_task:
+            close_queued_on_first.set()
+        elif current is subscriber_task:
+            subscriber_queued_on_first.set()
+        return await real_first_acquire()
+
+    async def observe_second_acquire():
+        if asyncio.current_task() is close_task:
+            close_queued_on_second.set()
+        return await real_second_acquire()
+
+    try:
+        # Hold the later run so close() retires the first generation but remains
+        # inside its drain, with the admission fence still raised.
+        async with second_condition:
+            async with first_condition:
+                monkeypatch.setattr(first_condition, "acquire", observe_first_acquire)
+                monkeypatch.setattr(second_condition, "acquire", observe_second_acquire)
+                close_task = asyncio.create_task(bridge.close())
+                await asyncio.wait_for(close_queued_on_first.wait(), 1)
+                subscriber_task = asyncio.create_task(anext(first_stream))
+                await asyncio.wait_for(subscriber_queued_on_first.wait(), 1)
+
+            await asyncio.wait_for(close_queued_on_second.wait(), 1)
+            assert bridge._closing
+            assert await asyncio.wait_for(asyncio.shield(subscriber_task), 1) == StreamGap(None, None, None)
+            assert not bridge._streams[live_run].retired
+            with pytest.raises(RuntimeError, match="closing"):
+                await anext(bridge.subscribe(live_run, last_event_id="0-0"))
+            with pytest.raises(StopAsyncIteration):
+                await anext(first_stream)
+
+        await asyncio.wait_for(close_task, 1)
+        assert not bridge._closing
+    finally:
+        for task in (subscriber_task, close_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (subscriber_task, close_task) if task is not None),
+            return_exceptions=True,
+        )
+        await bridge.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["publish", "publish_end"])
+@pytest.mark.parametrize("cancel_close", [False, True], ids=["close-completes", "close-cancelled"])
+async def test_producer_arriving_after_close_fence_is_rejected_before_waiting(monkeypatch, operation, cancel_close):
+    bridge = MemoryStreamBridge()
+    run_id = f"producer-after-close-{operation}-{cancel_close}"
+    await bridge.publish(run_id, "before", {"value": "before"})
+    stream = bridge._streams[run_id]
+    cleanup_started = asyncio.Event()
+    original_cleanup = bridge.cleanup
+
+    async def observe_cleanup(cleanup_run_id, *, delay=0):
+        cleanup_started.set()
+        await original_cleanup(cleanup_run_id, delay=delay)
+
+    monkeypatch.setattr(bridge, "cleanup", observe_cleanup)
+    closing = None
+    producer = None
+    try:
+        async with stream.condition:
+            closing = asyncio.create_task(bridge.close())
+            await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+            assert bridge._closing
+
+            async def produce():
+                if operation == "publish":
+                    await bridge.publish(run_id, "late", {"value": "late"})
+                else:
+                    await bridge.publish_end(run_id)
+
+            producer_started = asyncio.Event()
+
+            async def observed_producer():
+                producer_started.set()
+                await produce()
+
+            producer = asyncio.create_task(observed_producer())
+            # The task runs through the API call until it either raises at the
+            # close fence or blocks trying to acquire the held stream Condition.
+            await asyncio.wait_for(producer_started.wait(), timeout=1)
+            if cancel_close:
+                closing.cancel()
+                await asyncio.gather(closing, return_exceptions=True)
+                assert not bridge._closing
+
+        if not cancel_close:
+            await asyncio.wait_for(closing, timeout=1)
+        with pytest.raises(RuntimeError, match="closing"):
+            await asyncio.wait_for(producer, timeout=1)
+
+        if cancel_close:
+            assert not stream.retired
+            assert [event.event for event in stream.events] == ["before"]
+            assert not stream.ended
+        else:
+            assert stream.retired
+            assert stream.events == []
+    finally:
+        for task in (producer, closing):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(*(task for task in (producer, closing) if task is not None), return_exceptions=True)
+        await bridge.close()

@@ -1,11 +1,10 @@
 # Runtime (`deerflow/runtime/`)
 
-Executes runs: admission, the run worker, the stream bridge (memory and Redis),
-checkpoint access, the run event store and journal, and the server-installed
-capabilities of a run. Background:
+Owns run admission/worker, memory and Redis stream bridges, checkpoints, event
+store/journal, and server-installed run capabilities. See
 [runtime details](../../../../docs/runtime-guidance-details.md),
 [run event stream](../../../../docs/RUN_EVENT_STREAM.md),
-[streaming](../../../../docs/STREAMING.md),
+[streaming](../../../../docs/STREAMING.md), and
 [checkpoint retention](../../../../docs/checkpoint-retention-contract.md).
 
 ## Verify
@@ -18,51 +17,41 @@ make test-blocking-io
 
 ## Streams and reconnect
 
-- **A replay gap is not the end of a run.** When the retained window no longer
-  covers a reconnect cursor, the bridge reports a gap and the reader reloads state.
-- **Reconnect cursors are client input.** Parse them strictly and answer a
-  malformed one as bad input.
-- **Redis END publication is one Lua script.** The producer-token check, the END
-  detection and the append happen atomically. Restart all Gateways together when
-  the stream mode changes, because old and new producers cannot share a stream.
-- **Subscribers get their own copy.** The memory bridge copies events outside its
-  condition lock, and caches copy on ingest and on read, so one consumer cannot
-  change what another sees.
-- **Keep registry locks short.** Heartbeats take the same locks and must not queue
-  behind slow work.
-- **Subgraph frames keep their namespace.** A bare `values` frame from a subgraph
-  would overwrite the thread view of an SDK client. Consumers that only handle the
-  root run ignore namespaced frames.
-
-- **Memory writers fence the captured generation.** After waiting for the stream Condition, check `retired` and `ended` before allocating an event ID or appending; rejected writes consume no sequence number, and END is idempotent for that generation.
+- A replay gap is not run completion: report the gap and reload state.
+- Treat reconnect cursors as untrusted input; reject malformed values.
+- Redis END is one Lua transaction: validate producer token, detect END, append.
+  Restart all Gateways together when stream mode changes.
+- Subscribers and caches own copies; one consumer must not mutate another's data.
+- Keep registry locks short; heartbeats share them.
+- Preserve subgraph namespaces; root-only SDK consumers ignore namespaced frames.
+- **Memory close is a generation fence.** Reject writes at entry and under the
+  Condition. Check retired/ended before allocating IDs or appending; rejected
+  writes consume no sequence. END is idempotent. Retired readers retain their
+  gap while later runs drain. Overlapping closes keep the fence until all
+  drains exit, including cancellation; a new generation starts after close
+  returns. Redis fences publish/end and checks subscribe around cursor lookup.
 
 ## Checkpoints
 
-- **The channel mode is fixed for the life of the process.** A reader in `full`
-  mode rejects a `delta` checkpoint; it does not guess.
-- **Read and change state through `CheckpointStateAccessor`** with the thread's
-  effective schema. It preserves mode gates, parentage and pending writes.
-- **A failed pre-run snapshot leaves no message-ID boundary.** When a
-  checkpointer exists but the pre-run capture fails, the first `values` frame
-  establishes a replay baseline; only later message IDs can decide this run's
-  LLM error fallback.
-- **Delta resume and rollback rewrite the current head.** They do not fork.
-  Reject a missing tuple or pending sends before the first write.
-- **Redis history cache purges include the previous default namespace.** On
-  the v1-to-v2 upgrade, purge thread data under both prefixes for the same
-  database identity. Custom namespaces have an operator-managed migration.
+- Channel mode is fixed for process lifetime; full readers reject delta state.
+- Use `CheckpointStateAccessor` with the effective thread schema; preserve mode,
+  parentage and pending writes.
+- If pre-run snapshot capture fails, the first values frame sets replay baseline;
+  only later message IDs determine LLM-error fallback.
+- Delta resume/rollback rewrites the current head, not a fork. Reject missing
+  tuples or pending sends before writing.
+- Redis history purge includes the previous default namespace during v1→v2
+  upgrade for the same DB identity; custom namespaces need operator migration.
 
 ## Admission and terminal commit
 
-- **Only the worker that owns the run commits its terminal state.** A lost or
-  expired lease fences later writes, so a recovered run is not overwritten.
-- **Register completion before cleanup awaits.** Cancellation during cleanup is
-  then safe, and an idempotent request gets the stored result replayed.
-- **Terminal cleanup always finishes.** Streams, journals and graph references
-  are closed even when the run is cancelled.
-- **A provider tool-call ID is not an owner.** Providers reuse IDs across parent
-  runs. The server-generated execution ID owns the registry entry, polling,
-  cancellation and cleanup; the provider ID only correlates what the user sees.
+- Only the run-owning worker commits terminal state. Lost/expired leases fence
+  later writes so recovery cannot be overwritten.
+- Register completion before cleanup awaits; cancellation then remains safe and
+  idempotent requests replay the stored result.
+- Always finish terminal cleanup of streams, journals and graph references.
+- Provider tool-call IDs are not ownership IDs; use server-generated execution
+  IDs for registry, polling, cancellation and cleanup.
 
 ## Run events and journal
 
@@ -90,23 +79,17 @@ make test-blocking-io
 
 ## Goals
 
-- **Goal synthesis is read-only.** `runtime/goal_synthesis.py` composes the
-  `/goal from-chat` objective from the recent agreement; the Gateway route owns
-  the save. It treats the conversation as data, applies the evaluator's PII
-  redaction and oneshot-LLM path, excludes evidence tool results, keeps the
-  newest turn within its own 12,000-character budget even when a single paste
-  exceeds it, and caps the compaction summary at half so recent constraints
-  retain room.
+Goal synthesis is read-only; the Gateway route owns persistence. The evaluator
+uses PII redaction and the oneshot path, excludes evidence tool results, keeps
+the newest turn within its 12,000-character budget (even for oversized pastes),
+and caps summary compaction at half to preserve recent constraints.
 
 ## Server-installed capabilities
 
-- **Capabilities exist for one request.** The scheduler capability, the
-  conversation reader and client capability hints are installed by the server.
-  A copy that a caller sends is rejected in both context carriers, and none is
-  restored from a checkpoint.
-- **Run metadata and hidden messages are display data.** They grant nothing.
-- **A scheduled goal is installed in a fresh thread only** and is removed before
-  the terminal status commits.
-- **Retry the goal evaluator only for a malformed verdict** from a normal model
-  completion. Other failures are final.
-- **A truncated workspace snapshot cannot prove that a file is absent.**
+Capabilities are request-scoped and installed by the server (scheduler,
+conversation reader, client hints). Caller-supplied copies are rejected in both
+context carriers and never restored from checkpoints. Run metadata and hidden
+messages are display data, not authority. Scheduled goals use a fresh thread
+and are removed before terminal commit. Retry goal evaluation only for malformed
+verdicts from normal model completion; other failures are final. A truncated
+workspace snapshot cannot prove a file is absent.
