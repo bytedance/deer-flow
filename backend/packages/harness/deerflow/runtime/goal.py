@@ -14,7 +14,7 @@ import inspect
 import json
 import logging
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from typing import Any, Literal, NamedTuple
 from uuid import uuid4
@@ -816,7 +816,7 @@ async def ensure_thread_checkpoint(checkpointer: Any, thread_id: str, *, initial
         await write_initial_thread_checkpoint(checkpointer, config, initial_metadata=initial_metadata, created_at=created_at)
 
 
-async def write_initial_thread_checkpoint(checkpointer: Any, config: dict[str, Any], *, initial_metadata: dict[str, Any] | None = None, created_at: str | None = None) -> None:
+async def write_initial_thread_checkpoint(checkpointer: Any, config: dict[str, Any], *, initial_metadata: dict[str, Any] | None = None, created_at: str | None = None, validate: Callable[[], Awaitable[None]] | None = None) -> None:
     """Write the seed after the caller has confirmed the root checkpoint is missing."""
     metadata = {
         **(initial_metadata or {}),
@@ -826,7 +826,14 @@ async def write_initial_thread_checkpoint(checkpointer: Any, config: dict[str, A
         "parents": {},
         "created_at": created_at or now_iso(),
     }
-    await _call_checkpointer_method(checkpointer, "aput", "put", config, empty_checkpoint(), metadata, {})
+    checkpoint = empty_checkpoint()
+    if validate is not None:
+        from deerflow.runtime.checkpointer.seed import put_sql_seed
+
+        await validate()
+        if await put_sql_seed(checkpointer, config, checkpoint, metadata, validate):
+            return
+    await _call_checkpointer_method(checkpointer, "aput", "put", config, checkpoint, metadata, {})
 
 
 def _checkpoint_id_from_tuple(checkpoint_tuple: Any) -> str | None:

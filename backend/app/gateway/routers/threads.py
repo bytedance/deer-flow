@@ -70,6 +70,7 @@ from deerflow.config.summarization_config import ContextSize
 from deerflow.persistence.thread_meta import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, ThreadMetaStore, ThreadOwnershipConflictError
 from deerflow.runtime import ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels, validate_state_mutation_node
+from deerflow.runtime.checkpointer.seed import delete_thread_checkpoints
 from deerflow.runtime.context_compaction import (
     ContextCompactionDisabled,
     ContextCompactionFailed,
@@ -873,7 +874,7 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     checkpointer = getattr(request.app.state, "checkpointer", None)
     if checkpointer is not None:
         try:
-            await checkpointer.adelete_thread(thread_id)
+            await await_drained(delete_thread_checkpoints(checkpointer, thread_id))
         except Exception as exc:
             logger.exception("Failed to delete checkpoints for thread %s", sanitize_log_param(thread_id))
             raise HTTPException(status_code=500, detail="Failed to delete thread checkpoints.") from exc
@@ -1059,18 +1060,16 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
             # the admitted origin and ordinary client keys belong in a seed.
             excluded = _CHECKPOINT_OWNED_METADATA_KEYS | (_SERVER_RESERVED_METADATA_KEYS - {DEERFLOW_ORIGIN_KEY})
             initial_metadata = {key: value for key, value in (current.get("metadata") or {}).items() if key not in excluded}
-            # A peer can recover an expired lease before the next local heartbeat.
-            if not await run_manager.owns_active_admission(reservation):
-                raise ConflictError(f"Thread {thread_id} reservation lease was lost")
 
-            async def write_seed_if_owned() -> None:
-                # The local heartbeat may not have observed a takeover while this task was queued.
+            async def validate_seed() -> None:
+                latest = await thread_store.get(thread_id, **thread_owner_kwargs)
+                if latest is None or latest.get("incarnation") != current.get("incarnation"):
+                    raise ConflictError(f"Thread {thread_id} changed during creation")
                 owns_admission = await run_manager.owns_active_admission(reservation)
                 if not owns_admission or reservation.ownership_lost or reservation.abort_event.is_set():
                     raise ConflictError(f"Thread {thread_id} reservation lease was lost")
-                await write_initial_thread_checkpoint(checkpointer, config, initial_metadata=initial_metadata, created_at=coerce_iso(current.get("created_at")))
 
-            await await_drained(write_seed_if_owned())
+            await await_drained(write_initial_thread_checkpoint(checkpointer, config, initial_metadata=initial_metadata, created_at=coerce_iso(current.get("created_at")), validate=validate_seed))
             logger.info("Thread checkpoint ready: %s", sanitize_log_param(thread_id))
             return _existing_thread_response(thread_id, current)
     except ConflictError as exc:
@@ -1379,7 +1378,7 @@ async def _branch_thread_with_reservation(
             try:
                 # A failed head write may already have persisted the replay base.
                 # Keep the owner row if checkpoint removal itself fails.
-                await write_if_owned(get_checkpointer(request).adelete_thread, new_thread_id)
+                await write_if_owned(delete_thread_checkpoints, get_checkpointer(request), new_thread_id)
                 await write_if_owned(thread_store.delete, new_thread_id, **thread_owner_kwargs)
             except ConflictError:
                 raise

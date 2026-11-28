@@ -1,9 +1,11 @@
 """Concurrent HTTP creates preserve the first admitted thread and checkpoint."""
 
 import asyncio
+import os
+import sqlite3
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -400,3 +402,76 @@ async def test_create_drains_seed_already_in_progress_on_lease_loss(thread_store
     assert response.status_code == 409
     assert await saver.aget_tuple({"configurable": {"thread_id": "started-seed"}}) is not None
     assert await runs.list_inflight() == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("database", ["sqlite", "postgres"])
+@pytest.mark.parametrize("changed", ["lease", "incarnation"])
+async def test_sql_seed_is_fenced_until_commit(database, changed, monkeypatch, tmp_path):
+    thread_id = str(uuid4())
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    if database == "sqlite":
+        open_saver = AsyncSqliteSaver.from_conn_string
+        dsn = str(tmp_path / "checkpoints.db")
+        probe = "SELECT 1 FROM checkpoints WHERE thread_id = ?"
+        lock_timeout, lock_error = "PRAGMA busy_timeout=50", sqlite3.OperationalError
+    else:
+        dsn = os.getenv("TEST_POSTGRES_URI")
+        if not dsn:
+            pytest.skip("requires TEST_POSTGRES_URI")
+        open_saver = pytest.importorskip("langgraph.checkpoint.postgres.aio").AsyncPostgresSaver.from_conn_string
+        from psycopg.errors import LockNotAvailable
+
+        probe = "SELECT 1 FROM checkpoints WHERE thread_id = %s"
+        lock_timeout, lock_error = "SET lock_timeout='50ms'", LockNotAvailable
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("app.gateway.deps.get_config", lambda: AppConfig.model_validate({"sandbox": {"use": "test"}}))
+    async with open_saver(dsn) as writer, open_saver(dsn) as peer:
+        await writer.setup()
+        await peer.setup()
+        await peer.conn.execute(lock_timeout)
+        store = MemoryThreadMetaStore(InMemoryStore())
+        app = app_for(store, writer)
+        runs = MemoryRunStore()
+        app.state.run_manager = RunManager(store=runs)
+        get_thread = store.get
+        saw_staged_seed = False
+
+        async def change_at_commit(thread_id, **kwargs):
+            nonlocal saw_staged_seed
+            async with await writer.conn.execute(probe, (thread_id,)) as cursor:
+                if await cursor.fetchone() is None:
+                    return await get_thread(thread_id, **kwargs)
+            saw_staged_seed = True
+            assert await peer.aget_tuple(config) is None
+            # An independent connection may read, but deletion must wait for
+            # the pending publication even when it sees no checkpoint rows.
+            with pytest.raises(lock_error, match="lock"):
+                await threads.delete_thread_checkpoints(peer, thread_id)
+            if changed == "lease":
+                [reservation] = await runs.list_inflight()
+                await runs.update_status(reservation["run_id"], status="error", error="lease lost")
+            else:
+                await store.delete(thread_id, **kwargs)
+                await store.create(thread_id, **kwargs)
+            return await get_thread(thread_id, **kwargs)
+
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                monkeypatch.setattr(store, "get", change_at_commit)
+                failed = await client.post("/api/threads", json={"thread_id": thread_id, "metadata": {"generation": "old"}})
+                assert saw_staged_seed
+                assert failed.status_code == 409, failed.text
+                assert await peer.aget_tuple(config) is None
+                monkeypatch.setattr(store, "get", get_thread)
+                deleted = await client.delete(f"/api/threads/{thread_id}")
+                assert deleted.status_code == 200, deleted.text
+                created = await client.post("/api/threads", json={"thread_id": thread_id, "metadata": {"generation": "new"}})
+                assert created.status_code == 200, created.text
+                state = await client.get(f"/api/threads/{thread_id}/state")
+                assert state.status_code == 200, state.text
+                assert state.json()["metadata"]["generation"] == created.json()["metadata"]["generation"] == "new"
+                assert [row.checkpoint["id"] async for row in peer.alist(config)] == [state.json()["checkpoint_id"]]
+        finally:
+            await writer.adelete_thread(thread_id)
