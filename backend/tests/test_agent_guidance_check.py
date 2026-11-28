@@ -70,6 +70,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "examples/deerflow-extension-knowledge-management/AGENTS.md",
     "examples/deerflow-extension-knowledge-platform/AGENTS.md",
     "examples/deerflow-extension-knowledge-center/AGENTS.md",
+    "examples/deerflow-storage-adapters/AGENTS.md",
     "examples/deerflow-extension-lightrag/AGENTS.md",
 }
 

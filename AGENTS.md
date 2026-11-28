@@ -49,7 +49,7 @@ Before changing ingress, port bindings or provisioner mounts, read
 | `docker/`, `deploy/helm/` | Compose files, nginx config, provisioner, Helm chart |
 | `skills/public/`, `skills/custom/` | Committed skills and local, gitignored skills |
 | `contracts/` | JSON contracts shared across components |
-| `examples/` | Installable extension examples |
+| `examples/` | Installable extension examples and the [standalone storage adapter example](examples/deerflow-storage-adapters/README.md) |
 | `scripts/`, `tests/` | Root orchestration scripts, and tests for public skills |
 
 `config.yaml` and `extensions_config.json` are copied from the example files at
