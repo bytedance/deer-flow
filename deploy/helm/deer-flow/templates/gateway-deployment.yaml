@@ -295,6 +295,10 @@ spec:
           {{- else if .Values.skills.configMap }}
           configMap:
             name: {{ .Values.skills.configMap }}
+            {{- with .Values.skills.configMapItems }}
+            items:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
           {{- else }}
           emptyDir: {}
           {{- end }}

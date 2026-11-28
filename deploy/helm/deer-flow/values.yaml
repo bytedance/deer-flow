@@ -364,6 +364,15 @@ skills:
   enabled: false
   existingClaim: ""
   configMap: ""
+  # -- Optional key-to-path mapping for skills.configMap. ConfigMap keys cannot
+  #    contain "/", so without items every key lands flat in /app/skills and no
+  #    skill directory (public/<name>/SKILL.md) can exist. Example:
+  #      configMapItems:
+  #        - key: my-skill.SKILL.md
+  #          path: public/my-skill/SKILL.md
+  #        - key: my-skill.helper.py
+  #          path: public/my-skill/helper.py
+  configMapItems: []
 
 # -- Provider/channel/search secrets injected as env vars into the gateway.
 #    Reference them from config.yaml as $VAR. Example:

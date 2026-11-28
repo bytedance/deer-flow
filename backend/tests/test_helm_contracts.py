@@ -351,6 +351,30 @@ def test_no_workload_sets_pull_secrets_by_default() -> None:
     assert [name for name, pod in workloads.items() if "imagePullSecrets" in pod] == []
 
 
+def _skills_volume(*settings: str) -> dict:
+    gateway = _by_kind(_render_chart(*settings), "Deployment", "-gateway")
+    return next(volume for volume in gateway["spec"]["template"]["spec"]["volumes"] if volume["name"] == "skills")
+
+
+def test_skills_config_map_mounts_flat_without_items() -> None:
+    assert _skills_volume("skills.configMap=platform-skills") == {"name": "skills", "configMap": {"name": "platform-skills"}}
+
+
+def test_skills_config_map_items_lay_out_skill_directories() -> None:
+    """ConfigMap keys cannot contain "/", so only items can place files under public/<name>/."""
+    volume = _skills_volume(
+        "skills.configMap=platform-skills",
+        "skills.configMapItems[0].key=tools.SKILL.md",
+        "skills.configMapItems[0].path=public/tools/SKILL.md",
+        "skills.configMapItems[1].key=tools.helper.py",
+        "skills.configMapItems[1].path=public/tools/helper.py",
+    )
+    assert volume["configMap"] == {
+        "name": "platform-skills",
+        "items": [{"key": "tools.SKILL.md", "path": "public/tools/SKILL.md"}, {"key": "tools.helper.py", "path": "public/tools/helper.py"}],
+    }
+
+
 # --- test_helm_init_containers ---
 
 

@@ -483,7 +483,9 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   (audited against `docker/provisioner/app.py`).
 - **Skills.** Disabled by default (emptyDir at `/app/skills`). Populate via
   `skills.existingClaim` or `skills.configMap`, or bake skills into a custom
-  gateway image.
+  gateway image. A ConfigMap needs `skills.configMapItems` to lay out skill
+  directories: its keys cannot contain `/`, so each item maps a key to a path
+  such as `public/<name>/SKILL.md`.
 
 ## Security
 
