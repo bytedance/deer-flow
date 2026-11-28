@@ -582,7 +582,10 @@ require_compose_version
 
 
 @pytest.mark.parametrize("args", ["logs --prod", "logs --prod --gateway"])
-@pytest.mark.parametrize("env_file_kind", ["default", "relative", "absolute", "missing-default"])
+@pytest.mark.parametrize(
+    "env_file_kind",
+    ["default", "relative", "absolute", "missing-default", "empty-selector", "missing-explicit", "directory-explicit", "unreadable-explicit"],
+)
 def test_logs_prod_targets_production_stack(args, env_file_kind, tmp_path):
     """`logs --prod` must tail the stack deploy.sh started, not the dev project.
 
@@ -607,12 +610,22 @@ def test_logs_prod_targets_production_stack(args, env_file_kind, tmp_path):
 
     env = _isolated_shell_env(tmp_path)
     selected_file = default_file
-    if env_file_kind in {"relative", "absolute"}:
+    invalid_profile = env_file_kind in {"missing-explicit", "directory-explicit", "unreadable-explicit"}
+    if env_file_kind in {"relative", "absolute"} or invalid_profile:
         selected_file = tmp_path / "profiles with spaces" / "stage.env"
         selected_file.parent.mkdir()
-        selected_file.write_text("KEEP=profile\n", encoding="utf-8", newline="\n")
-        selector = selected_file.relative_to(tmp_path) if env_file_kind == "relative" else selected_file
+        if env_file_kind == "directory-explicit":
+            selected_file.mkdir()
+        elif env_file_kind != "missing-explicit":
+            selected_file.write_text("KEEP=profile\n", encoding="utf-8", newline="\n")
+        if env_file_kind == "unreadable-explicit":
+            if os.name != "posix" or os.geteuid() == 0:
+                pytest.skip("Requires POSIX permissions under a non-root user")
+            selected_file.chmod(0)
+        selector = selected_file if env_file_kind == "absolute" else selected_file.relative_to(tmp_path)
         env["DEER_FLOW_COMPOSE_ENV_FILE"] = str(selector)
+    elif env_file_kind == "empty-selector":
+        env["DEER_FLOW_COMPOSE_ENV_FILE"] = ""
     marker = tmp_path / "prod_invoke.txt"
 
     command = f"""
@@ -630,7 +643,33 @@ docker() {{
 }}
 {args}
 """
-    subprocess.run([BASH_EXECUTABLE, "-c", command], cwd=docker_dir, env=env, check=True, timeout=10)
+    result = subprocess.run([BASH_EXECUTABLE, "-c", command], cwd=docker_dir, env=env, capture_output=True, text=True, encoding="utf-8", timeout=10)
+
+    if invalid_profile:
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert not marker.exists()
+        diagnostic = "DEER_FLOW_COMPOSE_ENV_FILE must name a readable file: "
+        assert result.stderr.startswith(diagnostic)
+        reported_path = result.stderr.removeprefix(diagnostic).strip()
+        # Git Bash can report an MSYS path that native Python cannot compare.
+        # Compare the parent directory in Bash because the file may not exist.
+        subprocess.run(
+            [
+                BASH_EXECUTABLE,
+                "-c",
+                'test "$(dirname "$1")" -ef "$(dirname "$2")" && test "$(basename "$1")" = "$(basename "$2")"',
+                "--",
+                reported_path,
+                selected_file.as_posix(),
+            ],
+            cwd=docker_dir,
+            env=env,
+            check=True,
+            timeout=10,
+        )
+        return
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
     *compose_args, runtime_home, service_env_file = marker.read_text(encoding="utf-8").splitlines()
     assert compose_args[:5] == ["compose", "-p", "deer-flow", "-f", "docker-compose.yaml"]

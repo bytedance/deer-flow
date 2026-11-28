@@ -419,6 +419,24 @@ logs() {
         # runs with cwd=$DOCKER_DIR.
         COMPOSE_FILE="docker-compose.yaml"
         COMPOSE_PROJECT="deer-flow"
+
+        # Match deploy.sh: resolve relative selectors from the checkout root
+        # and let Compose use the same file for interpolation and env_file.
+        local compose_env_file="${DEER_FLOW_COMPOSE_ENV_FILE:-$PROJECT_ROOT/.env}"
+        if command -v cygpath >/dev/null 2>&1; then
+            compose_env_file="$(cd "$PROJECT_ROOT" && cygpath -au -- "$compose_env_file")"
+        elif [[ "$compose_env_file" != /* ]]; then
+            compose_env_file="$PROJECT_ROOT/$compose_env_file"
+        fi
+        if [ -n "${DEER_FLOW_COMPOSE_ENV_FILE:-}" ] && { [ ! -f "$compose_env_file" ] || [ ! -r "$compose_env_file" ]; }; then
+            printf 'DEER_FLOW_COMPOSE_ENV_FILE must name a readable file: %s\n' "$compose_env_file" >&2
+            return 1
+        fi
+        export DEER_FLOW_COMPOSE_ENV_FILE="$compose_env_file"
+        if [ -f "$compose_env_file" ]; then
+            env_file_args=(--env-file "$compose_env_file")
+        fi
+
         # deploy.sh exports these before every compose invocation so the
         # volume specs in docker-compose.yaml interpolate; without them even
         # `logs` fails to parse the file on checkouts without a .env.
@@ -445,21 +463,6 @@ logs() {
     if [ "$is_prod" = 0 ]; then
         if [ "$service" = "provisioner" ] || { [ -z "$service" ] && [ "$(detect_sandbox_mode)" = "provisioner" ]; }; then
             COMPOSE_CMD="$COMPOSE_CMD --profile provisioner"
-        fi
-    fi
-
-    if [ "$is_prod" = 1 ]; then
-        # Match deploy.sh: resolve relative selectors from the checkout root
-        # and let Compose use the same file for interpolation and env_file.
-        local compose_env_file="${DEER_FLOW_COMPOSE_ENV_FILE:-$PROJECT_ROOT/.env}"
-        if command -v cygpath >/dev/null 2>&1; then
-            compose_env_file="$(cd "$PROJECT_ROOT" && cygpath -au -- "$compose_env_file")"
-        elif [[ "$compose_env_file" != /* ]]; then
-            compose_env_file="$PROJECT_ROOT/$compose_env_file"
-        fi
-        export DEER_FLOW_COMPOSE_ENV_FILE="$compose_env_file"
-        if [ -f "$compose_env_file" ]; then
-            env_file_args=(--env-file "$compose_env_file")
         fi
     fi
 
