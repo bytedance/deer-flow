@@ -1201,6 +1201,19 @@ class Restorer:
         return self.runs if validator is None else ValidatingRuns(self.runs, validator)
 
 
+class ContendedSemaphore(asyncio.Semaphore):
+    """Semaphore that reports an acquire arriving while every permit is held."""
+
+    def __init__(self, value):
+        super().__init__(value)
+        self.contended = asyncio.Event()
+
+    async def acquire(self):
+        if self.locked():
+            self.contended.set()
+        return await super().acquire()
+
+
 async def crash_like_record(service, run_id, owner="alice"):
     """What a SIGKILL leaves: recoverable, children back at their queued window."""
     record = await asyncio.to_thread(service.store.get, owner, run_id)
@@ -1358,6 +1371,85 @@ async def test_cancelling_a_recovered_workflow_keeps_child_cleanup_authorized(pl
     finally:
         gate.set()
         runs.release.set()
+        await replacement.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_recovered_workflow_observes_its_running_child(plugin):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from deerflow_extension_workflows.service import Workflows
+
+    _, actions, service, runs = plugin
+    launched = await actions["launch"](
+        {"request_id": "reattach", "script": "return await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});", "unattended_recovery": True},
+        replace(context(runs), interaction="session"),
+    )
+    run_id = launched["run_id"]
+    gate = asyncio.Event()
+    original_create = runs.create_thread
+
+    async def gated_create(**kwargs):
+        await gate.wait()
+        return await original_create(**kwargs)
+
+    runs.create_thread = gated_create
+    for _ in range(500):
+        record = await asyncio.to_thread(service.store.get, "alice", run_id)
+        if record["steps"]:
+            break
+        await asyncio.sleep(0.01)
+    gate.set()
+    await asyncio.wait_for(runs.entered.wait(), 5)
+    await service.stop()
+    runs.create_thread = original_create
+    await crash_like_record(service, run_id)
+    # A crash can also leave an admitted child behind: the row stays running
+    # with its run identity and the host still holds that child.
+    record = await asyncio.to_thread(service.store.get, "alice", run_id)
+    row = record["steps"][0]
+    stale_thread = row["thread_id"]
+    surviving = next(value for value in runs.runs.values() if value.thread_id == stale_thread)
+    row["status"] = "running"
+    row["run_id"] = surviving.run_id
+    runs.runs[row["run_id"]] = AgentRun(stale_thread, row["run_id"], "running")
+    await asyncio.to_thread(service.store.put, "alice", record)
+
+    # Park the replay step on the global slot before cancelling. A cancel that
+    # lands while the step is still waiting to be dispatched is handled by the
+    # supervisor's own cleanup and passes without the fix, so the semaphore
+    # reports the step's blocked acquire: cancellation then deterministically
+    # meets the reattached child inside the stopping branch.
+    replacement = Workflows(service.config)
+    replacement.global_slots = ContendedSemaphore(service.config["global_concurrency"])
+    held_slots = service.config["global_concurrency"]
+    for _ in range(held_slots):
+        await replacement.global_slots.acquire()
+    await replacement.start(SimpleNamespace(agent_runs_restore=Restorer(runs)))
+    try:
+        for _ in range(500):
+            if replacement.entries.get(run_id) is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert replacement.entries.get(run_id) is not None, "recovery never published the workflow"
+        await asyncio.wait_for(replacement.global_slots.contended.wait(), 10)
+        assert (await replacement.cancel({"run_id": run_id}, context(runs)))["status"] == "cancelling"
+        replacement.global_slots.release()
+        held_slots -= 1
+        await asyncio.wait_for(replacement.wait_idle(run_id), 10)
+        final = await replacement.get({"run_id": run_id}, context(runs))
+        assert final["status"] == "cancelled", (final.get("error"), [(s["step_id"], s["status"], s.get("error"), s.get("child_status")) for s in final["steps"]])
+        assert final["steps"][0]["status"] == "cancelled", final["steps"][0]
+        assert final["steps"][0]["child_status"] == "interrupted", final["steps"][0]
+        assert runs.runs[row["run_id"]].status == "interrupted"
+        persisted = await asyncio.to_thread(replacement.store.get, "alice", run_id)
+        assert persisted["grant"]["revoked"] is True
+    finally:
+        gate.set()
+        runs.release.set()
+        for _ in range(held_slots):
+            replacement.global_slots.release()
         await replacement.stop()
 
 
