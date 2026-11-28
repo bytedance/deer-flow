@@ -1,5 +1,6 @@
 """Subagent configuration definitions."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -20,8 +21,11 @@ class SubagentConfig:
         tools: Optional list of tool names to allow. If None, inherits all tools.
         disallowed_tools: Optional list of tool names to deny.
         skills: Optional list of skill names to make discoverable and activatable.
-                If None, all enabled skills are available. If empty, skills are
-                disabled for this subagent. Skill bodies load lazily at runtime;
+                If None, inherits the parent agent's available skills (all enabled
+                skills when unrestricted). If empty, skills are disabled for this
+                subagent. An explicit non-empty list applies independently of the
+                parent agent's skill list while remaining subject to host skill
+                authorization. Skill bodies load lazily at runtime;
                 allowed-tools is compatibility metadata only and never restricts
                 this subagent's tools.
         model: Model to use - 'inherit' uses parent's model.
@@ -75,3 +79,23 @@ def resolve_subagent_model_name(config: SubagentConfig, parent_model: str | None
 
         app_config = get_app_config()
     return _default_model_name(app_config)
+
+
+def resolve_subagent_skills(
+    config: SubagentConfig,
+    parent_available_skills: Iterable[str] | None,
+) -> list[str] | None:
+    """Resolve the effective subagent skill allowlist.
+
+    - ``config.skills is None``: inherit ``parent_available_skills`` (``None``
+      keeps all enabled skills; a restricted list preserves the parent policy).
+    - ``config.skills == []``: disable all skills for this subagent.
+    - ``config.skills`` non-empty: apply the subagent's explicit skill list
+      independently of ``parent_available_skills``; host skill authorization
+      remains enforced when the subagent loads and activates skills.
+    """
+    if config.skills is not None:
+        return list(dict.fromkeys(config.skills))
+    if parent_available_skills is None:
+        return None
+    return list(dict.fromkeys(parent_available_skills))

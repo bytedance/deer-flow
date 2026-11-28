@@ -304,18 +304,19 @@ async def test_fresh_skill_projection_defers_acquire_until_first_tool(monkeypatc
     middleware = SandboxMiddleware(available_skills={"allowed"})
     prepared = []
 
-    def prepare(thread_id, *, user_id):
-        prepared.append((thread_id, user_id))
+    def prepare(thread_id, *, user_id, context):
+        prepared.append((thread_id, user_id, context))
         return projection
 
     monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", prepare)
     context = {"thread_id": "thread-lazy-policy", "user_id": "owner-policy"}
+    expected_projection_context = dict(context)
     set_sandbox_provider(provider)
     try:
         runtime = Runtime(context=context)
         result = await middleware.abefore_agent({}, runtime) if async_hook else middleware.before_agent({}, runtime)
         assert result is None
-        assert prepared == [("thread-lazy-policy", "owner-policy")]
+        assert prepared == [("thread-lazy-policy", "owner-policy", expected_projection_context)]
         assert provider.thread_ids == []
         assert provider.skill_syncs == []
         assert "sandbox_id" not in context
@@ -447,9 +448,9 @@ def test_non_owner_skill_policy_preserves_lazy_init_without_projection_or_acquir
     prepare_calls: list[tuple[str, str]] = []
     original_prepare = middleware._prepare_agent_skill_projection
 
-    def _prepare(thread_id: str, *, user_id: str):
+    def _prepare(thread_id: str, *, user_id: str, context):
         prepare_calls.append((thread_id, user_id))
-        return original_prepare(thread_id, user_id=user_id)
+        return original_prepare(thread_id, user_id=user_id, context=context)
 
     monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", _prepare)
     set_sandbox_provider(provider)

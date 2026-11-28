@@ -456,6 +456,51 @@ def test_lead_runtime_middlewares_pass_agent_skills_to_sandbox(
         "available_skills": {"allowed-skill"},
         "owns_agent_skill_projection": True,
         "skill_storage": None,
+        "subagent_enabled": False,
+        "allowed_subagents": None,
+        "app_config": app_config,
+        "skill_authorization": None,
+        "authz_context": None,
+    }
+
+
+def test_lead_runtime_middlewares_pass_subagent_projection_context_when_restricted(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.input_sanitization_middleware",
+        _module(
+            "deerflow.agents.middlewares.input_sanitization_middleware",
+            InputSanitizationMiddleware=object,
+            neutralize_untrusted_tags=lambda value: value,
+        ),
+    )
+    app_config = _make_app_config()
+    _stub_runtime_middleware_imports(monkeypatch)
+    skill_authz = object()
+    authz_ctx = {"roles": ["analyst"]}
+
+    middlewares = build_lead_runtime_middlewares(
+        app_config=app_config,
+        available_skills=set(),
+        subagent_enabled=True,
+        allowed_subagents=["specialist"],
+        skill_authorization=skill_authz,
+        authz_context=authz_ctx,
+    )
+
+    sandbox_middleware = next(middleware for middleware in middlewares if getattr(middleware, "kwargs", {}).get("available_skills") == set())
+    assert sandbox_middleware.kwargs == {
+        "lazy_init": True,
+        "available_skills": set(),
+        "owns_agent_skill_projection": True,
+        "skill_storage": None,
+        "subagent_enabled": True,
+        "app_config": app_config,
+        "allowed_subagents": ("specialist",),
+        "skill_authorization": skill_authz,
+        "authz_context": authz_ctx,
     }
 
 
@@ -486,6 +531,11 @@ def test_lead_runtime_middlewares_can_delegate_skill_projection_ownership(
         "available_skills": {"bootstrap"},
         "owns_agent_skill_projection": False,
         "skill_storage": None,
+        "subagent_enabled": False,
+        "allowed_subagents": None,
+        "app_config": app_config,
+        "skill_authorization": None,
+        "authz_context": None,
     }
 
 

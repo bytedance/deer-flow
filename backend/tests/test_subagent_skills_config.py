@@ -638,3 +638,28 @@ class TestSkillsFilterPassthrough:
         )
         available = set(config.skills) if config.skills is not None else None
         assert available == {"data-analysis", "web-search"}
+
+
+class TestResolveSubagentSkills:
+    @pytest.mark.parametrize(
+        ("parent_skills", "subagent_skills", "expected"),
+        [
+            (None, None, None),
+            (["safe-skill"], None, ["safe-skill"]),
+            ([], None, []),
+            (["safe-skill"], [], []),
+            (None, [], []),
+            (["safe-skill"], ["specialist-a", "specialist-b", "specialist-a"], ["specialist-a", "specialist-b"]),
+            ([], ["specialist-a"], ["specialist-a"]),
+        ],
+    )
+    def test_tri_state_resolution(self, parent_skills, subagent_skills, expected):
+        from deerflow.subagents.config import resolve_subagent_skills
+
+        config = SubagentConfig(
+            name="test",
+            description="test",
+            system_prompt="test",
+            skills=subagent_skills,
+        )
+        assert resolve_subagent_skills(config, parent_skills) == expected

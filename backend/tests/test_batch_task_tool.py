@@ -396,3 +396,63 @@ def test_bound_batch_tools_expose_a_sync_invocation_path(monkeypatch) -> None:
     assert message.status == "success"
     assert message.additional_kwargs["subagent_batch_id"] == "subagent-batch-explicit"
     explicit.submit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("parent_skills", "subagent_skills", "expected_skills"),
+    [
+        (["safe-skill"], None, ["safe-skill"]),
+        (None, None, None),
+        (["safe-skill"], [], []),
+        (["safe-skill"], ["safe-skill", "other-skill"], ["safe-skill", "other-skill"]),
+        ([], ["specialist-skill"], ["specialist-skill"]),
+    ],
+    ids=[
+        "unset-inherits-restricted-parent",
+        "unset-inherits-unrestricted-parent",
+        "explicit-empty-disables",
+        "explicit-widens-beyond-parent",
+        "empty-parent-specialist-subagent",
+    ],
+)
+async def test_batch_task_resolves_subagent_skills_tri_state(
+    monkeypatch,
+    parent_skills,
+    subagent_skills,
+    expected_skills,
+) -> None:
+    submitter = _explicit_submitter()
+    monkeypatch.setattr(tool_module, "get_subagent_batch_submitter", lambda: submitter)
+    monkeypatch.setattr(
+        tool_module,
+        "get_available_subagent_names",
+        lambda **_kwargs: ["general-purpose"],
+    )
+    monkeypatch.setattr(
+        tool_module,
+        "get_subagent_config",
+        lambda *_args, **_kwargs: SubagentConfig(
+            name="general-purpose",
+            description="General purpose",
+            skills=subagent_skills,
+        ),
+    )
+
+    runtime = _runtime()
+    if parent_skills is not None:
+        runtime.config["metadata"]["available_skills"] = parent_skills
+    else:
+        runtime.config["metadata"].pop("available_skills", None)
+
+    command = await tool_module.batch_task.coroutine(
+        runtime=runtime,
+        title="Tri-state skills",
+        items=[BatchTaskItem(key="record-1", prompt="Process one")],
+        subagent_type="general-purpose",
+        tool_call_id="call-skills",
+    )
+
+    assert _message(command).status == "success"
+    request = submitter.submit.await_args.args[0]
+    assert request.execution_spec["subagent_config"]["skills"] == expected_skills

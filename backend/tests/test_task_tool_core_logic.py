@@ -1365,7 +1365,21 @@ def test_task_tool_inherits_parent_skill_allowlist_for_default_subagent(monkeypa
     assert captured["config"].skills == ["safe-skill"]
 
 
-def test_task_tool_intersects_parent_and_subagent_skill_allowlists(monkeypatch):
+@pytest.mark.parametrize(
+    ("parent_skills", "subagent_skills", "expected_skills"),
+    [
+        (["safe-skill"], ["safe-skill", "other-skill"], ["safe-skill", "other-skill"]),
+        ([], ["specialist-skill"], ["specialist-skill"]),
+        (["safe-skill"], [], []),
+    ],
+    ids=["explicit-widens-beyond-parent", "empty-parent-specialist-subagent", "explicit-empty-disables"],
+)
+def test_task_tool_applies_explicit_subagent_skills_independently_of_parent(
+    monkeypatch,
+    parent_skills,
+    subagent_skills,
+    expected_skills,
+):
     config = _make_subagent_config()
     config = SubagentConfig(
         name=config.name,
@@ -1373,10 +1387,10 @@ def test_task_tool_intersects_parent_and_subagent_skill_allowlists(monkeypatch):
         system_prompt=config.system_prompt,
         max_turns=config.max_turns,
         timeout_seconds=config.timeout_seconds,
-        skills=["safe-skill", "other-skill"],
+        skills=subagent_skills,
     )
     runtime = _make_runtime()
-    runtime.config["metadata"]["available_skills"] = ["safe-skill"]
+    runtime.config["metadata"]["available_skills"] = parent_skills
     events = []
     captured = {}
 
@@ -1404,11 +1418,11 @@ def test_task_tool_intersects_parent_and_subagent_skill_allowlists(monkeypatch):
         description="执行任务",
         prompt="use skills",
         subagent_type="general-purpose",
-        tool_call_id="tc-skills-intersection",
+        tool_call_id="tc-skills-explicit",
     )
 
     assert _task_tool_message(output).content == "Task Succeeded. Result: done"
-    assert captured["config"].skills == ["safe-skill"]
+    assert captured["config"].skills == expected_skills
 
 
 def test_task_tool_no_tool_groups_passes_none(monkeypatch):
