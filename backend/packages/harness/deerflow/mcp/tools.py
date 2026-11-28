@@ -641,9 +641,12 @@ def _convert_call_tool_result(
                 lc_content.append(create_text_block(text=_resolve_text(res.text)))
             elif isinstance(res, BlobResourceContents):
                 mime = res.mimeType or None
-                if is_error and not res.blob:
-                    kind = "image" if mime and mime.startswith("image/") else "file"
-                    empty_binary_shapes.append(f"{kind} ({mime or 'application/octet-stream'})")
+                if not res.blob:
+                    if is_error:
+                        kind = "image" if mime and mime.startswith("image/") else "file"
+                        empty_binary_shapes.append(f"{kind} ({mime or 'application/octet-stream'})")
+                    else:
+                        lc_content.append(create_text_block(text=f"Empty resource ({mime or 'application/octet-stream'})."))
                     continue
                 if mime and mime.startswith("image/"):
                     lc_content.append(create_image_block(base64=res.blob, mime_type=mime))
