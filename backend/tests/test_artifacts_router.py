@@ -1250,6 +1250,34 @@ def test_get_skill_archive_preview_supports_bounded_range_requests(tmp_path, mon
     assert invalid.headers["content-range"] == f"bytes */{len(payload)}"
 
 
+def test_get_skill_archive_preview_honors_matching_if_range(tmp_path, monkeypatch) -> None:
+    payload = ("skill preview \u4e2d\u6587\n" * 100_000).encode()
+    skill_path = tmp_path / "sample.skill"
+    with zipfile.ZipFile(skill_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_ref:
+        zip_ref.writestr("SKILL.md", payload)
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: skill_path)
+
+    etag = f'"{hashlib.sha256(payload).hexdigest()}"'
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        matching = client.get(
+            "/api/threads/thread-1/artifacts/mnt/user-data/outputs/sample.skill/SKILL.md",
+            headers={"Range": "bytes=0-99", "If-Range": etag},
+        )
+        stale = client.get(
+            "/api/threads/thread-1/artifacts/mnt/user-data/outputs/sample.skill/SKILL.md",
+            headers={"Range": "bytes=0-99", "If-Range": '"deadbeef"'},
+        )
+
+    assert matching.status_code == 206
+    assert matching.content == payload[:100]
+    assert matching.headers["content-range"] == f"bytes 0-99/{len(payload)}"
+    assert stale.status_code == 200
+    assert stale.content == payload
+
+
 def test_get_skill_archive_inline_returns_sha256_etag(tmp_path, monkeypatch) -> None:
     payload = ("skill preview \u4e2d\u6587\n" * 100).encode()
     skill_path = tmp_path / "sample.skill"

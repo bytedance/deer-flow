@@ -646,15 +646,22 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
         # semantics here so the frontend can request only its preview budget,
         # including a final partial UTF-8 sequence.
         request_headers = request.headers if request is not None else {}
-        range_header = None if request_headers.get("if-range") else request_headers.get("range")
+        # Real SHA-256 so the browser can skip crypto.subtle (unavailable on
+        # non-secure contexts) when previewing / editing artifacts (#4864).
+        etag = f'"{hashlib.sha256(content).hexdigest()}"'
+        range_header = request_headers.get("range")
+        if_range = request_headers.get("if-range")
+        if if_range and if_range != etag:
+            # Only a stale If-Range (or a date the client no longer matches)
+            # drops the range; a matching ETag keeps the 206 slice, mirroring
+            # the viewed-image blob branch below.
+            range_header = None
         ranged_content, status_code, range_headers = _slice_byte_range(content, range_header)
         inline_headers = {
             **cache_headers,
             **range_headers,
             "X-Content-Type-Options": "nosniff",
-            # Real SHA-256 so the browser can skip crypto.subtle (unavailable on
-            # non-secure contexts) when previewing / editing artifacts (#4864).
-            "ETag": f'"{hashlib.sha256(content).hexdigest()}"',
+            "ETag": etag,
         }
 
         if mime_type and mime_type.startswith("text/"):
