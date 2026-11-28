@@ -8,6 +8,7 @@ import {
   pluginPages,
   pluginPageTitle,
   pluginPagePath,
+  threadIdFromQuery,
 } from "@/core/extensions/pages";
 import {
   loadFrontendExtensions,
@@ -98,5 +99,22 @@ describe("plugin-owned pages", () => {
       expect(result[0]?.error).toBeTruthy();
       expect(pluginPages(result)).toEqual([]);
     }
+  });
+});
+
+describe("threadIdFromQuery", () => {
+  test("returns a trimmed thread id from a single value", () => {
+    expect(threadIdFromQuery("  thread-1  ")).toBe("thread-1");
+  });
+
+  test("takes the first value when the parameter repeats", () => {
+    expect(threadIdFromQuery(["first", "second"])).toBe("first");
+  });
+
+  test("ignores missing, blank and oversized values", () => {
+    expect(threadIdFromQuery(undefined)).toBeUndefined();
+    expect(threadIdFromQuery("")).toBeUndefined();
+    expect(threadIdFromQuery("   ")).toBeUndefined();
+    expect(threadIdFromQuery("t".repeat(257))).toBeUndefined();
   });
 });

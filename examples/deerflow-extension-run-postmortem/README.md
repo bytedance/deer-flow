@@ -45,9 +45,10 @@ an incident ticket. Query `max_events` (1–2000, default 200) bounds the work.
 ### Workspace page
 
 The same plugin adds a **Run postmortem** page (sidebar entry, localized en/zh)
-with the same data. When the host supplies the current thread id to the surface,
-the page prefills it; hosts that mount pages without thread context leave the
-field empty, so it stays editable. The page can load the latest run the caller
+with the same data. When the host supplies the current thread id to the surface —
+for example through a `?thread=` deep link (see
+[docs/full-stack-plugins.md](../../docs/full-stack-plugins.md)) — the page
+prefills it; otherwise the field stays empty and editable. The page can load the latest run the caller
 owns on that thread **when the changed-run feed can be read to its end**; a
 bounded scan that stops early says so and asks for a run ID instead of
 presenting an older run as latest. It renders the verdict, anomalies, activity
