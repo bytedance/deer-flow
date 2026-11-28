@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import logging
 import time
+import traceback
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread
 from unittest.mock import Mock
 
 import pytest
@@ -228,6 +232,212 @@ def test_provisioner_list_sends_auth_header_when_api_key_set(monkeypatch):
 
     backend._provisioner_list()
     assert captured[0]["headers"] == {"X-API-Key": "secret"}
+
+
+def test_provisioner_list_sends_stripped_key_when_configured_key_has_whitespace(monkeypatch):
+    # A Secret mounted through envFrom keeps its trailing newline; the raw
+    # value would make requests refuse the header before anything is sent.
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key="secret\r\n")
+    captured: list[dict] = []
+
+    def mock_get(url: str, timeout: int, headers=None):
+        captured.append({"headers": headers})
+        return _StubResponse(payload={"sandboxes": []})
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    backend._provisioner_list()
+    assert captured[0]["headers"] == {"X-API-Key": "secret"}
+
+
+def test_provisioner_list_sends_no_header_for_whitespace_only_key(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key=" \r\n")
+    captured: list[dict] = []
+
+    def mock_get(url: str, timeout: int, headers=None):
+        captured.append({"headers": headers})
+        return _StubResponse(payload={"sandboxes": []})
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    backend._provisioner_list()
+    assert captured[0]["headers"] == {}
+
+
+def test_provisioner_list_redacts_key_from_transport_refusal(monkeypatch, caplog):
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key="secret")
+    refusal = requests.exceptions.InvalidHeader("Invalid leading whitespace, reserved character(s), or return character(s) in header value: 'secret\\r\\n'")
+
+    def mock_get(url: str, timeout: int, headers=None):
+        raise refusal
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with caplog.at_level(logging.WARNING):
+        assert backend._provisioner_list() == []
+    assert "secret" not in caplog.text
+    assert "[REDACTED]" in caplog.text
+
+
+def test_create_failure_redacts_key_from_error_and_log(monkeypatch, caplog):
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key="secret")
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+    refusal = requests.exceptions.InvalidHeader("Invalid leading whitespace, reserved character(s), or return character(s) in header value: 'secret\\r\\n'")
+
+    def mock_post(url: str, json=None, timeout: int = 0, headers=None):
+        raise refusal
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(RuntimeError, match="Provisioner create failed") as excinfo:
+            backend.create("thread-1", "abc123", user_id="user-1")
+    assert "secret" not in str(excinfo.value)
+    assert "[REDACTED]" in str(excinfo.value)
+    assert "secret" not in caplog.text
+
+
+def test_inspect_runtime_failure_redacts_key_from_error(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key="secret")
+    refusal = requests.exceptions.InvalidHeader("Invalid leading whitespace, reserved character(s), or return character(s) in header value: 'secret\\r\\n'")
+
+    def mock_get(url: str, timeout: int, headers=None):
+        raise refusal
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with pytest.raises(RuntimeError, match="Could not inspect runtime") as excinfo:
+        backend.inspect_runtime("abc123")
+    assert "secret" not in str(excinfo.value)
+    assert "[REDACTED]" in str(excinfo.value)
+
+
+def test_transport_refusal_chain_never_carries_the_key(monkeypatch):
+    # Upstream logger.exception / exc_info=True callers print the whole cause
+    # chain; the unredacted transport exception must not survive in it.
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key="secret")
+    refusal = requests.exceptions.InvalidHeader("Invalid leading whitespace, reserved character(s), or return character(s) in header value: 'secret\\r\\n'")
+
+    def mock_get(url: str, timeout: int, headers=None):
+        raise refusal
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        backend.inspect_runtime("abc123")
+    rendered = "".join(traceback.format_exception(type(excinfo.value), excinfo.value, excinfo.value.__traceback__))
+    assert "secret" not in rendered
+    assert "[REDACTED]" in rendered
+
+
+def test_redaction_scrubs_repr_escaped_interior_whitespace(monkeypatch):
+    # A multi-line Secret value keeps interior newlines after strip; the
+    # transport quotes it repr-escaped, so the raw substring never matches.
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key="sec\nret")
+    refusal = requests.exceptions.InvalidHeader("Invalid leading whitespace, reserved character(s), or return character(s) in header value: 'sec\\nret'")
+
+    def mock_get(url: str, timeout: int, headers=None):
+        raise refusal
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        backend.inspect_runtime("abc123")
+    message = str(excinfo.value)
+    assert "sec\\nret" not in message
+    assert "sec\nret" not in message
+    assert "[REDACTED]" in message
+
+
+def test_destroy_failure_redacts_key_from_error(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key="secret")
+    refusal = requests.exceptions.InvalidHeader("Invalid leading whitespace, reserved character(s), or return character(s) in header value: 'secret\\r\\n'")
+
+    def mock_delete(url: str, timeout: int, headers=None):
+        raise refusal
+
+    monkeypatch.setattr(requests, "delete", mock_delete)
+
+    with pytest.raises(RuntimeError, match="Provisioner destroy failed") as excinfo:
+        backend.destroy(SandboxInfo(sandbox_id="abc123", sandbox_url="http://k3s:31001"))
+    assert "secret" not in str(excinfo.value)
+    assert "[REDACTED]" in str(excinfo.value)
+
+
+def test_health_check_failure_redacts_key_from_error(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key="secret")
+    refusal = requests.exceptions.InvalidHeader("Invalid leading whitespace, reserved character(s), or return character(s) in header value: 'secret\\r\\n'")
+
+    def mock_get(url: str, timeout: int, headers=None):
+        raise refusal
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with pytest.raises(RuntimeError, match="Provisioner health check failed") as excinfo:
+        backend.is_alive(SandboxInfo(sandbox_id="abc123", sandbox_url="http://k3s:31001"))
+    assert "secret" not in str(excinfo.value)
+    assert "[REDACTED]" in str(excinfo.value)
+
+
+def test_discover_failure_redacts_key_from_log(monkeypatch, caplog):
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key="secret")
+    refusal = requests.exceptions.InvalidHeader("Invalid leading whitespace, reserved character(s), or return character(s) in header value: 'secret\\r\\n'")
+
+    def mock_get(url: str, timeout: int, headers=None):
+        raise refusal
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    with caplog.at_level(logging.DEBUG, logger="deerflow.community.aio_sandbox.remote_backend"):
+        assert backend.discover("abc123") is None
+    assert "secret" not in caplog.text
+    assert "[REDACTED]" in caplog.text
+
+
+def test_none_api_key_reads_as_unconfigured(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key=None)
+    captured: list[dict] = []
+
+    def mock_get(url: str, timeout: int, headers=None):
+        captured.append({"headers": headers})
+        return _StubResponse(payload={"sandboxes": []})
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    backend._provisioner_list()
+    assert captured[0]["headers"] == {}
+
+
+def test_stripped_key_survives_real_transport_header_validation():
+    # The transport's own header validation stays in the loop: requests must
+    # accept the header and the server must receive the stripped key.
+    key = "sk-provisioner-test-4f7c2a91"
+    received: list[dict[str, str]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            received.append({name.lower(): value for name, value in self.headers.items()})
+            body = b'{"sandboxes": []}'
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        backend = RemoteSandboxBackend(f"http://127.0.0.1:{server.server_port}", api_key=f"{key}\r\n")
+        assert backend.list_running() == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert received and received[0]["x-api-key"] == key
 
 
 def test_provisioner_list_returns_empty_on_request_exception(monkeypatch):
@@ -706,17 +916,22 @@ def test_provisioner_is_alive_raises_on_request_exception(monkeypatch):
         backend._provisioner_is_alive("abc123")
 
 
-def test_provisioner_is_alive_raises_on_server_error(monkeypatch):
-    backend = RemoteSandboxBackend("http://provisioner:8002")
+def test_provisioner_is_alive_raises_on_server_error_without_upstream_body(monkeypatch):
+    # _check_tracked_sandbox_alive logs this error, so an upstream body that
+    # echoes headers or proxy diagnostics would bypass the transport redaction.
+    backend = RemoteSandboxBackend("http://provisioner:8002", api_key="secret")
+    upstream_body = "unavailable; X-API-Key: secret"
 
     def mock_get(url: str, timeout: int, headers=None):
         response = _StubResponse(status_code=503)
-        response.text = "unavailable"
+        response.text = upstream_body
         return response
 
     monkeypatch.setattr(requests, "get", mock_get)
-    with pytest.raises(RuntimeError, match="HTTP 503 unavailable"):
+    with pytest.raises(RuntimeError, match="Provisioner health check failed for abc123: HTTP 503") as excinfo:
         backend._provisioner_is_alive("abc123")
+    assert upstream_body not in str(excinfo.value)
+    assert "secret" not in str(excinfo.value)
 
 
 def test_discover_delegates_to_provisioner_discover(monkeypatch):

@@ -63,10 +63,19 @@ make test-blocking-io
   state or a missing cleanup receipt quarantines the sandbox.
 - **Cleanup markers support cooperative cleanup.** They do not isolate hostile
   code.
+- **Cleanup interrupts the marked process groups before it terminates them.**
+  The shell exported the marker itself, so its own environ lacks it; killing
+  only the children first lets it run the rest of the command.
 - **Broker logs carry argument count, exit code and duration**, never argument
   values.
-- **`read_file` returns content or an `Error: ...` string and never raises.** A
-  missing file is expected when a write probes first, and is logged at debug.
+- **`read_file` returns content or an `Error: ...` string.** A missing file is
+  expected when a write probes first, and is logged at debug. Only a file over
+  the download limit raises `EFBIG`: `str_replace` would replace text inside an
+  error string and write it over the file. The read-before-write gate blocks on
+  `EFBIG` instead of failing open, because no read can ever mark that file.
+- **`read_file` reads the download route, not `/v1/file/read`.** That route
+  turns every line ending into `\n` and splits ranges at a bare `\r` too, so
+  `str_replace` would write a CRLF file back as LF.
 
 ## Restricted network mode
 
@@ -74,6 +83,13 @@ make test-blocking-io
   egress. Reject a host that the policy denies before any DNS lookup.
 - **An approval never replays a tool call.** Subagent and non-interactive runs
   deny without asking.
+- **Denial recording is bounded and best effort.** The sidecar's only writable
+  space is a 16 MiB tmpfs, and a sandbox can deny unlimited unique hosts, so
+  superseded and resolved events are pruned inside the recording transaction.
+  Retention orders resolved rows by when the decision was applied and reserves
+  room for pending approvals. A surfaced undecided row is a card the user is
+  looking at and survives pruning, and a policy-database failure still returns
+  a denial rather than closing the connection.
 - **Discovery and enumeration are read-only**, also when the policy or network
   mode does not match. Only the provider replaces a sandbox, under the teardown
   reservation and the cross-instance lease. The sandbox, its sidecar and both

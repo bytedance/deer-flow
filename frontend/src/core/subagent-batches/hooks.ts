@@ -9,6 +9,7 @@ import { toast } from "sonner";
 
 import { threadHistoryQueryKey } from "@/core/threads/hooks";
 import { runInputsKey } from "@/core/threads/run-inputs";
+import { threadTokenUsageQueryKey } from "@/core/threads/token-usage";
 
 import {
   controlSubagentBatch,
@@ -35,7 +36,11 @@ export function useSubagentBatches(
   options: { enabled?: boolean; polling?: boolean } = {},
 ) {
   const queryClient = useQueryClient();
-  const observed = useRef({ threadId, runs: new Set<string>() });
+  const observed = useRef({
+    threadId,
+    runs: new Set<string>(),
+    usage: undefined as string | undefined,
+  });
   const query = useQuery({
     queryKey: subagentBatchesKey(threadId),
     queryFn: () => fetchSubagentBatches(threadId),
@@ -48,7 +53,26 @@ export function useSubagentBatches(
   });
   useEffect(() => {
     if (observed.current.threadId !== threadId) {
-      observed.current = { threadId, runs: new Set<string>() };
+      observed.current = {
+        threadId,
+        runs: new Set<string>(),
+        usage: undefined,
+      };
+    }
+    // Batch items add their tokens to the thread's usage when an attempt
+    // ends, with or without a follow-up run: refetch it when the item counts
+    // move, not only when a continuation appears.
+    const usage = query.data
+      ?.map((batch) => `${batch.id}:${JSON.stringify(batch.counts ?? null)}`)
+      .join("|");
+    if (usage !== undefined && usage !== observed.current.usage) {
+      const known = observed.current.usage !== undefined;
+      observed.current.usage = usage;
+      if (known) {
+        void queryClient.invalidateQueries({
+          queryKey: threadTokenUsageQueryKey(threadId),
+        });
+      }
     }
     const newRuns =
       query.data?.flatMap((batch) =>

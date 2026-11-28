@@ -12,6 +12,7 @@ from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import wrap_tool_call
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.errors import NodeCancelledError
@@ -428,6 +429,20 @@ async def test_sdk_submits_with_a_repository_using_the_original_signature(batch_
         assert [item["item_key"] for item in await repository.list_items(committed_id, user_id="user-1")] == ["job-1"]
 
 
+def test_batch_schema_advertises_continuation_only_with_run_capability():
+    tools = list(tool_module.bind_batch_tools(AsyncMock()))
+    limited = tool_module.restrict_batch_continuation(tools, available=False)
+    interactive = tool_module.restrict_batch_continuation(tools, available=True)
+
+    def properties(bound_tools):
+        batch = next(tool for tool in bound_tools if tool.name == "batch_task")
+        return convert_to_openai_tool(batch)["function"]["parameters"]["properties"]
+
+    assert "continuation" in properties(interactive)
+    assert properties(limited) == {name: field for name, field in properties(interactive).items() if name != "continuation"}
+    assert "continuation" in properties(tools)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("thread_incarnation", "expected_present"),
@@ -463,8 +478,10 @@ async def test_batch_task_is_explicit_idempotent_submission(
         ),
     )
 
+    runtime = _runtime(thread_incarnation)
+    runtime.context["non_interactive"] = True
     command = await tool_module.batch_task.coroutine(
-        runtime=_runtime(thread_incarnation),
+        runtime=runtime,
         title="Process records",
         items=[
             BatchTaskItem(key="record-1", prompt="Process one"),
@@ -481,6 +498,7 @@ async def test_batch_task_is_explicit_idempotent_submission(
     assert re.fullmatch(r"batch-v1:[a-f0-9]{64}", request.submission_key)
     assert request.run_id == "run-1"
     assert request.execution_spec["mcp_plugins"] == ["stable-plugin"]
+    assert "ask_clarification" in request.execution_spec["subagent_config"]["disallowed_tools"]
     assert request.user_id == "user-1"
     assert [item["key"] for item in request.items] == ["record-1", "record-2"]
     assert request.max_live_items == 20

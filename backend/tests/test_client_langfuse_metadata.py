@@ -53,8 +53,7 @@ def _stub_agent_creation(monkeypatch, fake_agent: _FakeAgent) -> dict[str, Any]:
     def _stub_ensure_agent(self, config, **kwargs):
         captured["config"] = config
         captured["context"] = kwargs.get("context")
-        self._agent = fake_agent
-        self._agent_config_key = ("stub",)
+        return fake_agent, None
 
     monkeypatch.setattr(DeerFlowClient, "_ensure_agent", _stub_ensure_agent)
     return captured
@@ -80,8 +79,7 @@ def _make_client(_monkeypatch) -> DeerFlowClient:
     client._available_skills = None
     client._middlewares = None
     client._checkpointer = None
-    client._agent = None
-    client._agent_config_key = None
+    client._agent_cache = None
     client._environment = None
     return client
 
@@ -127,8 +125,7 @@ def test_stream_tags_the_effective_default_model(monkeypatch):
     fake_agent = _FakeAgent()
 
     def ensure_agent(self, config, **kwargs):
-        self._effective_model_name = "stub-model"
-        self._agent = fake_agent
+        return fake_agent, "stub-model"
 
     monkeypatch.setattr(DeerFlowClient, "_ensure_agent", ensure_agent)
     client = _make_client(monkeypatch)

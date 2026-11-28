@@ -33,6 +33,7 @@ class CreateWorkerTask(BaseModel):
     objective: TaskText
     assistant_id: str = Field(default="lead_agent", min_length=1, max_length=128)
     project_id: str | None = Field(default=None, min_length=1, max_length=64)
+    coordinator: StrictBool = False
     run: WorkerRunSettings | None = None
 
 
@@ -56,6 +57,7 @@ async def create_worker_task(body: CreateWorkerTask, request: Request):
             request_id=body.request_id,
             objective=body.objective,
             project_id=body.project_id,
+            coordinator=body.coordinator,
             run_settings=body.run.model_dump(exclude_none=True) if body.run is not None else None,
         )
         return await service.dispatch(runs, owner, task["id"], body.assistant_id)

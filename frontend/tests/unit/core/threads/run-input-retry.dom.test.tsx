@@ -44,6 +44,7 @@ type SubmittedInput = {
     mode: RunInputMode;
     context: Record<string, unknown>;
   };
+  files?: File[];
 };
 
 const queryClients: QueryClient[] = [];
@@ -64,7 +65,7 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
-function receiptFor({ runId, body }: SubmittedInput): RunInput {
+function receiptFor({ runId, body, files }: SubmittedInput): RunInput {
   return {
     id: body.request_id,
     target_run_id: runId,
@@ -73,6 +74,9 @@ function receiptFor({ runId, body }: SubmittedInput): RunInput {
     mode: body.mode,
     status: "pending",
     created_at: "2026-11-02T00:00:00Z",
+    ...(files?.length
+      ? { files: files.map(({ name: filename, size }) => ({ filename, size })) }
+      : {}),
   };
 }
 
@@ -185,12 +189,15 @@ beforeEach(() => {
       );
       if (match && init?.method === "POST") {
         expect(init.credentials).toBe("include");
-        if (typeof init.body !== "string") {
-          throw new Error("Expected a JSON run-input request body");
-        }
+        const form = init.body instanceof FormData ? init.body : undefined;
+        const input = form ? form.get("input") : init.body;
+        if (typeof input !== "string") throw new Error("Missing run input");
+        if (form)
+          expect(new Headers(init.headers).get("Content-Type")).toBeNull();
         const submission: SubmittedInput = {
           runId: match[1]!,
-          body: JSON.parse(init.body) as SubmittedInput["body"],
+          body: JSON.parse(input) as SubmittedInput["body"],
+          ...(form ? { files: form.getAll("files") as File[] } : {}),
         };
         submittedInputs.push(submission);
         const receipt = receiptFor(submission);
@@ -308,4 +315,56 @@ test("recovers an accepted input when the POST response was lost", async () => {
 
   expect(submittedInputs).toHaveLength(1);
   expect(receipts[0]?.id).toBe(submittedInputs[0]?.body.request_id);
+});
+
+test("keeps the attachment and request ID after a lost queue submission", async () => {
+  firstPostFailure = "network";
+  const { result, queryClient } = await renderThread();
+  const screenshot = new File(["image"], "screenshot.png", {
+    type: "image/png",
+  });
+
+  await act(async () => {
+    await expect(
+      result.current.sendInput("See screenshot", "queue", [screenshot]),
+    ).rejects.toThrow("Failed to fetch");
+  });
+  await advanceToNextRun(queryClient);
+  await act(async () => {
+    await expect(
+      result.current.sendInput("See screenshot", "queue", [screenshot]),
+    ).resolves.toMatchObject({
+      target_run_id: "run-1",
+      files: [{ filename: screenshot.name, size: screenshot.size }],
+    });
+  });
+
+  expect(submittedInputs).toHaveLength(2);
+  expect(submittedInputs[0]?.files).toEqual([screenshot]);
+  expect(submittedInputs[1]).toEqual(submittedInputs[0]);
+});
+
+test("uses a fresh request ID when the attachment changes", async () => {
+  firstPostFailure = "network";
+  const { result, queryClient } = await renderThread();
+  const first = new File(["one"], "screenshot.png", { type: "image/png" });
+  const replacement = new File(["two"], "screenshot.png", {
+    type: "image/png",
+  });
+
+  await act(async () => {
+    await expect(
+      result.current.sendInput("", "queue", [first]),
+    ).rejects.toThrow("Failed to fetch");
+  });
+  await advanceToNextRun(queryClient);
+  await act(async () => {
+    await result.current.sendInput("", "queue", [replacement]);
+  });
+
+  expect(submittedInputs[1]?.files).toEqual([replacement]);
+  expect(submittedInputs[1]?.body.request_id).not.toBe(
+    submittedInputs[0]?.body.request_id,
+  );
+  expect(submittedInputs[1]?.runId).toBe("run-2");
 });

@@ -4,6 +4,7 @@ import importlib
 from ipaddress import ip_address
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from urllib.parse import urljoin
 
 import pytest
 
@@ -65,9 +66,22 @@ def test_extract_article_resolves_images_and_relative_document_base():
     assert "![Chart](https://example.com/assets/images/chart.png)" in markdown
 
 
-def test_extract_article_without_url_preserves_legacy_relative_links():
+def test_extract_article_without_url_preserves_legacy_relative_links(monkeypatch):
+    # Exercise the real Python fallback even on hosts with a working Node bridge.
+    monkeypatch.setattr("deerflow.utils.readability._readability_js_available", lambda: False)
     article = ReadabilityExtractor().extract_article(_article('<a href="../next">Next</a>'))
     assert "[Next](../next)" in article.to_markdown()
+
+
+@pytest.mark.parametrize("url", [None, PAGE_URL])
+@pytest.mark.parametrize("head", ['<script>const example = "<body>Sample body";</script>', "<!-- <body>Sample body -->"])
+def test_python_fallback_uses_document_body_and_ignores_head_examples(monkeypatch, url, head):
+    monkeypatch.setattr("deerflow.utils.readability._readability_js_available", lambda: False)
+    article = ReadabilityExtractor().extract_article(_article('<a href="../next">Next</a>', head=head), url=url)
+    markdown = article.to_markdown()
+    assert "Sample body" not in markdown
+    assert markdown.count("Guide") == 1
+    assert f"[Next]({urljoin(url or '', '../next')})" in markdown
 
 
 @pytest.mark.parametrize(
@@ -215,10 +229,9 @@ def test_base_precheck_false_positives_do_not_override_page_url(head):
     assert '<a href="https://example.com/next">Next</a>' in _resolve_html_urls(html, PAGE_URL)
 
 
-def test_falls_back_when_extraction_returns_unextracted_document(monkeypatch):
-    """When Readability.js returns the raw document instead of the extracted
-    article (e.g. on Windows), the resolved HTML's <body> content is used so
-    that <a> destinations survive."""
+@pytest.mark.parametrize("url", [None, PAGE_URL])
+def test_falls_back_when_extraction_returns_unextracted_document(monkeypatch, url):
+    """A raw extraction result uses the source body with or without a URL."""
     import deerflow.utils.readability as R
 
     monkeypatch.setattr(
@@ -226,23 +239,25 @@ def test_falls_back_when_extraction_returns_unextracted_document(monkeypatch):
         "simple_json_from_html_string",
         lambda html, use_readability=True: {"title": "Guide", "content": html},
     )
-    article = R.ReadabilityExtractor().extract_article(_article('<a href="../next">Next</a> <a href="/reference">Reference</a>'), url=PAGE_URL)
+    article = R.ReadabilityExtractor().extract_article(_article('<a href="../next">Next</a> <a href="/reference">Reference</a>'), url=url)
     md = article.to_markdown()
-    assert "[Next](https://example.com/next)" in md
-    assert "[Reference](https://example.com/reference)" in md
+    assert md.count("Guide") == 1
+    assert f"[Next]({urljoin(url or '', '../next')})" in md
+    assert f"[Reference]({urljoin(url or '', '/reference')})" in md
 
 
-def test_link_free_article_with_link_bearing_chrome_does_not_fall_back(monkeypatch):
+@pytest.mark.parametrize("url", [None, PAGE_URL])
+@pytest.mark.parametrize("decoration", ["", "<svg><title>Chart</title></svg>", "<!-- <body>Example</body> -->", '<script>const example = "<body>";</script>', "<svg><foreignObject><body>Chart</body></foreignObject></svg>"])
+def test_link_free_article_with_link_bearing_chrome_does_not_fall_back(monkeypatch, url, decoration):
     """A legitimately link-free article whose page chrome has links must NOT
     trigger the unextracted-document fallback — Readability correctly strips
     the chrome, and the article body genuinely has no links."""
     import deerflow.utils.readability as R
 
     prose = "Long enough prose for the readability extractor to retain this as content. "
-    html = f'<html><head><title>Guide</title></head><body><nav><a href="/home">Home</a> <a href="/about">About</a></nav><article><p>{prose * 4}</p></article></body></html>'
-    url = PAGE_URL
+    html = f'<html><head><title>Guide</title></head><body><nav><a href="/home">Home</a> <a href="/about">About</a></nav><article><p>{prose * 4}</p>{decoration}</article></body></html>'
 
-    extracted_content = f"<div><p>{prose * 4}</p></div>"
+    extracted_content = f"<div><p>{prose * 4}</p>{decoration}</div>"
 
     def fake_extract(html, use_readability=True):
         return {"title": "Guide", "content": extracted_content}

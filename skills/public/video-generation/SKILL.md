@@ -53,7 +53,7 @@ Parameters:
 - `--prompt-file`: Absolute path to JSON prompt file (required)
 - `--reference-images`: Absolute paths to reference images (optional). Images used by the provider must have a recognized filename extension: `.png`, `.jpg`, `.jpeg`, `.webp`, or `.gif` (case-insensitive). Missing or other extensions are rejected before submission. Filenames must match their contents: the script neither validates image contents nor converts bytes. Recognizing an extension does not guarantee that the selected provider accepts that format.
 - `--output-file`: Absolute path to output image file (required)
-- `--aspect-ratio` sets the video aspect ratio for Gemini (optional, defaults to 16:9).
+- `--aspect-ratio`: Aspect ratio of the generated video for Gemini and BytePlus Agent Plan (optional, defaults to `16:9`; BytePlus Agent Plan supports `16:9`, `9:16`, `1:1`, `4:3`, `3:4`, `21:9`, `adaptive`).
 
 [!NOTE]
 Do NOT read the python file, instead just call it with the parameters.
@@ -134,6 +134,17 @@ VIDEO_GENERATION_PROVIDER=minimax MINIMAX_VIDEO_RESOLUTION=1080P MINIMAX_VIDEO_D
   --output-file /mnt/user-data/outputs/narnia-farewell-scene-01.mp4
 ```
 
+With BytePlus Agent Plan (Seedance 2.5), one API key powers LLM planning, Seedream reference images, and video generation with native synchronized audio:
+
+```bash
+VIDEO_GENERATION_PROVIDER=byteplus_agentplan BYTEPLUS_AGENTPLAN_VIDEO_RESOLUTION=720p BYTEPLUS_AGENTPLAN_VIDEO_DURATION=6 \
+  python /mnt/skills/public/video-generation/scripts/generate.py \
+  --prompt-file /mnt/user-data/workspace/narnia-farewell-scene.json \
+  --reference-images /mnt/user-data/outputs/narnia-farewell-scene-01.jpg \
+  --output-file /mnt/user-data/outputs/narnia-farewell-scene-01.mp4 \
+  --aspect-ratio 16:9
+```
+
 > Do NOT read the python file, just call it with the parameters.
 
 ## Output Handling
@@ -156,7 +167,7 @@ After generation:
 - Reference image enhance generation quality significantly
 - Iterative refinement is normal for optimal results
 
-## Providers (Gemini / MiniMax)
+## Providers (Gemini / MiniMax / BytePlus Agent Plan)
 
 Provider credentials are read from the runtime environment, not embedded in the
 script. Do not put their values in prompt files or command-line arguments.
@@ -164,8 +175,21 @@ script. Do not put their values in prompt files or command-line arguments.
 Auto-selected by environment variables (CLI unchanged):
 
 - `GEMINI_API_KEY` set → Gemini Veo (default, unchanged).
-- Only `MINIMAX_API_KEY` set → MiniMax video (`/v1/video_generation`, async 3-step poll/download).
-- Force with `VIDEO_GENERATION_PROVIDER=gemini|minimax`.
+- Otherwise, `MINIMAX_API_KEY` set → MiniMax video (`/v1/video_generation`, async 3-step poll/download).
+- Otherwise, `BYTEPLUS_AGENTPLAN_API_KEY` set → BytePlus Agent Plan Seedance 2.5 (`/api/plan/v3/contents/generations/tasks`, async poll/download).
+- Force with `VIDEO_GENERATION_PROVIDER=gemini|minimax|byteplus_agentplan` (aliases `byteplus`, `byteplus-agentplan`, and `seedance` are also accepted).
+
+BytePlus Agent Plan settings:
+
+- `BYTEPLUS_AGENTPLAN_API_KEY` (required; subscribe or upgrade at https://console.byteplus.com/ark/region:ap-southeast-1/subscription/agent-plan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow — Seedance 2.5 video generation is included in **Large**, **Max**, and **Enterprise Shared Package** tiers).
+- `BYTEPLUS_AGENTPLAN_BASE_URL` (default `https://ark.ap-southeast.bytepluses.com/api/plan/v3`).
+- `BYTEPLUS_AGENTPLAN_VIDEO_MODEL` (default `dreamina-seedance-2.5`; set `dreamina-seedance-2.5-flash` for faster/lower-AFP drafts).
+- `BYTEPLUS_AGENTPLAN_VIDEO_RESOLUTION` (optional, e.g. `480p`, `720p`, `1080p`).
+- `BYTEPLUS_AGENTPLAN_VIDEO_DURATION` (optional integer seconds `4`–`30`, or `-1` for auto).
+- `BYTEPLUS_AGENTPLAN_GENERATE_AUDIO` (optional boolean, default `true` for native synchronized audio).
+- `BYTEPLUS_AGENTPLAN_VIDEO_DOWNLOAD_HOSTS` (optional comma-separated list of additional exact HTTPS download hostnames approved by the operator; BytePlus Ark TOS storage endpoints under `tos-ap-southeast-1.volces.com`, `tos-ap-southeast-1.bytepluses.com`, and `tos-cn-beijing.volces.com` are trusted by default).
+- Reference images passed via `--reference-images` are all sent as `role: "reference_image"` data URLs to preserve subject/product consistency.
+- For a fast draft-to-final workflow, render a `480p` preview with `dreamina-seedance-2.5-flash` first, verify framing and motion, then render the final `720p` or `1080p` clip with `dreamina-seedance-2.5`.
 
 MiniMax uses `MINIMAX_API_HOST` (default `https://api.minimaxi.com`) and
 `MINIMAX_VIDEO_MODEL` (default `MiniMax-Hailuo-2.3`). It uses the first reference

@@ -20,11 +20,17 @@ const snapshot = {
       id: "answer",
       type: "ai",
       content:
-        "Revenue rose. [Report](sandbox:/mnt/user-data/outputs/report.html) ![tracking](https://tracker.invalid/pixel) [private](/workspace/chats/secret)",
+        "Revenue rose. [Report](sandbox:/mnt/user-data/outputs/report.html?download=summary#summary) ![detail](sandbox:/mnt/user-data/outputs/charts.svg?v=2&download=1#detail) ![tracking](https://tracker.invalid/pixel) [private](/workspace/chats/secret)",
     },
     { id: "tool", type: "tool", name: "python", content: "Revenue: 42" },
   ],
   artifacts: [
+    {
+      path: "charts.svg",
+      mime_type: "image/svg+xml",
+      size: 100,
+      sha256: "c".repeat(64),
+    },
     {
       path: "report.html",
       mime_type: "text/html",
@@ -72,6 +78,12 @@ test("anonymous snapshot previews files without entering the private workspace",
         : "<h1>Frozen report</h1><script>parent.document.body.innerHTML='unsafe'</script>",
     }),
   );
+  await page.route(`**/api/shares/${token}/artifacts/charts.svg*`, (route) =>
+    route.fulfill({
+      contentType: "image/svg+xml",
+      body: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><view id="detail" viewBox="0 0 5 5"/><rect width="10" height="10"/></svg>',
+    }),
+  );
   await page.goto(`/share/${token}`);
   await expect(
     page.getByRole("heading", { name: "Quarterly report" }),
@@ -81,11 +93,20 @@ test("anonymous snapshot previews files without entering the private workspace",
   ).toBeVisible();
   await expect(page.locator("textarea, [contenteditable=true]")).toHaveCount(0);
   await expect(
+    page.getByRole("img", { name: "detail", exact: true }),
+  ).toHaveAttribute(
+    "src",
+    `/api/shares/${token}/artifacts/charts.svg?v=2#detail`,
+  );
+  await expect(
     page.getByRole("link", { name: "private", exact: true }),
   ).toHaveCount(0);
   await expect(
     page.getByRole("link", { name: "Report", exact: true }),
-  ).toHaveAttribute("href", `/api/shares/${token}/artifacts/report.html`);
+  ).toHaveAttribute(
+    "href",
+    `/api/shares/${token}/artifacts/report.html#summary`,
+  );
   await page.getByRole("button", { name: "report.html", exact: true }).click();
   await expect(page.locator("iframe")).toHaveAttribute("sandbox", "");
   await expect(

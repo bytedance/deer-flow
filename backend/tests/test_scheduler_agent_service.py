@@ -42,9 +42,9 @@ async def scheduler(tmp_path):
         await close_engine()
 
 
-async def create_task(tasks, **extra):
+async def create_task(tasks, *, task_id="task-a", **extra):
     return await tasks.create(
-        task_id="task-a",
+        task_id=task_id,
         user_id="owner",
         thread_id=None,
         context_mode="fresh_thread_per_run",
@@ -76,6 +76,42 @@ async def dispatch_scheduled(tasks, service):
     claimed = await tasks.claim_due_tasks(now=now, lease_owner=service._lease_owner, lease_seconds=120, limit=1)
     assert len(claimed) == 1
     return await service.dispatch_task(claimed[0], now=now, trigger="scheduled")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("trigger", ["manual", "scheduled"])
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_dispatch_uses_stored_delegation_setting(scheduler, trigger, enabled):
+    sf, tasks, _, service, launches, _ = scheduler
+    await create_task(tasks, subagent_enabled=enabled)
+    reopened = ScheduledTaskRepository(sf)
+    task = await reopened.get("task-a", user_id="owner")
+    assert task["subagent_enabled"] is enabled
+    if trigger == "scheduled":
+        await service.run_once(now=datetime.now(UTC))
+    else:
+        result = await service.dispatch_task(task, now=datetime.now(UTC), trigger="manual")
+        assert result["outcome"] == "launched"
+
+    assert len(launches) == 1
+    assert launches[0]["subagent_enabled"] is enabled
+    assert launches[0]["owner_user_id"] == "owner"
+
+
+@pytest.mark.anyio
+async def test_due_tasks_keep_independent_delegation_settings(scheduler):
+    _, tasks, _, service, launches, _ = scheduler
+    await create_task(tasks, subagent_enabled=True)
+    await create_task(tasks, task_id="task-b")
+    now = datetime.now(UTC)
+    await service.run_once(now=now)
+    await service.run_once(now=now)
+
+    assert len(launches) == 2
+    assert {launch["metadata"]["scheduled_task_id"]: launch["subagent_enabled"] for launch in launches} == {
+        "task-a": True,
+        "task-b": False,
+    }
 
 
 @pytest.mark.anyio

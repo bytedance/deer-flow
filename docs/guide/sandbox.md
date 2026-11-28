@@ -6,6 +6,7 @@ DeerFlow supports multiple sandbox execution modes:
 - **Local Workspace** (files through workspace tools and configured mounts)
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
+- **Cloud Sandboxes** (serverless remote providers including [BytePlus veFaaS](../../backend/packages/harness/deerflow/community/vefaas_sandbox/README.md), E2B, OpenSandbox, boxd, and Tenki)
 
 When a provider returns a structured exit code, Bash tool status follows that
 code, including timeout failures. Providers that return plain text, including
@@ -113,6 +114,18 @@ the thread's files and skills before it is handed out, and release copies
 generated outputs back to thread storage with the same alias and path checks.
 See its [configuration](../../backend/docs/CONFIGURATION.md#sandbox).
 
+The optional [BytePlus veFaaS Cloud Sandbox provider](../../backend/packages/harness/deerflow/community/vefaas_sandbox/README.md)
+runs each user/thread scope in a serverless [BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
+AIO sandbox over the veFaaS OpenAPI (`Version=2024-06-06`, SigV4) with no extra
+cloud SDK dependency. It supports per-agent skill isolation, optional
+thread-scoped TOS mounts or automatic output mirroring on release, speculative
+`sandbox.prewarm`, opt-in idle pause/resume, thread-scoped snapshots with
+retention pruning, and asynchronous image precaching. Multi-worker gateways
+sharing one veFaaS sandbox application should enable `sandbox.ownership.type: redis`.
+See the [veFaaS documentation](https://docs.byteplus.com/en/docs/vefaas/what-is-vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
+and [provider README](../../backend/packages/harness/deerflow/community/vefaas_sandbox/README.md)
+for setup and snapshot retention guidance.
+
 The [sandbox benchmark](../../backend/scripts/benchmark/sandbox/README.md#opensandbox)
 also supports OpenSandbox cold acquisition, warm reuse and concurrent scopes,
 using the configured service connection and reporting unconfirmed cleanup as a
@@ -130,6 +143,34 @@ not a failure of the read tool. This keeps receipts accurate when inspecting
 saved API error responses and avoids blocking later reads when the optional
 `tool_progress` guard is enabled. Actual read failures and output truncation
 still retain their error or partial-result status.
+
+## Kubernetes sandbox Pod resources
+
+With the AIO Kubernetes provisioner, set `provisioner.sandboxResources` in
+your Helm values to size the sandbox container in each new Pod. For example,
+to raise the memory limit to 4 GiB and the ephemeral storage limit to 2 GiB:
+
+```yaml
+provisioner:
+  sandboxResources:
+    limits:
+      memory: 4Gi
+      ephemeral-storage: 2Gi
+```
+
+Each field can be overridden independently. Helm rejects unknown resource names
+in `requests` and `limits` when rendering the chart. For a standalone provisioner,
+set the corresponding environment variables on the provisioner container.
+
+| Resource | Request variable | Default request | Limit variable | Default limit |
+| --- | --- | --- | --- | --- |
+| `cpu` | `SANDBOX_CPU_REQUEST` | `100m` | `SANDBOX_CPU_LIMIT` | `1000m` |
+| `memory` | `SANDBOX_MEMORY_REQUEST` | `256Mi` | `SANDBOX_MEMORY_LIMIT` | `1Gi` |
+| `ephemeral-storage` | `SANDBOX_EPHEMERAL_STORAGE_REQUEST` | `500Mi` | `SANDBOX_EPHEMERAL_STORAGE_LIMIT` | `500Mi` |
+
+The provisioner checks at startup that each value is a nonnegative Kubernetes
+quantity and each request is at most its limit. The separate Helm value
+`provisioner.resources` sizes the provisioner container itself.
 
 ## Redis Cluster for shared sandbox ownership
 
@@ -266,6 +307,16 @@ from a complete scan with no produced outputs; it does not prove that no outputs
 were produced. Outputs modified and observed in both snapshots still participate
 in that check.
 
+`OpenSandboxProvider` preserves its legacy soft cap by default. Set
+`overflow_policy: reject` to make `replicas` a process-local hard cap covering
+active sandboxes, the warm pool and in-flight create reservations. A full pool
+with no warm sandbox to evict raises `SandboxCapacityExceededError` before an
+SDK create, with a 30 second retry hint. Failed creates release their
+reservations. `burst` is E2B-only: OpenSandbox logs a warning and keeps the
+soft cap. This is not a
+multi-process quota: use it only when one Gateway process owns the provider and
+`replicas` fits the Kubernetes ResourceQuota.
+
 `E2BSandboxProvider` uses `wait` as its default overflow policy. It waits for
 `acquire_timeout`, then fails the agent turn. DeerFlow does not retry the turn
 automatically. Clients can use the structured error to schedule a retry.
@@ -350,7 +401,11 @@ On Linux and macOS, local sandbox `write_file` replacements and `str_replace` st
 
 Loop warnings let agents save collected results before their final answer. If the save is blocked by the read-before-write gate, the agent may read the target file and retry the save once. A looping or stopped tool must be replaced by an available alternative; if no permitted save path exists or the retry fails, the final answer includes the collected results and reports that the file was not saved. When `present_files` is available, the warning also asks the agent to present the files it already created in `/mnt/user-data/outputs` before answering, so finished outputs are delivered. Recovery calls still count toward the loop limits, and a hard stop prevents further tool execution.
 
-Ranged `read_file` calls count lines the same way on every sandbox provider: a line ends only at a newline. On E2B, BoxLite, Tenki, and OpenSandbox, a file with bare carriage returns (such as a saved progress log), form feeds, or Unicode line separators therefore returns the same lines as on the local sandbox, and the `start_line` a truncated read suggests points at the next unread line.
+Ranged `read_file` calls count lines the same way on every sandbox provider: a line ends only at a newline. On AIO, E2B, BoxLite, Tenki, and OpenSandbox, a file with bare carriage returns (such as a saved progress log), form feeds, or Unicode line separators therefore returns the same lines as on the local sandbox, and the `start_line` a truncated read suggests points at the next unread line.
+
+A full `read_file` returns line endings as stored, and `str_replace` changes only the text it matches: every other byte, line endings included, stays as stored. A file without CRLF, including an LF-only or CR-only file, is matched literally and `new_str` is written as given. In a file that contains CRLF, a CRLF counts as one line break. An `old_str` without `\r\n`, such as one copied from a ranged read (whose lines are joined with `\n`) or typed with `\n`, matches wherever its lines end in CRLF, LF or a mix of both. An `old_str` with `\r\n`, such as one copied from a full read, matches as written or with every line break spelled CRLF, and a leading `\n` may also be the end of a CRLF line. A snippet that mixes `\r\n` and `\n` therefore does not match lines whose endings mix in another way; accepting any mix would make the search quadratic, while every search is linear in the size of the file and of `old_str`. Matches are taken in file order: without `replace_all` only the first one changes, and with it every one does. Each line break in `new_str` is written in the ending of the corresponding line break in the matched text, so an edit that keeps the number of lines keeps every line's ending; extra lines take the ending of the last matched line break, and a match without one takes the ending of its line. A match never splits a CRLF. A line that ends in more than one `\r` before its `\n` matches only as stored, because a ranged read drops all of those `\r`.
+
+On AIO, `read_file` and `str_replace` read the stored bytes and fail on a file larger than 100 MB, leaving it unchanged. Because such a file can never be read back, the read-before-write check also blocks `write_file` over it. Read or change it with `bash` (`head`, `tail` or `sed -n`).
 
 Concurrent reads and writes to the same file share a gate across synchronous and asynchronous tool calls. Async callers waiting for that gate do not occupy worker threads needed to finish the current read or write. Cancelling a waiting call leaves the current operation running; a call that already started file inspection still waits for that work to finish before releasing its gate.
 
@@ -422,7 +477,7 @@ This remains a best-effort scan, not an atomic filesystem snapshot.
 When you reopen the destination conversation, the Artifacts sidebar restores
 files from confirmed handoffs.
 
-Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. Long artifact lists scroll within the panel on desktop and in the mobile drawer, keeping every file reachable. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. A delayed background read cannot replace a successfully saved revision in the editor; cancelled preview and full-file reads also abort their HTTP requests. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
+Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. The file card lists only the string paths in the call's `filepaths`, so a malformed entry does not hide the valid files. When the backend rejects a call, for example because a path is outside `/mnt/user-data/outputs`, neither the file card nor the artifact panel lists its paths. Long artifact lists scroll within the panel on desktop and in the mobile drawer, keeping every file reachable. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. A delayed background read cannot replace a successfully saved revision in the editor; cancelled preview and full-file reads also abort their HTTP requests. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
 
 Unsaved artifact edits survive switching chats, workspace pages, or visiting the
 home page and returning in the same browser tab. Drafts stay in memory for the

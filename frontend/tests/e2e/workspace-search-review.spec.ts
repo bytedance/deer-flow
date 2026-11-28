@@ -73,7 +73,7 @@ for (const agentName of [undefined, "researcher"]) {
     await composer.press("Enter");
     await (await first).finished();
     await expect(
-      page.getByRole("button", { name: "Submit", exact: true }),
+      page.getByRole("button", { name: "Send", exact: true }),
     ).toBeEnabled();
     await page.keyboard.press("ControlOrMeta+k");
     const dialog = page.getByRole("dialog", { name: "Search conversations" });
