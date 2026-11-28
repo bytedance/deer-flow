@@ -324,40 +324,45 @@ describe("InputBox staged project attachments", () => {
     expect(readComposerDraft(storage, sendingDraftKey)).toBeNull();
   });
 
-  it("keeps a replacement draft saved under the same key after an unmounted composer's send is dispatched", async () => {
-    let dispatched!: () => void;
-    const onSubmit: SubmitSpy = rs.fn(
-      (_message: unknown, options?: InputBoxSubmitOptions) => {
-        dispatched = () => options?.onSent?.();
-        return new Promise<void>(() => undefined);
-      },
-    );
-    const { container, unmount } = renderComposer({ onSubmit });
-    fireEvent.change(screen.getByRole("textbox"), {
-      target: { value: "first question" },
-    });
-    fireEvent.click(getSubmitButton(container));
-    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+  it.each([false, true])(
+    "keeps a replacement draft after an unmounted send (same text: %s)",
+    async (sameText) => {
+      let dispatched!: () => void;
+      const onSubmit: SubmitSpy = rs.fn(
+        (_message: unknown, options?: InputBoxSubmitOptions) => {
+          dispatched = () => options?.onSent?.();
+          return new Promise<void>(() => undefined);
+        },
+      );
+      const { container, unmount } = renderComposer({ onSubmit });
+      fireEvent.change(screen.getByRole("textbox"), {
+        target: { value: "first question" },
+      });
+      fireEvent.click(getSubmitButton(container));
+      await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
 
-    // Leaving mid-upload persists the pending draft so a failed send could
-    // be retried; a later composer for the same key then saves its own.
-    unmount();
-    const draftKey = buildComposerDraftKey({
-      userId: "user-1",
-      threadId: "thread-1",
-    });
-    const storage = getSessionComposerDraftStorage();
-    expect(readComposerDraft(storage, draftKey)?.text).toBe("first question");
-    writeComposerDraft(storage, draftKey, {
-      text: "a different question",
-      skillName: null,
-    });
-    dispatched();
+      // Leaving mid-upload persists the pending draft so a failed send could
+      // be retried; a later composer for the same key then saves its own.
+      unmount();
+      const draftKey = buildComposerDraftKey({
+        userId: "user-1",
+        threadId: "thread-1",
+      });
+      const storage = getSessionComposerDraftStorage();
+      expect(readComposerDraft(storage, draftKey)?.text).toBe("first question");
+      const replacement = {
+        text: sameText ? "first question" : "a different question",
+        skillName: null,
+        conversationReferences: [
+          { threadId: "other-chat", title: "New reference" },
+        ],
+      };
+      writeComposerDraft(storage, draftKey, replacement);
+      dispatched();
 
-    expect(readComposerDraft(storage, draftKey)?.text).toBe(
-      "a different question",
-    );
-  });
+      expect(readComposerDraft(storage, draftKey)).toEqual(replacement);
+    },
+  );
 
   it("retires an unmounted composer's sent draft once its send is dispatched", async () => {
     let dispatched!: () => void;

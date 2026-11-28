@@ -6,6 +6,7 @@ import {
   getSessionComposerDraftStorage,
   readComposerDraft,
   resolveComposerDraft,
+  retireSentComposerDraft,
   writeComposerDraft,
   type ComposerDraftStorage,
 } from "@/core/threads/composer-draft";
@@ -38,6 +39,33 @@ class MemoryStorage implements ComposerDraftStorage {
 }
 
 describe("composer draft storage", () => {
+  it("retires only a matching sent text and conversation reference snapshot", () => {
+    const storage = new MemoryStorage();
+    const reference = { threadId: "new-reference", title: "New draft" };
+    for (const text of ["", "same question"]) {
+      const draft = {
+        text,
+        skillName: null,
+        conversationReferences: [reference],
+      };
+      writeComposerDraft(storage, "key", draft);
+      retireSentComposerDraft(storage, "key", [text]);
+      expect(readComposerDraft(storage, "key")).toEqual(draft);
+      retireSentComposerDraft(
+        storage,
+        "key",
+        [text],
+        [{ threadId: "old-reference", title: "Old draft" }],
+      );
+      expect(readComposerDraft(storage, "key")).toEqual(draft);
+      retireSentComposerDraft(storage, "key", [text], [reference]);
+      expect(readComposerDraft(storage, "key")).toBeNull();
+    }
+    writeComposerDraft(storage, "key", { text: "sent", skillName: null });
+    retireSentComposerDraft(storage, "key", ["sent"]);
+    expect(readComposerDraft(storage, "key")).toBeNull();
+  });
+
   it("isolates drafts by user, agent, and thread", () => {
     const base = {
       userId: "user:1",
