@@ -429,6 +429,55 @@ class TestListMessagesByRun:
                 await close_engine()
 
 
+# -- zero-limit message pages --
+
+
+class TestZeroMessageLimit:
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("backend", ["memory", "jsonl", "db"])
+    @pytest.mark.parametrize("by_run", [False, True], ids=["thread", "run"])
+    @pytest.mark.parametrize(
+        "cursors,expected,one",
+        [
+            ({}, [1, 2, 3], [3]),
+            ({"before_seq": 3}, [1, 2], [2]),
+            ({"after_seq": 1}, [2, 3], [2]),
+            ({"after_seq": 1, "before_seq": 3}, [2], [2]),
+        ],
+        ids=["latest", "backward", "forward", "window"],
+    )
+    async def test_zero_returns_no_messages_without_changing_other_pages(self, tmp_path, backend, by_run, cursors, expected, one):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+        from deerflow.runtime.user_context import get_current_user
+
+        if backend == "db":
+            await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'test.db'}", sqlite_dir=str(tmp_path))
+            event_store = DbRunEventStore(get_session_factory())
+        elif backend == "jsonl":
+            event_store = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        else:
+            event_store = MemoryRunEventStore()
+
+        try:
+            for content in ("first", "second", "third"):
+                await event_store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message", content=content)
+            # A later trace must not become a message when selecting the latest page.
+            await event_store.put(thread_id="t1", run_id="r1", event_type="llm_end", category="trace")
+            reader = event_store.list_messages_by_run if by_run else event_store.list_messages
+            args = ("t1", "r1") if by_run else ("t1",)
+            user_id = get_current_user().id
+
+            assert [row["seq"] for row in await reader(*args, user_id=user_id, **cursors)] == expected
+            assert [row["seq"] for row in await reader(*args, limit=1, user_id=user_id, **cursors)] == one
+            assert await reader(*args, limit=0, user_id=user_id, **cursors) == []
+            assert [row["content"] for row in await reader(*args, user_id=user_id)] == ["first", "second", "third"]
+        finally:
+            if backend == "db":
+                await close_engine()
+
+
 # -- count_messages --
 
 

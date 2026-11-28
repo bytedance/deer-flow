@@ -144,6 +144,8 @@ class MemoryRunEventStore(RunEventStore):
             )
 
     async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
+        if limit == 0:
+            return []
         # ``messages`` is messages-only and seq-sorted, so the seq window is a
         # contiguous slice located with bisect (O(log m)) rather than a full scan.
         messages = self._messages.get(thread_id, [])
@@ -185,6 +187,8 @@ class MemoryRunEventStore(RunEventStore):
         return deepcopy(run_events[:limit])
 
     async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
+        if limit == 0:
+            return []
         # Per-run, messages-only, seq-sorted: the seq window is a contiguous
         # slice located with bisect (O(log m_run)) over only this run's
         # messages, instead of re-scanning the whole thread's event log.
