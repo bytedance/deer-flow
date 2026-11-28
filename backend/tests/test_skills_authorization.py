@@ -2516,6 +2516,84 @@ def test_durable_render_hides_denied_entries_sync(tmp_path, monkeypatch):
     assert load_calls["count"] == 1
 
 
+@pytest.mark.parametrize("history_blocks", [False, True], ids=["text", "content-blocks"])
+def test_durable_render_applies_current_visibility_to_historical_projections(tmp_path, monkeypatch, history_blocks):
+    """A resumed snapshot and its retained updates must not resurrect a skill
+    that the current activation step denies, while checkpoint bytes stay intact."""
+    from copy import deepcopy
+
+    from langchain_core.messages import HumanMessage
+
+    from deerflow.agents.middlewares.durable_context_middleware import (
+        _render_data_block,
+        _render_durable_sections,
+        _section_digest,
+    )
+
+    provider = _ActionAwareProvider(denied_activate={"demo-skill"})
+    activation, durable, entries, load_calls = _durable_render_setup(tmp_path, monkeypatch, provider=provider)
+    entries[0]["description"] = "PRIVATE_DEMO_DESCRIPTION"
+    entries[1]["description"] = "PUBLIC_OK_DESCRIPTION"
+    sections = _render_durable_sections("UNCHANGED_SUMMARY", [], entries)
+    digests = {name: _section_digest(text) for name, text in sections.items()}
+    snapshot = {"content": _render_data_block(sections, replace=True), "sections": digests}
+    retained = HumanMessage(
+        content=_render_data_block(sections, replace=False),
+        id="retained-durable-update",
+        additional_kwargs={"durable_context_data": True, "durable_context_sections": digests},
+    )
+    if history_blocks:
+        retained.content = [{"type": "text", "text": retained.content}]
+    original_snapshot = deepcopy(snapshot)
+    original_retained = deepcopy(retained)
+
+    class _Request(SimpleNamespace):
+        def override(self, **kwargs):
+            updates = dict(self.__dict__)
+            updates.update(kwargs)
+            return _Request(**updates)
+
+    request = _Request(
+        messages=[retained, HumanMessage(content="plain task")],
+        state={"skill_context": entries, "durable_context_snapshot": snapshot},
+        runtime=SimpleNamespace(context={}),
+    )
+
+    def _inner(prepared):
+        return durable.wrap_model_call(prepared, _sync_identity)
+
+    def _sync_identity(prepared):  # noqa: ARG001
+        return prepared
+
+    prepared = activation.wrap_model_call(request, _inner)
+
+    visible = "\n".join(str(message.content) for message in prepared.messages)
+    assert "demo-skill" not in visible
+    assert "PRIVATE_DEMO_DESCRIPTION" not in visible
+    assert "/mnt/skills/custom/demo-skill/SKILL.md" not in visible
+    assert "ok-skill" in visible
+    assert "PUBLIC_OK_DESCRIPTION" in visible
+    assert "UNCHANGED_SUMMARY" in visible
+
+    prepared_again = activation.wrap_model_call(request, _inner)
+    assert [(message.type, message.content) for message in prepared_again.messages] == [(message.type, message.content) for message in prepared.messages]
+
+    provider.denied_activate = {"demo-skill", "ok-skill"}
+    no_skills = activation.wrap_model_call(request, _inner)
+    no_skills_text = "\n".join(str(message.content) for message in no_skills.messages)
+    assert "## Active skills" not in no_skills_text
+    assert "UNCHANGED_SUMMARY" in no_skills_text
+
+    provider.denied_activate = set()
+    allowed = activation.wrap_model_call(request, _inner)
+    allowed_text = "\n".join(str(message.content) for message in allowed.messages)
+    assert "demo-skill" in allowed_text
+    assert "PRIVATE_DEMO_DESCRIPTION" in allowed_text
+    assert snapshot == original_snapshot
+    assert retained == original_retained
+    assert load_calls["count"] == 4
+
+
 def test_durable_render_unfiltered_without_authorization(tmp_path, monkeypatch):
     """Authorization disabled: nothing is published and the reminder renders
     every persisted entry — the absent-is-permissive carrier contract."""

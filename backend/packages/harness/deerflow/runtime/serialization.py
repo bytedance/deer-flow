@@ -79,11 +79,13 @@ def serialize_channel_values(channel_values: dict[str, Any]) -> dict[str, Any]:
 
     Only ``__pregel_*`` keys are removed — ``__interrupt__`` is deliberately
     preserved so the LangGraph SDK can detect interrupt events from values
-    chunks (see issue #3595).
+    chunks (see issue #3595). The middleware-owned ``durable_context_snapshot``
+    channel is also removed because it is model/checkpoint state, not public
+    API data.
     """
     result: dict[str, Any] = {}
     for key, value in channel_values.items():
-        if key.startswith("__pregel_"):
+        if key.startswith("__pregel_") or key == "durable_context_snapshot":
             continue
         result[key] = serialize_lc_object(value)
     return result
@@ -161,12 +163,24 @@ def serialize_messages_tuple(obj: Any) -> Any:
     return serialize_lc_object(obj)
 
 
+def _serialize_state_frame(frame: Any, state_keys: frozenset[str]) -> Any:
+    """Filter only documented state-bearing fields on one public stream frame."""
+    if isinstance(frame, (list, tuple)):
+        return [_serialize_state_frame(item, state_keys) for item in frame]
+    if not isinstance(frame, dict):
+        return serialize_lc_object(frame)
+    return {key: serialize_channel_values(value) if key in state_keys and isinstance(value, dict) else serialize_lc_object(value) for key, value in frame.items()}
+
+
 def serialize(obj: Any, *, mode: str = "") -> Any:
     """Serialize LangChain objects with mode-specific handling.
 
     * ``messages`` — obj is ``(message_chunk, metadata_dict)``
     * ``values`` — obj is the full state dict; ``__pregel_*`` keys stripped and
       base64 ``data:`` image blocks dropped from hide_from_ui messages
+    * ``updates``: node state writes have internal channels stripped
+    * ``checkpoints`` / ``tasks`` / ``debug``: the same channel filter applies
+      only to their documented state-bearing fields, not to nested app data
     * everything else — recursive ``model_dump()`` / ``dict()`` fallback
     """
     if mode == "messages":
@@ -175,4 +189,12 @@ def serialize(obj: Any, *, mode: str = "") -> Any:
         # ``values`` snapshots stream the full state to the frontend, so they
         # must drop base64 image payloads the same way the REST endpoints do.
         return serialize_channel_values_for_api(obj) if isinstance(obj, dict) else serialize_lc_object(obj)
+    if mode == "updates" and isinstance(obj, dict):
+        return {node: serialize_channel_values(update) if isinstance(update, dict) else serialize_lc_object(update) for node, update in obj.items()}
+    if mode == "checkpoints":
+        return _serialize_state_frame(obj, frozenset({"values", "channel_values"}))
+    if mode == "tasks":
+        return _serialize_state_frame(obj, frozenset({"input", "result"}))
+    if mode == "debug" and isinstance(obj, dict):
+        return {key: _serialize_state_frame(value, frozenset({"values", "channel_values", "input", "result"})) if key == "payload" else serialize_lc_object(value) for key, value in obj.items()}
     return serialize_lc_object(obj)

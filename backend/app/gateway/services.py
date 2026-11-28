@@ -184,6 +184,9 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             # Only the scheduler's internal launch may mark a message as a
             # scheduled run prompt.
             SCHEDULED_ORIGIN_KEY,
+            # Framework-written durable projections are not caller-owned metadata.
+            "durable_context_data",
+            "durable_context_sections",
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
@@ -648,9 +651,11 @@ def _normalize_input_messages(
 
 #: State channels only the server writes. ``goal_outcome`` is the "goal met"
 #: record that clearing a satisfied goal writes; a caller copy would forge one.
+#: ``durable_context_snapshot`` is the durable-context anchor; a caller copy
+#: would forge the prefix the cache key is derived from.
 #: Older checkpoints can contain loop detection's record of frequency-capped
 #: tools. Reserve its channel for server-owned state.
-SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs", LOOP_CAP_STATE_KEY, IMPORTED_HISTORY_CHANNEL})
+SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs", LOOP_CAP_STATE_KEY, IMPORTED_HISTORY_CHANNEL, "durable_context_snapshot"})
 
 #: The ``write_todos`` status contract the todo middleware renders.
 _TODO_STATUSES = frozenset({"pending", "in_progress", "completed", "blocked", "waiting"})

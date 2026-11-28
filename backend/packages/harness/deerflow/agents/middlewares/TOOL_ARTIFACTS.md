@@ -25,7 +25,7 @@ through capture, checkpoint persistence and subsequent handle resolution.
 
 ## Durable projection
 
-Artifact handles are projected with working notes and summary history in the hidden HumanMessage data block when `tool_artifacts.enabled` and `inject_model_context` are enabled. Every model-visible artifact label (display name, type, tool name, MIME type) is redacted with the configured PII policy before HTML escaping. Generated handles remain usable and internal `real_ref` values remain unchanged for resolution. Values remain untrusted data. Artifact capture precedes compaction; task continuity and PII redaction retain independent configuration. `inject_tool_artifacts` participates in the middleware release policy fingerprint.
+Artifact handles are projected with working notes and summary history in the hidden HumanMessage data block when `tool_artifacts.enabled` and `inject_model_context` are enabled. Every model-visible artifact label (display name, type, tool name, MIME type) is redacted with the configured PII policy before HTML escaping. Generated handles remain usable and internal `real_ref` values remain unchanged for resolution. Values remain untrusted data. Artifact capture precedes compaction; task continuity and PII redaction retain independent configuration. `inject_tool_artifacts` participates in the middleware release policy fingerprint. Disabling model injection also removes the renderer-owned artifact section from frozen snapshots and retained updates on checkpoint replay; it never rewrites the stored registry, snapshot, update history or handle-resolution references.
 
 ## Delegation scope (MVP)
 
