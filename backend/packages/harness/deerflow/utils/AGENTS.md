@@ -58,6 +58,9 @@ make test-blocking-io
   and project-document downloads. Keep platform aliases mapped to their standard
   type, and keep the generic `+xml` rule.
 
+- **Strip a backtick wrapper only when its first matching close is the final line.**
+  Preserve separate blocks, malformed fences and the body's original separators.
+
 ## Network
 
 - **`http_policy.control_plane_trust_env` decides whether a client inherits the

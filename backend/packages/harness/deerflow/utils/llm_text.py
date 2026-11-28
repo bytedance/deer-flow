@@ -131,8 +131,19 @@ def strip_markdown_code_fence(text: str) -> str:
     if not stripped.startswith("```"):
         return stripped
     lines = stripped.splitlines(keepends=True)
-    if len(lines) >= 3 and lines[0].startswith("```") and lines[-1].startswith("```"):
-        return "".join(lines[1:-1]).strip()
+    if len(lines) < 3:
+        return stripped
+    opening = re.fullmatch(r"(`{3,})[^`]*", lines[0].rstrip("\r\n"))
+    if opening is None:
+        return stripped
+    closing = re.compile(r" {0,3}`{" + str(len(opening.group(1))) + r",}[ \t]*")
+    for index, line in enumerate(lines[1:], start=1):
+        if closing.fullmatch(line.rstrip("\r\n")):
+            # An earlier close means the response contains more than one block,
+            # not a single wrapper around the entire response.
+            if index == len(lines) - 1:
+                return "".join(lines[1:-1]).strip()
+            return stripped
     return stripped
 
 

@@ -337,7 +337,7 @@ Backend response cleanup preserves unrelated tag names such as `<think-tank>` an
 
 The Web UI composer can polish draft input before sending. The rewrite runs as a short Gateway LLM request using the `input_polish` model configuration, keeps slash skill prefixes such as `/data-analysis`, and only replaces the local draft after the user clicks the polish button; it does not create a thread run or persist a message.
 
-Removing a code-fence wrapper from a polished draft preserves Unicode separators inside the draft, including JSON string values.
+Response cleanup removes only a single enclosing backtick code fence; separate code blocks and malformed fences in the rewritten draft keep their fences. Removing a code-fence wrapper preserves Unicode separators inside the draft, including JSON string values.
 
 Input polishing, follow-up suggestions, background project-file summaries, the
 LLM skill scanner, thread title generation, the `/goal` evaluator, and manual
