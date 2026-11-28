@@ -77,6 +77,15 @@ def _normalize_presented_filepath(
     except ValueError as exc:
         raise ValueError(f"Only files in {OUTPUTS_VIRTUAL_PREFIX} can be presented: {filepath}") from exc
 
+    # The file must actually exist: silently "presenting" a file that was never
+    # written (e.g. the agent's write command failed earlier) produces a success
+    # message here but a 404 for every downstream consumer. Failing loudly lets
+    # the agent self-correct by writing the file first.
+    if not actual_path.exists():
+        raise ValueError(f"File not found: {filepath} — write the file to {OUTPUTS_VIRTUAL_PREFIX} before presenting it")
+    if not actual_path.is_file():
+        raise ValueError(f"Path is not a file: {filepath}")
+
     return f"{OUTPUTS_VIRTUAL_PREFIX}/{relative_path.as_posix()}"
 
 
