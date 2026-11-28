@@ -15,9 +15,11 @@ graceful shutdown). Memory updates are best-effort: a failed or lost normal upda
 is re-fed on the next conversation turn (the middleware passes the full
 conversation each cycle, and the updater's watermark does not advance on
 failure), so an in-memory queue covers the realistic graceful-deploy case
-without a persistence layer. Emergency snapshots cannot rely on that retry
-because compaction removes their messages; they are still in-memory only and
-can be lost on process exit or extraction failure.
+without a persistence layer. Emergency snapshots cannot rely on that re-feed
+because compaction removes their messages, so the queue retries a failed one
+itself: a bounded number of times, after a backoff, holding that conversation's
+later updates behind it. They are still in-memory only and are lost on process
+exit, or once every attempt has failed.
 """
 
 from __future__ import annotations
@@ -37,6 +39,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _EMERGENCY_BACKLOG_WARNING_DEPTH = 32
+# Backoff before each retry of a failed emergency snapshot; the length bounds
+# the retries. Normal updates need none: the next turn re-feeds them.
+_EMERGENCY_RETRY_DELAYS_SECONDS = (5.0, 30.0)
+
+# ``cancel_by_agent`` arguments ``(agent_name, user_id, all_agents)``; ``None`` is every context.
+_CancelScope = tuple[str | None, str | None, bool] | None
 
 
 class QueueFull(Exception):
@@ -79,6 +87,18 @@ class ConversationContext:
     # Monotonic scheduling times; timestamp remains wall-clock metadata.
     first_at: float = field(default_factory=time.monotonic)
     due_at: float = 0.0
+    # Failed extraction attempts so far. Only emergency snapshots are retried.
+    attempts: int = 0
+
+
+def _in_cancel_scope(context: ConversationContext, scope: _CancelScope) -> bool:
+    """Return whether a ``cancel_by_agent`` scope covers ``context``."""
+    if scope is None:
+        return True
+    agent_name, user_id, all_agents = scope
+    # Scope matches storage: user_id=None is the legacy no-user root
+    # only (None == None), never "every user".
+    return (all_agents or context.agent_name == agent_name) and context.user_id == user_id
 
 
 class MemoryUpdateQueue:
@@ -104,6 +124,10 @@ class MemoryUpdateQueue:
         # (and would be lost on exit). See ``flush_sync`` step (1).
         self._processing_thread: threading.Thread | None = None
         self._reprocess_pending = False
+        # Scopes cancelled while a worker holds contexts outside ``_items``. A
+        # snapshot that fails there must not be re-queued behind the
+        # cancellation; the finishing worker consumes the list.
+        self._cancelled_in_flight: list[_CancelScope] = []
 
     def add(
         self,
@@ -208,6 +232,11 @@ class MemoryUpdateQueue:
         # A forced flush's deadline must survive same-key coalescing.
         if existing is not None and existing.due_at <= now:
             due_at = existing.due_at
+        # Extraction keeps one conversation in arrival order, so a new update
+        # waits behind a snapshot that is backing off before a retry. For a
+        # normal update this hold outlasts its debounce and max-wait deadlines.
+        held_until = [c.due_at for c in self._items if c.bypass_watermark and queue_key(c.thread_id, c.user_id, c.agent_name) == key]
+        due_at = max([due_at, *held_until])
         context = ConversationContext(
             thread_id=thread_id,
             messages=messages,
@@ -311,8 +340,19 @@ class MemoryUpdateQueue:
 
         succeeded = 0
         failed = 0
+        # Failed emergency snapshots to re-queue, each followed by the later
+        # updates of its conversation that were held back behind it.
+        requeue: list[ConversationContext] = []
+        held_keys: set[tuple[str, str | None, str | None]] = set()
         try:
             for context in contexts_to_process:
+                key = queue_key(context.thread_id, context.user_id, context.agent_name)
+                # The shutdown drain holds nothing back: no retry follows it, so
+                # every pending update gets its one attempt.
+                if key in held_keys and not skip_inter_item_delay:
+                    requeue.append(context)
+                    continue
+                success = False
                 try:
                     logger.info("Updating memory for thread %s (trace_id=%s)", context.thread_id, context.trace_id)
                     success = self._updater.update_memory(
@@ -338,6 +378,19 @@ class MemoryUpdateQueue:
                 except Exception as e:
                     failed += 1
                     logger.error("Error updating memory for thread %s (trace_id=%s): %s", context.thread_id, context.trace_id, e)
+                if not success and context.bypass_watermark:
+                    context.attempts += 1
+                    if context.attempts <= len(_EMERGENCY_RETRY_DELAYS_SECONDS):
+                        requeue.append(context)
+                        held_keys.add(key)
+                    else:
+                        logger.warning(
+                            "Dropping emergency memory snapshot for thread %r (user_id=%r, agent_name=%r) after %d failed extraction attempts; compaction already removed its messages, so they will not reach memory.",
+                            context.thread_id,
+                            context.user_id,
+                            context.agent_name,
+                            context.attempts,
+                        )
 
                 # Small delay between updates to avoid rate limiting.
                 # Skipped on the shutdown-drain path, which races a bounded
@@ -355,6 +408,7 @@ class MemoryUpdateQueue:
             with self._lock:
                 self._processing = False
                 self._processing_thread = None
+                self._requeue_locked(requeue)
                 # Reschedule inside the lock: ``_schedule_timer`` read-cancels-
                 # reassigns ``self._timer`` non-atomically, and a concurrent
                 # ``add``'s ``_rearm_timer_locked`` (also under the lock) touches the
@@ -363,6 +417,45 @@ class MemoryUpdateQueue:
                 # synchronous lock acquisition), so this cannot deadlock.
                 self._reprocess_pending = False
                 self._rearm_timer_locked()
+
+    def _requeue_locked(self, contexts: list[ConversationContext]) -> None:
+        """Put failed emergency snapshots back at the head. Caller must hold ``_lock``.
+
+        ``contexts`` is in arrival order: each failed snapshot is followed by
+        the later updates of its conversation that the worker held back.
+        Those, and any that arrived meanwhile, wait for the same retry time so
+        extraction keeps the conversation's arrival order. That includes its
+        normal update: extracted before the retry, a correction in it would be
+        followed by the older fact from the snapshot.
+        """
+        cancelled, self._cancelled_in_flight = self._cancelled_in_flight, []
+        contexts = [context for context in contexts if not any(_in_cancel_scope(context, scope) for scope in cancelled)]
+        if not contexts:
+            return
+        now = time.monotonic()
+        arrived_normal = {queue_key(c.thread_id, c.user_id, c.agent_name): c for c in self._items if not c.bypass_watermark}
+        retry_at: dict[tuple[str, str | None, str | None], float] = {}
+        requeued: list[ConversationContext] = []
+        for context in contexts:
+            key = queue_key(context.thread_id, context.user_id, context.agent_name)
+            if key not in retry_at:
+                # The first context of a key is the snapshot that just failed.
+                delay = _EMERGENCY_RETRY_DELAYS_SECONDS[context.attempts - 1]
+                retry_at[key] = now + delay
+                logger.info("Retrying emergency memory snapshot for thread %s in %.0fs (trace_id=%s)", context.thread_id, delay, context.trace_id)
+            newer = None if context.bypass_watermark else arrived_normal.get(key)
+            if newer is None:
+                requeued.append(context)
+            else:
+                # A normal update that arrived meanwhile carries the cumulative
+                # history, so it replaces the held one as coalescing would.
+                newer.signals |= context.signals
+                newer.first_at = min(newer.first_at, context.first_at)
+        self._items = requeued + self._items
+        for context in self._items:
+            hold_until = retry_at.get(queue_key(context.thread_id, context.user_id, context.agent_name))
+            if hold_until is not None:
+                context.due_at = max(context.due_at, hold_until)
 
     def flush(self, *, skip_inter_item_delay: bool = False) -> None:
         """Force immediate processing of the queue.
@@ -480,7 +573,8 @@ class MemoryUpdateQueue:
         ``_items``. Contexts already pulled out by an in-flight
         :meth:`_process_queue` worker are deliberately left alone -- interrupting
         mid-LLM-call belongs to a durable outbox, not this in-memory debounce
-        queue.
+        queue. An emergency snapshot that fails in flight is not re-queued for a
+        scope cancelled meanwhile.
 
         Args:
             agent_name: Canonical agent bucket to cancel. Ignored when
@@ -495,17 +589,12 @@ class MemoryUpdateQueue:
         Returns:
             Number of pending contexts removed.
         """
+        scope = (agent_name, user_id, all_agents)
         with self._lock:
             before = len(self._items)
-
-            def _keep(context: ConversationContext) -> bool:
-                # Scope matches storage: user_id=None is the legacy no-user root
-                # only (None == None), never "every user".
-                if not all_agents and context.agent_name != agent_name:
-                    return True
-                return context.user_id != user_id
-
-            self._items = [context for context in self._items if _keep(context)]
+            self._items = [context for context in self._items if not _in_cancel_scope(context, scope)]
+            if self._processing:
+                self._cancelled_in_flight.append(scope)
             removed = before - len(self._items)
             if removed and not self._items and self._timer is not None:
                 self._timer.cancel()
@@ -522,6 +611,8 @@ class MemoryUpdateQueue:
                 self._timer.cancel()
                 self._timer = None
             self._items = []
+            # A worker still in flight must not re-queue into the cleared queue.
+            self._cancelled_in_flight = [None] if self._processing else []
             self._processing = False
             self._processing_thread = None
             self._reprocess_pending = False
