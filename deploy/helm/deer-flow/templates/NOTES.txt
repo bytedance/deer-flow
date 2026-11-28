@@ -1,4 +1,5 @@
 DeerFlow has been deployed.
+{{- $nginxPort := .Values.nginx.service.port | default 2026 -}}
 
   namespace: {{ include "deer-flow.namespace" . }}
 
@@ -15,8 +16,8 @@ Get the status:
 
 Quick port-forward to nginx (bypasses Ingress):
 
-  kubectl -n {{ include "deer-flow.namespace" . }} port-forward svc/nginx 2026:2026
-  # then open http://localhost:2026
+  kubectl -n {{ include "deer-flow.namespace" . }} port-forward svc/nginx {{ $nginxPort }}:{{ $nginxPort }}
+  # then open http://localhost:{{ $nginxPort }}
 
 {{- if .Values.ingress.enabled }}
 
