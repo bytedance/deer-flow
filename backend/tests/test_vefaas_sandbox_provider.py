@@ -444,6 +444,49 @@ class TestVeFaaSSandboxProviderLifecycle:
         finally:
             provider.shutdown()
 
+    def test_upload_marker_rejects_the_pty_echo_of_a_dead_script(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        provider, _, aio_instances = _install_provider(monkeypatch, tmp_path)
+        try:
+            sandbox_id = provider.acquire("t-marker", user_id="u-marker")
+            aio = aio_instances[0]
+            aio.uploaded_files.clear()
+            aio.commands.clear()
+
+            proj_root = tmp_path / "proj-marker"
+            for cat in ("public", "custom", "legacy", "integrations"):
+                (proj_root / cat).mkdir(parents=True)
+            (proj_root / "public" / "demo.md").write_text("demo", encoding="utf-8")
+            projection = SimpleNamespace(
+                public=proj_root / "public",
+                custom=proj_root / "custom",
+                legacy=proj_root / "legacy",
+                integrations=proj_root / "integrations",
+            )
+
+            # The persistent PTY echoes the command string, and a script that
+            # dies before its final printf returns nothing but that echo. The
+            # echoed text carries the split printf's pieces, so a substring
+            # check counts it as success; only a standalone marker line does.
+            aio.echo_upload_command = True
+            aio.fail_upload_script = True
+            with pytest.raises(RuntimeError, match="upload into") as excinfo:
+                provider.sync_agent_skills(sandbox_id, thread_id="t-marker", user_id="u-marker", projection=projection)
+            message = str(excinfo.value)
+            assert provider_mod._UPLOAD_OK_MARKER not in message
+            assert "'UPLOAD_OK' )" in message  # the echoed split printf, not a standalone marker
+            assert "set +e; ( set -e" not in message  # the tail of the echoed script, not its head
+
+            # The standalone line the script's printf prints still proves
+            # success when it follows the echo.
+            aio.fail_upload_script = False
+            provider.sync_agent_skills(sandbox_id, thread_id="t-marker", user_id="u-marker", projection=projection)
+            upload_cmds = [cmd for cmd in aio.commands if "UPLOAD_OK" in cmd]
+            assert upload_cmds and all("printf 'DEERFLOW_VEFAAS_%s\\n' 'UPLOAD_OK'" in cmd for cmd in upload_cmds)
+            assert not any("echo UPLOAD_OK" in cmd for cmd in aio.commands)
+            assert any(path.endswith(".tar.gz") for path in aio.uploaded_files)
+        finally:
+            provider.shutdown()
+
     def test_lost_ownership_lease_forgets_locally_without_killing_peer_sandbox(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         provider, server, aio_instances = _install_provider(monkeypatch, tmp_path)
         try:
@@ -1174,7 +1217,7 @@ class TestVeFaaSSandboxProviderLifecycle:
                                             extracted = tf.extractfile(member)
                                             if extracted is not None:
                                                 remote_files[member.name] = extracted.read()
-                        return "UPLOAD_OK\n"
+                        return f"{provider_mod._UPLOAD_OK_MARKER}\n"
                     return ""
 
             return _SharedRemoteAioSandbox

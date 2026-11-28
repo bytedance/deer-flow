@@ -117,6 +117,9 @@ _BOOTSTRAP_OK_MARKER = "DEERFLOW_VEFAAS_BOOTSTRAP_OK"
 # Use a split printf format so PTY echo of the command string cannot satisfy the marker check,
 # and run in a subshell with ``set +e`` outside so persistent shell state is never poisoned.
 _BOOTSTRAP_COMMAND = "set +e; ( mkdir -p -- /mnt/user-data/workspace /mnt/user-data/uploads /mnt/user-data/outputs && printf 'DEERFLOW_VEFAAS_%s\\n' 'BOOTSTRAP_OK' )"
+# ``_upload_trees`` prints the same kind of split-printf marker; its success
+# check requires it as a standalone line for the same echo-forgery reason.
+_UPLOAD_OK_MARKER = "DEERFLOW_VEFAAS_UPLOAD_OK"
 _INIT_MARKER_PATH = "/tmp/.deerflow-vefaas-initialized"
 _ADOPT_INIT_WAIT_SECONDS = 10.0
 _ADOPT_INIT_POLL_INTERVAL_SECONDS = 0.2
@@ -2631,7 +2634,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 f"if [ -L {quoted_root} ]; then echo 'Refusing symlinked destination' >&2; exit 2; fi; "
                 f"mkdir -p -- {quoted_root} {quoted_stage} {stage_dirs}; "
                 f"tar -xzf {quoted_tar} -C {quoted_stage} --no-same-owner; "
-                f"{swap_steps} echo UPLOAD_OK )"
+                f"{swap_steps} printf 'DEERFLOW_VEFAAS_%s\\n' 'UPLOAD_OK' )"
             )
         else:
             script = (
@@ -2639,11 +2642,15 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 f"if [ -L {quoted_root} ]; then echo 'Refusing symlinked destination' >&2; exit 2; fi; "
                 f"mkdir -p -- {quoted_root}; "
                 f"tar -xzf {quoted_tar} -C {quoted_root} --no-same-owner; "
-                f"echo UPLOAD_OK )"
+                f"printf 'DEERFLOW_VEFAAS_%s\\n' 'UPLOAD_OK' )"
             )
         output = sandbox.execute_command(script)
-        if "UPLOAD_OK" not in output:
-            raise RuntimeError(f"veFaaS upload into {dest_root} failed: {output[:200]}")
+        # The persistent PTY echoes the command string, and the echoed script
+        # carries the split printf's pieces, so only a standalone marker line
+        # proves the script reached its end. Failures land after the echoed
+        # script, so report the tail of the output, not its head.
+        if not any(line.strip() == _UPLOAD_OK_MARKER for line in output.splitlines()):
+            raise RuntimeError(f"veFaaS upload into {dest_root} failed: {output[-200:]}")
         return complete
 
     def _restore_thread_files(self, sandbox: AioSandbox, *, thread_id: str, user_id: str) -> None:
