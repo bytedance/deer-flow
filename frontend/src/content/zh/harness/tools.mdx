@@ -124,7 +124,17 @@ tools:
 
 ### 网络搜索
 
-<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
+<Tabs items={["Parallel Search（默认）", "DuckDuckGo", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.parallel_search.tools:web_search_tool
+    max_results: 5
+```
+这是全新本地和 Docker 安装的默认选项。搜索查询会发送到 Parallel.ai，无需 API 密钥，匿名访问有频率限制。
+  </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -132,7 +142,7 @@ tools:
     group: web
     use: deerflow.community.ddg_search.tools:web_search_tool
 ```
-无需 API Key。默认配置，适合开发和通用用途。
+无需 API Key。
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml

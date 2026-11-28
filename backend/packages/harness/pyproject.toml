@@ -36,6 +36,8 @@ dependencies = [
     "langgraph-runtime-inmem>=0.30.0",
     "markdownify>=1.2.2",
     "markitdown[all,xlsx]>=0.0.1a2",
+    # Built-in Parallel Search supplies its HTTPX client to the MCP transport.
+    "mcp>=1.24.0",
     "packaging>=24.2",
     "pydantic>=2.12.5",
     "pyyaml>=6.0.3",

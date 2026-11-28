@@ -707,6 +707,14 @@ LLM_PROVIDERS: list[LLMProvider] = [
 
 SEARCH_PROVIDERS: list[SearchProvider] = [
     SearchProvider(
+        name="parallel",
+        display_name="Parallel Search",
+        description="Sends queries to Parallel.ai; no API key required, rate-limited",
+        use="deerflow.community.parallel_search.tools:web_search_tool",
+        env_var=None,
+        extra_config={"max_results": 5},
+    ),
+    SearchProvider(
         name="ddg",
         display_name="DuckDuckGo (free, no key needed)",
         description="No API key required",

@@ -40,6 +40,7 @@ from deerflow.community.infoquest import tools as infoquest_tools
 from deerflow.community.jina_ai import tools as jina_tools
 from deerflow.community.jsonify import tools as jsonify_tools
 from deerflow.community.lightrag import tools as lightrag_tools
+from deerflow.community.parallel_search import tools as parallel_tools
 from deerflow.community.ragflow import tools as ragflow_tools
 from deerflow.community.searxng import tools as searxng_tools
 from deerflow.community.tavily import tools as tavily_tools
@@ -133,6 +134,7 @@ _CASES = [
     pytest.param(browserless_tools, _call(browserless_tools.web_fetch_tool, url=_URL), 1, id="browserless-web_fetch"),
     pytest.param(browserless_tools, _with_runtime(browserless_tools.web_capture_tool, url=_URL), 1, id="browserless-web_capture"),
     pytest.param(tavily_tools, _call(tavily_tools.web_search_tool, query="q"), 1, id="tavily-web_search"),
+    pytest.param(parallel_tools, _call(parallel_tools.web_search_tool, query="q"), 1, id="parallel-web_search"),
     pytest.param(tavily_tools, _call(tavily_tools.web_fetch_tool, url=_HOSTED_URL), 1, id="tavily-web_fetch"),
     pytest.param(searxng_tools, _call(searxng_tools.web_search_tool, query="q"), 1, id="searxng-web_search"),
     pytest.param(firecrawl_tools, _call(firecrawl_tools.web_search_tool, query="q"), 1, id="firecrawl-web_search"),

@@ -199,13 +199,13 @@ sandbox:
 
 ### 工具
 
-参见[工具](/docs/harness/tools)页面了解完整的工具配置参考。快速参考：
+全新的本地和 Docker 安装默认使用 Parallel Search 搜索网页，并使用 Jina AI 抓取网页内容。搜索查询会发送到 Parallel.ai，无需搜索密钥，匿名访问有频率限制。完整配置参见[工具](/docs/harness/tools)。
 
 ```yaml
 tools:
   - name: web_search
     group: web
-    use: deerflow.community.ddg_search.tools:web_search_tool
+    use: deerflow.community.parallel_search.tools:web_search_tool
   - name: web_fetch
     group: web
     use: deerflow.community.jina_ai.tools:web_fetch_tool

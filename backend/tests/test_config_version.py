@@ -704,6 +704,25 @@ def _write_outdated_config(path: Path) -> str:
 
 
 @pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+@pytest.mark.parametrize("tools", [None, [], [{"name": "web_search", "group": "web", "use": "deerflow.community.ddg_search.tools:web_search_tool", "backend": "brave"}]])
+def test_config_upgrade_preserves_saved_web_search_and_offline_config(tmp_path, tools):
+    config_path = tmp_path / "config.yaml"
+    example_path = Path(__file__).resolve().parents[2] / "config.example.yaml"
+    example_version = yaml.safe_load(example_path.read_text(encoding="utf-8"))["config_version"]
+    config = {"config_version": example_version - 1}
+    if tools is not None:
+        config["tools"] = tools
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    result = _run_config_upgrade_in_checkout(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    upgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert upgraded["config_version"] == example_version
+    assert upgraded.get("tools") == tools
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
 def test_config_upgrade_targets_checkout_config_over_legacy_backend_copy(tmp_path):
     """With both copies present, upgrade the checkout config.yaml that `make dev` loads."""
     checkout = tmp_path / "checkout"

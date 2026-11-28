@@ -127,7 +127,17 @@ Community tools connect the agent to external services. Each `tools:` entry in `
 
 ### Web search
 
-<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
+<Tabs items={["Parallel Search (default)", "DuckDuckGo", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.parallel_search.tools:web_search_tool
+    max_results: 5
+```
+The default for new local and Docker setups. Search queries go to Parallel.ai. Anonymous access is rate-limited and requires no API key.
+  </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -135,7 +145,7 @@ tools:
     group: web
     use: deerflow.community.ddg_search.tools:web_search_tool
 ```
-No API key required. Default configuration. Suitable for development and general use.
+No API key required.
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
