@@ -928,6 +928,50 @@ def test_prepare_edit_regenerate_payload_returns_new_human_and_edit_metadata():
     }
 
 
+_ALICE = {"namespace": "example.team", "provider": "members", "id": "alice", "label": "Alice Chen"}
+
+
+@pytest.mark.parametrize(
+    ("replacement_text", "expected"),
+    [
+        (
+            "@skill-a @skill-b ask @Alice Chen to review the Globex contract",
+            {"skill_references": ["skill-a", "skill-b"], "extension_mentions": [_ALICE]},
+        ),
+        ("@skill-a review the Globex contract", {"skill_references": ["skill-a"]}),
+        ("review the Globex contract (@skill-b)", {"skill_references": ["skill-b"]}),
+        ("审核 Globex 合同，@skill-a", {"skill_references": ["skill-a"]}),
+        ("review the Globex contract", {}),
+        ("@skill-ab and @Alice Chenko review Globex", {}),
+        ("@skill-b send the report to reviewer@skill-a.example", {"skill_references": ["skill-b"]}),
+        ("see https://wiki.example/@skill-a for Globex", {}),
+    ],
+)
+def test_prepare_edit_regenerate_payload_keeps_mentions_still_in_text(replacement_text: str, expected: dict):
+    """The edit box shows @ selections as "@label" text; deleting it drops the selection."""
+    from app.gateway.routers import thread_runs
+
+    human = HumanMessage(
+        id="human-1",
+        content="@skill-a @skill-b ask @Alice Chen to review the Acme contract",
+        additional_kwargs={"skill_references": ["skill-a", "skill-b"], "extension_mentions": [_ALICE]},
+    )
+    ai = AIMessage(id="ai-1", content="answer v1")
+    checkpointer = FakeCheckpointer([_checkpoint("ckpt-ai", [human, ai]), _checkpoint("ckpt-base", [])])
+    event_store, run_manager = _answer_run_fixtures()
+
+    response = asyncio.run(
+        thread_runs._prepare_edit_regenerate_payload(
+            "thread-1",
+            "human-1",
+            replacement_text,
+            _request(checkpointer, event_store, run_manager=run_manager),
+        )
+    )
+
+    assert response.input["messages"][0]["additional_kwargs"] == expected
+
+
 def _first_turn_checkpointer() -> FakeCheckpointer:
     """First-turn history where the user message's id is swapped mid-run.
 
