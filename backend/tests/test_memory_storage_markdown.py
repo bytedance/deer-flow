@@ -87,6 +87,32 @@ def test_memory_json_contains_only_global_summaries_and_agent_fact_is_markdown(s
     assert "# Project uses Python 3.12" in text
 
 
+@pytest.mark.parametrize("read", ["load", "reload"])
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize("separator", ["-", "\u0085", "\u2028", "\u2029"], ids=["ascii", "next-line", "line-separator", "paragraph-separator"])
+def test_fact_json_content_preserves_line_separators(storage: FileMemoryStorage, tmp_path: Path, read: str, newline: bytes, separator: str) -> None:
+    value = {"notes": f"before{separator}after"}
+    content = json.dumps(value, ensure_ascii=False, indent=2)
+    memory = _memory_with_fact(content)
+    memory["facts"][0]["title"] = "Structured note"
+    assert storage.save(memory, "agent-a", user_id="alice")
+    (fact_path,) = tmp_path.rglob(f"{memory['facts'][0]['id']}.md")
+    fact_path.write_bytes(fact_path.read_bytes().replace(b"\n", newline))
+
+    # A fresh instance exercises load without reusing the writer's cache.
+    reader = FileMemoryStorage(DeerMemConfig(storage_path=str(tmp_path))) if read == "load" else storage
+    try:
+        (fact,) = getattr(reader, read)("agent-a", user_id="alice")["facts"]
+        assert fact["content"] == content
+        assert json.loads(fact["content"]) == value
+        assert fact["id"] == memory["facts"][0]["id"]
+        assert fact["title"] == "Structured note"
+        assert fact["scope"] == {"userId": "alice", "agentName": "agent-a"}
+    finally:
+        if reader is not storage:
+            reader.close()
+
+
 def test_load_keeps_frontend_shape_but_only_agent_load_returns_facts(storage: FileMemoryStorage) -> None:
     assert storage.save(_memory_with_fact(), "agent-a", user_id="alice")
 
