@@ -582,54 +582,76 @@ require_compose_version
 
 
 @pytest.mark.parametrize("args", ["logs --prod", "logs --prod --gateway"])
-def test_logs_prod_targets_production_stack(args):
+@pytest.mark.parametrize("env_file_kind", ["default", "relative", "absolute", "missing-default"])
+def test_logs_prod_targets_production_stack(args, env_file_kind, tmp_path):
     """`logs --prod` must tail the stack deploy.sh started, not the dev project.
 
     `make up` runs scripts/deploy.sh (project `deer-flow`, docker-compose.yaml)
     while the dev default is project `deer-flow-dev`, so `make docker-logs`
     after `make up` printed nothing (#5529). The production entry point must
-    target the same project and interpolate the same .env.
+    target the same project and interpolate the selected production env file.
 
     Compose detection is NOT stubbed here: it rebuilds COMPOSE_CMD, and the
     appended `--env-file` must survive that rebuild (#5538 review).
     """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_root = Path(tmpdir)
-        (tmp_root / "docker-compose.yaml").write_text("services: {}\n", encoding="utf-8")
-        (tmp_root / ".env").write_text("KEEP=me\n", encoding="utf-8")
-        marker = tmp_root / "prod_invoke.txt"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    script = scripts_dir / SCRIPT_PATH.name
+    shutil.copyfile(SCRIPT_PATH, script)
+    docker_dir = tmp_path / "docker"
+    docker_dir.mkdir()
+    (docker_dir / "docker-compose.yaml").write_text("services: {}\n", encoding="utf-8", newline="\n")
+    default_file = tmp_path / ".env"
+    if env_file_kind != "missing-default":
+        default_file.write_text("KEEP=me\n", encoding="utf-8", newline="\n")
 
-        command = f"""
-source '{SCRIPT_PATH}'
-PROJECT_ROOT='{tmp_root}'
-DOCKER_DIR='{tmp_root}'
+    env = _isolated_shell_env(tmp_path)
+    selected_file = default_file
+    if env_file_kind in {"relative", "absolute"}:
+        selected_file = tmp_path / "profiles with spaces" / "stage.env"
+        selected_file.parent.mkdir()
+        selected_file.write_text("KEEP=profile\n", encoding="utf-8", newline="\n")
+        selector = selected_file.relative_to(tmp_path) if env_file_kind == "relative" else selected_file
+        env["DEER_FLOW_COMPOSE_ENV_FILE"] = str(selector)
+    marker = tmp_path / "prod_invoke.txt"
+
+    command = f"""
+source {shlex.quote(str(script))}
 docker() {{
   if [ "$1" = compose ] && [ "$2" = version ]; then
     echo '2.41.0'
     return 0
   fi
   if [ "$1" = compose ]; then
-    printf '%s\\n' "$*" "DEER_FLOW_HOME=${{DEER_FLOW_HOME:-unset}}" > '{marker}'
+    printf '%s\\n' "$@" "DEER_FLOW_HOME=${{DEER_FLOW_HOME:-unset}}" "DEER_FLOW_COMPOSE_ENV_FILE=${{DEER_FLOW_COMPOSE_ENV_FILE:-unset}}" > {shlex.quote(str(marker))}
     return 0
   fi
   command docker "$@"
 }}
-unset DEER_FLOW_ROOT DEER_FLOW_HOME DEER_FLOW_CONFIG_PATH
-unset DEER_FLOW_EXTENSIONS_CONFIG_PATH DEER_FLOW_REPO_ROOT
-unset BETTER_AUTH_SECRET DEER_FLOW_INTERNAL_AUTH_TOKEN
 {args}
 """
-        subprocess.check_call([BASH_EXECUTABLE, "-lc", command])
+    subprocess.run([BASH_EXECUTABLE, "-c", command], cwd=docker_dir, env=env, check=True, timeout=10)
 
-        recorded = marker.read_text(encoding="utf-8")
-        assert "-p deer-flow " in recorded, recorded
-        assert "-f docker-compose.yaml" in recorded, recorded
-        assert "--env-file ../.env" in recorded, recorded
-        assert "logs" in recorded, recorded
-        # deploy.sh exports interpolation defaults before every compose call;
-        # `logs --prod` must too, or the volume specs fail to parse.
-        assert "DEER_FLOW_HOME=" in recorded, recorded
-        assert "DEER_FLOW_HOME=unset" not in recorded, recorded
+    *compose_args, runtime_home, service_env_file = marker.read_text(encoding="utf-8").splitlines()
+    assert compose_args[:5] == ["compose", "-p", "deer-flow", "-f", "docker-compose.yaml"]
+    logs_args = ["logs", "-f"] + (["gateway"] if args.endswith("--gateway") else [])
+    if env_file_kind == "missing-default":
+        assert compose_args[5:] == logs_args
+    else:
+        assert compose_args[5] == "--env-file"
+        assert compose_args[7:] == logs_args
+        env_file_arg = compose_args[6]
+        assert service_env_file == f"DEER_FLOW_COMPOSE_ENV_FILE={env_file_arg}"
+        subprocess.run(
+            [BASH_EXECUTABLE, "-c", 'test "$1" -ef "$2"', "--", env_file_arg, str(selected_file)],
+            cwd=docker_dir,
+            env=env,
+            check=True,
+            timeout=10,
+        )
+    # Without this interpolation default, Compose cannot parse the home mount.
+    assert runtime_home.startswith("DEER_FLOW_HOME=")
+    assert runtime_home != "DEER_FLOW_HOME=unset"
 
 
 def test_logs_without_dev_containers_hints_at_prod_logs():

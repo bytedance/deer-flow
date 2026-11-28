@@ -148,7 +148,9 @@ without reading or generating secrets.
 Production Docker commands can select a root dotenv profile with
 `DEER_FLOW_COMPOSE_ENV_FILE=/srv/deer-flow/stage.env make up`. The same file
 feeds Compose interpolation, Gateway/provisioner variables, and deployment
-secret checks. YAML and runtime-state locations remain separate selectors;
+secret checks. To follow the production logs, pass the same selector to
+`make prod-logs`. Relative profile paths resolve from the checkout root.
+YAML and runtime-state locations remain separate selectors;
 see [production env files](../../backend/docs/CONFIGURATION.md#production-compose-env-files).
 
 For persistent deployments, configure `database.backend` as `sqlite` or

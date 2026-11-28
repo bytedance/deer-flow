@@ -391,6 +391,7 @@ start() {
 logs() {
     local service=""
     local is_prod=0
+    local env_file_args=()
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -447,10 +448,19 @@ logs() {
         fi
     fi
 
-    # Append --env-file only after compose_preflight(): its Compose detection
-    # may rebuild COMPOSE_CMD, which would drop anything appended before it.
-    if [ "$is_prod" = 1 ] && [ -f "$PROJECT_ROOT/.env" ]; then
-        COMPOSE_CMD="$COMPOSE_CMD --env-file ../.env"
+    if [ "$is_prod" = 1 ]; then
+        # Match deploy.sh: resolve relative selectors from the checkout root
+        # and let Compose use the same file for interpolation and env_file.
+        local compose_env_file="${DEER_FLOW_COMPOSE_ENV_FILE:-$PROJECT_ROOT/.env}"
+        if command -v cygpath >/dev/null 2>&1; then
+            compose_env_file="$(cd "$PROJECT_ROOT" && cygpath -au -- "$compose_env_file")"
+        elif [[ "$compose_env_file" != /* ]]; then
+            compose_env_file="$PROJECT_ROOT/$compose_env_file"
+        fi
+        export DEER_FLOW_COMPOSE_ENV_FILE="$compose_env_file"
+        if [ -f "$compose_env_file" ]; then
+            env_file_args=(--env-file "$compose_env_file")
+        fi
     fi
 
     if [ -n "$service" ]; then
@@ -461,7 +471,7 @@ logs() {
         echo -e "${BLUE}Viewing all logs...${NC}"
     fi
 
-    cd "$DOCKER_DIR" && $COMPOSE_CMD logs -f $service
+    cd "$DOCKER_DIR" && $COMPOSE_CMD "${env_file_args[@]}" logs -f $service
 }
 
 # Stop Docker development environment
