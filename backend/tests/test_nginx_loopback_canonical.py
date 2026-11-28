@@ -6,7 +6,8 @@ jars. The proxy canonicalizes the numeric spellings onto ``localhost`` with a
 301, safe methods only: a redirected API POST would strand clients that do not
 re-send bodies, and non-loopback Hosts (LAN names, ingress domains) must never
 match. The canonical target itself must not match either, or the redirect
-would loop.
+would loop. Browser OAuth handoffs still redirect, while other Gateway routes
+keep the request host.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from __future__ import annotations
 import re
 
 import pytest
-from support.nginx_conf import NGINX_CONFIGS, read_config
+from support.nginx_conf import NGINX_CONFIGS, extract_location_block, read_config
 
 
 def _extract_block(content: str, marker: re.Pattern[str]) -> str:
@@ -79,10 +80,11 @@ def _evaluate_map(entries: list[tuple[str, str]], key: str) -> str:
     return default
 
 
-def _canonical_origin(content: str, method: str, host: str, upgrade: str = "") -> str:
-    """The redirect target the two-map pipeline produces, or "" for no redirect."""
+def _canonical_origin(content: str, method: str, host: str, upgrade: str = "", uri: str = "/") -> str:
+    """Return the redirect target for a normalized URI, or "" for no redirect."""
     canonical_host = _evaluate_map(_extract_map(content, "loopback_canonical_host"), host)
-    origin = _evaluate_map(_extract_map(content, "loopback_origin"), f"{method}:{upgrade}:{canonical_host}")
+    scope = _evaluate_map(_extract_map(content, "loopback_redirect_scope"), uri)
+    origin = _evaluate_map(_extract_map(content, "loopback_origin"), f"{method}:{upgrade}:{scope}:{canonical_host}")
     return origin.replace("$loopback_canonical_host", canonical_host)
 
 
@@ -124,11 +126,48 @@ def test_websocket_handshake_is_not_redirected(config_path: str, host: str) -> N
 
 
 @pytest.mark.parametrize("config_path", NGINX_CONFIGS)
+@pytest.mark.parametrize(
+    ("uri", "expected"),
+    [
+        ("/", "localhost:2026"),
+        ("/workspace", "localhost:2026"),
+        ("/auth/callback", "localhost:2026"),
+        ("/_next/static/x.js", "localhost:2026"),
+        ("/api/v1/auth/oauth/keycloak", "localhost:2026"),
+        ("/api/v1/auth/callback/keycloak", "localhost:2026"),
+        ("/api/mcp/user-oauth/callback", "localhost:2026"),
+        ("/api/models", ""),
+        ("/api/langgraph/threads", ""),
+        ("/api/v1/auth/me", ""),
+        ("/api/threads/abc/artifacts/x", ""),
+        ("/api/docs", ""),
+        ("/api/redoc", ""),
+        ("/docs", ""),
+        ("/docs/", ""),
+        ("/docs/oauth2-redirect", ""),
+        ("/docs/oauth2-redirect/", ""),
+        ("/docs/application/quick-start", "localhost:2026"),
+        ("/redoc", ""),
+        ("/redoc/", ""),
+        ("/redoc-guide", "localhost:2026"),
+        ("/health", ""),
+        ("/health/ready", ""),
+        ("/openapi.json", ""),
+    ],
+)
+def test_loopback_redirect_path_scope(config_path: str, uri: str, expected: str) -> None:
+    assert _canonical_origin(read_config(config_path), "GET", "127.0.0.1:2026", uri=uri) == expected
+
+
+@pytest.mark.parametrize("config_path", NGINX_CONFIGS)
 def test_main_server_redirects_to_the_canonical_origin(config_path: str) -> None:
     content = read_config(config_path)
     server = _extract_block(content, re.compile(r"server\s*\{(?=[^}]*?listen\s+(?:\S+:)?2026\b)"))
+    frontend = extract_location_block(server, "/")
+    redirect = "return 301 $scheme://$loopback_origin$request_uri;"
     assert 'if ($loopback_origin != "")' in server
-    assert "return 301 $scheme://$loopback_origin$request_uri;" in server
+    assert redirect in server
+    assert redirect not in frontend
 
 
 def test_canonicalization_maps_match_across_configs() -> None:
@@ -136,6 +175,7 @@ def test_canonicalization_maps_match_across_configs() -> None:
     per_config = [
         (
             _extract_map(read_config(path), "loopback_canonical_host"),
+            _extract_map(read_config(path), "loopback_redirect_scope"),
             _extract_map(read_config(path), "loopback_origin"),
         )
         for path in NGINX_CONFIGS
