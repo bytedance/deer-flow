@@ -1,8 +1,13 @@
 "use client";
 
-import { ArrowUpRightIcon, FileDiffIcon } from "lucide-react";
+import { ArrowUpRightIcon, ChevronRightIcon, FileDiffIcon } from "lucide-react";
 import { useState } from "react";
 
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { Sheet } from "@/components/ui/sheet";
 import { useI18n } from "@/core/i18n/hooks";
 import { useWorkspaceChanges } from "@/core/workspace-changes/hooks";
@@ -14,6 +19,9 @@ import type { WorkspaceFileChange } from "@/core/workspace-changes/types";
 import { cn } from "@/lib/utils";
 
 import { WorkspaceChangePanel } from "./workspace-change-panel";
+
+// Runs with more changed files than this start with the inline list collapsed.
+const INLINE_CHANGE_LIST_LIMIT = 3;
 
 export function WorkspaceChangeBadge({
   threadId,
@@ -44,19 +52,51 @@ export function WorkspaceChangeBadge({
   }
 
   const files = sortWorkspaceChanges(data.files);
+  const canCollapse = count > INLINE_CHANGE_LIST_LIMIT && files.length > 0;
+  const title = t.workspaceChanges.editedTitle(count);
+  const titleClassName = "text-foreground text-sm font-semibold";
+  const fileList = (
+    <div className="border-border/70 border-t py-1">
+      {isLoading ? (
+        <div className="text-muted-foreground px-3 py-2 text-xs">
+          {t.workspaceChanges.loading}
+        </div>
+      ) : (
+        files.map((file) => (
+          <WorkspaceChangeSummaryRow
+            key={`${file.status}:${file.path}`}
+            file={file}
+          />
+        ))
+      )}
+    </div>
+  );
 
   return (
     <Sheet open={open} onOpenChange={setOpen}>
-      <div className="border-border/70 bg-muted/20 mt-3 overflow-hidden rounded-xl border">
-        <div className="border-border/70 flex items-center justify-between gap-3 border-b p-3">
+      <Collapsible className="border-border/70 bg-muted/20 mt-3 overflow-hidden rounded-xl border">
+        <div className="flex items-center justify-between gap-3 p-3">
           <div className="flex min-w-0 items-center gap-2.5">
             <div className="bg-background/80 flex size-10 shrink-0 items-center justify-center rounded-lg">
               <FileDiffIcon className="text-muted-foreground size-4" />
             </div>
             <div className="min-w-0">
-              <div className="text-foreground text-sm font-semibold">
-                {t.workspaceChanges.editedTitle(count)}
-              </div>
+              {canCollapse ? (
+                <CollapsibleTrigger
+                  className={cn(
+                    "group/changes hover:text-primary focus-visible:ring-ring flex items-center gap-1 rounded-sm focus-visible:ring-2",
+                    titleClassName,
+                  )}
+                >
+                  {title}
+                  <ChevronRightIcon
+                    aria-hidden="true"
+                    className="size-4 shrink-0 transition-transform group-data-[state=open]/changes:rotate-90"
+                  />
+                </CollapsibleTrigger>
+              ) : (
+                <div className={titleClassName}>{title}</div>
+              )}
               <button
                 type="button"
                 className="text-muted-foreground hover:text-foreground mt-0.5 inline-flex items-center gap-1 text-xs font-medium transition-colors"
@@ -74,21 +114,12 @@ export function WorkspaceChangeBadge({
           />
         </div>
 
-        <div className="py-1">
-          {isLoading && (
-            <div className="text-muted-foreground px-3 py-2 text-xs">
-              {t.workspaceChanges.loading}
-            </div>
-          )}
-          {!isLoading &&
-            files.map((file) => (
-              <WorkspaceChangeSummaryRow
-                key={`${file.status}:${file.path}`}
-                file={file}
-              />
-            ))}
-        </div>
-      </div>
+        {canCollapse ? (
+          <CollapsibleContent>{fileList}</CollapsibleContent>
+        ) : (
+          fileList
+        )}
+      </Collapsible>
       <WorkspaceChangePanel
         threadId={threadId}
         runId={runId}
