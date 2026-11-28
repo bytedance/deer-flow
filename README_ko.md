@@ -466,7 +466,7 @@ DeerFlow는 프록시 뒤에서 브라우저 측 스킴과 출처를 복원하�
 
 사전 준비: 먼저 위의 "설정" 단계(`make setup`)를 완료하세요. `make dev`를 실행하려면 프로젝트 루트에 유효한 `config.yaml`이 있어야 합니다. 그 루트를 명시적으로 지정하려면 `DEER_FLOW_PROJECT_ROOT`를, 특정 설정 파일을 가리키려면 `DEER_FLOW_CONFIG_PATH`를 설정하세요. 런타임 상태는 기본적으로 프로젝트 루트 아래의 `.deer-flow`에 저장되며 `DEER_FLOW_HOME`으로 위치를 옮길 수 있습니다. 스킬은 기본적으로 프로젝트 루트 아래의 `skills/`에 있으며 `DEER_FLOW_SKILLS_PATH`로 위치를 옮길 수 있습니다. 시작하기 전에 `make doctor`를 실행해 설정을 확인하세요.
 
-설정 검사와 에이전트 저장소 마이그레이션은 저장소 루트에서 `uv run --no-sync --project backend`를 통해 설치된 백엔드 환경을 사용합니다. 이렇게 하면 상대 런타임 경로와 설치된 선택적 의존성이 유지됩니다. [설정 검사](backend/docs/SETUP.md#steps)와 [에이전트 저장소 마이그레이션](backend/docs/CONFIGURATION.md#agent-storage)을 참고하세요.
+설정 검사와 에이전트 저장소 마이그레이션은 저장소 루트에서 `uv run --no-sync --project backend`를 통해 설치된 백엔드 환경을 사용합니다. 이렇게 하면 상대 런타임 경로와 설치된 선택적 의존성이 유지됩니다. [설정 검사](backend/docs/CONFIGURATION.md#verify-the-local-configuration)와 [에이전트 저장소 마이그레이션](backend/docs/CONFIGURATION.md#agent-storage)을 참고하세요.
 
 Windows에서는 Git Bash에서 로컬 개발 흐름을 실행하세요. bash 기반 서비스 스크립트는 네이티브 `cmd.exe`와 PowerShell 셸에서 지원되지 않으며, 일부 스크립트가 `cygpath` 같은 Git for Windows 유틸리티에 의존하기 때문에 WSL에서의 동작도 보장되지 않습니다.
 
