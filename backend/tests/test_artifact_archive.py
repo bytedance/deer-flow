@@ -714,3 +714,24 @@ async def test_repeated_cancellation_keeps_the_archive_slot_until_worker_exit(mo
         release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        ("Report", "report/slides/lesson.pptx"),
+        ("report/slides/lesson.pptx", "Report"),
+        ("Caf\u00e9", "Cafe\u0301/slides/lesson.pptx"),
+        ("Cafe\u0301/slides/lesson.pptx", "Caf\u00e9"),
+        ("week/Report", "week/report/slides/lesson.pptx"),
+        ("Report.txt", "report.txt"),
+    ],
+)
+def test_archive_entry_names_reject_portable_collisions(entries) -> None:
+    with pytest.raises(artifact_archive.ArtifactArchiveError) as exc_info:
+        artifact_archive._validate_archive_entry_names(entries)
+    assert exc_info.value.status_code == 409
+
+
+def test_archive_entry_names_accept_files_with_shared_directories() -> None:
+    artifact_archive._validate_archive_entry_names(("report/slides/lesson.pptx", "Report/notes.md"))
