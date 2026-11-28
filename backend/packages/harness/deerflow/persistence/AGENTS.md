@@ -63,6 +63,10 @@ with best-effort cleanup, preserving the original publication outcome.
 
 ## Leases, claims and terminal writes
 
+- **Batch controls reserve the parent writer and refresh state** before applying
+  pause/resume/cancel. SQLite ignores `SELECT FOR UPDATE`; an earlier snapshot
+  can overwrite committed terminal outcomes. Keep parent-before-item lock
+  order and terminal completion timestamps.
 - **A scan selects candidates; it grants nothing.** After you take the row locks,
   check status and lease expiry again. The row can have been requeued and
   reclaimed while recovery waited, also by the same process.

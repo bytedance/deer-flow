@@ -1,5 +1,6 @@
 """Paused batches still reconcile abandoned attempts without starting new work."""
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 import pytest_asyncio
 from _router_auth_helpers import make_authed_test_app
 from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
 from app.gateway.routers import subagent_batches
@@ -19,7 +21,7 @@ from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.subagent_batches import SubagentBatchRepository
-from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow
+from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow, SubagentBatchRow
 from deerflow.persistence.thread_meta import ThreadMetaRepository
 from deerflow.subagents.batch_service import SubagentBatchService
 
@@ -171,3 +173,49 @@ async def test_last_paused_item_reaches_terminal_status_on_completion_or_expiry(
     assert batch["completed_at"] is not None
     assert batch["counts"]["leased"] == batch["counts"]["running"] == 0
     app.state.subagent_batch_service._execute_item.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["pause", "resume", "cancel"])
+@pytest.mark.parametrize("terminal_action", ["complete", "cancel"])
+async def test_in_flight_control_preserves_a_terminal_batch(api, monkeypatch, action, terminal_action):
+    app, client, _ = api
+    app.state.subagent_batches_available = True
+    repo = app.state.subagent_batch_repo
+    await _create(repo, count=1, max_attempts=1)
+    now = datetime.now(UTC)
+    item = (await repo.claim_items(now=now, lease_owner="worker", lease_seconds=10, limit=1))[0]
+    if action == "resume":
+        assert (await client.post(f"{_URL}/pause")).json()["status"] == "paused"
+    control_read, release = asyncio.Event(), asyncio.Event()
+    original_get = AsyncSession.get
+
+    async def get(session, entity, *args, **kwargs):
+        row = await original_get(session, entity, *args, **kwargs)
+        if entity is SubagentBatchRow and kwargs.get("with_for_update") and not control_read.is_set():
+            # SQLite's SELECT FOR UPDATE does not lock the parent. Let the
+            # real completion/cancellation commit after the control read.
+            control_read.set()
+            await release.wait()
+        return row
+
+    monkeypatch.setattr(AsyncSession, "get", get)
+    request = asyncio.create_task(client.post(f"{_URL}/{action}"))
+    try:
+        await asyncio.wait_for(control_read.wait(), 5)
+        if terminal_action == "complete":
+            await _finish(repo, item, owner="worker", now=now + timedelta(seconds=1))
+        else:
+            assert (await client.post(f"{_URL}/cancel")).status_code == 200
+        terminal = (await client.get(_URL)).json()
+        assert terminal["status"] == ("completed" if terminal_action == "complete" else "cancelled")
+    finally:
+        release.set()
+        response = await asyncio.wait_for(request, 5)
+
+    assert response.status_code == 200
+    current = (await client.get(_URL)).json()
+    for view in (response.json(), current):
+        assert view["status"] == terminal["status"]
+        assert view["completed_at"] == terminal["completed_at"]
+        assert view["counts"] == terminal["counts"]
