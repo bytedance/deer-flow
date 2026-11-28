@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.runnables import RunnableLambda
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_progress_middleware import (
@@ -307,6 +308,25 @@ def test_blocked_tool_is_intercepted_without_calling_handler():
     assert call_count[0] == call_count_before
     assert isinstance(result, ToolMessage)
     assert "[TOOL_BLOCKED]" in result.content
+
+
+def test_tool_progress_scopes_embedded_threads_by_runnable_config():
+    middleware = _make_mw()
+    runtime = SimpleNamespace(context=None)
+    request = _make_tool_request(runtime=runtime)
+    failure = _make_non_recoverable_error_message(error_type="auth", recommended_next_action="stop")
+    success = _make_tool_message()
+
+    def in_thread(thread_id, callback):
+        return RunnableLambda(lambda _: callback()).invoke(None, config={"configurable": {"thread_id": thread_id}})
+
+    in_thread("sdk-a", lambda: middleware.before_agent({}, runtime))
+    in_thread("sdk-b", lambda: middleware.before_agent({}, runtime))
+
+    assert in_thread("sdk-a", lambda: middleware.wrap_tool_call(request, lambda _: failure)) is failure
+    blocked = in_thread("sdk-a", lambda: middleware.wrap_tool_call(request, lambda _: pytest.fail("blocked tool ran")))
+    assert blocked.status == "error"
+    assert in_thread("sdk-b", lambda: middleware.wrap_tool_call(request, lambda _: success)) is success
 
 
 # ---------------------------------------------------------------------------

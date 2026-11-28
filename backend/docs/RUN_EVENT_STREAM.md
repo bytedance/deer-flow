@@ -248,6 +248,8 @@ recorder cannot stall unrelated tool-state updates. Recorder failures are
 fail-open and do not change guard behavior. These events are emitted only when
 `tool_progress.enabled` is true (the default is false).
 
+When embedding the agent, tool-progress state uses the thread ID from runtime context, then falls back to LangGraph's `configurable.thread_id`.
+
 `middleware:tool_promotion` records deferred MCP schemas newly promoted for
 the active catalog. `changes.source` distinguishes automatic `routing_hint`
 promotion from an explicit `tool_search`; the remaining fields contain sorted

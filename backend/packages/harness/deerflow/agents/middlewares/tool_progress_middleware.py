@@ -62,6 +62,7 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import HumanMessage, ToolMessage
+from langgraph.config import get_config
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
@@ -310,6 +311,12 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
     @staticmethod
     def _thread_id(runtime: Runtime) -> str:
         tid = runtime.context.get("thread_id") if runtime.context else None
+        if not tid:
+            try:
+                config = get_config()
+            except RuntimeError:
+                config = {}
+            tid = config.get("configurable", {}).get("thread_id")
         return str(tid) if tid else "default"
 
     @staticmethod
