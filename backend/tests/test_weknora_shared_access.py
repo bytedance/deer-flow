@@ -122,7 +122,7 @@ def test_gateway_propagates_only_verified_user_to_shared_catalog_and_tool(shared
     monkeypatch.setattr("app.gateway.deps.get_current_user_from_request", resolve_user)
     monkeypatch.setattr("app.gateway.auth.pat.authenticate_pat", resolve_pat)
     monkeypatch.setattr("app.gateway.auth.pat.is_pat_allowed_route", lambda *args: True)
-    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: AuthorizationConfig())
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", lambda: (AuthorizationConfig(), True))
     registry = ExtensionRegistry()
     with registry.attributed_to("deerflow_extension_weknora:install"):
         registry.knowledge_provider("weknora", provider)

@@ -57,8 +57,8 @@ def _fake_user(user_id: str = "user-1", *, system_role: str = "user"):
 @pytest.fixture(autouse=True)
 def _default_route_authorization_config(monkeypatch):
     monkeypatch.setattr(
-        "app.gateway.authz._get_route_authorization_config",
-        lambda: AuthorizationConfig(),
+        "app.gateway.authz._get_route_access_config",
+        lambda: (AuthorizationConfig(), True),
     )
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "")
     from app.gateway.auth.config import AuthConfig, set_auth_config

@@ -131,9 +131,12 @@ export type MockSkill = {
   category?: string;
   license?: string | null;
   enabled?: boolean;
+  editable?: boolean;
 };
 
 export type MockAPIOptions = {
+  systemRole?: string;
+  permissions?: string[] | null;
   threads?: MockThread[];
   projects?: MockProject[];
   projectsConfig?: {
@@ -178,6 +181,12 @@ export type MockAPIOptions = {
     threadActivity?: {
       available?: boolean;
     };
+    /** Undefined omits the block (old Gateway); null explicitly returns null. */
+    skillManagement?: {
+      lifecyclePermissions: true;
+      canManage: boolean;
+      sourceInstallAvailable: boolean;
+    } | null;
   };
   runStreamHandler?: (route: Route) => Promise<void>;
 };
@@ -793,7 +802,11 @@ export function mockLangGraphAPI(
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(MOCK_AUTH_USER),
+        body: JSON.stringify({
+          ...MOCK_AUTH_USER,
+          system_role: options?.systemRole ?? MOCK_AUTH_USER.system_role,
+          permissions: options?.permissions,
+        }),
       });
     }
     return route.fallback();
@@ -2416,6 +2429,21 @@ export function mockLangGraphAPI(
           thread_activity: {
             available: featureFlags.threadActivity.available,
           },
+          ...(options?.features?.skillManagement === undefined
+            ? {}
+            : {
+                skill_management:
+                  options.features.skillManagement === null
+                    ? null
+                    : {
+                        lifecycle_permissions:
+                          options.features.skillManagement.lifecyclePermissions,
+                        can_manage: options.features.skillManagement.canManage,
+                        source_install_available:
+                          options.features.skillManagement
+                            .sourceInstallAvailable,
+                      },
+              }),
         }),
       });
     }

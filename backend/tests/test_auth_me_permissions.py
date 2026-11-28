@@ -17,27 +17,33 @@ from fastapi.testclient import TestClient
 
 os.environ.setdefault("AUTH_JWT_SECRET", "test-secret-key-auth-me-permissions-min-32")
 
-from app.gateway.authz import Permissions  # noqa: E402
+from app.gateway.authz import _ALL_PERMISSIONS, _DISABLED_AUTHORIZATION_ADMIN_ONLY, Permissions  # noqa: E402
 from deerflow.authz.provider import AuthzDecision, AuthzReason  # noqa: E402
 from deerflow.config.authorization_config import AuthorizationConfig  # noqa: E402
 
 _TEST_SECRET = "test-secret-key-auth-me-permissions-min-32"
+_DISABLED_NON_ADMIN_PERMISSIONS = [permission for permission in _ALL_PERMISSIONS if permission not in _DISABLED_AUTHORIZATION_ADMIN_ONLY]
 
-_ALL_PERMISSIONS = [
-    Permissions.THREADS_READ,
-    Permissions.THREADS_WRITE,
-    Permissions.THREADS_DELETE,
-    Permissions.RUNS_CREATE,
-    Permissions.RUNS_READ,
-    Permissions.RUNS_CANCEL,
-    Permissions.MEMORY_READ,
-    Permissions.MEMORY_WRITE,
-    Permissions.AGENTS_READ,
-    Permissions.AGENTS_WRITE,
-    Permissions.PROJECTS_READ,
-    Permissions.PROJECTS_WRITE,
-    Permissions.PROJECTS_DELETE,
-]
+
+def test_permission_registry_membership_is_exact():
+    expected = {
+        "threads:read",
+        "threads:write",
+        "threads:delete",
+        "runs:create",
+        "runs:read",
+        "runs:cancel",
+        "memory:read",
+        "memory:write",
+        "agents:read",
+        "agents:write",
+        "projects:read",
+        "projects:write",
+        "projects:delete",
+        "skills:manage",
+    }
+    assert len(_ALL_PERMISSIONS) == len(expected)
+    assert set(_ALL_PERMISSIONS) == expected
 
 
 class _RecordingProvider:
@@ -93,8 +99,8 @@ def _setup_auth(tmp_path):
 def _default_route_authorization_config(monkeypatch):
     """Keep /me independent of a repository config.yaml (disabled by default)."""
     monkeypatch.setattr(
-        "app.gateway.authz._get_route_authorization_config",
-        lambda: AuthorizationConfig(),
+        "app.gateway.authz._get_route_access_config",
+        lambda: (AuthorizationConfig(), True),
     )
 
 
@@ -121,7 +127,7 @@ def _initialize_admin(client: TestClient):
 
 def _enable_authorization(monkeypatch, provider) -> None:
     config = AuthorizationConfig(enabled=True, fail_closed=True, default_role="user")
-    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", lambda: (config, True))
     monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", lambda c: provider)
 
 
@@ -133,6 +139,16 @@ def test_me_lists_all_route_permissions_when_authorization_disabled(client):
     res = client.get("/api/v1/auth/me")
     assert res.status_code == 200
     assert res.json()["permissions"] == _ALL_PERMISSIONS
+
+
+def test_me_omits_skill_management_when_deployment_disables_it(client, monkeypatch):
+    monkeypatch.setattr("app.gateway.authz._get_route_access_config", lambda: (AuthorizationConfig(), False))
+    _initialize_admin(client)
+
+    response = client.get("/api/v1/auth/me")
+
+    assert response.status_code == 200
+    assert Permissions.SKILLS_MANAGE not in response.json()["permissions"]
 
 
 def test_account_preferences_use_registered_auth_and_csrf_middleware(client):
@@ -152,7 +168,7 @@ def test_account_preferences_use_registered_auth_and_csrf_middleware(client):
 def test_me_reuses_middleware_resolved_permissions(client, monkeypatch):
     """One provider decision per registered permission — /me reads the
     AuthContext AuthMiddleware already stamped instead of re-resolving."""
-    denied = {Permissions.THREADS_DELETE, Permissions.RUNS_CANCEL}
+    denied = {Permissions.THREADS_DELETE, Permissions.RUNS_CANCEL, Permissions.SKILLS_MANAGE}
     provider = _RecordingProvider(denied=denied)
     _enable_authorization(monkeypatch, provider)
     _initialize_admin(client)
@@ -214,7 +230,7 @@ async def test_me_falls_back_to_fresh_resolution_without_middleware_context():
 
     response = await get_me(_fallback_request(_stub_user(), "session"))
 
-    assert response.permissions == _ALL_PERMISSIONS
+    assert response.permissions == _DISABLED_NON_ADMIN_PERMISSIONS
 
 
 @pytest.mark.asyncio

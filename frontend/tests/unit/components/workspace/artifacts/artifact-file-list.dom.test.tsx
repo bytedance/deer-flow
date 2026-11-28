@@ -13,6 +13,7 @@ const artifactState = rs.hoisted(() => ({
   select: rs.fn(),
   setOpen: rs.fn(),
 }));
+const skillManagementState = rs.hoisted(() => ({ canManage: false }));
 const archiveState = rs.hoisted(() => {
   class RequestError extends Error {
     readonly status: number;
@@ -33,6 +34,9 @@ const archiveState = rs.hoisted(() => {
 
 rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: () => ({ user: null }),
+}));
+rs.mock("@/core/skills/hooks", () => ({
+  useSkillManagement: () => skillManagementState,
 }));
 rs.mock("@/components/workspace/artifacts/context", () => ({
   useArtifacts: () => artifactState,
@@ -88,6 +92,9 @@ function renderList(
 afterEach(cleanup);
 afterEach(() => {
   rs.restoreAllMocks();
+});
+afterEach(() => {
+  skillManagementState.canManage = false;
 });
 
 // `present_files` args are the model's output, and the same extraction runs
@@ -383,5 +390,18 @@ describe("ArtifactFileList archive download", () => {
         "An artifact archive can contain at most 50 files",
       );
     });
+  });
+});
+
+describe("ArtifactFileList skill installation", () => {
+  it("shows .skill installation with the manage capability", () => {
+    skillManagementState.canManage = true;
+    renderList({ files: ["/mnt/user-data/outputs/demo.skill"] });
+    expect(screen.getByRole("button", { name: "Install" })).toBeTruthy();
+  });
+
+  it("hides .skill installation when manage is denied", () => {
+    renderList({ files: ["/mnt/user-data/outputs/demo.skill"] });
+    expect(screen.queryByRole("button", { name: "Install" })).toBeNull();
   });
 });

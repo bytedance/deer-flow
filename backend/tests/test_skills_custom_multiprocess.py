@@ -18,6 +18,7 @@ def _content(description: str) -> str:
 
 def _mutate_in_process(base_dir, action, content, gate_phase, ready, start, attempted, parked, release, done):
     # Use spawn, not fork: each worker has its own lock registry and storage.
+    from app.gateway.authz import AuthContext
     from app.gateway.routers import skills as router
     from deerflow.config.paths import Paths
     from deerflow.skills.security_scanner import ScanResult
@@ -75,7 +76,8 @@ def _mutate_in_process(base_dir, action, content, gate_phase, ready, start, atte
 
             patch.setattr(UserScopedSkillStorage, method, gated)
 
-        request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+        user = SimpleNamespace(system_role="admin")
+        request = SimpleNamespace(state=SimpleNamespace(user=user, auth=AuthContext(user=user, permissions=["skills:manage"])))
         ready.set()
         assert start.wait(30), "parent did not start the mutation"
         if action == "tool_edit":

@@ -15,11 +15,18 @@ from starlette.formparsers import MultiPartException, MultiPartParser
 from app.gateway.authz import (
     _AuthorizationUnavailable,
     _is_internal_caller,
+    require_permission,
     resolve_skill_authorization,
 )
 from app.gateway.deps import get_config, get_optional_user_from_request, require_admin_user
 from app.gateway.path_utils import resolve_thread_virtual_path
 from app.gateway.skill_export import ExportClientDisconnected, SkillExportManifestResponse, SkillExportResponse, export_http_error, run_export_work
+from app.gateway.skill_source import (
+    SkillSourceError,
+    discard_prepared_source,
+    prepare_skill_source,
+    validate_expected_snapshot_digest,
+)
 from deerflow.agents.lead_agent.prompt import (
     SkillCacheResetPublishError,
     clear_skills_system_prompt_cache,
@@ -132,6 +139,7 @@ class SkillInstallResponse(BaseModel):
     success: bool = Field(..., description="Whether the installation was successful")
     skill_name: str = Field(..., description="Name of the installed skill")
     message: str = Field(..., description="Installation result message")
+    enabled: bool = Field(default=True, description="Whether the installed skill is enabled for the caller")
 
 
 class SkillReloadResponse(BaseModel):
@@ -166,6 +174,49 @@ class SkillRollbackRequest(BaseModel):
         if isinstance(value, bool):
             raise ValueError("Boolean values are invalid for history_index")
         return value
+
+
+class SkillSourceInspectRequest(BaseModel):
+    source: str
+
+
+class SkillSourceInstallRequest(SkillSourceInspectRequest):
+    expected_snapshot_digest: str
+
+
+class SkillSourceInspectResponse(BaseModel):
+    source: str
+    source_url: str
+    skill_name: str
+    description: str
+    snapshot_digest: str
+    upstream_hash: str | None
+    file_count: int
+    total_bytes: int
+
+
+@require_permission("skills", "manage")
+async def _require_custom_skill_management(request: Request) -> None:
+    """Apply the lifecycle permission only after a toggle resolves to CUSTOM."""
+
+
+def _source_http_exception(error: SkillSourceError) -> HTTPException:
+    detail: dict[str, Any] = {"code": error.code, "message": error.message}
+    if error.findings is not None:
+        detail["findings"] = error.findings
+    headers = {"Retry-After": error.retry_after} if error.retry_after is not None else None
+    return HTTPException(status_code=error.status_code, detail=detail, headers=headers)
+
+
+def _source_install_http_exception(error: HTTPException) -> HTTPException:
+    """Keep installer fields/findings while giving source callers a code."""
+    if isinstance(error.detail, dict):
+        detail = dict(error.detail)
+        detail.setdefault("code", "skill_security_scan_failed" if "findings" in detail or "skill_name" in detail else "skill_install_failed")
+        detail.setdefault("message", "Skill installation failed.")
+    else:
+        detail = {"code": "skill_install_failed", "message": str(error.detail)}
+    return HTTPException(status_code=error.status_code, detail=detail, headers=error.headers)
 
 
 # Custom-skill mutations (edit, delete, rollback) each span three steps —
@@ -472,14 +523,57 @@ async def list_skills(request: Request, config: AppConfig = Depends(get_config))
     return SkillsListResponse(skills=[_skill_to_response(skill) for skill in visible_skills])
 
 
+@router.post("/skills/install/source/inspect", response_model=SkillSourceInspectResponse, summary="Inspect Skill Source")
+@require_permission("skills", "manage")
+async def inspect_skill_source(request: Request, body: SkillSourceInspectRequest, config: AppConfig = Depends(get_config)) -> SkillSourceInspectResponse:
+    prepared = None
+    try:
+        prepared = await prepare_skill_source(body.source, user_id=get_effective_user_id(), app_config=config)
+        return SkillSourceInspectResponse(
+            source=f"{prepared.reference.source}@{prepared.reference.slug}",
+            source_url=prepared.reference.source_url,
+            skill_name=prepared.skill_name,
+            description=prepared.description,
+            snapshot_digest=prepared.snapshot_digest,
+            upstream_hash=prepared.upstream_hash,
+            file_count=prepared.file_count,
+            total_bytes=prepared.total_bytes,
+        )
+    except SkillSourceError as error:
+        raise _source_http_exception(error) from error
+    finally:
+        if prepared is not None:
+            await await_drained(asyncio.to_thread(discard_prepared_source, prepared))
+
+
+@router.post("/skills/install/source", response_model=SkillInstallResponse, summary="Install Skill From Source")
+@require_permission("skills", "manage")
+async def install_skill_from_source(request: Request, body: SkillSourceInstallRequest, config: AppConfig = Depends(get_config)) -> SkillInstallResponse:
+    prepared = None
+    try:
+        expected_digest = validate_expected_snapshot_digest(body.expected_snapshot_digest)
+        prepared = await prepare_skill_source(body.source, user_id=get_effective_user_id(), app_config=config)
+        if prepared.snapshot_digest != expected_digest:
+            raise SkillSourceError(409, "skill_source_changed", "The source changed; inspect it again.")
+        try:
+            return await _install_skill_archive(prepared.archive_path, config)
+        except HTTPException as error:
+            raise _source_install_http_exception(error) from error
+    except SkillSourceError as error:
+        raise _source_http_exception(error) from error
+    finally:
+        if prepared is not None:
+            await await_drained(asyncio.to_thread(discard_prepared_source, prepared))
+
+
 @router.post(
     "/skills/install",
     response_model=SkillInstallResponse,
     summary="Install Skill",
     description="Install a skill from a .skill file (ZIP archive) located in the thread's user-data directory.",
 )
+@require_permission("skills", "manage")
 async def install_skill(request: Request, body: SkillInstallRequest, config: AppConfig = Depends(get_config)) -> SkillInstallResponse:
-    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_file_path = resolve_thread_virtual_path(body.thread_id, body.path)
     except FileNotFoundError as e:
@@ -509,11 +603,11 @@ async def install_skill(request: Request, body: SkillInstallRequest, config: App
         }
     },
 )
+@require_permission("skills", "manage")
 async def upload_and_install_skill(
     request: Request,
     config: AppConfig = Depends(get_config),
 ) -> SkillInstallResponse:
-    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
 
     form: FormData | None = None
     temporary_path: Path | None = None
@@ -619,6 +713,8 @@ async def list_custom_skills(request: Request, config: AppConfig = Depends(get_c
 
 
 @router.get("/skills/diagnostics/custom", response_model=SkillDiagnosticsResponse, summary="List Owned Custom Skill YAML Errors")
+# Diagnostics are an operational troubleshooting surface, not a lifecycle
+# prerequisite. They intentionally remain admin-only alongside global diagnostics.
 async def list_custom_skill_diagnostics(request: Request, response: Response, config: AppConfig = Depends(get_config)) -> SkillDiagnosticsResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     response.headers["Cache-Control"] = "no-store"
@@ -634,8 +730,8 @@ async def list_custom_skill_diagnostics(request: Request, response: Response, co
 
 
 @router.get("/skills/custom/{skill_name}/export-manifest", response_model=SkillExportManifestResponse, response_model_exclude_unset=True, summary="Preview Custom Skill Export")
+@require_permission("skills", "manage")
 async def preview_custom_skill_export(skill_name: str, request: Request, response: Response, config: AppConfig = Depends(get_config)) -> SkillExportManifestResponse | Response:
-    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         result, lease = await run_export_work(lambda cancel: export_manifest(_get_user_skill_storage(config), skill_name, cancel), request)
     except ExportClientDisconnected:
@@ -654,13 +750,13 @@ async def preview_custom_skill_export(skill_name: str, request: Request, respons
 
 
 @router.get("/skills/custom/{skill_name}/export", summary="Download Custom Skill Archive")
+@require_permission("skills", "manage")
 async def download_custom_skill_export(
     skill_name: str,
     request: Request,
     expected_revision: str = Query(..., pattern=r"^[a-f0-9]{64}$"),
     config: AppConfig = Depends(get_config),
 ) -> Response:
-    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         archive, lease = await run_export_work(lambda cancel: build_skill_export(_get_user_skill_storage(config), skill_name, expected_revision, cancel), request)
     except ExportClientDisconnected:
@@ -675,8 +771,8 @@ async def download_custom_skill_export(
 
 
 @router.get("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Get Custom Skill Content")
+@require_permission("skills", "manage")
 async def get_custom_skill(skill_name: str, request: Request, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
-    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     return await _read_custom_skill_response(skill_name, config)
 
 
@@ -707,8 +803,8 @@ async def _read_custom_skill_response(skill_name: str, config: AppConfig) -> Cus
 
 
 @router.put("/skills/custom/{skill_name}", response_model=CustomSkillContentResponse, summary="Edit Custom Skill")
+@require_permission("skills", "manage")
 async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, request: Request, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
-    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
 
@@ -774,8 +870,8 @@ async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, r
 
 
 @router.delete("/skills/custom/{skill_name}", summary="Delete Custom Skill")
+@require_permission("skills", "manage")
 async def delete_custom_skill(skill_name: str, request: Request, config: AppConfig = Depends(get_config)) -> dict[str, bool]:
-    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         # Reject a malformed name (400 below) before the drained tail: failing
@@ -823,8 +919,8 @@ async def delete_custom_skill(skill_name: str, request: Request, config: AppConf
 
 
 @router.get("/skills/custom/{skill_name}/history", response_model=CustomSkillHistoryResponse, summary="Get Custom Skill History")
+@require_permission("skills", "manage")
 async def get_custom_skill_history(skill_name: str, request: Request, config: AppConfig = Depends(get_config)) -> CustomSkillHistoryResponse:
-    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         # A malformed name is a client error (400, as delete and rollback
@@ -858,8 +954,8 @@ async def get_custom_skill_history(skill_name: str, request: Request, config: Ap
 
 
 @router.post("/skills/custom/{skill_name}/rollback", response_model=CustomSkillContentResponse, summary="Rollback Custom Skill")
+@require_permission("skills", "manage")
 async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, request: Request, config: AppConfig = Depends(get_config)) -> CustomSkillContentResponse:
-    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
 
         def _read_rollback_history() -> tuple[SkillStorage, list[dict] | None]:
@@ -1045,15 +1141,13 @@ def _write_extensions_skill_state(
     "/skills/{skill_name}",
     response_model=SkillResponse,
     summary="Update Skill",
-    description=("Update a skill's enabled status (admin only). Public skills persist to the shared extensions_config.json; custom/legacy skills persist to per-user storage when available, otherwise to the shared configuration."),
+    description=("Update a skill's enabled status. Own custom skills require skills:manage; all other categories remain admin-only."),
 )
 async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Request, config: AppConfig = Depends(get_config)) -> SkillResponse:
-    # Keep skill toggles admin-only, including user-scoped custom/legacy skills.
-    # Public state uses shared extensions_config.json; custom/legacy state uses
-    # per-user storage when available, falling back to shared config otherwise.
-    # Public toggles clear all users' caches; custom/legacy refresh only the caller,
-    # even in the shared-config fallback (other users' cached state may be stale).
-    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    # Resolve the target before choosing the guard: management permission is
+    # deliberately scoped to the caller's CUSTOM storage, never global state.
+    if getattr(getattr(request.state, "user", None), "system_role", None) != "admin":
+        await _require_custom_skill_management(request)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
 
@@ -1068,6 +1162,10 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
 
         if skill is None:
             raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+        if skill.category == SkillCategory.CUSTOM:
+            await _require_custom_skill_management(request)
+        else:
+            await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
 
         async def _persist_state() -> None:
             # PUBLIC skills → global extensions_config.json (shared state).

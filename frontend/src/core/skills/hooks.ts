@@ -1,8 +1,31 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { enableSkill, SkillRequestError, uploadSkillArchive } from "./api";
+import { useAuth } from "@/core/auth/AuthProvider";
+import { fetchFeatures } from "@/core/features/api";
 
-import { loadSkills } from ".";
+import {
+  enableSkill,
+  loadSkills,
+  SkillRequestError,
+  uploadSkillArchive,
+} from "./api";
+import { canInstallSkillFromSource, canManageSkills } from "./permissions";
+
+export function useSkillManagement() {
+  const { user } = useAuth();
+  const { data } = useQuery({
+    queryKey: ["features", "skill_management"],
+    queryFn: ({ signal }) => fetchFeatures(signal),
+    staleTime: 0,
+    refetchOnMount: true,
+    retry: false,
+  });
+  const feature = data?.skill_management;
+  return {
+    canManage: canManageSkills(user, feature),
+    sourceInstallAvailable: canInstallSkillFromSource(feature),
+  };
+}
 
 export function useSkills() {
   const { data, isLoading, isFetching, error, refetch } = useQuery({
@@ -16,15 +39,13 @@ export function useSkills() {
 export function useEnableSkill() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async ({
+    mutationFn: ({
       skillName,
       enabled,
     }: {
       skillName: string;
       enabled: boolean;
-    }) => {
-      await enableSkill(skillName, enabled);
-    },
+    }) => enableSkill(skillName, enabled),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["skills"] });
     },

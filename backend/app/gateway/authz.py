@@ -85,6 +85,9 @@ class Permissions:
     AGENTS_READ = "agents:read"
     AGENTS_WRITE = "agents:write"
 
+    # Per-user custom skill installation and lifecycle management
+    SKILLS_MANAGE = "skills:manage"
+
 
 class AuthContext:
     """Authentication context for the current request.
@@ -172,7 +175,12 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.PROJECTS_READ,
     Permissions.PROJECTS_WRITE,
     Permissions.PROJECTS_DELETE,
+    Permissions.SKILLS_MANAGE,
 ]
+
+# Route permissions that do not become generally available when authorization
+# is disabled. Internal callers are deliberately not implicit administrators.
+_DISABLED_AUTHORIZATION_ADMIN_ONLY: frozenset[str] = frozenset({Permissions.SKILLS_MANAGE})
 
 
 def _make_test_request_stub() -> Any:
@@ -184,29 +192,42 @@ def _make_test_request_stub() -> Any:
     return SimpleNamespace(state=SimpleNamespace(), cookies={}, _deerflow_test_bypass_auth=True)
 
 
-def _get_route_authorization_config() -> AuthorizationConfig:
-    """Return the hot-reloaded authorization config for this request.
+def _get_route_access_config() -> tuple[AuthorizationConfig, bool]:
+    """Return route authorization and the skill gate from one AppConfig snapshot.
 
-    Falls back to a disabled config when AppConfig is not available (e.g. test
-    environments without a config.yaml), preserving legacy all-permissions behavior.
+    Falls back to disabled authorization and skill management when AppConfig is
+    unavailable (e.g. test environments without a config.yaml). This preserves
+    legacy route permissions without opening the newer management surface.
     ``get_app_config()`` stats and hashes ``config.yaml`` and
     ``extensions_config.json`` on every call, so async request paths use
-    :func:`_route_authorization_config_async`, and call the synchronous
-    helpers that read it (``resolve_model_authorization``,
-    ``resolve_skill_authorization``, ``authorize_model_use``,
-    ``authorize_sandbox_for_request``) through ``asyncio.to_thread``.
+    :func:`_route_access_config_async`, and call the synchronous helpers that
+    read it (``resolve_model_authorization``, ``resolve_skill_authorization``,
+    ``authorize_model_use``, ``authorize_sandbox_for_request``) through
+    ``asyncio.to_thread``.
     """
     from deerflow.config.app_config import get_app_config
 
     try:
-        return get_app_config().authorization
+        config = get_app_config()
+        return config.authorization, bool(config.skills.management_enabled)
     except (FileNotFoundError, RuntimeError):
-        return AuthorizationConfig()
+        return AuthorizationConfig(), False
 
 
-async def _route_authorization_config_async() -> AuthorizationConfig:
-    """Off-loop :func:`_get_route_authorization_config` for async request paths."""
-    return await asyncio.to_thread(_get_route_authorization_config)
+def _get_route_authorization_config() -> AuthorizationConfig:
+    """Return the hot-reloaded authorization config for synchronous route checks."""
+    return _get_route_access_config()[0]
+
+
+async def _route_access_config_async() -> tuple[AuthorizationConfig, bool]:
+    """Off-loop :func:`_get_route_access_config` for async request paths."""
+    return await asyncio.to_thread(_get_route_access_config)
+
+
+def _apply_skill_management_gate(permissions: list[str], *, enabled: bool) -> list[str]:
+    if enabled or Permissions.SKILLS_MANAGE not in permissions:
+        return permissions
+    return [permission for permission in permissions if permission != Permissions.SKILLS_MANAGE]
 
 
 # --- Provider cache (W1/F1) ---
@@ -278,27 +299,44 @@ def _get_cached_route_provider(config: AuthorizationConfig) -> AuthorizationProv
     return provider
 
 
+_route_permission_upgrade_diagnostics: set[tuple[str, str, str]] = set()
+
+
+def _log_route_permission_upgrade(config: AuthorizationConfig, *, role: str, target: str) -> None:
+    """Warn once per provider configuration and role about a new route grant."""
+    if id(config) == _route_provider_config_id and _route_provider_config_sig is not None:
+        signature = _route_provider_config_sig
+    else:
+        # The cache normally computed this already. The fallback also covers a
+        # provider-resolution failure and focused tests with a patched cache.
+        signature = repr(sorted(config.model_dump().items()))
+    key = (signature, role, target)
+    if key in _route_permission_upgrade_diagnostics:
+        return
+    _route_permission_upgrade_diagnostics.add(key)
+    logger.warning(
+        "Authorization upgrade audit: route permission %s is allowed for role %s; review the route policy and explicitly deny newly introduced targets that must remain restricted",
+        target,
+        role,
+    )
+
+
 async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[str]:
     """Return the route permissions granted to an authenticated user.
 
-    Disabled authorization preserves the legacy all-permissions behavior.
+    Disabled authorization preserves the legacy permissions, with explicit
+    admin-only grants filtered out for non-admin and internal callers.
     When enabled, every registered ``resource:action`` permission is evaluated
     independently so a provider failure affects only the route being checked.
     Provider instances are cached per config signature (hot-reload safe).
     The config is read in a worker: ``AuthMiddleware`` calls this for every
     authenticated request.
     """
-    config = await _route_authorization_config_async()
+    config, skill_management_enabled = await _route_access_config_async()
     if config.enabled is not True:
-        return list(_ALL_PERMISSIONS)
-
-    try:
-        provider = _get_cached_route_provider(config)
-        if provider is None:
-            raise ValueError("authorization is enabled but provider resolution returned None")
-    except Exception:
-        logger.warning("Failed to resolve authorization provider for Gateway routes", exc_info=True)
-        return [] if config.fail_closed else list(_ALL_PERMISSIONS)
+        if not is_internal and getattr(user, "system_role", None) == "admin":
+            return _apply_skill_management_gate(list(_ALL_PERMISSIONS), enabled=skill_management_enabled)
+        return _apply_skill_management_gate([permission for permission in _ALL_PERMISSIONS if permission not in _DISABLED_AUTHORIZATION_ADMIN_ONLY], enabled=skill_management_enabled)
 
     # Align with Phase 1B's tool path: internal callers (IM channel workers,
     # scheduler) have system_role="internal", which is not a real RBAC role.
@@ -309,6 +347,19 @@ async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[st
     user_role = getattr(user, "system_role", None)
     if user_role == INTERNAL_SYSTEM_ROLE:
         user_role = None
+    resolved_role = user_role or config.default_role
+
+    try:
+        provider = _get_cached_route_provider(config)
+        if provider is None:
+            raise ValueError("authorization is enabled but provider resolution returned None")
+    except Exception:
+        logger.warning("Failed to resolve authorization provider for Gateway routes", exc_info=True)
+        if not config.fail_closed:
+            if skill_management_enabled:
+                _log_route_permission_upgrade(config, role=resolved_role, target=Permissions.SKILLS_MANAGE)
+            return _apply_skill_management_gate(list(_ALL_PERMISSIONS), enabled=skill_management_enabled)
+        return []
 
     principal = build_principal_from_context(
         {
@@ -342,10 +393,15 @@ async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[st
                 permission,
                 exc_info=True,
             )
+            if not config.fail_closed and permission == Permissions.SKILLS_MANAGE:
+                _log_route_permission_upgrade(config, role=resolved_role, target=permission)
             return permission if not config.fail_closed else None
+        if decision.allow and permission == Permissions.SKILLS_MANAGE:
+            _log_route_permission_upgrade(config, role=resolved_role, target=permission)
         return permission if decision.allow else None
 
-    results = await asyncio.gather(*[_evaluate(p) for p in _ALL_PERMISSIONS])
+    permissions = _ALL_PERMISSIONS if skill_management_enabled else [permission for permission in _ALL_PERMISSIONS if permission != Permissions.SKILLS_MANAGE]
+    results = await asyncio.gather(*[_evaluate(p) for p in permissions])
     return [p for p in results if p is not None]
 
 

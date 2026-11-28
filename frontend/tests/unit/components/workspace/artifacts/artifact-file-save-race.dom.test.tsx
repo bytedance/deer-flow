@@ -26,6 +26,9 @@ rs.mock("next/navigation", () => ({
 rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: () => ({ user: null }),
 }));
+rs.mock("@/core/skills/hooks", () => ({
+  useSkillManagement: () => ({ canManage: false }),
+}));
 rs.mock("@/core/config", () => ({
   getBackendBaseURL: () => "/backend",
 }));

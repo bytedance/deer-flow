@@ -2430,6 +2430,12 @@ skills:
   # Default: /mnt/skills
   container_path: /mnt/skills
 
+  # Deployment-wide opt-in for installing and managing caller-owned custom skills.
+  # false (default): no role, including admin, receives skills:manage; the Web UI
+  # hides install/lifecycle controls and the routes remain forbidden.
+  # true: the authorization rules below determine which roles may manage skills.
+  management_enabled: false
+
   # Deferred skill discovery (default: false)
   # When enabled, only skill names appear in the system prompt (<skill_index>).
   # The LLM discovers skill details on demand via the describe_skill tool.
@@ -3699,7 +3705,7 @@ run_ownership:
 # Authorization Configuration
 # ============================================================================
 # Fine-grained resource authorization (RBAC and beyond). Disabled by default;
-# every authenticated user has access to all resources.
+# legacy permissions remain available, except skills:manage stays admin-only.
 # See RFC: https://github.com/bytedance/deer-flow/issues/4063
 #
 # authorization:
@@ -3711,10 +3717,12 @@ run_ownership:
 #     config:
 #       # A known role with no policy for a resource is unrestricted for it.
 #       # Define both `tools` and `routes` wherever access should be constrained.
-#       # `models` / `skills` govern the per-caller listing/detail surfaces
-#       # (which models/skills the caller sees on GET /api/models and the
-#       # GET /api/skills[.../custom, /{name}] skill routes); skill
-#       # management endpoints (install/edit/export) stay admin-gated.
+#       # `models` / `skills` govern per-caller listing/detail visibility.
+#       # `routes` separately governs per-user custom skill lifecycle actions
+#       # through skills:manage; it never grants public/integration/global or
+#       # other users' skill management. Wildcard and unrestricted route grants
+#       # include newly introduced targets, so explicitly deny skills:manage to
+#       # keep lifecycle management admin-only after an upgrade.
 #       #
 #       # Plugin resources: `plugin_actions` gates invoking a registered
 #       # backend action (POST /api/plugins/{ns}/actions/{name}), and
@@ -3740,7 +3748,10 @@ run_ownership:
 #           plugin_management: {allow: "*"}
 #         user:
 #           tools: {allow: "*", deny: ["update_agent"]}
-#           routes: {allow: "*"}
+#           # To grant a custom role, append skills:manage to its existing
+#           # routes.allow list (or remove an existing deny); do not replace the
+#           # role's other route grants with a manage-only list.
+#           routes: {allow: "*", deny: ["skills:manage"]}
 #           models: {allow: "*"}
 #           sandbox: {allow: "*"}
 #           skills: {allow: "*"}

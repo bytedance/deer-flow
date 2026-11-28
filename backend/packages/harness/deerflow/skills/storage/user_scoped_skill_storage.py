@@ -409,6 +409,10 @@ class UserScopedSkillStorage(LocalSkillStorage):
             await _scan_skill_archive_contents_or_raise(skill_dir, skill_name, app_config=self._app_config)
 
             await asyncio.to_thread(self._commit_skill_install, skill_dir, skill_name, custom_dir, target)
+            skills = await asyncio.to_thread(self.load_skills)
+            enabled = next((skill.enabled for skill in skills if skill.name == skill_name and skill.category == SkillCategory.CUSTOM), None)
+            if enabled is None:
+                raise FileNotFoundError(f"Skill '{skill_name}' was deleted concurrently after installation")
             logger.info("Skill %r installed to %s for user %s", skill_name, target, self._user_id)
         finally:
             try:
@@ -423,6 +427,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
             "success": True,
             "skill_name": skill_name,
             "message": f"Skill '{skill_name}' installed successfully for user '{self._user_id}'",
+            "enabled": enabled,
         }
 
     # ------------------------------------------------------------------

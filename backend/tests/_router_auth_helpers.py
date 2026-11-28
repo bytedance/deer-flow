@@ -21,10 +21,11 @@ This module provides two surfaces:
    Use from direct-call tests that previously imported the route
    function and called it positionally.
 
-Both helpers are deliberately permissive: they never deny a request.
-Tests that want to verify the *auth boundary itself* (e.g.
-``test_auth_middleware``, ``test_auth_type_system``) build their own
-apps with the real middleware — those should not use this module.
+The auth middleware mirrors disabled-authorization role defaults; tests can
+monkeypatch its grants for explicit denials. ``call_unwrapped`` deliberately
+bypasses decorators. Tests that verify the *auth boundary itself* (e.g.
+``test_auth_middleware``, ``test_auth_type_system``) build their own apps with
+the real middleware — those should not use this module.
 """
 
 from __future__ import annotations
@@ -38,23 +39,20 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from app.gateway.auth.models import User
-from app.gateway.authz import AuthContext, Permissions
+from app.gateway.authz import _ALL_PERMISSIONS, _DISABLED_AUTHORIZATION_ADMIN_ONLY, AuthContext
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
-# Default permission set granted to the stub user. Mirrors `_ALL_PERMISSIONS`
-# in authz.py — kept inline so the tests don't import a private symbol.
-_STUB_PERMISSIONS: list[str] = [
-    Permissions.THREADS_READ,
-    Permissions.THREADS_WRITE,
-    Permissions.THREADS_DELETE,
-    Permissions.RUNS_CREATE,
-    Permissions.RUNS_READ,
-    Permissions.RUNS_CANCEL,
-    Permissions.MEMORY_READ,
-    Permissions.MEMORY_WRITE,
-    Permissions.AGENTS_READ,
-    Permissions.AGENTS_WRITE,
-]
+# Keep the legacy stub grants complete without maintaining a second mirror of
+# the production permission registry. Some tests monkeypatch this list to
+# exercise explicit denials.
+_STUB_PERMISSIONS: list[str] = list(_ALL_PERMISSIONS)
+
+
+def _permissions_for_user(user: User) -> list[str]:
+    """Mirror disabled-authorization defaults instead of granting every role all permissions."""
+    if getattr(user, "system_role", None) == "admin":
+        return list(_STUB_PERMISSIONS)
+    return [permission for permission in _STUB_PERMISSIONS if permission not in _DISABLED_AUTHORIZATION_ADMIN_ONLY]
 
 
 def _make_stub_user() -> User:
@@ -75,15 +73,23 @@ class _StubAuthMiddleware(BaseHTTPMiddleware):
     authenticated context and skips its own re-authentication path.
     """
 
-    def __init__(self, app: ASGIApp, user_factory: Callable[[], User], bind_current_user: bool = False) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        user_factory: Callable[[], User],
+        bind_current_user: bool = False,
+        permissions: list[str] | None = None,
+    ) -> None:
         super().__init__(app)
         self._user_factory = user_factory
         self._bind_current_user = bind_current_user
+        self._permissions = permissions
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         user = self._user_factory()
         request.state.user = user
-        request.state.auth = AuthContext(user=user, permissions=list(_STUB_PERMISSIONS))
+        permissions = _permissions_for_user(user) if self._permissions is None else list(self._permissions)
+        request.state.auth = AuthContext(user=user, permissions=permissions)
         if not self._bind_current_user:
             return await call_next(request)
         token = set_current_user(user)
@@ -98,6 +104,7 @@ def make_authed_test_app(
     user_factory: Callable[[], User] | None = None,
     owner_check_passes: bool = True,
     bind_current_user: bool = False,
+    permissions: list[str] | None = None,
 ) -> FastAPI:
     """Build a FastAPI test app with stub auth + permissive thread_store.
 
@@ -111,6 +118,9 @@ def make_authed_test_app(
             permission failures surface correctly.
         bind_current_user: Also bind the stub user to the request's user
             context when a test needs to assert owner-scoped behavior.
+        permissions: Exact route grants for an authorized-role test. When
+            omitted, derive grants from the user's role and the disabled-
+            authorization defaults.
 
     Returns:
         A ``FastAPI`` app with the stub middleware installed and
@@ -119,7 +129,7 @@ def make_authed_test_app(
     """
     factory = user_factory or _make_stub_user
     app = FastAPI()
-    app.add_middleware(_StubAuthMiddleware, user_factory=factory, bind_current_user=bind_current_user)
+    app.add_middleware(_StubAuthMiddleware, user_factory=factory, bind_current_user=bind_current_user, permissions=permissions)
 
     repo = MagicMock()
     repo.check_access = AsyncMock(return_value=owner_check_passes)

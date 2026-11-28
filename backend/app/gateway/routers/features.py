@@ -12,11 +12,13 @@ from typing import Literal
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
+from app.gateway.authz import Permissions, get_auth_context
 from app.gateway.browser_capability import browser_capability
 from app.gateway.conversation_access import conversation_references_enabled
 from app.gateway.deps import get_config
 from app.gateway.routers.thread_activity import thread_activity_available
 from app.gateway.run_models import MAX_CONVERSATION_REFERENCES
+from app.gateway.skill_source import source_install_available
 from deerflow.config.app_config import AppConfig
 from deerflow.knowledge.providers import get_knowledge_capabilities
 from deerflow.scheduler.runtime import scheduler_tools_enabled
@@ -90,6 +92,14 @@ class ToolApprovalFeature(BaseModel):
     allowed_modes: list[Literal["ask", "auto", "full"]] = Field(default_factory=list)
 
 
+class SkillManagementFeature(BaseModel):
+    """Per-user custom skill lifecycle and source-install capabilities."""
+
+    lifecycle_permissions: bool = Field(default=True, description="Whether skill lifecycle routes use skills:manage")
+    can_manage: bool = Field(..., description="Whether the current request may manage its own custom skills")
+    source_install_available: bool = Field(..., description="Whether this deployment has Vercel OIDC source-install credentials")
+
+
 class VoiceInputFeature(BaseModel):
     enabled: bool = False
     max_audio_bytes: int = 0
@@ -107,6 +117,7 @@ class FeaturesResponse(BaseModel):
     knowledge_base: KnowledgeBaseFeature
     scheduled_tasks: ScheduledTasksFeature
     thread_activity: ThreadActivityFeature
+    skill_management: SkillManagementFeature
     run_inputs: bool = False
     voice_input: VoiceInputFeature = Field(default_factory=VoiceInputFeature)
     tool_approval: ToolApprovalFeature = Field(default_factory=ToolApprovalFeature)
@@ -124,6 +135,8 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
     approval = getattr(config, "hitl_approval", None)
     voice = getattr(config, "voice_input", None)
     subagent_batch_worker_running = bool(getattr(request.app.state, "subagent_batches_available", False))
+    auth = get_auth_context(request)
+    skill_management_enabled = getattr(getattr(config, "skills", None), "management_enabled", False)
     return FeaturesResponse(
         voice_input=VoiceInputFeature(enabled=True, max_audio_bytes=voice.max_audio_bytes, max_duration_seconds=voice.max_duration_seconds) if voice is not None else VoiceInputFeature(),
         tool_approval=ToolApprovalFeature(enabled=approval.enabled, default_mode=approval.default_mode, allowed_modes=approval.allowed_modes) if approval is not None else ToolApprovalFeature(),
@@ -156,6 +169,10 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
         scheduled_tasks=_scheduled_tasks_feature(request, config),
         # Startup-scoped: the read repository exists only with SQL persistence.
         thread_activity=ThreadActivityFeature(available=thread_activity_available(request.app.state)),
+        skill_management=SkillManagementFeature(
+            can_manage=bool(skill_management_enabled and auth and Permissions.SKILLS_MANAGE in auth.permissions),
+            source_install_available=bool(skill_management_enabled and source_install_available()),
+        ),
     )
 
 

@@ -5,6 +5,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.gateway.authz import AuthContext, Permissions
 from app.gateway.deps import get_config
 from app.gateway.routers import features
 
@@ -20,6 +21,7 @@ def isolated_worker_env(monkeypatch):
     """
     monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
     monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    monkeypatch.delenv("VERCEL_OIDC_TOKEN", raising=False)
 
 
 def _app_with_config(
@@ -38,8 +40,17 @@ def _app_with_config(
     scheduler_running: bool = False,
     scheduler_tool_enabled: bool = False,
     channel_connections_enabled: bool | None = None,
+    permissions: list[str] | None = None,
+    skill_management_enabled: bool = True,
 ) -> FastAPI:
     app = FastAPI()
+    if permissions is not None:
+
+        @app.middleware("http")
+        async def stamp_auth(request, call_next):
+            request.state.auth = AuthContext(user=SimpleNamespace(id="feature-user", system_role="user"), permissions=permissions)
+            return await call_next(request)
+
     app.state.scheduled_task_repo = object() if scheduled_task_repo_available else None
     app.state.scheduled_task_service = SimpleNamespace(is_running=scheduler_running) if scheduled_task_repo_available else None
     app.state.mcp_tasks_available = mcp_tasks_available
@@ -55,6 +66,7 @@ def _app_with_config(
         tools.append(SimpleNamespace(name="read_conversation", use="deerflow.tools.conversation:read_conversation", model_extra={}))
     fake_config = SimpleNamespace(
         agents_api=SimpleNamespace(enabled=agents_api_enabled),
+        skills=SimpleNamespace(management_enabled=skill_management_enabled),
         tools=tools,
         subagent_runtime=SimpleNamespace(max_running=3),
         knowledge_base=SimpleNamespace(
@@ -94,6 +106,7 @@ def test_features_reports_agents_api_enabled() -> None:
         },
         "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60, "group_notifications": False},
         "thread_activity": {"available": False},
+        "skill_management": {"lifecycle_permissions": True, "can_manage": False, "source_install_available": False},
     }
 
 
@@ -120,7 +133,56 @@ def test_features_reports_agents_api_disabled() -> None:
         },
         "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60, "group_notifications": False},
         "thread_activity": {"available": False},
+        "skill_management": {"lifecycle_permissions": True, "can_manage": False, "source_install_available": False},
     }
+
+
+@pytest.mark.parametrize(
+    ("permissions", "can_manage"),
+    [
+        ([Permissions.SKILLS_MANAGE], True),
+        ([Permissions.THREADS_READ], False),
+        ([], False),
+    ],
+)
+def test_features_reports_skill_management_from_current_request_permissions(permissions, can_manage) -> None:
+    with TestClient(_app_with_config(agents_api_enabled=True, permissions=permissions)) as client:
+        response = client.get("/api/features")
+
+    assert response.status_code == 200
+    assert response.json()["skill_management"] == {
+        "lifecycle_permissions": True,
+        "can_manage": can_manage,
+        "source_install_available": False,
+    }
+
+
+def test_features_reevaluates_source_install_availability_per_request(monkeypatch) -> None:
+    app = _app_with_config(agents_api_enabled=True, permissions=[Permissions.SKILLS_MANAGE])
+    with TestClient(app) as client:
+        monkeypatch.setenv("VERCEL_OIDC_TOKEN", "first-token")
+        assert client.get("/api/features").json()["skill_management"]["source_install_available"] is True
+
+        monkeypatch.setenv("VERCEL_OIDC_TOKEN", "  ")
+        assert client.get("/api/features").json()["skill_management"]["source_install_available"] is False
+
+        monkeypatch.setenv("VERCEL_OIDC_TOKEN", "rotated-token")
+        assert client.get("/api/features").json()["skill_management"]["source_install_available"] is True
+
+
+def test_features_disables_skill_management_deployment_wide(monkeypatch) -> None:
+    monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")
+    app = _app_with_config(
+        agents_api_enabled=True,
+        permissions=[Permissions.SKILLS_MANAGE],
+        skill_management_enabled=False,
+    )
+
+    with TestClient(app) as client:
+        capability = client.get("/api/features").json()["skill_management"]
+
+    assert capability["can_manage"] is False
+    assert capability["source_install_available"] is False
 
 
 def test_features_reports_conversation_references_when_the_tool_is_configured() -> None:

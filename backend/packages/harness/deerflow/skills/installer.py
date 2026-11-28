@@ -115,6 +115,8 @@ def is_unsafe_zip_member(info: zipfile.ZipInfo) -> bool:
     name = info.filename
     if not name:
         return False
+    if "\x00" in name:
+        return True
     normalized = name.replace("\\", "/")
     if normalized.startswith("/"):
         return True
@@ -142,22 +144,40 @@ def should_ignore_archive_entry(path: Path) -> bool:
 
 
 def resolve_skill_dir_from_archive(temp_path: Path) -> Path:
-    """Locate the skill root directory from extracted archive contents.
-
-    Filters out macOS metadata (__MACOSX) and dotfiles (.DS_Store).
-
-    Returns:
-        Path to the skill directory.
-
-    Raises:
-        ValueError: If the archive is empty after filtering.
-    """
+    """Locate the single skill root and reject ambiguous nested definitions."""
     items = [p for p in temp_path.iterdir() if not should_ignore_archive_entry(p)]
     if not items:
         raise ValueError("Skill archive is empty")
-    if len(items) == 1 and items[0].is_dir():
-        return items[0]
-    return temp_path
+    skill_dir = items[0] if len(items) == 1 and items[0].is_dir() else temp_path
+    for skill_md in temp_path.rglob("SKILL.md"):
+        if not skill_md.is_relative_to(skill_dir):
+            continue
+        if skill_md.parent != skill_dir:
+            relative = skill_md.relative_to(skill_dir).as_posix()
+            raise SkillSecurityScanError(f"Security scan failed for skill archive: nested SKILL.md is not allowed at {relative}")
+    return skill_dir
+
+
+def resolve_and_validate_skill_dir(temp_path: Path) -> tuple[Path, str, str]:
+    """Apply the installer's shared root and frontmatter rules to an extracted tree."""
+    from deerflow.skills.frontmatter import split_skill_markdown
+    from deerflow.skills.validation import _validate_skill_frontmatter
+
+    skill_dir = resolve_skill_dir_from_archive(temp_path)
+    is_valid, message, skill_name = _validate_skill_frontmatter(skill_dir)
+    if not is_valid:
+        raise ValueError(f"Invalid skill: {message}")
+    if not skill_name or "/" in skill_name or "\\" in skill_name or ".." in skill_name:
+        raise ValueError(f"Invalid skill name: {skill_name}")
+    reason = windows_incompatible_segment(skill_name)
+    if reason is not None:
+        raise ValueError(f"Invalid skill name: {skill_name} (not portable to Windows: {reason})")
+
+    content = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+    parts, error = split_skill_markdown(content)
+    if error or parts is None or not isinstance(parts.metadata.get("description"), str):
+        raise ValueError(f"Invalid skill: {error or 'Description must be a string'}")
+    return skill_dir, skill_name, parts.metadata["description"].strip()
 
 
 def safe_extract_skill_archive(

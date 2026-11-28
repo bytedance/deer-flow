@@ -99,7 +99,7 @@ export default function SkillExportDialog({
     error instanceof SkillExportRequestError
       ? ((
           {
-            403: text.installAdminRequired,
+            403: text.skillManageRequired,
             404: text.exportNotFound,
             409: text.exportChanged,
             413: text.exportLimit,

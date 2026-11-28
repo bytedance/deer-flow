@@ -1,7 +1,7 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 
 const mocks = rs.hoisted(() => ({
@@ -19,6 +19,7 @@ const mocks = rs.hoisted(() => ({
     error: undefined as unknown,
   },
 }));
+const skillManagementState = rs.hoisted(() => ({ canManage: false }));
 
 rs.mock("@/core/artifacts/hooks", () => ({
   useArtifactContent: () => mocks.artifactContent,
@@ -51,6 +52,9 @@ rs.mock("@/components/workspace/artifacts/context", () => ({
 
 rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: () => ({ user: null }),
+}));
+rs.mock("@/core/skills/hooks", () => ({
+  useSkillManagement: () => skillManagementState,
 }));
 
 // Inspect the source passed to the editor without bundling CodeMirror.
@@ -98,6 +102,7 @@ beforeEach(() => {
   mocks.messages = [];
   mocks.artifactContent.content = undefined;
   mocks.artifactContent.sha256 = undefined;
+  skillManagementState.canManage = false;
 });
 
 describe("ArtifactFileDetail leading tabular write results", () => {
@@ -218,4 +223,17 @@ describe("ArtifactFileDetail malformed write-file URLs", () => {
       expect(() => renderDetail(filepath)).not.toThrow();
     },
   );
+});
+
+describe("ArtifactFileDetail skill installation", () => {
+  it("shows .skill installation with the manage capability", () => {
+    skillManagementState.canManage = true;
+    renderDetail("/mnt/user-data/outputs/demo.skill");
+    expect(screen.getByRole("button", { name: "Install" })).toBeTruthy();
+  });
+
+  it("hides .skill installation when manage is denied", () => {
+    renderDetail("/mnt/user-data/outputs/demo.skill");
+    expect(screen.queryByRole("button", { name: "Install" })).toBeNull();
+  });
 });

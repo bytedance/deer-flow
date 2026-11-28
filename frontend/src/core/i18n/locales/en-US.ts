@@ -2784,14 +2784,78 @@ export const enUS: Translations = {
       emptyDescription:
         "Put your agent skill folders under the `/skills/custom` folder under the root folder of DeerFlow.",
       emptyButton: "Create Your First Skill",
-      adminRequired: "Admin privileges are required to manage agent skills.",
-      installAdminRequired:
-        "Admin privileges are required to install agent skills.",
-      installFromFile: "Install .skill",
+      skillManageRequired:
+        "You need the skills:manage permission to manage your custom skills.",
+      installSkill: "Install skill",
+      installFromSource: "From source",
+      installFromFile: "From .skill file",
       installingArchive: "Installing...",
       invalidArchive: "Choose a file with the .skill extension.",
       archiveTooLarge: "The skill archive must be 100 MiB or smaller.",
-      installFailed: "Failed to install the skill archive.",
+      installFailed: "Failed to install the skill.",
+      skillSecurityScanFailed:
+        "Security checks blocked the installation. Review the findings below.",
+      sourceDialogTitle: "Install skill from source",
+      sourceDialogDescription:
+        "Enter an owner/repo@skill source from skills.sh, inspect its snapshot, then confirm installation.",
+      sourceLabel: "Skill source",
+      sourcePlaceholder: "owner/repo@skill",
+      sourceInspect: "Preview skill",
+      sourceInspecting: "Inspecting source…",
+      sourceFiles: "Files",
+      sourceSize: "Total size",
+      sourceDigest: "Snapshot digest",
+      sourceUpstreamHash: "Upstream hash",
+      sourceImmediateEffect:
+        "Installing enables this custom skill immediately for your subsequent agent runs.",
+      sourceFinalScanNotice:
+        "This preview passes deterministic compatibility checks. Final content scanning runs when you install.",
+      sourceInstall: "Install skill",
+      sourceInstalling: "Installing skill…",
+      sourceBack: "Back",
+      sourceRetry: "Edit source",
+      sourceErrorTitle: "The skill could not be installed",
+      sourceInvalid:
+        "Enter one valid owner/repo@skill source. URLs, local paths, and private Git sources are not supported.",
+      sourceNotConfigured:
+        "This deployment does not have skills.sh source installation. Use a .skill file instead.",
+      sourceAuthFailed:
+        "skills.sh rejected the deployment credential. Ask the deployment maintainer to check its Vercel OIDC credential and validity.",
+      sourceUnavailable:
+        "skills.sh is temporarily unavailable or timed out. Try again later.",
+      sourceRateLimited: (retryAfter: string | null) =>
+        retryAfter
+          ? `The source request was rate limited. Retry after ${/^\d+$/.test(retryAfter) ? `${retryAfter} seconds` : retryAfter}.`
+          : "The source request was rate limited. Try again later.",
+      sourceNotFound: "The requested skill source does not exist.",
+      sourceSnapshotUnusable:
+        "The source snapshot is not a valid DeerFlow skill. Review the reason below or install a local .skill file instead.",
+      sourceChanged:
+        "The source changed after the preview. Inspect it again before installing.",
+      sourceRequestFailed: "The source request failed. Try again.",
+      sourceSuccessTitle: "Skill installed",
+      sourceSuccessDescription:
+        "The custom skill is enabled and takes effect immediately in your subsequent agent runs.",
+      sourceSuccessDisabledDescription:
+        "The custom skill remains disabled from your previous setting. Enable it to use it in subsequent agent runs.",
+      sourceVisibilityNotice:
+        "If your visibility policy filters this skill, it is installed but may not appear in My skills.",
+      sourceEnabled: "Skill enabled",
+      skillContent: "SKILL.md",
+      skillContentLoading: "Loading skill content…",
+      editSkill: "Edit skill",
+      saveSkill: "Save changes",
+      cancelEdit: "Cancel",
+      deleteSkill: "Delete skill",
+      deleteConfirm:
+        "Delete this custom skill? This removes it from your custom skill space.",
+      confirmDelete: "Delete permanently",
+      skillSaved: "Skill changes saved.",
+      skillDeleted: "Custom skill deleted.",
+      skillLoadFailed: "Could not load this custom skill.",
+      skillSaveFailed: "Could not save this custom skill.",
+      skillDeleteFailed: "Could not delete this custom skill.",
+      retry: "Retry",
     },
     notification: {
       title: "Notification",

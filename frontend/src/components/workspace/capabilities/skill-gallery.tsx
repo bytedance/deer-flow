@@ -1,11 +1,6 @@
 "use client";
 
-import {
-  DownloadIcon,
-  LoaderIcon,
-  SparklesIcon,
-  UploadIcon,
-} from "lucide-react";
+import { SparklesIcon } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { type ChangeEvent, useMemo, useRef, useState } from "react";
@@ -38,6 +33,7 @@ import {
 } from "@/core/skills/api";
 import {
   useEnableSkill,
+  useSkillManagement,
   useSkills,
   useUploadSkillArchive,
 } from "@/core/skills/hooks";
@@ -45,8 +41,11 @@ import type { Skill } from "@/core/skills/type";
 import { env } from "@/env";
 
 import { CapabilityCard, CapabilityIcon } from "./capability-card";
+import { CustomSkillDetails } from "./custom-skill-details";
+import { InstallSkillMenu } from "./install-skill-menu";
 import { SkillDiagnostics } from "./skill-diagnostics";
 import { presentSkill } from "./skill-presentation";
+import { SkillSourceInstallDialog } from "./skill-source-install-dialog";
 
 const SkillExportDialog = dynamic(() => import("./skill-export-dialog"), {
   ssr: false,
@@ -56,8 +55,6 @@ export function SkillGallery({ query = "" }: { query?: string } = {}) {
   const { t } = useI18n();
   const { user } = useAuth();
   const { skills, isLoading, error } = useSkills();
-  const adminRequired =
-    error instanceof SkillRequestError && error.isAdminRequired;
   return (
     <div>
       {user?.system_role === "admin" &&
@@ -66,10 +63,6 @@ export function SkillGallery({ query = "" }: { query?: string } = {}) {
         )}
       {isLoading ? (
         <div className="text-muted-foreground text-sm">{t.common.loading}</div>
-      ) : adminRequired ? (
-        <div className="text-muted-foreground text-sm">
-          {t.settings.skills.adminRequired}
-        </div>
       ) : error ? (
         <div>
           {t.common.error} {error.message}
@@ -94,15 +87,16 @@ function SkillList({ skills, query }: { skills: Skill[]; query: string }) {
 
   const { user } = useAuth();
   const isAdmin = user?.system_role === "admin";
+  const { canManage, sourceInstallAvailable } = useSkillManagement();
   const [exportName, setExportName] = useState<string | null>(null);
+  const [sourceOpen, setSourceOpen] = useState(false);
   const [filter, setFilter] = useState<string>("public");
   const { mutate: enableSkill, isPending: isEnabling } = useEnableSkill();
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { mutateAsync: uploadSkillArchive, isPending: isUploading } =
     useUploadSkillArchive();
-  const isArchiveUploadDisabled =
-    isUploading || !isAdmin || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
+  const isArchiveUploadDisabled = isUploading || !canManage;
   const filteredSkills = useMemo(
     () =>
       skills.filter((skill) => {
@@ -145,8 +139,8 @@ function SkillList({ skills, query }: { skills: Skill[]; query: string }) {
         toast.error(result.message || t.settings.skills.installFailed);
       }
     } catch (error) {
-      if (error instanceof SkillRequestError && error.isAdminRequired) {
-        toast.error(t.settings.skills.installAdminRequired);
+      if (error instanceof SkillRequestError && error.status === 403) {
+        toast.error(t.settings.skills.skillManageRequired);
       } else if (error instanceof SkillRequestError && error.status === 413) {
         toast.error(t.settings.skills.archiveTooLarge);
       } else if (
@@ -169,17 +163,30 @@ function SkillList({ skills, query }: { skills: Skill[]; query: string }) {
       }
     }
   };
+  const installMenu = (
+    <InstallSkillMenu
+      canManage={canManage}
+      sourceInstallAvailable={sourceInstallAvailable}
+      isUploading={isUploading}
+      onSelectFile={() => fileInputRef.current?.click()}
+      onSelectSource={() => setSourceOpen(true)}
+    />
+  );
   return (
     <div className="flex w-full flex-col gap-4">
-      {exportName &&
-        isAdmin &&
-        env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
-          <SkillExportDialog
-            key={`${user.id}:${exportName}`}
-            name={exportName}
-            onClose={() => setExportName(null)}
-          />
-        )}
+      {exportName && canManage && (
+        <SkillExportDialog
+          key={`${user?.id ?? "current"}:${exportName}`}
+          name={exportName}
+          onClose={() => setExportName(null)}
+        />
+      )}
+      {sourceOpen && canManage && sourceInstallAvailable && (
+        <SkillSourceInstallDialog
+          onClose={() => setSourceOpen(false)}
+          onInstalled={() => setFilter("custom")}
+        />
+      )}
       <div>
         <h2 className="text-base font-semibold">
           {t.capabilities.availableSkills}
@@ -214,23 +221,7 @@ function SkillList({ skills, query }: { skills: Skill[]; query: string }) {
             className="sr-only"
             onChange={handleSkillArchive}
           />
-          {isAdmin && (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={isArchiveUploadDisabled}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              {isUploading ? (
-                <LoaderIcon className="size-4 animate-spin" />
-              ) : (
-                <UploadIcon className="size-4" />
-              )}
-              {isUploading
-                ? t.settings.skills.installingArchive
-                : t.settings.skills.installFromFile}
-            </Button>
-          )}
+          {installMenu}
           <Button size="sm" onClick={handleCreateSkill}>
             <SparklesIcon className="size-4" />
             {t.settings.skills.createSkill}
@@ -253,18 +244,7 @@ function SkillList({ skills, query }: { skills: Skill[]; query: string }) {
               {t.capabilities.communityDescription}
             </EmptyDescription>
           </EmptyHeader>
-          {isAdmin && (
-            <EmptyContent>
-              <Button
-                variant="outline"
-                disabled={isArchiveUploadDisabled}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <UploadIcon />
-                {t.settings.skills.installFromFile}
-              </Button>
-            </EmptyContent>
-          )}
+          {canManage && <EmptyContent>{installMenu}</EmptyContent>}
         </Empty>
       ) : filteredSkills.length === 0 ? (
         <EmptySkill onCreateSkill={handleCreateSkill} />
@@ -272,6 +252,10 @@ function SkillList({ skills, query }: { skills: Skill[]; query: string }) {
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {filteredSkills.map((skill) => {
             const presentation = presentSkill(skill, locale);
+            const canToggle =
+              env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
+              (skill.category === "custom" ? canManage : isAdmin);
+            const canViewDetails = skill.category !== "custom" || canManage;
             return (
               <CapabilityCard
                 key={skill.name}
@@ -299,32 +283,34 @@ function SkillList({ skills, query }: { skills: Skill[]; query: string }) {
                       : t.capabilities.disabled}
                   </>
                 }
-                onDetails={() => setSelectedSkill(skill)}
+                onDetails={
+                  canViewDetails ? () => setSelectedSkill(skill) : undefined
+                }
                 detailsLabel={`${t.capabilities.details} ${presentation.title}`}
               >
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 text-xs"
-                  onClick={() => setSelectedSkill(skill)}
-                >
-                  {t.capabilities.details}
-                </Button>
-                <Switch
-                  aria-label={`${t.capabilities.skillEnabled} ${skill.name}`}
-                  checked={skill.enabled}
-                  disabled={
-                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
-                    !isAdmin ||
-                    isEnabling
-                  }
-                  onCheckedChange={(enabled) =>
-                    enableSkill(
-                      { skillName: skill.name, enabled },
-                      { onError: (error) => toast.error(error.message) },
-                    )
-                  }
-                />
+                {canViewDetails && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 text-xs"
+                    onClick={() => setSelectedSkill(skill)}
+                  >
+                    {t.capabilities.details}
+                  </Button>
+                )}
+                {(skill.category !== "custom" || canManage) && (
+                  <Switch
+                    aria-label={`${t.capabilities.skillEnabled} ${skill.name}`}
+                    checked={skill.enabled}
+                    disabled={!canToggle || isEnabling}
+                    onCheckedChange={(enabled) =>
+                      enableSkill(
+                        { skillName: skill.name, enabled },
+                        { onError: (error) => toast.error(error.message) },
+                      )
+                    }
+                  />
+                )}
               </CapabilityCard>
             );
           })}
@@ -353,27 +339,23 @@ function SkillList({ skills, query }: { skills: Skill[]; query: string }) {
               <div className="text-muted-foreground text-sm leading-7 whitespace-pre-wrap">
                 {selectedSkill.description}
               </div>
-              <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
+              <div className="border-t pt-4">
                 <span className="text-muted-foreground text-xs">
                   {selectedSkill.license || sourceLabel(selectedSkill)}
                 </span>
-                <div className="flex gap-2">
-                  {isAdmin && selectedSkill.category === "custom" && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"}
-                      onClick={() => {
-                        setExportName(selectedSkill.name);
-                        setSelectedSkill(null);
-                      }}
-                    >
-                      <DownloadIcon className="size-4" />
-                      {t.settings.skills.exportSkill}
-                    </Button>
-                  )}
-                </div>
               </div>
+              {selectedSkill.category === "custom" && canManage && (
+                <CustomSkillDetails
+                  key={selectedSkill.name}
+                  skill={selectedSkill}
+                  onChanged={setSelectedSkill}
+                  onDeleted={() => setSelectedSkill(null)}
+                  onExport={() => {
+                    setExportName(selectedSkill.name);
+                    setSelectedSkill(null);
+                  }}
+                />
+              )}
             </>
           )}
         </DialogContent>

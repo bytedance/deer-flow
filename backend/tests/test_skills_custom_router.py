@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
+from app.gateway.authz import AuthContext
 from app.gateway.deps import get_config
 from app.gateway.routers import skills as skills_router
 from app.gateway.routers import uploads as uploads_router
@@ -35,6 +36,11 @@ def _make_member_user() -> User:
     from uuid import uuid4
 
     return User(email="member-test@example.com", password_hash="x", system_role="user", id=uuid4())
+
+
+def _direct_manage_request() -> SimpleNamespace:
+    user = _make_admin_user()
+    return SimpleNamespace(state=SimpleNamespace(user=user, auth=AuthContext(user=user, permissions=["skills:manage"])))
 
 
 def _skill_content(name: str, description: str = "Demo skill") -> str:
@@ -156,6 +162,114 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
         }
     ]
     assert refresh_calls == [("refresh", "default")]
+
+
+def test_install_returns_effective_enabled_state(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    (skills_root / "custom").mkdir(parents=True)
+    archive = _make_skill_archive(tmp_path, "archive-skill")
+
+    from deerflow.config.paths import Paths
+
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    storage = UserScopedSkillStorage("default", host_path=str(skills_root))
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: storage)
+    monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
+    monkeypatch.setattr(skills_router, "refresh_user_skills_system_prompt_cache_async", lambda user_id: _async_scan("allow", "ok"))
+    monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
+    app = _make_test_app(config)
+
+    with TestClient(app) as client:
+        request = {"thread_id": "thread-1", "path": "mnt/user-data/outputs/archive-skill.skill"}
+        first = client.post("/api/skills/install", json=request)
+        assert first.status_code == 200
+        assert first.json()["enabled"] is True
+        assert client.delete("/api/skills/custom/archive-skill").status_code == 200
+
+        # No per-user override exists yet: the operator's global disable must
+        # still determine both the install response and the skill detail.
+        from unittest.mock import patch
+
+        global_config = SimpleNamespace(skills={}, is_skill_enabled=lambda name, _category: name != "archive-skill")
+        with patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=global_config):
+            globally_disabled = client.post("/api/skills/install", json=request)
+            assert globally_disabled.status_code == 200
+            assert globally_disabled.json()["enabled"] is False
+            global_detail = client.get("/api/skills/custom/archive-skill")
+            assert global_detail.status_code == 200
+            assert global_detail.json()["enabled"] is False
+
+        assert client.put("/api/skills/archive-skill", json={"enabled": False}).status_code == 200
+        assert client.delete("/api/skills/custom/archive-skill").status_code == 200
+
+        reinstalled = client.post("/api/skills/install", json=request)
+        assert reinstalled.status_code == 200
+        assert reinstalled.json()["enabled"] is False
+        detail = client.get("/api/skills/custom/archive-skill")
+        assert detail.status_code == 200
+        assert detail.json()["enabled"] is False
+
+
+def test_delete_after_install_publication_has_defined_outcome(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    (skills_root / "custom").mkdir(parents=True)
+    archive = _make_skill_archive(tmp_path, "archive-skill")
+
+    from deerflow.config.paths import Paths
+
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    storage = UserScopedSkillStorage("default", host_path=str(skills_root))
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: storage)
+    monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
+    monkeypatch.setattr(skills_router, "refresh_user_skills_system_prompt_cache_async", lambda user_id: _async_scan("allow", "ok"))
+    monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
+
+    published = threading.Event()
+    delete_done = threading.Event()
+    original_commit = storage._commit_skill_install
+
+    def _commit_then_wait_for_delete(*args):
+        original_commit(*args)
+        published.set()
+        assert delete_done.wait(5)
+
+    monkeypatch.setattr(storage, "_commit_skill_install", _commit_then_wait_for_delete)
+    app = _make_test_app(config)
+    install_responses: list[httpx.Response] = []
+
+    with TestClient(app) as install_client, TestClient(app) as delete_client:
+
+        def _install():
+            install_responses.append(install_client.post("/api/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/archive-skill.skill"}))
+
+        install_thread = threading.Thread(target=_install)
+        install_thread.start()
+        try:
+            assert published.wait(5)
+            delete_response = delete_client.delete("/api/skills/custom/archive-skill")
+            assert delete_response.status_code == 200
+        finally:
+            delete_done.set()
+            install_thread.join(10)
+
+    assert not install_thread.is_alive()
+    assert len(install_responses) == 1
+    assert install_responses[0].status_code == 404
+    assert "deleted concurrently" in install_responses[0].json()["detail"]
 
 
 @pytest.mark.parametrize("endpoint", ["thread", "upload"])
@@ -1714,7 +1828,7 @@ async def test_update_custom_skill_drains_mutation_tail_across_cancellation(monk
 
     monkeypatch.setattr(UserScopedSkillStorage, "write_custom_skill", _blocked_write)
 
-    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    request = _direct_manage_request()
     body = skills_router.CustomSkillUpdateRequest(content=_skill_content("demo-skill", "Edited skill"))
 
     task = asyncio.create_task(skills_router.update_custom_skill("demo-skill", body, request, config))
@@ -1784,7 +1898,7 @@ async def test_delete_custom_skill_drains_mutation_tail_across_cancellation(monk
 
     monkeypatch.setattr(UserScopedSkillStorage, "delete_custom_skill", _blocked_delete)
 
-    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    request = _direct_manage_request()
 
     task = asyncio.create_task(skills_router.delete_custom_skill("demo-skill", request, config))
     try:
@@ -1853,7 +1967,7 @@ async def test_update_custom_skill_logs_failed_drained_mutation_after_cancellati
 
     monkeypatch.setattr(UserScopedSkillStorage, "write_custom_skill", _failing_write)
 
-    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    request = _direct_manage_request()
     body = skills_router.CustomSkillUpdateRequest(content=_skill_content("demo-skill", "Edited skill"))
 
     task = asyncio.create_task(skills_router.update_custom_skill("demo-skill", body, request, config))
@@ -1929,7 +2043,7 @@ async def test_update_skill_drains_state_write_and_cache_refresh_across_cancella
     monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
     monkeypatch.setattr(skills_router, "refresh_user_skills_system_prompt_cache_async", _refresh)
 
-    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    request = _direct_manage_request()
     body = skills_router.SkillUpdateRequest(enabled=False)
 
     task = asyncio.create_task(skills_router.update_skill("demo-skill", body, request, SimpleNamespace()))

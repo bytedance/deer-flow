@@ -22,6 +22,7 @@ from uuid import UUID
 import pytest
 from fastapi import Request
 
+from app.gateway.authz import AuthContext
 from app.gateway.routers.skills import _get_user_skill_storage, get_custom_skill_history
 
 pytestmark = pytest.mark.asyncio
@@ -38,11 +39,10 @@ def _config(skills_root: Path) -> SimpleNamespace:
 
 
 def _admin_request() -> Request:
-    # The route is admin-only. ``AuthMiddleware`` normally stamps
-    # ``request.state.user``; supply it directly here, as
-    # ``test_channel_runtime_config_store`` does for the same reason.
+    # Direct calls need the lifecycle grant normally stamped by middleware.
     user = SimpleNamespace(id=UUID("11111111-2222-3333-4444-555555555555"), system_role="admin")
-    return Request({"type": "http", "headers": [], "state": {"user": user}})
+    auth = AuthContext(user=user, permissions=["skills:manage"])
+    return Request({"type": "http", "headers": [], "state": {"user": user, "auth": auth}})
 
 
 async def test_get_custom_skill_history_does_not_block_event_loop(tmp_path: Path) -> None:
