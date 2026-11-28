@@ -86,11 +86,36 @@ def _list_assistants() -> list[AssistantResponse]:
     return assistants
 
 
+def _json_value_matches(stored: Any, requested: Any) -> bool:
+    """Compare metadata values with JSON semantics rather than Python's ``==``.
+
+    ``True == 1`` in Python, but ``true`` and ``1`` are different JSON values, so
+    a boolean filter only matches a stored boolean (and vice versa). Every other
+    pair compares with ``==``, which already makes ``1`` and ``1.0`` -- the same
+    JSON number written two ways -- match.
+    """
+    if isinstance(stored, bool) or isinstance(requested, bool):
+        return stored is requested
+    return stored == requested
+
+
+def _matches_metadata(assistant: AssistantResponse, metadata: dict[str, Any]) -> bool:
+    """Return whether every requested metadata key/value pair matches exactly.
+
+    Key presence is required: a key that is missing from the assistant's
+    metadata never matches, not even a ``None`` filter value, and a boolean
+    filter does not match the number ``1``.
+    """
+    return all(key in assistant.metadata and _json_value_matches(assistant.metadata[key], value) for key, value in metadata.items())
+
+
 @router.post("/search", response_model=list[AssistantResponse])
 async def search_assistants(body: AssistantSearchRequest | None = None) -> list[AssistantResponse]:
     """Search assistants.
 
-    Returns all registered assistants (lead_agent + custom agents from config).
+    Returns registered assistants (lead_agent + custom agents from config),
+    filtered by ``graph_id``, ``name`` (case-insensitive substring) and
+    ``metadata`` (exact match on every key/value pair).
     """
     # _list_assistants reads custom agents through the sync agent store (file IO
     # or a DB round trip), so keep it off the event loop.
@@ -100,6 +125,8 @@ async def search_assistants(body: AssistantSearchRequest | None = None) -> list[
         assistants = [a for a in assistants if a.graph_id == body.graph_id]
     if body and body.name:
         assistants = [a for a in assistants if body.name.lower() in a.name.lower()]
+    if body and body.metadata:
+        assistants = [a for a in assistants if _matches_metadata(a, body.metadata)]
 
     offset = body.offset if body else 0
     limit = body.limit if body else 10
