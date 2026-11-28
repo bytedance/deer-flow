@@ -15,13 +15,16 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
 from langchain_core.messages import ToolMessage
 
+from deerflow.agents.middlewares.tool_transform_meta import TOOL_OUTPUT_BLOB_KEY, read_tool_transforms
 from deerflow.agents.thread_state import ArtifactEntry
+from deerflow.utils.messages import INFERRED_PLUGIN_ERROR_FILE_REFS, LEGACY_PLUGIN_FILE_REFS_KEY, get_tool_message_status
 
 _HANDLE_PREFIX = "art_"
 _HANDLE_LENGTH = 8
@@ -269,6 +272,14 @@ def _collect_structured_refs(value: Any, found: list[tuple[str, str]]) -> bool:
     return True
 
 
+def _iter_resource_links(artifact: dict) -> Iterator[tuple[str, dict]]:
+    links = artifact.get("resource_links")
+    if isinstance(links, list):
+        for link in links:
+            if isinstance(link, dict) and isinstance(uri := link.get("uri"), str) and _is_referenceable_url(uri):
+                yield uri, link
+
+
 def _serialize_bounded_data(value: Any) -> str | None:
     """Keep complete JSON only when its shape and UTF-8 size fit the budget.
 
@@ -319,6 +330,22 @@ def _serialize_bounded_data(value: Any) -> str | None:
 
 def _display_name_for_ref(ref: str) -> str:
     return ref.replace("\\", "/").split("/")[-1] or ref
+
+
+def _externalized_output_path(result: ToolMessage) -> str | None:
+    prefix = f"{_SANDBOX_PATH_PREFIX}outputs/"
+    for transform in reversed(read_tool_transforms(result)):
+        if transform["kind"] != "externalized" or transform.get("by") != "ToolOutputBudgetMiddleware":
+            continue
+        path = transform.get("externalized_path")
+        if not isinstance(path, str) or not path.startswith(prefix) or not _is_referenceable_url(path):
+            continue
+        if "\\" in path or "\x00" in path or _REF_LINE_BOUNDARY_PATTERN.search(path):
+            continue
+        parts = path.removeprefix(prefix).split("/")
+        if len(parts) == 2 and all(part not in {"", ".", ".."} for part in parts):
+            return path
+    return None
 
 
 class _EntrySink:
@@ -378,13 +405,18 @@ def extract_artifacts_from_result(
        conservatively for sandbox paths and remote file URLs (gated by
        ``detect_refs_in_text``).
 
-    Error results produce no entries. Every distinct reference from one
-    result gets its own handle via a sequential ordinal; the same ``real_ref``
+    Error results can register a saved diagnostic and explicit file references
+    from legacy plugin artifacts. Every distinct reference gets its own handle
+    via a sequential ordinal; the same ``real_ref``
     surfaced by several sources (e.g. a ``resource_links`` entry and the
     placeholder text the conversion layer wrote for the same link) is kept
     only from the first source, so one resource never gets two handles.
     """
-    if result.status == "error":
+    failed = get_tool_message_status(result) == "error"
+    kwargs = result.additional_kwargs or {}
+    legacy_files = failed and result.status != "error" and kwargs.get(LEGACY_PLUGIN_FILE_REFS_KEY) == INFERRED_PLUGIN_ERROR_FILE_REFS
+    diagnostic_path = _externalized_output_path(result) if failed else None
+    if failed and diagnostic_path is None and not legacy_files:
         return []
 
     now = _utc_now_iso()
@@ -393,6 +425,16 @@ def extract_artifacts_from_result(
     sink = _EntrySink(thread_id=thread_id, tool_call_id=tool_call_id, call_index=call_index, created_at=now, tool_name=tool_name, occurrence_id=result.id)
     entries: list[ArtifactEntry] = []
     seen_refs: set[str] = set()
+
+    if diagnostic_path is not None:
+        entry = sink.add(artifact_type="file", display_name=_display_name_for_ref(diagnostic_path), real_ref=diagnostic_path)
+        blob = kwargs.get(TOOL_OUTPUT_BLOB_KEY)
+        if isinstance(blob, dict) and blob.get("virtual_path") == diagnostic_path:
+            entry[TOOL_OUTPUT_BLOB_KEY] = blob
+        entries.append(entry)
+        if not legacy_files:
+            return entries
+        seen_refs.add(diagnostic_path)
 
     def _add_unique(**fields: Any) -> None:
         # Several sources can surface the same ref for one result — e.g. the
@@ -412,30 +454,28 @@ def extract_artifacts_from_result(
             if _collect_structured_refs(structured, found):
                 for key, value in found:
                     is_task = key in _STRUCTURED_TASK_KEYS
+                    if failed and is_task:
+                        continue
                     if not (_is_referenceable_task_id(value) if is_task else _is_referenceable_url(value)):
                         continue
                     _add_unique(artifact_type="task" if is_task else "file", display_name=_display_name_for_ref(value), real_ref=value)
-                if not entries and not any(value.startswith(("data:", "blob:")) for _, value in found):
+                if not failed and not entries and not any(value.startswith(("data:", "blob:")) for _, value in found):
                     encoded = _serialize_bounded_data(structured)
                     if encoded is not None:
                         _add_unique(artifact_type="data", display_name=f"{tool_name} structured result", real_ref=encoded)
 
-        resource_links = artifact.get("resource_links")
-        if isinstance(resource_links, list):
-            for link in resource_links:
-                if not isinstance(link, dict):
-                    continue
-                uri = link.get("uri")
-                if not isinstance(uri, str) or not _is_referenceable_url(uri):
-                    continue
-                name = link.get("name")
-                mime = link.get("mime_type")
-                _add_unique(
-                    artifact_type="file",
-                    display_name=name if isinstance(name, str) and name else _display_name_for_ref(uri),
-                    real_ref=uri,
-                    mime_type=mime if isinstance(mime, str) and mime else None,
-                )
+        for uri, link in _iter_resource_links(artifact):
+            name = link.get("name")
+            mime = link.get("mime_type")
+            _add_unique(
+                artifact_type="file",
+                display_name=name if isinstance(name, str) and name else _display_name_for_ref(uri),
+                real_ref=uri,
+                mime_type=mime if isinstance(mime, str) and mime else None,
+            )
+
+    if failed:
+        return entries
 
     content = result.content
     if isinstance(content, str):

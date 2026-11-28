@@ -32,7 +32,7 @@ import posixpath
 import re
 import shlex
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import replace as dc_replace
 from typing import TYPE_CHECKING, Any, NamedTuple, override
 
@@ -48,7 +48,7 @@ from deerflow.agents.middlewares.skill_usage import MAX_SKILL_SNAPSHOT_CHARS, SK
 from deerflow.agents.middlewares.tool_call_args import ToolCallOccurrence, pair_tool_call_results, rewrite_messages_tool_call_args
 from deerflow.agents.middlewares.tool_output_synopsis import render_tool_output_preview
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
-from deerflow.agents.middlewares.tool_transform_meta import append_tool_transform, tool_content_fingerprint
+from deerflow.agents.middlewares.tool_transform_meta import TOOL_OUTPUT_BLOB_KEY, append_tool_transform, tool_content_fingerprint
 from deerflow.community.ragflow.sources import budget_source_artifact
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.config.tool_output_config import ToolOutputConfig
@@ -68,9 +68,6 @@ logger = logging.getLogger(__name__)
 # ``read_file`` tool can read it back (issue #3416).
 _VIRTUAL_OUTPUTS_BASE = "/mnt/user-data/outputs"
 
-# Checkpointed capability added only by this middleware. The Gateway strips
-# client-supplied copies before they can enter state.
-TOOL_OUTPUT_BLOB_KEY = "deerflow_tool_output_blob"
 _TOOL_OUTPUT_BLOB_VERSION = 1
 _TOOL_OUTPUT_BLOB_KIND = "tool-output"
 _TOOL_OUTPUT_CONTENT_TYPE = "text/plain; charset=utf-8"
@@ -95,6 +92,7 @@ class _BudgetedContent(NamedTuple):
     replacement: str
     transform_kind: str
     blob_metadata: dict[str, Any] | None = None
+    externalized_path: str | None = None
 
 
 def _default_config() -> ToolOutputConfig:
@@ -541,8 +539,8 @@ def _budget_content(
 ) -> _BudgetedContent | None:
     """Apply budget to *content* and name the applied transform.
 
-    Returns the replacement, transform kind, and optional durable blob
-    metadata, or ``None`` if no change was needed.
+    Returns the replacement, transform kind, and any persisted output reference,
+    or ``None`` if no change was needed.
     """
     threshold = config.tool_overrides.get(tool_name, config.externalize_min_chars)
     if threshold <= 0 and config.fallback_max_chars <= 0:
@@ -652,7 +650,8 @@ def _budget_content(
                     tail_chars=config.preview_tail_chars,
                 ),
                 "externalized",
-                blob_metadata,
+                blob_metadata=blob_metadata,
+                externalized_path=virtual_path,
             )
 
         if durable_fallback_required:
@@ -745,9 +744,10 @@ def _patch_tool_message(
         source_sha256 = tool_content_fingerprint(msg.content)
     except (TypeError, ValueError, RecursionError):
         source_sha256 = None
-    if citation_result is not None and budgeted is not None and budgeted.transform_kind == "externalized":
-        append_tool_transform(new_kwargs, "externalized", by="ToolOutputBudgetMiddleware", source_sha256=source_sha256)
-    append_tool_transform(new_kwargs, transform_kind, by="ToolOutputBudgetMiddleware", source_sha256=source_sha256)
+    if budgeted is not None and budgeted.externalized_path is not None:
+        append_tool_transform(new_kwargs, "externalized", by="ToolOutputBudgetMiddleware", source_sha256=source_sha256, externalized_path=budgeted.externalized_path)
+    if transform_kind != "externalized":
+        append_tool_transform(new_kwargs, transform_kind, by="ToolOutputBudgetMiddleware", source_sha256=source_sha256)
     update["additional_kwargs"] = new_kwargs
     return msg.model_copy(update=update)
 
@@ -969,7 +969,7 @@ def _discard_mismatched_output(filepath: str) -> None:
         logger.warning("Failed to remove mismatched externalized tool output", exc_info=True)
 
 
-def _restore_tool_output_blobs(messages: list[Any], *, outputs_path: str) -> None:
+def _restore_tool_output_blobs(payloads: Iterable[object], *, outputs_path: str) -> None:
     """Materialize durable host-externalized results under this Gateway.
 
     Existing digest-matching files are reused without touching the blob store.
@@ -978,10 +978,7 @@ def _restore_tool_output_blobs(messages: list[Any], *, outputs_path: str) -> Non
     """
     store_resolved = False
     blob_store = None
-    for message in messages:
-        if not isinstance(message, ToolMessage):
-            continue
-        payload = (message.additional_kwargs or {}).get(TOOL_OUTPUT_BLOB_KEY)
+    for payload in payloads:
         if not isinstance(payload, Mapping):
             continue
         if payload.get("version") != _TOOL_OUTPUT_BLOB_VERSION or payload.get("encoding") != "utf-8":
@@ -1004,7 +1001,6 @@ def _restore_tool_output_blobs(messages: list[Any], *, outputs_path: str) -> Non
         )
         if filepath is None:
             continue
-
         local_mismatch = False
         try:
             if os.stat(filepath).st_size != ref.size:
@@ -1044,6 +1040,13 @@ def _restore_tool_output_blobs(messages: list[Any], *, outputs_path: str) -> Non
             continue
         if not _write_restored_output(filepath, data) and local_mismatch:
             _discard_mismatched_output(filepath)
+
+
+def restore_tool_artifact_blobs(request: ToolCallRequest, payloads: Iterable[object]) -> None:
+    """Restore the diagnostics referenced by the current tool call after compaction."""
+    outputs_path = _resolve_outputs_path(request)
+    if outputs_path is not None:
+        _restore_tool_output_blobs(payloads, outputs_path=outputs_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1267,7 +1270,8 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
             return request
         outputs_path = _model_outputs_path(request)
         if outputs_path is not None and _has_tool_output_blob_refs(original):
-            _restore_tool_output_blobs(original, outputs_path=outputs_path)
+            payloads = ((message.additional_kwargs or {}).get(TOOL_OUTPUT_BLOB_KEY) for message in original if isinstance(message, ToolMessage))
+            _restore_tool_output_blobs(payloads, outputs_path=outputs_path)
         if not self._config.enabled:
             return request
         messages = original

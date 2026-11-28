@@ -98,6 +98,20 @@ Content and artifact share the 64 KiB UTF-8 JSON output cap. The host validates 
 before attaching it to `ToolMessage.artifact`; it does not append it to ordinary
 tool content or let it replace the tool name or call ID. Invalid result shapes,
 non-JSON values and oversize output use the normal sanitized tool-error path.
+
+Set `status="error"` to report a business failure, for example
+`PluginToolResult("No report is available for this account.", status="error")`.
+The model receives the error status with the original text. Set
+`status="success"` when successful text may resemble an error. If status is
+omitted, JSON error objects and text beginning with `Error:` still report
+failure. When failure is inferred from legacy content, the host can register
+valid file references explicitly supplied in the artifact. Failure text
+contributes no inferred references. Structured HTTP failures skip these file
+references.
+A structured HTTP 4xx or 5xx response in the artifact still takes precedence
+over success. The status field requires a matching host and extension-api
+0.2.14 or newer.
+
 The default `response_format="content"` preserves existing JSON encoding,
 including tuple/list results. The structured mode requires a typed result rather
 than a bare tuple; an older host cannot silently JSON-encode that carrier.

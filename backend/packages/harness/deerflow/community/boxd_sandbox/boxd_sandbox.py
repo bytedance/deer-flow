@@ -33,7 +33,7 @@ from deerflow.sandbox.download import download_limit
 from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
-from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
+from deerflow.sandbox.sandbox import CommandOutput, Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, is_user_data_path, path_matches, should_ignore_path_under_root, truncate_line
 
 if TYPE_CHECKING:
@@ -321,7 +321,8 @@ class BoxdSandbox(Sandbox):
         exit_code = result.exit_code
         if exit_code not in (0, None):
             output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}\nExit Code: {exit_code}"
-        return output if output else "(no output)"
+        output = output or "(no output)"
+        return CommandOutput(output, exit_code) if type(exit_code) is int else output
 
     # ── File operations ──────────────────────────────────────────────────
 

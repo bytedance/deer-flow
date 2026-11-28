@@ -1361,7 +1361,12 @@ def _shell_arithmetic_end(command: str, start: int) -> int | None:
     return None
 
 
-def _scan_shell_words(command: str, arithmetic_spans: list[tuple[int, int]] | None = None) -> list[list[_ShellWord]] | None:
+def _scan_shell_words(
+    command: str,
+    arithmetic_spans: list[tuple[int, int]] | None = None,
+    *,
+    literal_double_quotes: bool = False,
+) -> list[list[_ShellWord]] | None:
     """Split *command* into word lists, one per command context, bash-style.
 
     The first list is the top-level command; every ``$(...)`` substitution adds
@@ -1440,12 +1445,16 @@ def _scan_shell_words(command: str, arithmetic_spans: list[tuple[int, int]] | No
                 position = end + 1
             elif char == '"':
                 position += 1
+                start = position
+                literal = literal_double_quotes
                 while position < n and command[position] != '"':
                     if command[position] == "\\":
+                        literal = False
                         position += 2
                     elif command[position] == "`":
                         return None
                     elif command.startswith("$((", position):
+                        literal = False
                         after = _shell_arithmetic_end(command, position)
                         if after is None:
                             return None
@@ -1453,15 +1462,17 @@ def _scan_shell_words(command: str, arithmetic_spans: list[tuple[int, int]] | No
                             arithmetic_spans.append((position + 3, after - 2))
                         position = after
                     elif command.startswith("$(", position):
+                        literal = False
                         after = scan(position + 2, True)
                         if after is None:
                             return None
                         position = after
                     else:
+                        literal = literal and command[position] != "$"
                         position += 1
                 if position >= n:
                     return None
-                text.append("\x00")  # opaque: content is never a bare awk program
+                text.append(command[start:position] if literal else "\x00")
                 in_word, plain_so_far = True, False
                 position += 1
             elif command.startswith("$'", position):
@@ -1531,7 +1542,10 @@ def _shell_commands_for_exemptions(command: str, arithmetic_spans: list[tuple[in
     contexts = _scan_shell_words(command, arithmetic_spans)
     if contexts is None:
         return None
+    return _shell_commands_from_words(contexts)
 
+
+def _shell_commands_from_words(contexts: list[list[_ShellWord]]) -> list[tuple[str, list[_ShellWord]]] | None:
     commands: list[tuple[str, list[_ShellWord]]] = []
     for items in contexts:
         at_command_start = True
@@ -1568,6 +1582,119 @@ def _shell_commands_for_exemptions(command: str, arithmetic_spans: list[tuple[in
             commands.append((name, items[index + 1 : argument_end]))
             index += 1
     return commands
+
+
+_DIRECT_FILE_ARGUMENT_COMMANDS = frozenset({"cat", "cmp", "diff", "file", "grep", "head", "less", "ls", "md5sum", "more", "rg", "sed", "sha256sum", "stat", "tail", "wc"})
+_FILE_ARGUMENT_FLAG_GROUPS = {
+    "cat": "AbEnsTtuv",
+    "grep": "EFGHILPRUZabchilnoqrsuvwxyz",
+    "head": "qv",
+    "rg": "0FHILNPSUabcilnopqsuvwxz",
+    "sed": "Enrsuz",
+    "tail": "fFqv",
+    "wc": "clmwL",
+}
+_FILTER_EXPRESSION_OPTIONS = {"grep": "--regexp", "rg": "--regexp", "sed": "--expression"}
+_SEARCH_LONG_FLAGS = frozenset(
+    {
+        "--byte-offset",
+        "--count",
+        "--files-with-matches",
+        "--files-without-match",
+        "--fixed-strings",
+        "--ignore-case",
+        "--invert-match",
+        "--line-number",
+        "--line-regexp",
+        "--no-filename",
+        "--no-messages",
+        "--null",
+        "--only-matching",
+        "--quiet",
+        "--text",
+        "--with-filename",
+        "--word-regexp",
+    }
+)
+_FILTER_LONG_FLAGS = {
+    "grep": _SEARCH_LONG_FLAGS | {"--basic-regexp", "--extended-regexp", "--perl-regexp"},
+    "rg": _SEARCH_LONG_FLAGS | {"--count-matches", "--heading", "--hidden", "--no-heading", "--no-ignore", "--no-line-number", "--smart-case"},
+    "sed": frozenset({"--posix", "--quiet", "--regexp-extended", "--sandbox", "--separate", "--silent", "--unbuffered", "--zero-terminated"}),
+}
+_FILE_REDIRECTIONS = frozenset({"<", ">", ">>", "<>", ">|", "&>", "&>>"})
+_COUNT_OPTION = re.compile(r"(?:-[nc]|--(?:bytes|lines)=?)([+-]?\d+)?")
+_SEARCH_COUNT_OPTION = re.compile(r"(?:-[ABCm](\+?\d+)?|--(?:after-context|before-context|context|max-count)(?:=(\+?\d+))?)")
+
+
+def _filter_source_option(word: str, flags: str, long_expression_option: str) -> tuple[bool, str | None] | None:
+    """Return whether the option takes a file, and its attached value if present."""
+    if word.startswith("--"):
+        option, separator, value = word.partition("=")
+        if option in (long_expression_option, "--file"):
+            return option == "--file", value if separator else None
+    else:
+        tail = word[1:].lstrip(flags)
+        if tail.startswith(("e", "f")):
+            return tail[0] == "f", tail[1:] or None
+    return None
+
+
+def _literal_command_file_operands(name: str, arguments: list[_ShellWord]) -> list[str]:
+    if name not in _DIRECT_FILE_ARGUMENT_COMMANDS:
+        return []
+    # Shell redirections are processed separately and never enter the utility's argv.
+    words = [item.text for index, item in enumerate(arguments) if item.kind == "word" and (index == 0 or arguments[index - 1].kind != "redir")]
+    operands: list[str] = []
+    option_files: list[str] = []
+    flags = _FILE_ARGUMENT_FLAG_GROUPS.get(name, "")
+    expression_option = _FILTER_EXPRESSION_OPTIONS.get(name)
+    has_explicit_expression = False
+    index = 0
+    parse_options = True
+    while index < len(words):
+        word = words[index]
+        index += 1
+        if not parse_options or not word.startswith("-") or word == "-":
+            operands.append(word)
+        elif word == "--":
+            parse_options = False
+        elif expression_option and (source := _filter_source_option(word, flags, expression_option)) is not None:
+            reads_file, value = source
+            if value is None:
+                if index >= len(words):
+                    return []
+                value = words[index]
+                index += 1
+            has_explicit_expression = True
+            if reads_file:
+                option_files.append(value)
+        elif name in {"head", "tail"} and index == 1 and re.fullmatch(r"-[0-9]+", word):
+            continue  # The legacy numeric count is accepted only as the first argument.
+        elif name in {"head", "tail"} and (count := _COUNT_OPTION.fullmatch(word)):
+            if count[1] is None:
+                if index >= len(words) or not re.fullmatch(r"[+-]?\d+", words[index]):
+                    return []
+                index += 1
+        elif name in {"grep", "rg"} and (count := _SEARCH_COUNT_OPTION.fullmatch(word)):
+            if not any(count.groups()):
+                if index >= len(words) or not re.fullmatch(r"\+?\d+", words[index]):
+                    return []
+                index += 1
+        elif word not in _FILTER_LONG_FLAGS.get(name, ()) and not all(flag in flags for flag in word[1:]):
+            return []  # Unknown options can consume what looks like a file operand.
+    if expression_option and not has_explicit_expression:
+        operands = operands[1:]  # The first positional operand is the pattern or script.
+    return option_files + operands
+
+
+def literal_shell_file_operands(command: str) -> set[str]:
+    """Find literal absolute file operands in ordinary shell commands and redirections."""
+    contexts = _scan_shell_words(command, literal_double_quotes=True)
+    if contexts is None or (commands := _shell_commands_from_words(contexts)) is None:
+        return set()
+    paths = {following.text for words in contexts for item, following in zip(words, words[1:]) if item.kind == "redir" and item.text in _FILE_REDIRECTIONS and following.kind == "word" and following.text.startswith("/")}
+    paths.update(operand for name, arguments in commands for operand in _literal_command_file_operands(name, arguments) if operand.startswith("/"))
+    return paths
 
 
 def _awk_program_field_spans(command: str) -> list[tuple[int, int]]:

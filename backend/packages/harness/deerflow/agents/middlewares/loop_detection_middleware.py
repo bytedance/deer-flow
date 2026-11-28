@@ -93,9 +93,9 @@ from deerflow.agents.middlewares.audit_context import (
 from deerflow.agents.middlewares.model_response import is_empty_stop_response
 from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
-from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.agents.middlewares.tool_transform_meta import tool_content_fingerprint, tool_result_source_digest
 from deerflow.runtime.events.catalog import MIDDLEWARE_LOOP_DETECTION_TAG
+from deerflow.utils.messages import get_tool_message_status
 
 if TYPE_CHECKING:
     from deerflow.config.loop_detection_config import LoopDetectionConfig
@@ -277,15 +277,14 @@ class _CallObservation:
 
 def _tool_result_hash(result: ToolMessage) -> str | None:
     """Fingerprint successful data, ignoring receipt IDs and diagnostic churn."""
-    metadata = result.additional_kwargs if isinstance(result.additional_kwargs, dict) else {}
-    meta = metadata.get(TOOL_META_KEY)
     # Repeated failures are not progress, even if diagnostics or classifications
-    # change. Read structured producer status, never infer errors from prose.
-    if result.status == "error" or (isinstance(meta, dict) and meta.get("status") == "error"):
+    # change.
+    if get_tool_message_status(result) == "error":
         return _ERROR_RESULT_HASH
 
     # Ranged reads may return identical lines while the rest of a file changes.
     # Consume the gate's existing full-file version without importing its I/O code.
+    metadata = result.additional_kwargs if isinstance(result.additional_kwargs, dict) else {}
     read_mark = metadata.get("deerflow_read_mark")
     version = None
     if isinstance(read_mark, dict):

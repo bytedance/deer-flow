@@ -16,7 +16,7 @@ from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
-from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
+from deerflow.sandbox.sandbox import CommandOutput, Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, is_user_data_path, path_matches, should_ignore_path_under_root, truncate_line
 
 if TYPE_CHECKING:
@@ -166,7 +166,7 @@ class E2BSandbox(Sandbox):
     ) -> str:
         """Execute a shell command via ``sandbox.commands.run``.
 
-        Returns the combined stdout/stderr.
+        Returns the combined stdout/stderr with the exit status when known.
         The lock serialises concurrent calls on the same instance
         because the e2b SDK shares a single HTTP/2 connection per sandbox.
 
@@ -202,7 +202,7 @@ class E2BSandbox(Sandbox):
                     result = exc
                 stdout = getattr(result, "stdout", "") or ""
                 stderr = getattr(result, "stderr", "") or ""
-                exit_code = getattr(result, "exit_code", 0)
+                exit_code = getattr(result, "exit_code", None)
                 if stdout and stderr:
                     output = f"{stdout}\n{stderr}"
                 else:
@@ -213,12 +213,15 @@ class E2BSandbox(Sandbox):
                     # evidence consumers (acceptance checklist) can recover the
                     # actual shell status.
                     output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
-                return output if output else "(no output)"
+                output = output or "(no output)"
+                if type(exit_code) is int:
+                    return CommandOutput(output, exit_code)
+                return output
             except TimeoutException:
                 # A command deadline is a shell outcome, not a provider hiccup:
                 # end with the same Exit Code: 124 marker Local/AIO/Tenki emit
                 # on timeout so evidence consumers recover the real status.
-                return "Error: command timed out\nExit Code: 124"
+                return CommandOutput("Error: command timed out\nExit Code: 124", 124)
             except Exception as e:
                 if _is_sandbox_gone_error(e):
                     self._dead = True

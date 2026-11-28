@@ -7,9 +7,13 @@ import shutil
 from pathlib import Path
 from typing import Annotated, Any
 
+from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, InjectedToolArg, StructuredTool
 from pydantic import BaseModel, Field
+
+from deerflow.tools.types import Runtime
+from deerflow.utils.messages import TOOL_META_KEY, make_tool_result_meta
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +25,7 @@ _EXIT_DRAIN_SECONDS = 2.0
 class _InvokeACPAgentInput(BaseModel):
     agent: str = Field(description="Name of the ACP agent to invoke")
     prompt: str = Field(description="The concise task prompt to send to the agent")
+    runtime: Annotated[Any, InjectedToolArg] = None
 
 
 class _ModelSelectionError(ValueError):
@@ -287,10 +292,29 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
     # Capture agents in closure so the function can reference it
     _agents = dict(agents)
 
-    async def _invoke(agent: str, prompt: str, config: Annotated[RunnableConfig, InjectedToolArg] = None) -> str:
+    async def _invoke(
+        agent: str,
+        prompt: str,
+        config: Annotated[RunnableConfig, InjectedToolArg] = None,
+        runtime: Runtime = None,
+    ) -> str | ToolMessage:
+        def tool_result(content: str, *, failed: bool = False) -> str | ToolMessage:
+            call_id = runtime.tool_call_id if runtime is not None else None
+            if not call_id:
+                return content
+            if failed:
+                return ToolMessage(content=content, name="invoke_acp_agent", tool_call_id=call_id, status="error")
+            # A completed ACP report can begin with a legacy error marker.
+            return ToolMessage(
+                content=content,
+                name="invoke_acp_agent",
+                tool_call_id=call_id,
+                additional_kwargs={TOOL_META_KEY: make_tool_result_meta(status="success")},
+            )
+
         if agent not in _agents:
             available = ", ".join(_agents.keys())
-            return f"Error: Unknown agent '{agent}'. Available: {available}"
+            return tool_result(f"Error: Unknown agent '{agent}'. Available: {available}", failed=True)
 
         agent_config = _agents[agent]
         logger.info("Invoking ACP agent %s (prompt length: %d)", agent, len(prompt))
@@ -300,7 +324,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             from acp import PROTOCOL_VERSION, Client, text_block
             from acp.schema import ClientCapabilities, Implementation
         except ImportError:
-            return "Error: agent-client-protocol package is not installed. Run `uv sync` to install project dependencies."
+            return tool_result("Error: agent-client-protocol package is not installed. Run `uv sync` to install project dependencies.", failed=True)
 
         class _CollectingClient(Client):
             """Minimal ACP Client that collects streamed text from session updates."""
@@ -350,7 +374,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             )
             mcp_servers = []
 
-        async def _converse(conn) -> None:
+        async def _converse(conn) -> str:
             await conn.initialize(
                 protocol_version=PROTOCOL_VERSION,
                 client_capabilities=ClientCapabilities(),
@@ -360,10 +384,11 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             session = await conn.new_session(**session_kwargs)
             if agent_config.model:
                 await _select_session_model(conn, session, agent_config.model)
-            await conn.prompt(
+            response = await conn.prompt(
                 session_id=session.session_id,
                 prompt=[text_block(prompt)],
             )
+            return response.stop_reason
 
         stderr_drain: asyncio.Task[None] | None = None
         timed_out = False
@@ -376,7 +401,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                     stderr_drain = asyncio.create_task(_drain_agent_stderr(proc.stderr))
                 try:
                     async with asyncio.timeout(agent_config.timeout_seconds) as deadline:
-                        await _await_while_agent_runs(_converse(conn), proc)
+                        stop_reason = await _await_while_agent_runs(_converse(conn), proc)
                 except TimeoutError:
                     if not deadline.expired():
                         raise
@@ -385,22 +410,29 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 except _AgentExitedError as exc:
                     status = f"exited with code {exc.returncode}" if exc.returncode is not None else "closed its ACP connection"
                     logger.error("ACP agent '%s' %s before completing the ACP invocation", agent, status)
-                    return f"Error: ACP agent '{agent}' {status} before completing the ACP invocation. Check that the agent is installed and authenticated and that acp_agents.{agent} in config.yaml is correct."
+                    return tool_result(
+                        f"Error: ACP agent '{agent}' {status} before completing the ACP invocation. Check that the agent is installed and authenticated and that acp_agents.{agent} in config.yaml is correct.",
+                        failed=True,
+                    )
             if timed_out:
                 logger.error("ACP agent '%s' timed out after %s seconds during initialization, session creation, or prompt", agent, agent_config.timeout_seconds)
-                return (
+                return tool_result(
                     f"Error: ACP agent '{agent}' timed out after {agent_config.timeout_seconds} seconds "
                     "without completing the ACP invocation. The agent subprocess has been terminated. If this agent handles "
-                    f"long-running tasks, increase acp_agents.{agent}.timeout_seconds in config.yaml."
+                    f"long-running tasks, increase acp_agents.{agent}.timeout_seconds in config.yaml.",
+                    failed=True,
                 )
             result = client.collected_text
-            logger.info("ACP agent '%s' returned %d characters", agent, len(result))
-            return result or "(no response)"
+            logger.info("ACP agent '%s' stopped with reason '%s' and returned %d characters", agent, stop_reason, len(result))
+            if stop_reason != "end_turn":
+                error = f"Error: ACP agent '{agent}' stopped with reason '{stop_reason}'."
+                return tool_result(f"{error}\n\n{result}" if result else error, failed=True)
+            return tool_result(result or "(no response)")
         except Exception as e:
             logger.error("ACP agent '%s' invocation failed (%s)", agent, type(e).__name__)
             # Report the configured command, not the resolved path: remediation
             # text has to match what the operator wrote in config.yaml.
-            return await asyncio.to_thread(_format_invocation_error, agent, agent_config.command, e)
+            return tool_result(await asyncio.to_thread(_format_invocation_error, agent, agent_config.command, e), failed=True)
         finally:
             if stderr_drain is not None:
                 stderr_drain.cancel()

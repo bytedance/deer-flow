@@ -497,8 +497,9 @@ def _build_runtime_middlewares(
 
     # Resolve handles before any policy inspects arguments. Receipts enclose
     # this layer too, so unknown-handle errors remain part of the ledger.
-    if app_config.tool_artifacts.enabled and app_config.tool_artifacts.resolve_handles_in_args:
-        from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+    resolve_artifacts = app_config.tool_artifacts.enabled and app_config.tool_artifacts.resolve_handles_in_args
+    if resolve_artifacts:
+        from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactBlobRestoreMiddleware, ArtifactResolutionMiddleware
 
         tail.append(ArtifactResolutionMiddleware(config=app_config.tool_artifacts))
 
@@ -590,14 +591,12 @@ def _build_runtime_middlewares(
             skill_storage=skill_storage,
         )
     )
+    if resolve_artifacts:
+        tail.append(ArtifactBlobRestoreMiddleware())
     # Artifact capture is a `before_model` hook that reads state messages, so
     # its position in the tool-execution wrap chain is functionally irrelevant:
-    # it always sees the normalized results stored in state, and error results
-    # (status == "error") are skipped at extraction. It is appended after
-    # ToolErrorHandlingMiddleware purely for readability. It captures
-    # lightweight metadata only, so ToolOutputBudgetMiddleware truncating the
-    # content does not affect it. The configured cap (max_entries) is enforced
-    # inside the middleware when it emits updates; no assembly-time side effect.
+    # it sees the normalized, budgeted result stored in state. For errors, the
+    # registry only captures the output file recorded by the budget middleware.
     if app_config.tool_artifacts.enabled:
         from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
 

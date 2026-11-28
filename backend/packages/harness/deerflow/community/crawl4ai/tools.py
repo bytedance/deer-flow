@@ -2,12 +2,15 @@ import asyncio
 import logging
 
 from langchain.tools import tool
+from langchain_core.messages import ToolMessage
 
 from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.url_safety import validate_delegated_backend_url, validate_public_http_url
 from deerflow.config import get_app_config
+from deerflow.tools.types import Runtime
+from deerflow.utils.messages import TOOL_META_KEY, make_tool_result_meta
 
-from .crawl4ai_client import Crawl4AiClient
+from .crawl4ai_client import Crawl4AiClient, Crawl4AiFetchError
 
 logger = logging.getLogger(__name__)
 
@@ -133,8 +136,22 @@ def _validate_backend_base_url(cfg: dict | None) -> str | None:
     )
 
 
+def _fetch_result(runtime: Runtime | None, content: str, *, failed: bool = False) -> str | ToolMessage:
+    call_id = runtime.tool_call_id if runtime is not None else None
+    if not call_id:
+        return content
+    if failed:
+        return ToolMessage(content=content, name="web_fetch", tool_call_id=call_id, status="error")
+    return ToolMessage(
+        content=content,
+        name="web_fetch",
+        tool_call_id=call_id,
+        additional_kwargs={TOOL_META_KEY: make_tool_result_meta(status="success")},
+    )
+
+
 @tool("web_fetch", parse_docstring=True)
-async def web_fetch_tool(url: str) -> str:
+async def web_fetch_tool(url: str, runtime: Runtime = None) -> str | ToolMessage:
     """Fetch the contents of a web page at a given URL.
     Only fetch EXACT URLs that have been provided directly by the user or have been returned in results from the web_search and web_fetch tools.
     This tool can NOT access content that requires authentication, such as private Google Docs or pages behind login walls.
@@ -150,19 +167,19 @@ async def web_fetch_tool(url: str) -> str:
         allow_private_addresses = _coerce_bool(cfg.get("allow_private_addresses") if cfg is not None else None, False)
         url_error = await asyncio.to_thread(validate_public_http_url, url, allow_private_addresses=allow_private_addresses)
         if url_error:
-            return url_error
+            return _fetch_result(runtime, url_error, failed=True)
         backend_error = await asyncio.to_thread(_validate_backend_base_url, cfg)
         if backend_error:
-            return backend_error
+            return _fetch_result(runtime, backend_error, failed=True)
         filter_mode = _coerce_filter(cfg.get("filter") if cfg is not None else None)
         client = _build_client(cfg)
         markdown = await client.fetch_markdown(url, filter_mode=filter_mode)
 
-        if markdown.startswith("Error:"):
-            return markdown
-
-        return _truncate(markdown, _coerce_max_chars(cfg.get("max_chars") if cfg is not None else None))
+        if isinstance(markdown, Crawl4AiFetchError):
+            return _fetch_result(runtime, str(markdown), failed=True)
+        max_chars = _coerce_max_chars(cfg.get("max_chars") if cfg is not None else None)
+        return _fetch_result(runtime, _truncate(markdown, max_chars))
 
     except Exception as e:
         logger.error(f"Error in web_fetch_tool: {e}")
-        return f"Error: {str(e)}"
+        return _fetch_result(runtime, f"Error: {e}", failed=True)

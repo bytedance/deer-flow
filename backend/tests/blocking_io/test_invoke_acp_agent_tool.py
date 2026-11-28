@@ -56,8 +56,9 @@ async def test_invoke_acp_agent_setup_does_not_block_event_loop(monkeypatch, tmp
             captured["new_session"] = kwargs
             return SimpleNamespace(session_id="session-1")
 
-        async def prompt(self, **kwargs: Any) -> None:
+        async def prompt(self, **kwargs: Any) -> acp.schema.PromptResponse:
             captured["prompt"] = kwargs
+            return acp.schema.PromptResponse(stop_reason="end_turn")
 
     @contextlib.asynccontextmanager
     async def fake_spawn_agent_process(client, command, *args, env=None, cwd=None):

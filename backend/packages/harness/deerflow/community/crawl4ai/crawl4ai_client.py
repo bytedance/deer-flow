@@ -8,6 +8,10 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+class Crawl4AiFetchError(str):
+    """String-compatible failure returned by the Crawl4AI client."""
+
+
 class Crawl4AiClient:
     """Client for a self-hosted Crawl4AI Docker server (POST /md)."""
 
@@ -24,7 +28,7 @@ class Crawl4AiClient:
             filter_mode: Crawl4AI markdown filter ("fit", "raw", "bm25", "llm").
 
         Returns:
-            Markdown content, or an "Error: ..." string on failure.
+            Markdown content, or a string-compatible Crawl4AiFetchError on failure.
         """
         payload: dict[str, Any] = {"url": url, "f": filter_mode}
         headers = {"Content-Type": "application/json"}
@@ -38,13 +42,13 @@ class Crawl4AiClient:
                 resp = await client.post(f"{self.base_url}/md", json=payload, headers=headers)
 
                 if resp.status_code != 200:
-                    return f"Error: Crawl4AI HTTP {resp.status_code}: {resp.text[:200]}"
+                    return Crawl4AiFetchError(f"Error: Crawl4AI HTTP {resp.status_code}: {resp.text[:200]}")
 
                 try:
                     data = resp.json()
                 except (json.JSONDecodeError, ValueError):
                     content_type = resp.headers.get("content-type", "unknown")
-                    return f"Error: Crawl4AI returned a non-JSON 200 response (content-type: {content_type}): {resp.text[:200]}"
+                    return Crawl4AiFetchError(f"Error: Crawl4AI returned a non-JSON 200 response (content-type: {content_type}): {resp.text[:200]}")
 
                 # A JSON 200 that is not an object is a format error, not a
                 # success: indexing it raised "'list' object has no attribute
@@ -53,25 +57,25 @@ class Crawl4AiClient:
                 # report a format error instead.
                 if not isinstance(data, dict):
                     logger.error("Crawl4AI returned an unexpected payload type: %s", type(data).__name__)
-                    return "Error: Crawl4AI returned an unexpected response format"
+                    return Crawl4AiFetchError("Error: Crawl4AI returned an unexpected response format")
 
-                if not data.get("success", False):
-                    return f"Error: Crawl4AI reported failure for {url}"
+                if data.get("success") is not True:
+                    return Crawl4AiFetchError(f"Error: Crawl4AI reported failure for {url}")
 
                 markdown = data.get("markdown") or ""
                 if not isinstance(markdown, str):
                     logger.error("Crawl4AI returned an unexpected 'markdown' payload type: %s", type(markdown).__name__)
-                    return "Error: Crawl4AI returned an unexpected response format"
+                    return Crawl4AiFetchError("Error: Crawl4AI returned an unexpected response format")
                 if not markdown.strip():
-                    return "Error: Crawl4AI returned empty markdown"
+                    return Crawl4AiFetchError("Error: Crawl4AI returned empty markdown")
 
                 return markdown
 
         except httpx.TimeoutException:
-            return f"Error: Crawl4AI request timed out after {self.timeout_s}s"
+            return Crawl4AiFetchError(f"Error: Crawl4AI request timed out after {self.timeout_s}s")
         except httpx.RequestError as e:
             logger.error(f"Crawl4AI request failed: {e}")
-            return f"Error: Crawl4AI request failed: {e!s}"
+            return Crawl4AiFetchError(f"Error: Crawl4AI request failed: {e!s}")
         except Exception as e:
             logger.error(f"Crawl4AI fetch failed: {e}")
-            return f"Error: Crawl4AI fetch failed: {e!s}"
+            return Crawl4AiFetchError(f"Error: Crawl4AI fetch failed: {e!s}")

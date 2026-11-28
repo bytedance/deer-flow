@@ -18,7 +18,7 @@ from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
-from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
+from deerflow.sandbox.sandbox import CommandOutput, Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, is_user_data_path, path_matches, should_ignore_path_under_root, truncate_line
 
 if TYPE_CHECKING:
@@ -289,7 +289,7 @@ class OpenSandboxSandbox(Sandbox):
         if _is_timeout_execution(execution, exit_code):
             body = execution_body(execution)
             message = "Error: command timed out\nExit Code: 124"
-            return f"{body}\n{message}" if body else message
+            return CommandOutput(f"{body}\n{message}" if body else message, 124)
         output = format_execution(execution)
         if exit_code is None:
             detail = output or "no completion or error event"
@@ -298,7 +298,7 @@ class OpenSandboxSandbox(Sandbox):
             # Mirror LocalSandbox: preserve a nonzero exit in the output text
             # even when the command produced output (see e2b_sandbox).
             output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
-        return output if output else "(no output)"
+        return CommandOutput(output or "(no output)", exit_code)
 
     def read_file(self, path: str, start_line: int | None = None, end_line: int | None = None) -> str:
         resolved = self._resolve_path(path)
