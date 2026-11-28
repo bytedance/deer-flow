@@ -728,6 +728,9 @@ export interface Translations {
     instructionsTooLong: (max: number) => string;
     instructionsSaved: string;
     instructionsSaveFailed: string;
+    instructionsConflict: string;
+    instructionsEmpty: string;
+    instructionsReviewed: string;
     // Project page — Documents tab shelf (Phase 2 Slice E)
     documentsShelf: string;
     documentsShelfHint: string;

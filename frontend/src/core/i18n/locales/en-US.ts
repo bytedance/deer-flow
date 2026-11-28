@@ -924,6 +924,10 @@ export const enUS: Translations = {
       `Instructions are over the ${max}-byte limit. Shorten them to save.`,
     instructionsSaved: "Saved",
     instructionsSaveFailed: "Failed to save instructions",
+    instructionsConflict:
+      "Instructions changed since you started editing. Review the saved version below and merge the changes you want to keep into your draft.",
+    instructionsEmpty: "The saved instructions are empty.",
+    instructionsReviewed: "I've reviewed the saved instructions",
     documentsShelf: "Shelf",
     documentsShelfHint: "Drop files here to add them to the shelf",
     uploadDocuments: "Upload",

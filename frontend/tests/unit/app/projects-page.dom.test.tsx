@@ -2,7 +2,13 @@ rs.mock("@/components/workspace/projects/project-memory-section", () => ({
   ProjectMemorySection: () => null,
 }));
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 import type { PropsWithChildren, ReactNode } from "react";
 
 // Hoisted hook doubles: the page reads everything through the projects
@@ -26,6 +32,7 @@ const mocks = rs.hoisted(() => ({
   patchPending: false,
   patchSuccess: false,
   memoryPending: false,
+  projectError: null as Error | null,
 }));
 
 rs.mock("@/core/projects/memory", () => ({
@@ -58,7 +65,11 @@ rs.mock("@/core/projects", () => ({
     instructions_max_bytes: 8192,
     trash_retention_days: 30,
   },
-  useProject: () => ({ data: mocks.project, isError: false }),
+  useProject: () => ({
+    data: mocks.project,
+    isError: mocks.projectError !== null,
+    error: mocks.projectError,
+  }),
   useInfiniteProjectThreads: () => ({
     data: { pages: [[]] },
     isLoading: false,
@@ -94,6 +105,7 @@ rs.mock("@/components/workspace/projects/project-threads-section", () => ({
 }));
 
 import ProjectPage from "@/app/workspace/projects/[id]/page";
+import { parseGatewayApiError } from "@/core/api/errors";
 import { I18nProvider } from "@/core/i18n/context";
 
 function Wrapper({ children }: PropsWithChildren) {
@@ -119,6 +131,7 @@ function openInstructionsTab() {
 
 beforeEach(() => {
   mocks.memoryPending = false;
+  mocks.projectError = null;
   mocks.project = makeProject("");
   mocks.projectsConfig = undefined;
   mocks.patchPending = false;
@@ -213,13 +226,73 @@ describe("ProjectPage instructions reconciliation", () => {
     };
   }
 
+  it("keeps a stale draft and requires review of a fact promoted in another tab", () => {
+    mocks.project = makeProject("");
+    const { rerender } = renderInstructions();
+    const save = screen.getByRole("button", { name: "Save" });
+    fireEvent.change(editor(), { target: { value: "Use USD" } });
+    fireEvent.click(save);
+    expect(mocks.patchMutate).toHaveBeenLastCalledWith(
+      {
+        projectId: "proj-1",
+        input: { instructions: "Use USD", expected_instructions: "" },
+      },
+      expect.anything(),
+    );
+
+    act(() => {
+      mocks.patchMutate.mock.lastCall?.[1].onError(
+        new Error("Project instructions changed."),
+      );
+    });
+    // A failed conflict refetch must not unmount the draft.
+    mocks.projectError = new TypeError("Failed to fetch");
+    rerender(<ProjectPage />);
+    expect(editor()).toHaveProperty("value", "Use USD");
+    mocks.projectError = null;
+    const promoted = "- Reports exclude tax";
+    refetchWith(promoted);
+    rerender(<ProjectPage />);
+    expect(editor()).toHaveProperty("value", "Use USD");
+    expect(screen.getByText(promoted)).toBeDefined();
+    expect(save.hasAttribute("disabled")).toBe(true);
+
+    const merged = `Use USD\n${promoted}`;
+    fireEvent.change(editor(), { target: { value: merged } });
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "I've reviewed the saved instructions",
+      }),
+    );
+    expect(mocks.patchMutate).toHaveBeenCalledTimes(1);
+    fireEvent.click(save);
+    expect(mocks.patchMutate).toHaveBeenLastCalledWith(
+      {
+        projectId: "proj-1",
+        input: { instructions: merged, expected_instructions: promoted },
+      },
+      expect.anything(),
+    );
+  });
+
+  it("closes the editor when a refetch confirms the project is gone", () => {
+    mocks.project = makeProject("base");
+    const { rerender } = renderInstructions();
+    mocks.projectError = parseGatewayApiError({}, 404, "Project not found");
+    rerender(<ProjectPage />);
+    expect(screen.queryByRole("textbox", { name: "Instructions" })).toBeNull();
+  });
+
   it("keeps keystrokes typed while a save is in flight when the refetch lands", () => {
     mocks.project = makeProject("base");
     const { rerender } = renderInstructions();
     fireEvent.change(editor(), { target: { value: "base v1" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(mocks.patchMutate).toHaveBeenCalledWith(
-      { projectId: "proj-1", input: { instructions: "base v1" } },
+      {
+        projectId: "proj-1",
+        input: { instructions: "base v1", expected_instructions: "base" },
+      },
       expect.objectContaining({ onError: expect.any(Function) }),
     );
 
@@ -262,12 +335,18 @@ describe("ProjectPage instructions reconciliation", () => {
     fireEvent.change(editor(), { target: { value: "base v1" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     fireEvent.change(editor(), { target: { value: "base v1 v2" } });
+    act(() => {
+      mocks.patchMutate.mock.lastCall?.[1].onSuccess();
+    });
     refetchWith("base v1");
     rerender(<ProjectPage />);
 
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect(mocks.patchMutate).toHaveBeenLastCalledWith(
-      { projectId: "proj-1", input: { instructions: "base v1 v2" } },
+      {
+        projectId: "proj-1",
+        input: { instructions: "base v1 v2", expected_instructions: "base v1" },
+      },
       expect.objectContaining({ onError: expect.any(Function) }),
     );
   });

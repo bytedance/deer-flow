@@ -164,6 +164,18 @@ export function usePatchProject() {
       projectId: string;
       input: ProjectPatchInput;
     }) => patchProject(projectId, input),
+    onSuccess(project, { input }) {
+      if (input.expected_instructions !== undefined) {
+        // A refetch can deliver a newer edit before this save responds.
+        queryClient.setQueryData<Project>(
+          [...PROJECTS_QUERY_KEY, "detail", project.id],
+          (current) =>
+            current && current.instructions === input.expected_instructions
+              ? { ...current, instructions: project.instructions }
+              : current,
+        );
+      }
+    },
     onSettled() {
       invalidateProjectCaches(queryClient);
     },

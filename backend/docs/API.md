@@ -1702,6 +1702,26 @@ The `projects` config-block knobs the UI needs for client-side validation. Requi
 
 Values come from `projects.instructions_max_bytes` and `projects.trash_retention_days` in `config.yaml`; the documented defaults apply when the block is absent.
 
+#### Update project instructions
+
+```http
+PATCH /api/projects/{project_id}
+```
+
+```json
+{
+  "instructions": "Use metric units. Include a summary.",
+  "expected_instructions": "Use metric units."
+}
+```
+
+Requires `projects:write`. Send the exact instructions the draft was based on,
+including `""` if they were empty. If the saved text has changed, the gateway
+returns `409` and applies none of the fields in the request. Read the current
+project, merge the changes and retry with the newly reviewed text as
+`expected_instructions`. Omitting this optional field keeps the existing
+unconditional update behavior.
+
 ### Project Documents
 
 Per-project document shelf (Projects Phase 2). All routes fail closed: a missing or foreign project/document is `404` (never `403`); uploads and individual trash require an active project — archived projects answer `404` for those while keeping reads; a memory-backend deployment answers `503` `"Projects not available"`. Trashed rows are invisible to every route.

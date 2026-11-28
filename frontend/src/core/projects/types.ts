@@ -24,6 +24,7 @@ export type ProjectCreateInput = {
 export type ProjectPatchInput = {
   name?: string;
   instructions?: string;
+  expected_instructions?: string;
   presentation?: ProjectPresentation;
 };
 

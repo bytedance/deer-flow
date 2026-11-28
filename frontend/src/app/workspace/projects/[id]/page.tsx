@@ -40,6 +40,7 @@ import {
   WorkspaceContainer,
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
+import { GatewayApiError, UnauthorizedError } from "@/core/api/errors";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   PROJECTS_CONFIG_DEFAULT,
@@ -70,6 +71,13 @@ export default function ProjectPage() {
   const { id: projectId } = useParams<{ id: string }>();
   const projectQuery = useProject(projectId);
   const project = projectQuery.data;
+  // A transient refetch failure after a conflict must keep the editor mounted.
+  const projectUnavailable =
+    projectQuery.isError &&
+    (!project ||
+      projectQuery.error instanceof UnauthorizedError ||
+      (projectQuery.error instanceof GatewayApiError &&
+        [401, 403, 404].includes(projectQuery.error.status)));
   // Skip the threads request entirely when the project 404s — the endpoint
   // itself 404s for a missing project, so firing it would be pure noise.
   const threadsQuery = useInfiniteProjectThreads(projectId, {
@@ -95,7 +103,7 @@ export default function ProjectPage() {
       <WorkspaceBody>
         <ScrollArea className="size-full">
           <div className="mx-auto flex w-full max-w-(--container-width-md) flex-col gap-8 p-6 pt-8">
-            {projectQuery.isError ? (
+            {projectUnavailable ? (
               <ProjectNotFoundState />
             ) : project == null ? (
               <div className="text-muted-foreground py-16 text-center text-sm">
@@ -133,11 +141,7 @@ export default function ProjectPage() {
                     />
                   </TabsContent>
                   <TabsContent value="instructions">
-                    {/* Key on the project id only: a route switch must reset
-                        the editor, but a save round-trip must NOT remount it
-                        — the section reconciles server updates against the
-                        last-synced value so keystrokes typed while a save is
-                        in flight survive the refetch. */}
+                    {/* Keep the draft across refetches of the same project. */}
                     <ProjectInstructionsSection
                       key={project.id}
                       project={project}
@@ -365,26 +369,29 @@ function ProjectInstructionsSection({ project }: { project: Project }) {
   const maxBytes =
     configQuery.data?.instructions_max_bytes ??
     PROJECTS_CONFIG_DEFAULT.instructions_max_bytes;
-  const [instructions, setInstructions] = useState(project.instructions);
-  // Last server value the draft was synced from. The section is keyed on
-  // the project id (not updated_at), so a save's refetch does not remount
-  // the editor; instead this effect reconciles: overwrite the draft ONLY
-  // while it still equals the last-synced value (the user has not typed
-  // since). A diverged draft is kept and the server value becomes the new
-  // baseline for future comparisons.
-  const lastSyncedRef = useRef(project.instructions);
+  const [draft, setDraft] = useState<{ base: string; text: string } | null>(
+    null,
+  );
+  const base = draft?.base ?? project.instructions;
+  const instructions = draft?.text ?? project.instructions;
   useEffect(() => {
-    const serverValue = project.instructions;
-    const synced = lastSyncedRef.current;
-    lastSyncedRef.current = serverValue;
-    setInstructions((current) => (current === synced ? serverValue : current));
+    // A matching refetch makes the editor clean. A divergent refetch must
+    // preserve both the user's text and the version they started editing.
+    setDraft((current) =>
+      current?.text === project.instructions ? null : current,
+    );
   }, [project.instructions]);
 
   const byteCount = utf8ByteLength(instructions);
   const overCap = byteCount > maxBytes;
   const isDirty = instructions !== project.instructions;
+  const hasConflict = isDirty && base !== project.instructions;
   const canSave =
-    isDirty && !overCap && !patchProject.isPending && !memoryMutationPending;
+    isDirty &&
+    !hasConflict &&
+    !overCap &&
+    !patchProject.isPending &&
+    !memoryMutationPending;
   const showSaved = patchProject.isSuccess && !isDirty;
 
   const handleSave = () => {
@@ -392,8 +399,19 @@ function ProjectInstructionsSection({ project }: { project: Project }) {
       return;
     }
     patchProject.mutate(
-      { projectId: project.id, input: { instructions } },
       {
+        projectId: project.id,
+        input: { instructions, expected_instructions: base },
+      },
+      {
+        onSuccess: () => {
+          // Keystrokes entered during this save build on the submitted text.
+          setDraft((current) =>
+            current?.base === base
+              ? { ...current, base: instructions }
+              : current,
+          );
+        },
         onError: (error) => {
           toast.error(
             error instanceof Error && error.message
@@ -418,10 +436,35 @@ function ProjectInstructionsSection({ project }: { project: Project }) {
         disabled={memoryMutationPending}
         className="min-h-40"
         value={instructions}
-        onChange={(e) => setInstructions(e.target.value)}
+        onChange={(e) => {
+          const text = e.target.value;
+          setDraft(
+            text === project.instructions && !patchProject.isPending
+              ? null
+              : { base, text },
+          );
+        }}
         placeholder={t.projects.instructionsPlaceholder}
         aria-invalid={overCap}
       />
+      {hasConflict && !patchProject.isPending && (
+        <div className="flex flex-col items-start gap-2 rounded-md border p-3 text-sm">
+          <p role="alert">{t.projects.instructionsConflict}</p>
+          <pre className="bg-muted max-h-40 w-full overflow-auto rounded-md p-2 text-sm wrap-anywhere whitespace-pre-wrap">
+            {project.instructions || t.projects.instructionsEmpty}
+          </pre>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              setDraft({ base: project.instructions, text: instructions })
+            }
+          >
+            {t.projects.instructionsReviewed}
+          </Button>
+        </div>
+      )}
       <div className="flex items-center justify-between gap-2">
         <p
           className={cn(

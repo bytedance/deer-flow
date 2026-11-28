@@ -864,6 +864,10 @@ export const zhCN: Translations = {
     instructionsTooLong: (max) => `指令超过 ${max} 字节上限，请精简后再保存。`,
     instructionsSaved: "已保存",
     instructionsSaveFailed: "保存指令失败",
+    instructionsConflict:
+      "开始编辑后，项目指令已有更新。请查看下方已保存的版本，将需要保留的改动合并进草稿。",
+    instructionsEmpty: "已保存的指令为空。",
+    instructionsReviewed: "我已核对已保存的指令",
     documentsShelf: "文件架",
     documentsShelfHint: "拖放文件到此处即可加入文件架",
     uploadDocuments: "上传",
