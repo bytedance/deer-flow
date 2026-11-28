@@ -41,6 +41,7 @@ make docker-logs    # View logs
 ```
 
 `make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`). Direct Compose users can add `--profile provisioner` to the dev command for the same mode; the default stack does not require Kubernetes.
+When using the provisioner bundled with Compose or Helm, set `sandbox.provisioner_url` to its internal address, `http://provisioner:8002`.
 The Gateway and the provisioner compare `PROVISIONER_API_KEY` after stripping surrounding whitespace from the configured value on each side, so a key that arrives with a trailing newline (for example from a Kubernetes Secret created with `kubectl create secret --from-file`) still authenticates; see the [Helm architecture notes](../../deploy/helm/deer-flow/README.md#architecture-notes).
 With `USERDATA_PVC_NAME`, sandbox data, extra mounts and Lark broker credentials share one `user-data` volume with separate `subPath` mounts, avoiding duplicate references to the same claim on NFS CSI drivers.
 

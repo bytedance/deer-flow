@@ -121,7 +121,7 @@ services:
       start_period: 15s
 
   # ── Reverse Proxy ──────────────────────────────────────────────────────
-  # Routes API traffic to gateway and (optionally) provisioner.
+  # Routes API traffic to the gateway.
   nginx:
     # Pinned tag, not `nginx:alpine`: from 1.31.3 the alpine builds ship musl
     # 1.2.6, whose pwrite() issues pwritev2(RWF_NOAPPEND) — seccomp profiles
