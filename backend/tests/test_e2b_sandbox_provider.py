@@ -127,7 +127,8 @@ class FakeFilesAPI:
             raise FileNotFoundError(path)
         data = self.store[path]
         if format == "bytes":
-            return data
+            # e2b returns bytearray(r.content) for format="bytes".
+            return bytearray(data)
         if format == "stream":
             stream = _FakeFileStream(data, chunk_size=self._stream_chunk_size)
             self.streams.append(stream)
@@ -139,10 +140,16 @@ class FakeFilesAPI:
 
     def write(self, path: str, content: Any) -> None:
         is_stream = hasattr(content, "read")
+        if not is_stream and not isinstance(content, (str, bytes)):
+            # e2b rejects bytearray and other non-str/bytes payloads; keep the
+            # fake strict so a caller must normalise the pre-image to bytes.
+            raise TypeError(f"Unsupported data type for file: {type(content).__name__}")
         data = content.read() if is_stream else content
         self.write_streamed.append(is_stream)
         self.write_calls.append((path, data))
-        self.store[path] = data
+        # A real sandbox stores UTF-8 bytes; encode str payloads so reads
+        # return what the actual filesystem would hold.
+        self.store[path] = data.encode("utf-8") if isinstance(data, str) else bytes(data)
 
 
 class FakeClient:
@@ -6300,7 +6307,7 @@ def test_append_creates_file_when_file_does_not_exist(missing_exc):
 
     sb.write_file("/mnt/user-data/outputs/report.txt", "conclusion", append=True)
 
-    assert files.write_calls == [("/home/user/outputs/report.txt", "conclusion")]
+    assert files.write_calls == [("/home/user/outputs/report.txt", b"conclusion")]
 
 
 def test_append_does_not_overwrite_when_read_fails(caplog):
@@ -6335,23 +6342,22 @@ def test_append_accumulates_existing_content():
 
     sb.write_file("/mnt/user-data/outputs/report.txt", " world", append=True)
 
-    assert files.write_calls == [("/home/user/outputs/report.txt", "hello world")]
+    assert files.write_calls == [("/home/user/outputs/report.txt", b"hello world")]
 
 
-def test_append_decodes_bytes_preimage():
-    # FakeFilesAPI.read() returns str for valid utf-8. A bytes pre-image is
-    # what hits the decode branch before concatenation.
-    class BytesFilesAPI(FakeFilesAPI):
-        def read(self, path: str, *, format: str | None = None):
-            self.read_calls.append((path, format))
-            return self.store[path]
-
-    files = BytesFilesAPI(store={"/home/user/outputs/report.txt": b"hello"})
+def test_append_preserves_non_utf8_preimage_bytes():
+    # A text pre-read returns httpx's r.text, which decodes with
+    # errors="replace", and the write re-encodes the str, so appending to a
+    # file that holds non-UTF-8 bytes used to rewrite the original bytes as
+    # U+FFFD. The pre-image must be read and written as bytes instead.
+    original = b"binary\xff\xfepayload"
+    files = FakeFilesAPI(store={"/home/user/outputs/report.bin": original})
     sb = _make_sandbox(FakeClient(files=files))
 
-    sb.write_file("/mnt/user-data/outputs/report.txt", " world", append=True)
+    sb.write_file("/mnt/user-data/outputs/report.bin", " tail", append=True)
 
-    assert files.write_calls == [("/home/user/outputs/report.txt", "hello world")]
+    assert files.read_calls == [("/home/user/outputs/report.bin", "bytes")]
+    assert files.write_calls == [("/home/user/outputs/report.bin", original + b" tail")]
 
 
 # ── Remote grep/glob failure contract against a real POSIX sh (#5376) ─────────

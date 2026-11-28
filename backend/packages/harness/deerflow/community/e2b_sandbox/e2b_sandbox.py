@@ -369,25 +369,29 @@ class E2BSandbox(Sandbox):
             client = self._client
             if client is None:
                 raise RuntimeError("sandbox client has been closed")
+            payload: str | bytes = content
             if append:
                 # E2B has no append write. Read-modify-write must treat only
                 # explicit not-found as empty; any other read failure would
                 # otherwise overwrite the original file with just the tail.
                 try:
-                    existing = client.files.read(resolved) or ""
+                    existing = client.files.read(resolved, format="bytes") or b""
                 except (FileNotFoundException, FileNotFoundError):
-                    existing = ""
+                    existing = b""
                 except Exception:
                     logger.error(
                         "Append pre-read failed for %s; refusing to overwrite",
                         resolved,
                     )
                     raise
-                if isinstance(existing, bytes):
-                    existing = existing.decode("utf-8", errors="replace")
-                content = existing + content
+                # Read and write the pre-image as bytes. A text pre-read returns
+                # httpx's ``r.text``, which decodes with errors="replace" (the
+                # adapter's own decode was lossy too), so non-UTF-8 bytes were
+                # silently rewritten as U+FFFD. ``bytes()`` normalises the SDK's
+                # bytearray because files.write accepts bytes but not bytearray.
+                payload = bytes(existing) + content.encode("utf-8")
             try:
-                client.files.write(resolved, content)
+                client.files.write(resolved, payload)
             except Exception as e:
                 logger.error("Failed to write file %s in e2b sandbox: %s", resolved, e)
                 raise
