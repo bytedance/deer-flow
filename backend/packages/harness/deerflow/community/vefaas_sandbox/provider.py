@@ -24,6 +24,7 @@ import tarfile
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -3099,6 +3100,36 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             raise ValueError("Unsafe output path")
         return tuple(parts)
 
+    @staticmethod
+    def _output_name_key(name: str) -> str:
+        return unicodedata.normalize("NFC", name.casefold())
+
+    @classmethod
+    def _ambiguous_output_paths(cls, remote_paths: list[str]) -> set[str]:
+        # The sandbox filesystem is case-sensitive but the mirroring host may not
+        # be, so two names that differ only by case or Unicode normalization
+        # collide on it. Component IDs keep this preflight linear in the bounded
+        # listing size, even for deeply nested names, and a directory alias
+        # rejects all children. Mirrors OpenSandbox and boxd.
+        components: dict[tuple[int, str], tuple[str, int]] = {}
+        ambiguous: set[int] = set()
+        path_nodes: dict[str, list[int]] = {}
+        for remote_path in remote_paths:
+            try:
+                parts = cls._output_parts(remote_path)
+            except ValueError:
+                continue
+            parent = 0
+            nodes = path_nodes.setdefault(remote_path, [])
+            for part in parts:
+                key = (parent, cls._output_name_key(part))
+                spelling, node = components.setdefault(key, (part, len(components) + 1))
+                if spelling != part:
+                    ambiguous.add(node)
+                nodes.append(node)
+                parent = node
+        return {path for path, nodes in path_nodes.items() if ambiguous.intersection(nodes)}
+
     @classmethod
     def _output_destination(cls, root: Path, remote_path: str) -> Path:
         parts = cls._output_parts(remote_path)
@@ -3106,6 +3137,16 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         for component in reversed((target, *target.parents)):
             if component.is_symlink() or component.is_junction():
                 raise ValueError("Symlinked output destination")
+        # A same-key spelling already in an existing directory must never be
+        # overwritten by this mirror: the staged file is discarded instead.
+        parent = root
+        for part in parts:
+            if parent.is_dir():
+                key = cls._output_name_key(part)
+                with os.scandir(parent) as entries:
+                    if any(entry.name != part and cls._output_name_key(entry.name) == key for entry in entries):
+                        raise ValueError("Output destination aliases an existing path")
+            parent = parent / part
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists() and not stat.S_ISREG(target.stat().st_mode):
             raise ValueError("Output destination is not a regular file")
@@ -3120,11 +3161,18 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         if not listing or len(listing.encode("utf-8", errors="ignore")) > _MAX_SYNC_LISTING_BYTES:
             return
         remote_paths = [line.strip() for line in listing.splitlines() if line.strip().startswith(f"{OUTPUTS_ROOT}/")]
+        # The preflight covers the whole listing, including records beyond the
+        # transfer caps below: publishing the first of two aliases would expose
+        # its bytes through both artifact URLs.
+        ambiguous_paths = self._ambiguous_output_paths(remote_paths)
         deadline = time.monotonic() + _SYNC_DEADLINE_SECONDS
         total = 0
         for index, remote_path in enumerate(remote_paths):
             if index >= _MAX_SYNC_FILES or total >= _MAX_SYNC_TOTAL_BYTES or time.monotonic() >= deadline:
                 break
+            if remote_path in ambiguous_paths:
+                logger.warning("Skipping ambiguous veFaaS output %r", remote_path)
+                continue
             staged: Path | None = None
             try:
                 target = self._output_destination(root, remote_path)
