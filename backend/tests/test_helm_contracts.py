@@ -192,6 +192,85 @@ def test_gateway_and_postgres_resolve_the_same_secret(settings: tuple[str, ...],
         assert secrets == []
 
 
+# --- Bundled PostgreSQL data directory ---
+
+PG_VOLUME_ROOT = "/var/lib/postgresql/data"
+requires_postgres_docker = pytest.mark.skipif(os.getenv("DEERFLOW_TEST_HELM_POSTGRES") != "1", reason="set DEERFLOW_TEST_HELM_POSTGRES=1 to run the Docker-backed Helm tests")
+
+
+@pytest.mark.parametrize(
+    ("settings", "chart_managed"),
+    [
+        pytest.param(("postgresql.image.repository=mirror.example.com/library/postgres",), True, id="canonical-mirror"),
+        pytest.param(("postgresql.image.repository=mirror.example.com/team/postgres",), False, id="custom-repository"),
+        pytest.param(("postgresql.image.tag=16-trixie", "postgresql.image.useChartDataDirectory=true"), True, id="explicit-opt-in"),
+        pytest.param(("postgresql.image.useChartDataDirectory=false",), False, id="explicit-opt-out"),
+    ],
+)
+def test_postgres_image_data_directory_settings(settings: tuple[str, ...], chart_managed: bool) -> None:
+    postgres = _container(_render_chart(*settings), "postgres")
+    if chart_managed:
+        default = _container(_render_chart(), "postgres")
+        assert postgres["command"] == default["command"]
+        assert _env(postgres)["PGDATA"] == _env(default)["PGDATA"]
+    else:
+        assert "command" not in postgres
+        assert "PGDATA" not in _env(postgres)
+
+
+def _docker(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(["docker", *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+    if check:
+        assert result.returncode == 0, result.stdout
+    return result
+
+
+def _query_postgres_volume(postgres: dict, data: str, sql: str, *, legacy_entrypoint: bool = False) -> list[str]:
+    mount = _named(postgres["volumeMounts"], "data")["mountPath"]
+    options = ["--network=none", "--user", "999:999", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--mount", f"type=volume,src={data},dst={mount},volume-nocopy"]
+    for env in postgres["env"]:
+        if "value" in env and not (legacy_entrypoint and env["name"] == "PGDATA"):
+            options.extend(["--env", f"{env['name']}={env['value']}"])
+    command = [] if legacy_entrypoint else postgres.get("command", [])
+    if command:
+        options.extend(["--entrypoint", command[0]])
+    server = _docker("run", "-d", *options, "--env", "POSTGRES_PASSWORD=volume-test", postgres["image"], *command[1:]).stdout.strip()
+    try:
+        # TCP becomes available only after the temporary bootstrap server has stopped.
+        query = """
+            until pg_isready -q -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"; do sleep 0.2; done
+            readlink -f "$PGDATA"
+            exec psql -XAtq -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"
+        """
+        rows = _docker("exec", server, "sh", "-ec", query, "sh", sql).stdout.splitlines()
+        _docker("stop", server)
+        return rows
+    finally:
+        print(_docker("logs", server, check=False).stdout)
+        _docker("rm", "-fv", server)
+
+
+@requires_postgres_docker
+@pytest.mark.parametrize("legacy_root", [False, True], ids=["new-group-writable-volume", "existing-root-database"])
+def test_postgres_reopens_the_same_database_on_its_volume(legacy_root: bool) -> None:
+    pod = _by_kind(_render_chart(), "StatefulSet", "-postgres")["spec"]["template"]["spec"]
+    security = pod["securityContext"]
+    assert (security["runAsUser"], security["runAsGroup"], security["fsGroup"]) == (999, 999, 999)
+    postgres = _named(pod["containers"], "postgres")
+    owner, mode = ("999:999", "0700") if legacy_root else ("0:0", "0777")
+    directory = PG_VOLUME_ROOT if legacy_root else f"{PG_VOLUME_ROOT}/pgdata"
+    data = _docker("volume", "create").stdout.strip()
+    try:
+        _docker("run", "--rm", "--network=none", "-v", f"{data}:/volume", "--entrypoint", "sh", postgres["image"], "-ec", 'chown "$1" /volume && chmod "$2" /volume', "sh", owner, mode)
+        create = "CREATE TABLE helm_marker (v text); INSERT INTO helm_marker VALUES ('preserved'); SELECT system_identifier FROM pg_control_system()"
+        path, system_id = _query_postgres_volume(postgres, data, create, legacy_entrypoint=legacy_root)
+        assert path == directory
+        query = "SELECT system_identifier, v FROM pg_control_system() CROSS JOIN helm_marker"
+        assert _query_postgres_volume(postgres, data, query) == [directory, f"{system_id}|preserved"]
+    finally:
+        _docker("volume", "rm", data)
+
+
 # --- test_helm_extensions_config_writable ---
 
 RUNTIME_CONFIG_PATH = "/app/backend/.deer-flow/extensions-config/extensions_config.json"
@@ -244,6 +323,11 @@ def test_rendered_helm_extensions_config_is_writable_and_seeded(persistence_enab
         assert volumes["home"]["persistentVolumeClaim"]["claimName"].endswith("-home")
     else:
         assert volumes["home"]["emptyDir"] == {}
+
+
+def test_default_workspace_pvc_is_kept_on_uninstall() -> None:
+    pvc = _by_kind(_render_chart(), "PersistentVolumeClaim", "-home")
+    assert pvc["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
 
 
 # --- test_helm_image_pull_secrets ---

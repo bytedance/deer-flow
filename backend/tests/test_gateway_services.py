@@ -4546,20 +4546,38 @@ async def test_static_resume_recovers_selected_checkpoint_scope(_stub_app_config
 
 
 @pytest.mark.parametrize(
-    ("card", "reply_context", "current_scope"),
+    ("card", "reply_context", "current_scope", "checkpoint_field"),
     [
-        ("latest", {}, None),
-        ("latest", {"is_plan_mode": False, "subagent_enabled": False}, {"version": 1, "mode": "selected", "dataset_ids": ["dataset-current"]}),
-        ("latest", {"mode": "chat", "is_plan_mode": False, "subagent_enabled": False}, None),
-        ("malformed", {"mode": "chat", "is_plan_mode": False, "subagent_enabled": False}, None),
-        ("earlier", {}, None),
-        ("earlier", {"mode": "ultra", "is_plan_mode": True}, {"version": 1, "mode": "selected", "dataset_ids": ["dataset-current"]}),
-        ("unknown", {"mode": "chat"}, {"version": 1, "mode": "disabled"}),
+        ("latest", {}, None, None),
+        ("latest", {"is_plan_mode": False, "subagent_enabled": False}, {"version": 1, "mode": "selected", "dataset_ids": ["dataset-current"]}, None),
+        ("latest", {"mode": "chat", "is_plan_mode": False, "subagent_enabled": False}, None, None),
+        ("malformed", {"mode": "chat", "is_plan_mode": False, "subagent_enabled": False}, None, None),
+        ("earlier", {}, None, None),
+        ("earlier", {"mode": "ultra", "is_plan_mode": True}, {"version": 1, "mode": "selected", "dataset_ids": ["dataset-current"]}, None),
+        ("unknown", {"mode": "chat"}, {"version": 1, "mode": "disabled"}, None),
+        ("latest", {}, None, "checkpoint_id"),
+        ("latest", {"mode": "flash"}, {"version": 1, "mode": "selected", "dataset_ids": ["dataset-current"]}, "checkpoint"),
+        ("latest", {}, None, "checkpoint_map"),
+        ("malformed", {"mode": "chat"}, None, "checkpoint_id"),
+        ("earlier", {"mode": "ultra", "is_plan_mode": True}, None, "checkpoint"),
     ],
-    ids=["omitted-mode-and-scope", "composer-flags-and-new-scope", "explicit-chat", "malformed-response-keeps-chat", "earlier-chat-and-scope", "earlier-chat-with-new-scope", "unknown-card-keeps-chat"],
+    ids=[
+        "omitted-mode-and-scope",
+        "composer-flags-and-new-scope",
+        "explicit-chat",
+        "malformed-response-keeps-chat",
+        "earlier-chat-and-scope",
+        "earlier-chat-with-new-scope",
+        "unknown-card-keeps-chat",
+        "pinned-id-after-fork",
+        "pinned-sdk-checkpoint-with-new-scope",
+        "sdk-root-map-selects-retained-card",
+        "malformed-reply-recovers-only-pinned-scope",
+        "pinned-chat-after-ultra-fork",
+    ],
 )
 @pytest.mark.asyncio
-async def test_clarification_reply_recovers_source_mode_independently_of_knowledge_scope(_stub_app_config, monkeypatch, card, reply_context, current_scope):
+async def test_clarification_reply_recovers_source_mode_independently_of_knowledge_scope(_stub_app_config, monkeypatch, card, reply_context, current_scope, checkpoint_field):
     from unittest.mock import AsyncMock
 
     from _agent_e2e_helpers import FakeToolCallingModel
@@ -4586,7 +4604,9 @@ async def test_clarification_reply_recovers_source_mode_independently_of_knowled
     )
     request = _make_start_run_request(RunManager(store=MemoryRunStore()), stream_bridge=MemoryStreamBridge())
     question = {"question": "Which dataset?", "clarification_type": "missing_info"}
-    model = FakeToolCallingModel(responses=[AIMessage(content="", tool_calls=[{"name": "ask_clarification", "id": name, "args": question}]) for name in ("earlier", "latest")])
+    turn_order = ("latest", "earlier") if checkpoint_field and card == "earlier" else ("earlier", "latest")
+    cards = [AIMessage(content="", tool_calls=[{"name": "ask_clarification", "id": name, "args": question}]) for name in turn_order]
+    model = FakeToolCallingModel(responses=[*cards, AIMessage(content="Answer on the other branch")])
 
     def source_agent(*, config):
         return create_agent(model, tools=[ask_clarification_tool], middleware=[ClarificationMiddleware()], state_schema=ThreadState)
@@ -4599,14 +4619,41 @@ async def test_clarification_reply_recovers_source_mode_independently_of_knowled
         "earlier": ({"mode": "chat"}, {"version": 1, "mode": "selected", "dataset_ids": ["dataset-earlier"]}),
         "latest": ({"mode": "ultra", "is_plan_mode": True, "subagent_enabled": True, "reasoning_effort": "high"}, {"version": 1, "mode": "disabled"}),
     }
-    request_ids = {}
-    for name, (options, scope) in turns.items():
+    request_ids, checkpoints = {}, {}
+    thread_config = {"configurable": {"thread_id": thread_id}}
+    for name in turn_order:
+        options, scope = turns[name]
         original = RunCreateRequest(assistant_id="researcher", context=options, input={"messages": [{"role": "user", "content": "Research this.", "additional_kwargs": {"knowledge_scope": scope}}]})
         source = await services.start_run(original, thread_id, request)
         await source.task
         assert source.status == RunStatus.success
         request_ids[name] = source.human_input_request["request_id"]
+        if checkpoint_field:
+            snapshot = await anext(request.app.state.checkpointer.alist(thread_config, filter={"source": "loop"}, limit=1))
+            checkpoints[name] = snapshot.config["configurable"]
     assert request_ids["earlier"] != request_ids["latest"]
+
+    reply_checkpoint = {}
+    if checkpoint_field:
+        # Fork before the second card so it exists only on the retained branch.
+        base_name, retained_name = turn_order
+        sibling = RunCreateRequest(
+            assistant_id="researcher",
+            checkpoint_id=checkpoints[base_name]["checkpoint_id"],
+            context={"mode": "flash"},
+            input={"messages": [{"role": "user", "content": "Another question", "additional_kwargs": {"knowledge_scope": turns[base_name][1]}}]},
+        )
+        fork = await services.start_run(sibling, thread_id, request)
+        await fork.task
+        assert fork.status == RunStatus.success
+        head = await request.app.state.checkpointer.aget_tuple(thread_config)
+        assert request_ids[retained_name] not in {message.id for message in head.checkpoint["channel_values"]["messages"]}
+        retained = checkpoints[retained_name]
+        if checkpoint_field == "checkpoint_id":
+            reply_checkpoint["checkpoint_id"] = retained["checkpoint_id"]
+        else:
+            sdk_checkpoint = retained if checkpoint_field == "checkpoint" else checkpoints[base_name]
+            reply_checkpoint["checkpoint"] = {**sdk_checkpoint, "checkpoint_map": {"": retained["checkpoint_id"]}}
 
     response_metadata = {
         "version": 1,
@@ -4623,6 +4670,7 @@ async def test_clarification_reply_recovers_source_mode_independently_of_knowled
         assistant_id="researcher",
         input={"messages": [{"role": "user", "content": "Use the current dataset", "additional_kwargs": additional_kwargs}]},
         context=reply_context,
+        **reply_checkpoint,
     )
     worker = AsyncMock()
     monkeypatch.setattr(services, "run_agent", worker)
@@ -4630,6 +4678,9 @@ async def test_clarification_reply_recovers_source_mode_independently_of_knowled
     await run.task
 
     received = worker.await_args.kwargs
+    if checkpoint_field:
+        coords = received["config"]["configurable"]
+        assert coords["checkpoint_id"] == retained["checkpoint_id"]
     expected_options, source_scope = turns.get(card, (reply_context, turns["latest"][1]))
     assert received["graph_input"]["messages"][0].additional_kwargs["knowledge_scope"] == (current_scope or source_scope)
     _assert_clarification_mode_options(received["config"], expected_options)
@@ -4648,6 +4699,13 @@ def _assert_clarification_mode_options(config, expected):
         ("pending", {"mode": "ultra", "is_plan_mode": True, "subagent_enabled": True, "reasoning_effort": "high"}, "checkpoint"),
         ("retry", {"mode": "flash"}, "checkpoint"),
         ("unknown-card", {"mode": "ultra"}, "request"),
+        ("pinned-before-card", {"mode": "ultra"}, 409),
+        ("prepared-clarification", {"mode": "ultra"}, "checkpoint"),
+        ("stale-configurable-checkpoint", {}, 404),
+        ("malformed-stale-checkpoint", {}, 404),
+        ("empty-sdk-root-checkpoint", {"mode": "ultra"}, "checkpoint"),
+        ("null-sdk-root-checkpoint", {"mode": "ultra"}, "checkpoint"),
+        ("non-string-sdk-root-checkpoint", {}, 400),
         ("legacy-no-options", {}, "request"),
         ("empty-turn-marker", {}, "defaults"),
         ("ambiguous-on-chat-thread", {}, 409),
@@ -4659,7 +4717,7 @@ async def test_clarification_reply_uses_the_cards_execution_checkpoint(_stub_app
     from unittest.mock import AsyncMock
 
     from fastapi import HTTPException
-    from langchain_core.messages import HumanMessage, ToolMessage
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
     from langgraph.checkpoint.base import empty_checkpoint
 
     from app.gateway import checkpoint_lineage, services
@@ -4673,6 +4731,10 @@ async def test_clarification_reply_uses_the_cards_execution_checkpoint(_stub_app
     reply_id = "missing" if case == "unknown-card" else "card"
     response = {"version": 1, "kind": "human_input_response", "source": "ask_clarification", "request_id": reply_id, "response_kind": "text", "value": "current"}
     history = [([human], {"source": "loop"}), ([human, card], {"source": "loop", **checkpoint_options}), ([human, card], {"source": "update", "mode": "flash"})]
+    if case == "prepared-clarification":
+        human.additional_kwargs["deerflow_mode_options"] = checkpoint_options
+        reply_turn = HumanMessage(content="current", id="first-reply", additional_kwargs={"hide_from_ui": True, "human_input_response": response, "deerflow_mode_options": checkpoint_options})
+        history.append(([human, card, reply_turn, AIMessage(content="Done", id="completed-answer")], {"source": "loop", **checkpoint_options}))
     if case == "retry":
         previous_reply = HumanMessage(content="current", id="first-reply", additional_kwargs={"hide_from_ui": True, "human_input_response": response})
         later_question = HumanMessage(content="Another question", id="later-question", additional_kwargs={"deerflow_mode_options": {"mode": "ultra"}})
@@ -4683,9 +4745,22 @@ async def test_clarification_reply_uses_the_cards_execution_checkpoint(_stub_app
         checkpoint["channel_values"] = {"messages": messages}
         checkpoint["channel_versions"] = {"messages": step}
         config = await request.app.state.checkpointer.aput(config, checkpoint, {"step": step, **metadata}, {"messages": step})
+        if step == 1:
+            before_card = config["configurable"]["checkpoint_id"]
 
     reply_options = {} if case == "ambiguous-on-chat-thread" else {"mode": "chat", "is_plan_mode": False, "subagent_enabled": False}
-    reply = RunCreateRequest(input={"messages": [{"role": "user", "content": "current", "additional_kwargs": {"human_input_response": response}}]}, context=reply_options)
+    checkpoint_fields = {}
+    if case == "pinned-before-card":
+        checkpoint_fields["checkpoint_id"] = before_card
+    elif case == "prepared-clarification":
+        checkpoint_fields.update(checkpoint_id=before_card, metadata={"regenerate_from_message_id": "completed-answer", "replay_kind": "regenerate"})
+    elif case in {"stale-configurable-checkpoint", "malformed-stale-checkpoint"}:
+        checkpoint_fields["config"] = {"configurable": {"checkpoint_id": "pruned"}}
+    elif case in {"empty-sdk-root-checkpoint", "null-sdk-root-checkpoint", "non-string-sdk-root-checkpoint"}:
+        root_id = {"empty-sdk-root-checkpoint": "", "null-sdk-root-checkpoint": None, "non-string-sdk-root-checkpoint": 10}[case]
+        checkpoint_fields["checkpoint"] = {**config["configurable"], "checkpoint_id": before_card, "checkpoint_map": {"": root_id}}
+    payload = {} if case == "malformed-stale-checkpoint" else response
+    reply = RunCreateRequest(input={"messages": [{"role": "user", "content": "current", "additional_kwargs": {"human_input_response": payload}}]}, context=reply_options, **checkpoint_fields)
     worker = AsyncMock()
     monkeypatch.setattr(services, "run_agent", worker)
     if case == "lookup-deadline":

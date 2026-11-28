@@ -34,7 +34,7 @@ from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION, get_auth_disabled_user, is_auth_disabled
 from app.gateway.authz import require_cancel_permission_if, resolve_route_permissions
-from app.gateway.checkpoint_lineage import CheckpointLineageError, CheckpointLineageTimeoutError, find_checkpoint_introducing_message, replay_lineage_lookup_deadline, replay_lineage_timeout_http_error
+from app.gateway.checkpoint_lineage import CheckpointLineageError, CheckpointLineageTimeoutError, checkpoint_exists, find_checkpoint_introducing_message, replay_lineage_lookup_deadline, replay_lineage_timeout_http_error
 from app.gateway.checkpoint_mode_errors import CHECKPOINT_MODE_ERRORS, checkpoint_mode_http_error
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
@@ -2255,6 +2255,22 @@ async def apply_checkpoint_to_run_config(
         configurable["checkpoint_map"] = checkpoint_map
 
 
+def _normalize_clarification_checkpoint(configurable: dict[str, Any]) -> str | None:
+    """Use the same root checkpoint for card lookup, graph execution, and delta state reads."""
+    checkpoint_map = configurable.get("checkpoint_map", {})
+    if not isinstance(checkpoint_map, Mapping):
+        raise HTTPException(400, "checkpoint_map must be an object")
+    checkpoint_id = configurable.get("checkpoint_id")
+    if "" in checkpoint_map or configurable.get("checkpoint_ns"):
+        # The outer graph takes the map's root entry; a child coordinate alone
+        # leaves it unpinned. Delta state reads also consult checkpoint_id.
+        checkpoint_id = checkpoint_map.get("")
+        configurable.update(checkpoint_ns="", checkpoint_id=checkpoint_id or None)
+    if checkpoint_id is not None and not isinstance(checkpoint_id, str):
+        raise HTTPException(400, "The root checkpoint ID must be a string")
+    return checkpoint_id or None
+
+
 async def ensure_checkpoint_history_seeded(
     request: Request,
     *,
@@ -2557,6 +2573,7 @@ async def _recover_source_message_metadata(
     checkpoint_id: str | None = None,
     checkpoint_ns: str = "",
     resuming: bool = False,
+    pinned_clarification: bool = False,
 ) -> Mapping[str, Any] | None:
     """An ordinary source may have empty metadata. None means its message is missing."""
     checkpoint_kwargs: dict[str, Any] = {}
@@ -2574,6 +2591,8 @@ async def _recover_source_message_metadata(
     except Exception as exc:
         logger.exception("Failed to recover source turn for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to recover source turn") from exc
+    if pinned_clarification and not checkpoint_exists(snapshot):
+        raise HTTPException(404, f"Checkpoint {checkpoint_id} not found")
     values = getattr(snapshot, "values", None)
     messages = values.get("messages") if isinstance(values, Mapping) else None
     if not isinstance(messages, list):
@@ -2621,6 +2640,8 @@ async def _recover_source_message_metadata(
                     answer = messages[index]
                     messages = messages[:index]
                     break
+            if pinned_clarification and answer is None:
+                raise HTTPException(409, "Select a checkpoint from a history that contains this clarification card")
         source = next(
             (message for message in reversed(messages) if _is_scope_source_human_message(message)),
             None,
@@ -3025,11 +3046,12 @@ async def start_run(
 
         replay_kind = run_metadata.get("replay_kind")
         target_message_id = run_metadata.get("regenerate_from_message_id")
+        has_replay_target = isinstance(target_message_id, str) and bool(target_message_id)
         scope_graph_input = graph_input if isinstance(graph_input, dict) else {"messages": []}
         current_human_message = _current_human_message(graph_input)
         current_message_has_scope = current_human_message is not None and KNOWLEDGE_SCOPE_KEY in current_human_message.additional_kwargs
         resuming = isinstance(graph_input, Command)
-        replay_requires_scope_recovery = graph_input is None or resuming or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
+        replay_requires_scope_recovery = graph_input is None or resuming or (has_replay_target and (replay_kind != "edit" or not current_message_has_scope))
         is_human_input_response = current_human_message is not None and "human_input_response" in current_human_message.additional_kwargs
         clarification_response = read_human_input_response(_message_additional_kwargs(current_human_message)) if is_human_input_response else None
         # Clarification and edit-replay messages may intentionally replace the
@@ -3039,12 +3061,17 @@ async def start_run(
         # server recovery regardless of client input.
         is_scope_recovery = replay_requires_scope_recovery or (is_human_input_response and not current_message_has_scope)
         recovery_args: dict[str, Any] = {}
+        configurable = config.get("configurable") or {}
         if graph_input is None or resuming:
-            configurable = config.get("configurable") or {}
             recovery_args.update({key: configurable[key] for key in ("checkpoint_id", "checkpoint_ns") if configurable.get(key)})
+        elif is_human_input_response and not has_replay_target:
+            # A prepared replay's checkpoint can predate its target. A normal
+            # card reply instead resolves against the history the worker sees.
+            if checkpoint_id := _normalize_clarification_checkpoint(configurable):
+                recovery_args.update(checkpoint_id=checkpoint_id, pinned_clarification=True)
         if resuming:
             recovery_args["resuming"] = True
-        is_replay = is_scope_recovery or is_human_input_response or (isinstance(target_message_id, str) and bool(target_message_id))
+        is_replay = is_scope_recovery or is_human_input_response or has_replay_target
         source_metadata: Mapping[str, Any] | None = {}
         if is_replay and admitted_run is not None and target_message_id:
             # A keyed retry can outlive its source checkpoint. The original
@@ -3076,7 +3103,7 @@ async def start_run(
                 source_options = _stored_mode_options(admitted_run)
             source_chat = selected_mode(source_options) == "chat"
             restore_options = source_options is not None
-        elif isinstance(target_message_id, str) and target_message_id:
+        elif has_replay_target:
             restore_options = source_options is not None or source_chat or requested_mode == "chat"
         else:
             restore_options = clarification_response is not None and (source_options is not None or source_chat)

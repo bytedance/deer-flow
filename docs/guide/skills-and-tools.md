@@ -58,6 +58,9 @@ for the additional dependencies. Legacy `.xls` and CSV input do not require
 DuckDB extensions and can be analyzed offline with an empty extension cache.
 CSV paths passed to `--files` select individual files. For example, quote
 `'orders[1].csv'` in the shell to import that file even beside `orders1.csv`.
+A missing input, unsupported file format, or CSV import failure stops the
+analysis without exporting partial results or caching that import. Older cache
+entries are rebuilt on demand.
 The `.xlsx` reader continues to use the spatial extension. Legacy workbooks that
 cannot be opened are reported and skipped while other input files continue;
 analysis fails if no tables can be loaded.

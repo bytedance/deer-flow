@@ -379,7 +379,7 @@ def _checkpoint_identity(checkpoint_tuple: Any) -> tuple[str, str, str] | None:
     return _config_identity(getattr(checkpoint_tuple, "config", {}) or {})
 
 
-def _checkpoint_exists(checkpoint_tuple: Any) -> bool:
+def checkpoint_exists(checkpoint_tuple: Any) -> bool:
     """Distinguish a persisted empty checkpoint from an accessor miss.
 
     LangGraph represents a missing explicit ``checkpoint_id`` as an empty
@@ -483,7 +483,7 @@ async def _find_message_boundary(accessor: Any, head_checkpoint: Any, message_id
         if not isinstance(parent_config, dict) or (parent_identity := _config_identity(parent_config)) is None:
             raise CheckpointLineageIntegrityError("Checkpoint parent link is not addressable")
         parent = await read(parent_config)
-        if _checkpoint_identity(parent) != parent_identity or not _checkpoint_exists(parent):
+        if _checkpoint_identity(parent) != parent_identity or not checkpoint_exists(parent):
             raise CheckpointLineageIntegrityError("Checkpoint parent link is not addressable")
         if parent_identity in visited:
             raise CheckpointLineageIntegrityError("Checkpoint lineage contains a cycle")
@@ -508,7 +508,7 @@ async def _find_message_boundary(accessor: Any, head_checkpoint: Any, message_id
             gp_config = getattr(parent, "parent_config", None)
             if isinstance(gp_config, dict):
                 candidate = await read(gp_config)
-                if _checkpoint_exists(candidate):
+                if checkpoint_exists(candidate):
                     grandparent = candidate
             versions = await resolve_channel_versions(accessor, parent)
             if grandparent is not None:

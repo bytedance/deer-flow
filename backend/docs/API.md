@@ -516,8 +516,17 @@ turn's restrictions. They preserve a later selection for new requests.
 A structured `human_input_response` names its clarification card by
 `request_id`. The reply uses the mode, reasoning, planning, and delegation
 settings of the turn that issued that card, even if the reply supplies a
-different `context.mode` or a newer card exists. The reply can select a new
-knowledge scope. Omitting that selection preserves the issuing turn's scope.
+different `context.mode` or a newer card exists. To answer a card on another
+branch, pass its retained `checkpoint_id` or SDK `checkpoint` object. The
+Gateway looks for the card in the history used by the run. The SDK object's
+checkpoint ID must still exist. Its checkpoint map can select a different
+root through the `""` entry. A null or empty root entry, or a child namespace
+without a root entry, uses the current outer history. A missing checkpoint
+returns `404`. If the selected history does not contain the card, the Gateway
+returns `409`. Select a checkpoint that includes the card.
+Prepared edits and regenerations use their target message to locate the
+original turn. A clarification reply can select a new knowledge scope.
+Omitting that selection preserves the issuing turn's scope.
 For older cards, the Gateway recovers available settings from the checkpoint
 that introduced the card. During this history lookup, a temporary storage
 failure returns `503` and a lookup deadline returns `504`. If the source
