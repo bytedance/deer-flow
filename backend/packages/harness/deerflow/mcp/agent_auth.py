@@ -63,7 +63,13 @@ _token_managers_lock = threading.Lock()
 
 def agent_definition_digest(config: AgentConfig, soul: str | None) -> str:
     """Hash the stored agent settings and SOUL text that admission will pin."""
-    return canonical_hash({"version": 1, "config": config.model_dump(mode="json"), "soul": soul or ""})
+    definition = config.model_dump(mode="json", exclude={"subagent_policy"})
+    if config.subagent_policy is not None:
+        limits = config.subagent_policy.model_dump(exclude_none=True)
+        if limits:
+            # Keep existing v1 approvals usable when this optional setting is unset.
+            definition["subagent_policy"] = limits
+    return canonical_hash({"version": 1, "config": definition, "soul": soul or ""})
 
 
 def grant_subject(app_config: Any, binding: McpAgentCredentialBinding) -> McpAgentGrantSubject | None:

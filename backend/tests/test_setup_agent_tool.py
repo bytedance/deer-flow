@@ -132,6 +132,18 @@ class TestSetupAgentNoDataLoss:
         assert (agent_dir / "SOUL.md").read_text() == "# My Agent"
         assert (agent_dir / "config.yaml").exists()
 
+    def test_rebootstrap_preserves_subagent_policy(self, tmp_path: Path):
+        from deerflow.persistence.agents.file import FileAgentStore
+
+        store = FileAgentStore()
+        policy = {"max_concurrent": 3, "max_total": 8}
+        with patch("deerflow.config.agents_config.get_paths", return_value=_make_paths_mock(tmp_path)):
+            store.create("test-agent", {"name": "test-agent", "subagent_policy": policy}, "Original soul")
+            result = _call_setup_agent(tmp_path, soul="Updated soul", description="Rebootstrapped")
+            assert result.update["created_agent_name"] == "test-agent"
+            assert store.get_soul("test-agent") == "Updated soul"
+            assert store.get("test-agent").subagent_policy.model_dump(exclude_none=True) == policy
+
     @pytest.mark.no_auto_user
     def test_runtime_user_id_used_when_contextvar_missing(self, tmp_path: Path):
         """setup_agent should not fall back to default when runtime carries user_id."""

@@ -25,6 +25,7 @@ async function expectInsideViewport(element: Locator) {
 async function openSettings(
   page: Page,
   allowedSubagents: string[] | null = null,
+  subagentPolicy?: { max_concurrent: number; max_total: number },
 ) {
   const agent = {
     name: "test-agent",
@@ -32,6 +33,7 @@ async function openSettings(
     thinking_enabled: true,
     reasoning_effort: "high",
     allowed_subagents: allowedSubagents,
+    subagent_policy: subagentPolicy,
   };
   mockLangGraphAPI(page, { agents: [agent] });
   await page.route("**/api/models", (route) =>
@@ -81,6 +83,40 @@ async function openSettings(
   return { dialog, saved: () => saved };
 }
 
+test("an incomplete number cannot clear a saved delegation limit", async ({
+  page,
+}) => {
+  const { dialog, saved } = await openSettings(page, null, {
+    max_concurrent: 4,
+    max_total: 10,
+  });
+  const parallel = dialog.getByRole("spinbutton", {
+    name: "Max parallel task calls per response",
+  });
+  const save = dialog.getByRole("button", { name: "Save", exact: true });
+  const badInput = () =>
+    parallel.evaluate((input: HTMLInputElement) => input.validity.badInput);
+
+  await expect(parallel).toHaveValue("4");
+  await parallel.selectText();
+  await parallel.press("e");
+  await expect(parallel).toHaveValue("");
+  expect(await badInput()).toBe(true);
+
+  await save.click();
+  await expect(
+    page.getByText("Concurrent task calls must be a whole number from 1 to 64"),
+  ).toBeVisible();
+  expect(saved()).toBeUndefined();
+
+  await parallel.press("Backspace");
+  await expect(parallel).toHaveValue("");
+  expect(await badInput()).toBe(false);
+  await save.click();
+  await expect(dialog).toBeHidden();
+  expect(saved()?.subagent_policy).toEqual({ max_concurrent: null });
+});
+
 for (const viewport of [
   { width: 1280, height: 720 },
   { width: 390, height: 640 },
@@ -103,6 +139,22 @@ for (const viewport of [
     await expectInsideViewport(
       dialog.getByRole("button", { name: "Cancel", exact: true }),
     );
+
+    const parallel = dialog.getByRole("spinbutton", {
+      name: "Max parallel task calls per response",
+    });
+    const total = dialog.getByRole("spinbutton", {
+      name: "Max task calls per run",
+    });
+    await parallel.fill("2");
+    await total.fill("8");
+    await expectInsideViewport(total);
+    const limitsScreenshot = testInfo.outputPath("agent-delegation-limits.png");
+    await page.screenshot({ path: limitsScreenshot });
+    await testInfo.attach("agent delegation limits", {
+      path: limitsScreenshot,
+      contentType: "image/png",
+    });
 
     const general = dialog.getByRole("checkbox", {
       name: "general-purpose",
@@ -148,6 +200,10 @@ for (const viewport of [
     await dialog.getByRole("button", { name: "Save", exact: true }).click();
     await expect(dialog).toBeHidden();
     expect(saved()?.allowed_subagents).toEqual(["general-purpose", "bash"]);
+    expect(saved()?.subagent_policy).toEqual({
+      max_concurrent: 2,
+      max_total: 8,
+    });
   });
 
   test(`collapsed descriptions are accessible at ${viewport.width}x${viewport.height}`, async ({

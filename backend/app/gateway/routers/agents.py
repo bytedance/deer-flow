@@ -18,6 +18,7 @@ from deerflow.config.agents_config import (
     AgentConfig,
     AgentDisplayName,
     AgentModelSettings,
+    AgentSubagentPolicy,
     list_custom_agents,
     load_agent_config,
     load_agent_soul,
@@ -59,6 +60,7 @@ class AgentResponse(BaseModel):
     model_settings: AgentModelSettings | None = Field(default=None, description="Per-agent sampling overrides (temperature / max_tokens)")
     thinking_enabled: bool | None = Field(default=None, description="Per-agent thinking-mode default (None = runtime default)")
     reasoning_effort: ReasoningEffort | None = Field(default=None, description="Per-agent reasoning-effort default (None = runtime default)")
+    subagent_policy: AgentSubagentPolicy | None = Field(default=None, description="Optional per-Agent task delegation limits")
     soul: str | None = Field(default=None, description="SOUL.md content")
 
 
@@ -89,6 +91,7 @@ class AgentCreateRequest(BaseModel):
     model_settings: AgentModelSettings | None = Field(default=None, description="Per-agent sampling overrides (temperature / max_tokens)")
     thinking_enabled: bool | None = Field(default=None, description="Per-agent thinking-mode default (None = runtime default)")
     reasoning_effort: ReasoningEffort | None = Field(default=None, description="Per-agent reasoning-effort default (None = runtime default)")
+    subagent_policy: AgentSubagentPolicy | None = Field(default=None, description="Optional per-Agent task delegation limits")
     soul: str = Field(default="", description="SOUL.md content — agent personality and behavioral guardrails")
 
 
@@ -106,6 +109,7 @@ class AgentUpdateRequest(BaseModel):
     model_settings: AgentModelSettings | None = Field(default=None, description="Updated per-agent sampling overrides")
     thinking_enabled: bool | None = Field(default=None, description="Updated per-agent thinking-mode default")
     reasoning_effort: ReasoningEffort | None = Field(default=None, description="Updated per-agent reasoning-effort default")
+    subagent_policy: AgentSubagentPolicy | None = Field(default=None, description="Updated per-Agent task delegation limits. Null clears the policy.")
     soul: str | None = Field(default=None, description="Updated SOUL.md content")
 
 
@@ -188,15 +192,8 @@ def _validate_model_exists(model: str | None) -> None:
         raise HTTPException(status_code=422, detail=f"Unknown model '{model}'. Use a model name defined under `models:` in config.yaml.")
 
 
-def _merge_model_settings_update(value: AgentModelSettings, existing: AgentModelSettings | None) -> dict:
-    """Merge an explicit ``model_settings`` update with existing sub-fields.
-
-    The top-level ``model_settings`` key is optional in update requests:
-    omitted means "preserve the current block", while explicit ``null`` means
-    "clear the block". Inside the block, omitted sub-fields should behave the
-    same way. This lets API callers update only ``temperature`` without
-    accidentally clearing an existing ``max_tokens``.
-    """
+def _merge_nested_update(value: BaseModel, existing: BaseModel | None) -> dict:
+    """Preserve omitted sub-fields and drop fields explicitly set to null."""
     merged = existing.model_dump(exclude_none=True) if existing is not None else {}
     for field in value.model_fields_set:
         field_value = getattr(value, field)
@@ -223,11 +220,24 @@ def _apply_model_behavior(config_data: dict, source: BaseModel, existing: AgentC
         if value is None:
             continue
         if field == "model_settings" and isinstance(value, AgentModelSettings):
-            dumped_settings = _merge_model_settings_update(value, existing.model_settings if existing is not None else None)
+            dumped_settings = _merge_nested_update(value, existing.model_settings if existing is not None else None)
             if dumped_settings:
                 config_data[field] = dumped_settings
             continue
         config_data[field] = value.model_dump(exclude_none=True) if isinstance(value, BaseModel) else value
+
+
+def _apply_subagent_policy(
+    config_data: dict,
+    source: AgentCreateRequest | AgentUpdateRequest,
+    existing: AgentSubagentPolicy | None = None,
+) -> None:
+    """An absent block preserves existing caps. A null block clears both."""
+    value = source.subagent_policy if "subagent_policy" in source.model_fields_set else existing
+    if value is not None:
+        merged = _merge_nested_update(value, existing)
+        if merged:
+            config_data["subagent_policy"] = merged
 
 
 def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False, *, user_id: str | None = None) -> AgentResponse:
@@ -246,6 +256,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
         mcp_plugins=agent_cfg.mcp_plugins,
         knowledge_scope=agent_cfg.knowledge_scope,
         allowed_subagents=agent_cfg.allowed_subagents,
+        subagent_policy=agent_cfg.subagent_policy,
         model_settings=agent_cfg.model_settings,
         thinking_enabled=agent_cfg.thinking_enabled,
         reasoning_effort=agent_cfg.reasoning_effort,
@@ -273,6 +284,7 @@ def _build_agent_config(body: AgentCreateRequest, normalized_name: str, *, memor
     if not memory_enabled:
         config_data["memory_enabled"] = False
     _apply_model_behavior(config_data, body)
+    _apply_subagent_policy(config_data, body)
     return config_data
 
 
@@ -437,6 +449,7 @@ async def export_agent_package(name: str, request: Request, response: Response) 
                 knowledge_scope=agent_cfg.knowledge_scope,
                 skills=agent_cfg.skills,
                 allowed_subagents=agent_cfg.allowed_subagents,
+                subagent_policy=agent_cfg.subagent_policy,
                 model_settings=agent_cfg.model_settings,
                 thinking_enabled=agent_cfg.thinking_enabled,
                 reasoning_effort=agent_cfg.reasoning_effort,
@@ -558,7 +571,7 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
     user_id = get_effective_user_id()
 
     try:
-        agent_cfg = await asyncio.to_thread(load_agent_config, name, user_id=user_id)
+        await asyncio.to_thread(load_agent_config, name, user_id=user_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
     except Exception as e:
@@ -597,20 +610,20 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
         # Use model_fields_set to distinguish "field omitted" from "explicitly set to null".
         # This is critical for skills where None means "inherit all" (not "don't change").
         fields_set = body.model_fields_set
-        config_changed = bool(fields_set & ({"display_name", "description", "tool_groups", "skills", "mcp_plugins", "knowledge_scope", "allowed_subagents"} | set(_MODEL_BEHAVIOR_FIELDS)))
+        config_changed = bool(fields_set & ({"display_name", "description", "tool_groups", "skills", "mcp_plugins", "knowledge_scope", "allowed_subagents", "subagent_policy"} | set(_MODEL_BEHAVIOR_FIELDS)))
 
-        updated: dict | None = None
-        if config_changed:
+        def _build_updated(current: AgentConfig | None) -> dict:
+            assert current is not None  # require_existing=True
             updated = {
-                "name": agent_cfg.name,
+                "name": current.name,
                 # Explicit null resets to the AgentConfig default; storing None
                 # would make every later load of this agent fail validation.
-                "description": (body.description or "") if "description" in fields_set else agent_cfg.description,
+                "description": (body.description or "") if "description" in fields_set else current.description,
             }
             if "display_name" in fields_set:
                 updated["display_name"] = body.display_name or None
 
-            new_tool_groups = body.tool_groups if "tool_groups" in fields_set else agent_cfg.tool_groups
+            new_tool_groups = body.tool_groups if "tool_groups" in fields_set else current.tool_groups
             if new_tool_groups is not None:
                 updated["tool_groups"] = new_tool_groups
 
@@ -624,19 +637,20 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
             if "skills" in fields_set:
                 new_skills = body.skills
             else:
-                new_skills = agent_cfg.skills
+                new_skills = current.skills
             if new_skills is not None:
                 updated["skills"] = new_skills
 
             # allowed_subagents: None = all, [] = hard deny, list = whitelist.
-            new_allowed_subagents = body.allowed_subagents if "allowed_subagents" in fields_set else agent_cfg.allowed_subagents
+            new_allowed_subagents = body.allowed_subagents if "allowed_subagents" in fields_set else current.allowed_subagents
             if new_allowed_subagents is not None:
                 updated["allowed_subagents"] = new_allowed_subagents
 
             # model / model_settings / thinking_enabled / reasoning_effort:
             # take explicitly-set request fields, else preserve the existing
             # value (issue #4336).
-            _apply_model_behavior(updated, body, existing=agent_cfg)
+            _apply_model_behavior(updated, body, existing=current)
+            _apply_subagent_policy(updated, body, existing=current.subagent_policy)
 
             # Carry forward every top-level AgentConfig field this route does
             # not manage (currently ``github:``, plus any future field added
@@ -646,17 +660,19 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
             # ``github:`` binding — which would otherwise leave the next
             # webhook delivery unable to find the agent in the registry and
             # silently no-op.
-            for key, value in preserve_non_managed_fields(agent_cfg, new_tool_groups=new_tool_groups).items():
+            for key, value in preserve_non_managed_fields(current, new_tool_groups=new_tool_groups).items():
                 updated.setdefault(key, value)
+            return updated
 
         # Persist config (when changed) and/or soul (when provided) off the
-        # event loop. A no-change PATCH commits nothing and re-reads current state.
-        if updated is not None or body.soul is not None:
+        # event loop. Compose partial updates from the store's locked snapshot,
+        # not from the earlier existence/legacy checks.
+        if config_changed or body.soul is not None:
 
             def _update_agent() -> None:
-                get_agent_store().update(name, updated, body.soul, user_id=user_id)
+                get_agent_store().update(name, _build_updated if config_changed else None, body.soul, user_id=user_id, require_existing=True)
 
-            await run_drained_write("Update agent", _update_agent)
+            await run_drained_write("Update agent", _update_agent, (FileNotFoundError,))
 
         logger.info(f"Updated agent '{name}'")
 
@@ -669,6 +685,8 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
 
     except HTTPException:
         raise
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
     except Exception as e:
         logger.error(f"Failed to update agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to update agent")

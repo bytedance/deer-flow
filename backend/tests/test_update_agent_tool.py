@@ -17,7 +17,6 @@ import pytest
 import yaml
 from langchain.tools import ToolRuntime
 
-from deerflow.config.agents_config import AgentConfig
 from deerflow.tools.builtins.update_agent_tool import update_agent
 
 DEFAULT_USER = "test-user-autouse"  # matches the autouse fixture in tests/conftest.py
@@ -85,7 +84,7 @@ def _seed_agent(
 def patched_paths(tmp_path: Path):
     paths_mock = _make_paths_mock(tmp_path)
     with patch("deerflow.tools.builtins.update_agent_tool.get_paths", return_value=paths_mock):
-        # load_agent_config also calls get_paths(); patch the same target it uses.
+        # Point the real store at the same fixture directory.
         with patch("deerflow.config.agents_config.get_paths", return_value=paths_mock):
             yield paths_mock
 
@@ -382,6 +381,20 @@ def test_update_agent_preserves_model_behavior_on_description_change(tmp_path, p
     assert out["reasoning_effort"] == "high"
 
 
+def test_update_agent_preserves_subagent_policy_on_description_change(tmp_path, patched_paths):
+    agent_dir = _seed_agent(tmp_path, description="old desc")
+    config_path = agent_dir / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["subagent_policy"] = {"max_concurrent": 3, "max_total": 8}
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8", newline="")
+
+    update_agent.func(runtime=_runtime(), description="refined desc")
+
+    updated = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert updated["description"] == "refined desc"
+    assert updated["subagent_policy"] == {"max_concurrent": 3, "max_total": 8}
+
+
 def test_update_agent_skills_empty_list_disables_all(tmp_path, patched_paths):
     agent_dir = _seed_agent(tmp_path, skills=["a", "b"])
 
@@ -502,29 +515,12 @@ def test_update_agent_only_writes_under_current_user(tmp_path, patched_paths):
 
 
 def test_update_agent_round_trips_known_fields(tmp_path, patched_paths):
-    """update_agent reads through load_agent_config so all fields the loader
-    knows about (name, description, model, tool_groups, skills) round-trip
-    on a partial update.
-
-    Note: ``load_agent_config`` strips unknown fields before constructing
-    AgentConfig, so legacy/extra YAML keys are NOT preserved across
-    updates — by design.
-    """
-    _seed_agent(tmp_path, description="legacy")
-
-    fake_cfg = AgentConfig(
-        name="test-agent",
-        description="legacy",
-        skills=["s1"],
-        tool_groups=["g1"],
-        model="m1",
-        allowed_subagents=["planner"],
-    )
-    fake_app_config = MagicMock()
-    fake_app_config.get_model_config.return_value = object()
-    with patch("deerflow.tools.builtins.update_agent_tool.load_agent_config", return_value=fake_cfg):
-        with patch("deerflow.tools.builtins.update_agent_tool.get_app_config", return_value=fake_app_config):
-            update_agent.func(runtime=_runtime(), description="bumped")
+    agent_dir = _seed_agent(tmp_path, description="legacy")
+    config_path = agent_dir / "config.yaml"
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    cfg.update(skills=["s1"], tool_groups=["g1"], model="m1", allowed_subagents=["planner"])
+    config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8", newline="")
+    update_agent.func(runtime=_runtime(), description="bumped")
 
     cfg = yaml.safe_load((_user_agent_dir(tmp_path) / "config.yaml").read_text())
     assert cfg["description"] == "bumped"
@@ -581,13 +577,11 @@ def test_update_agent_proceeds_on_non_webhook_channel(tmp_path, patched_paths, s
     """
     seeded = _seed_agent(tmp_path, description="seeded")
 
-    fake_cfg = AgentConfig(name="test-agent", description="seeded")
     runtime = SimpleNamespace(
         context={"agent_name": "test-agent", "channel_name": "telegram"},
         tool_call_id="call_tg",
     )
-    with patch("deerflow.tools.builtins.update_agent_tool.load_agent_config", return_value=fake_cfg):
-        update_agent.func(runtime=runtime, description="bumped")
+    update_agent.func(runtime=runtime, description="bumped")
 
     cfg = yaml.safe_load((seeded / "config.yaml").read_text())
     assert cfg["description"] == "bumped"

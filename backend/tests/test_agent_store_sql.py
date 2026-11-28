@@ -8,11 +8,15 @@ signature the GitHub registry keys its cache off.
 
 from __future__ import annotations
 
+import os
+import uuid
 from datetime import datetime
 from unittest import mock
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import OperationalError
 
 import deerflow.persistence.agents.model as agent_model
 from deerflow.config.agents_config import AgentConfig
@@ -20,6 +24,7 @@ from deerflow.persistence.agents.base import AgentExistsError
 from deerflow.persistence.agents.model import AgentRow
 from deerflow.persistence.agents.sql import SqlAgentStore
 from deerflow.persistence.base import Base
+from deerflow.persistence.postgres_schema import dsn_with_search_path
 
 
 @pytest.fixture()
@@ -33,14 +38,75 @@ def store(tmp_path):
     return SqlAgentStore(url)
 
 
+@pytest.fixture
+def postgres_store():
+    uri = os.environ.get("TEST_POSTGRES_URI")
+    if not uri:
+        pytest.skip("requires TEST_POSTGRES_URI")
+    schema = f"agent_store_{uuid.uuid4().hex}"
+    admin = create_engine(make_url(uri).set(drivername="postgresql+psycopg"))
+    url = make_url(dsn_with_search_path(uri, schema)).set(drivername="postgresql+psycopg")
+    store = SqlAgentStore(url.render_as_string(hide_password=False))
+    engine = store._Session.kw["bind"]
+    with admin.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    try:
+        AgentRow.__table__.create(engine)
+        yield store
+    finally:
+        engine.dispose()
+        with admin.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        admin.dispose()
+
+
+@pytest.mark.parametrize("store_fixture", ["store", "postgres_store"], ids=["sqlite", "postgres"])
+def test_update_transform_holds_database_write_lock(request, store_fixture):
+    store = request.getfixturevalue(store_fixture)
+    store.create("bounded", {"subagent_policy": {"max_concurrent": 4, "max_total": 10}}, "soul", user_id="u1")
+
+    def probe_peer_write():
+        with store._Session() as peer:
+            if peer.get_bind().dialect.name == "sqlite":
+                peer.execute(text("PRAGMA busy_timeout=0"))
+                try:
+                    peer.execute(text("BEGIN IMMEDIATE"))
+                finally:
+                    peer.execute(text("PRAGMA busy_timeout=30000"))
+            else:
+                peer.execute(select(AgentRow).where(AgentRow.user_id == "u1", AgentRow.name == "bounded").with_for_update(nowait=True)).scalar_one()
+
+    def lower_concurrency(current):
+        with pytest.raises(OperationalError, match="locked|could not obtain lock"):
+            probe_peer_write()
+        assert current.subagent_policy.max_total == 10
+        return {"subagent_policy": {"max_concurrent": 2, "max_total": 10}}
+
+    store.update("bounded", lower_concurrency, None, user_id="u1", require_existing=True)
+    probe_peer_write()  # Both backends must release the lock on commit.
+    assert store.get("bounded", user_id="u1").subagent_policy.max_concurrent == 2
+
+
 def test_create_and_get_round_trips_config_and_soul(store):
-    store.create("reviewer", {"name": "reviewer", "description": "reviews code", "model": "gpt-x"}, "You review.", user_id="u1")
+    store.create(
+        "reviewer",
+        {
+            "name": "reviewer",
+            "description": "reviews code",
+            "model": "gpt-x",
+            "subagent_policy": {"max_concurrent": 4, "max_total": 12},
+        },
+        "You review.",
+        user_id="u1",
+    )
 
     cfg = store.get("reviewer", user_id="u1")
     assert isinstance(cfg, AgentConfig)
     assert cfg.name == "reviewer"
     assert cfg.description == "reviews code"
     assert cfg.model == "gpt-x"
+    assert cfg.subagent_policy.max_concurrent == 4
+    assert cfg.subagent_policy.max_total == 12
     assert store.get_soul("reviewer", user_id="u1") == "You review."
 
 

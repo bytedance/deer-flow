@@ -1,12 +1,19 @@
 """Configuration for the subagent system loaded from config.yaml."""
 
+from __future__ import annotations
+
 import logging
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from deerflow.config._boolean_guards import reject_boolean
 from deerflow.config.prompt_overlay import PromptOverlay
 from deerflow.config.token_budget_config import TokenBudgetConfig
+
+if TYPE_CHECKING:
+    from deerflow.config.agents_config import AgentSubagentPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +61,50 @@ def effective_total_subagents_per_run(value: int | None, app_config: object) -> 
     subagents = getattr(app_config, "subagents", None)
     requested = getattr(subagents, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN) if value is None else value
     return clamp_total_subagents_per_run(int(requested))
+
+
+@dataclass(frozen=True)
+class EffectiveSubagentLimits:
+    """Resolved delegation limits shared by prompt and enforcement layers."""
+
+    max_concurrent: int
+    max_total: int
+    agent_max_concurrent: int | None
+    agent_max_total: int | None
+
+
+def _apply_agent_cap(requested: int | None, cap: int | None) -> int | None:
+    if requested is None:
+        return cap
+    return min(int(requested), cap) if cap is not None else requested
+
+
+def resolve_subagent_limits(
+    max_concurrent: int | None,
+    max_total: int | None,
+    app_config: object,
+    *,
+    agent_policy: AgentSubagentPolicy | None = None,
+    execution_capacity: int | None = None,
+) -> EffectiveSubagentLimits:
+    """Resolve caller limits under optional Agent caps and runtime defaults.
+
+    A caller-supplied limit can only reduce an Agent cap. When omitted, a
+    configured Agent value replaces the corresponding global default. The
+    concurrency result is always clamped to the process's real running slots.
+    """
+    agent_max_concurrent = agent_policy.max_concurrent if agent_policy is not None else None
+    agent_max_total = agent_policy.max_total if agent_policy is not None else None
+    return EffectiveSubagentLimits(
+        max_concurrent=effective_subagent_concurrency(
+            _apply_agent_cap(max_concurrent, agent_max_concurrent),
+            app_config,
+            execution_capacity=execution_capacity,
+        ),
+        max_total=effective_total_subagents_per_run(_apply_agent_cap(max_total, agent_max_total), app_config),
+        agent_max_concurrent=agent_max_concurrent,
+        agent_max_total=agent_max_total,
+    )
 
 
 def default_subagent_token_budget(*, summarization_enabled: bool = False) -> TokenBudgetConfig:

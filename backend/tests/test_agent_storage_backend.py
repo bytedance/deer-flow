@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -175,7 +178,7 @@ def test_legacy_source_only_blocks_file_backed_updates(tmp_path, monkeypatch, ba
     legacy = tmp_path / "agents" / "reviewer"
     legacy.mkdir(parents=True)
     original_config = "name: reviewer\ndescription: original\n"
-    (legacy / "config.yaml").write_text(original_config, encoding="utf-8")
+    (legacy / "config.yaml").write_text(original_config, encoding="utf-8", newline="")
     (legacy / "SOUL.md").write_text("Review carefully.", encoding="utf-8")
     user_dir = tmp_path / "users" / "default" / "agents" / "reviewer"
     if memory_only:
@@ -295,14 +298,165 @@ def test_file_create_race_maps_file_exists_to_agent_exists(tmp_path, monkeypatch
 
     monkeypatch.setattr(paths_module, "_paths", None)
 
+    original_mkdir = pathlib.Path.mkdir
+
     def _racing_mkdir(self, *args, **kwargs):
-        raise FileExistsError(str(self))
+        if self.name == "racy" and self.parent.name == "agents":
+            raise FileExistsError(str(self))
+        return original_mkdir(self, *args, **kwargs)
 
     monkeypatch.setattr(pathlib.Path, "mkdir", _racing_mkdir)
 
     fs = FileAgentStore()
     with pytest.raises(AgentExistsError):
         fs.create("racy", {"name": "racy"}, "soul", user_id="u1")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows test host denies child-process creation; POSIX covers the cross-process path")
+def test_file_update_holds_agent_lock_across_processes(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    store = FileAgentStore()
+    store.create(
+        "bounded",
+        {"name": "bounded", "subagent_policy": {"max_concurrent": 4, "max_total": 10}},
+        "soul",
+        user_id="u1",
+    )
+    (sidecar,) = (tmp_path / "users" / "u1" / "agents" / ".locks").iterdir()
+    assert sidecar.read_bytes() == b""
+    probe = """
+import errno
+import os
+import sys
+
+with open(sys.argv[1], "r+b") as handle:
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno not in (errno.EACCES, errno.EAGAIN):
+            raise
+        print("locked")
+    else:
+        print("available")
+"""
+
+    def probe_lock():
+        return subprocess.run([sys.executable, "-c", probe, str(sidecar)], check=True, capture_output=True, text=True, timeout=15).stdout.strip()
+
+    def lower_concurrency(current):
+        assert probe_lock() == "locked"
+        assert current.subagent_policy.max_total == 10
+        return {"name": current.name, "subagent_policy": {"max_concurrent": 2, "max_total": current.subagent_policy.max_total}}
+
+    store.update("bounded", lower_concurrency, None, user_id="u1", require_existing=True)
+    assert probe_lock() == "available"
+    assert store.get("bounded", user_id="u1").subagent_policy.max_concurrent == 2
+
+
+def test_file_update_holds_agent_lock_across_threads(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    store = FileAgentStore()
+    store.create("bounded", {"name": "bounded", "subagent_policy": {"max_total": 10}}, "soul", user_id="u1")
+    entered = threading.Event()
+    release = threading.Event()
+    peer: threading.Thread | None = None
+
+    def peer_update():
+        entered.set()
+        store.update(
+            "bounded",
+            lambda current: {
+                "name": current.name,
+                "subagent_policy": {"max_concurrent": current.subagent_policy.max_concurrent, "max_total": 3},
+            },
+            None,
+            user_id="u1",
+            require_existing=True,
+        )
+        release.set()
+
+    def hold_lock(current):
+        nonlocal peer
+        peer = threading.Thread(target=peer_update)
+        peer.start()
+        assert entered.wait(5)
+        assert not release.wait(0.2)
+        assert current.subagent_policy.max_total == 10
+        return {"name": current.name, "subagent_policy": {"max_concurrent": 2, "max_total": 10}}
+
+    store.update("bounded", hold_lock, None, user_id="u1", require_existing=True)
+    assert peer is not None
+    peer.join(10)
+    assert release.is_set()
+    policy = store.get("bounded", user_id="u1").subagent_policy
+    assert policy is not None
+    assert policy.max_concurrent == 2
+    assert policy.max_total == 3
+
+
+def test_file_updates_for_different_agents_do_not_share_thread_lock(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    store = FileAgentStore()
+    for name in ("slow", "peer"):
+        store.create(name, {"name": name, "subagent_policy": {"max_total": 10}}, "soul", user_id="u1")
+
+    peer_started = threading.Event()
+    peer_finished = threading.Event()
+    peer_error: list[BaseException] = []
+
+    def peer_update():
+        try:
+            peer_started.set()
+            store.update(
+                "peer",
+                lambda current: {
+                    "name": current.name,
+                    "subagent_policy": {
+                        "max_concurrent": current.subagent_policy.max_concurrent,
+                        "max_total": 3,
+                    },
+                },
+                None,
+                user_id="u1",
+                require_existing=True,
+            )
+        except BaseException as error:  # pragma: no cover - surfaced below
+            peer_error.append(error)
+        finally:
+            peer_finished.set()
+
+    peer: threading.Thread | None = None
+
+    def hold_slow_agent(current):
+        nonlocal peer
+        peer = threading.Thread(target=peer_update)
+        peer.start()
+        assert peer_started.wait(5)
+        assert peer_finished.wait(2), "an unrelated agent must not wait on this agent's local lock"
+        assert current.subagent_policy.max_total == 10
+        return {"name": current.name, "subagent_policy": {"max_total": 11}}
+
+    store.update("slow", hold_slow_agent, None, user_id="u1", require_existing=True)
+    assert peer is not None
+    peer.join(10)
+    assert not peer.is_alive()
+    assert not peer_error
+    assert store.get("peer", user_id="u1").subagent_policy.max_total == 3
+    assert store.get("slow", user_id="u1").subagent_policy.max_total == 11
 
 
 # -- graph-subprocess config resolution (db backend's core cross-process invariant) --

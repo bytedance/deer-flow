@@ -5,6 +5,11 @@ export interface AgentModelSettings {
   max_tokens?: number | null;
 }
 
+export interface AgentSubagentPolicy {
+  max_concurrent?: number | null;
+  max_total?: number | null;
+}
+
 export type ReasoningEffort = "low" | "medium" | "high";
 
 export interface Agent {
@@ -17,6 +22,7 @@ export interface Agent {
   mcp_plugins?: string[] | null;
   knowledge_scope?: KnowledgeScopeSnapshot | null;
   allowed_subagents?: string[] | null;
+  subagent_policy?: AgentSubagentPolicy | null;
   model_settings?: AgentModelSettings | null;
   thinking_enabled?: boolean | null;
   reasoning_effort?: ReasoningEffort | null;
@@ -33,6 +39,7 @@ export interface CreateAgentRequest {
   mcp_plugins?: string[] | null;
   knowledge_scope?: KnowledgeScopeSnapshot | null;
   allowed_subagents?: string[] | null;
+  subagent_policy?: AgentSubagentPolicy | null;
   model_settings?: AgentModelSettings | null;
   thinking_enabled?: boolean | null;
   reasoning_effort?: ReasoningEffort | null;
@@ -59,6 +66,7 @@ export interface UpdateAgentRequest {
   mcp_plugins?: string[] | null;
   knowledge_scope?: KnowledgeScopeSnapshot | null;
   allowed_subagents?: string[] | null;
+  subagent_policy?: AgentSubagentPolicy | null;
   model_settings?: AgentModelSettings | null;
   thinking_enabled?: boolean | null;
   reasoning_effort?: ReasoningEffort | null;

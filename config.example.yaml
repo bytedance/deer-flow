@@ -2223,7 +2223,8 @@ subagent_runtime:
 #   # launching legal-sized batches forever. The default 6 allows two full
 #   # batches at the default concurrency of 3. Valid config range: 1-50.
 #   # Per-request runtime context can temporarily override this with
-#   # `max_total_subagents`, clamped to the same 1-50 range.
+#   # `max_total_subagents`, clamped to the same 1-50 range. A Custom Agent can
+#   # configure its own cap with `subagent_policy.max_total` in its config.yaml.
 #   max_total_per_run: 6
 #
 #   # Per-run token ceiling for subagents (#3875 Phase 2). A backstop against a

@@ -1690,11 +1690,21 @@ export const enUS: Translations = {
     settingsThinkingOn: "On",
     settingsThinkingOff: "Off",
     settingsReasoningEffort: "Reasoning effort",
+    settingsSubagentLimits: "Subagent limits",
+    settingsSubagentLimitsHint:
+      "Leave either field blank to inherit the server default. The server also limits concurrency to its running capacity.",
+    settingsMaxConcurrentSubagents: "Max parallel task calls per response",
+    settingsMaxTotalSubagents: "Max task calls per run",
+    settingsSubagentLimitPlaceholder: "Inherit server default",
     settingsInherit: "Inherit",
     settingsSaved: "Agent settings saved",
     settingsInvalidTemperature: "Temperature must be between 0 and 2",
     settingsInvalidMaxTokens:
       "Max output tokens must be a positive integer up to 200,000",
+    settingsInvalidMaxConcurrentSubagents:
+      "Concurrent task calls must be a whole number from 1 to 64",
+    settingsInvalidMaxTotalSubagents:
+      "Task calls per run must be a whole number from 1 to 50",
   },
 
   // Breadcrumb

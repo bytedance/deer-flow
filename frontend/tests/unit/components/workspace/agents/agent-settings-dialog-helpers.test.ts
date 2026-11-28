@@ -5,7 +5,10 @@ import {
   DEFAULT_MODEL_VALUE,
   INHERIT_VALUE,
   MAX_AGENT_OUTPUT_TOKENS,
+  MAX_AGENT_SUBAGENT_CONCURRENCY,
+  MAX_AGENT_SUBAGENTS_PER_RUN,
   parseAgentModelSettingsDraft,
+  parseAgentSubagentPolicyDraft,
   resolveEffectiveModel,
   selectionToAllowedSubagents,
   selectionToThinkingEnabled,
@@ -54,6 +57,41 @@ describe("parseAgentModelSettingsDraft", () => {
       ok: true,
       modelSettings: { temperature: 0.2, max_tokens: null },
     });
+  });
+});
+
+describe("parseAgentSubagentPolicyDraft", () => {
+  it("accepts independently unset bounded limits", () => {
+    expect(
+      parseAgentSubagentPolicyDraft({ maxConcurrent: "4", maxTotal: "" }),
+    ).toEqual({
+      ok: true,
+      policy: { max_concurrent: 4, max_total: null },
+    });
+  });
+
+  it("rejects fractional, zero, and out-of-range limits", () => {
+    expect(
+      parseAgentSubagentPolicyDraft({ maxConcurrent: "1.5", maxTotal: "" }),
+    ).toEqual({ ok: false, error: "max_concurrent" });
+    expect(
+      parseAgentSubagentPolicyDraft({ maxConcurrent: "0", maxTotal: "" }),
+    ).toEqual({ ok: false, error: "max_concurrent" });
+    expect(
+      parseAgentSubagentPolicyDraft({ maxConcurrent: "", maxTotal: "51" }),
+    ).toEqual({ ok: false, error: "max_total" });
+    expect(MAX_AGENT_SUBAGENT_CONCURRENCY).toBe(64);
+    expect(MAX_AGENT_SUBAGENTS_PER_RUN).toBe(50);
+  });
+
+  it("rejects browser number-input badInput instead of treating it as a clear", () => {
+    expect(
+      parseAgentSubagentPolicyDraft({
+        maxConcurrent: "",
+        maxTotal: "9",
+        maxConcurrentBadInput: true,
+      }),
+    ).toEqual({ ok: false, error: "max_concurrent" });
   });
 });
 

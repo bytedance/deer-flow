@@ -1,10 +1,13 @@
-"""Contention-only retries for non-blocking advisory file locks."""
+"""Advisory file locks and contention-only retries."""
 
 from __future__ import annotations
 
 import errno
+import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from pathlib import Path
 
 LOCK_RETRY_INTERVAL_SECONDS = 0.2
 
@@ -42,3 +45,32 @@ def retry_until_locked(
                     raise TimeoutError(timeout_message) from None
                 delay = min(delay, remaining)
             sleep(delay)
+
+
+@contextmanager
+def advisory_file_lock(lock_path: Path) -> Iterator[None]:
+    """Lock a stable sidecar across threads and processes; never unlink it."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+b") as lock_file:
+        if os.name == "nt":
+            import msvcrt
+
+            # msvcrt can lock beyond EOF. Keep the sidecar empty so workers
+            # do not race to initialize a byte before acquiring its lock.
+            lock_file.seek(0)
+            retry_until_locked(
+                lambda: msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1),
+            )
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)

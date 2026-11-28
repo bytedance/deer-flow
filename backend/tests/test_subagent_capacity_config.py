@@ -3,11 +3,12 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from deerflow.config.agents_config import AgentSubagentPolicy
 from deerflow.config.app_config import AppConfig
 from deerflow.config.reload_boundary import STARTUP_ONLY_FIELDS, STARTUP_ONLY_PREFIX
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
-from deerflow.config.subagents_config import SubagentsAppConfig, effective_subagent_concurrency, effective_total_subagents_per_run
+from deerflow.config.subagents_config import SubagentsAppConfig, effective_subagent_concurrency, effective_total_subagents_per_run, resolve_subagent_limits
 
 
 def test_subagent_runtime_defaults_are_safe_and_bounded() -> None:
@@ -65,3 +66,43 @@ def test_per_run_delegation_cap_treats_explicit_null_as_unset() -> None:
     assert effective_total_subagents_per_run(99, config) == 50
     assert effective_total_subagents_per_run(0, config) == 1
     assert effective_total_subagents_per_run(None, SimpleNamespace()) == 6
+
+
+def test_custom_agent_subagent_limits_bound_runtime_values_and_capacity() -> None:
+    config = SimpleNamespace(
+        subagent_runtime=SubagentRuntimeConfig(max_running=8),
+        subagents=SubagentsAppConfig(max_total_per_run=7),
+    )
+    policy = AgentSubagentPolicy(max_concurrent=4, max_total=5)
+
+    limits = resolve_subagent_limits(
+        6,
+        9,
+        config,
+        agent_policy=policy,
+        execution_capacity=3,
+    )
+
+    assert limits.max_concurrent == 3
+    assert limits.max_total == 5
+    assert limits.agent_max_concurrent == 4
+    assert limits.agent_max_total == 5
+
+
+def test_custom_agent_limits_replace_defaults_only_when_configured() -> None:
+    config = SimpleNamespace(
+        subagent_runtime=SubagentRuntimeConfig(max_running=6),
+        subagents=SubagentsAppConfig(max_total_per_run=7),
+    )
+    policy = AgentSubagentPolicy(max_total=9)
+
+    limits = resolve_subagent_limits(None, None, config, agent_policy=policy)
+    assert limits.max_concurrent == 6
+    assert limits.max_total == 9
+
+    lower_request = resolve_subagent_limits(2, 3, config, agent_policy=AgentSubagentPolicy(max_concurrent=4, max_total=9))
+    assert (lower_request.max_concurrent, lower_request.max_total) == (2, 3)
+
+    unconfigured = resolve_subagent_limits(None, None, config)
+    assert unconfigured.max_concurrent == 6
+    assert unconfigured.max_total == 7

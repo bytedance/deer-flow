@@ -34,7 +34,7 @@ from langchain_core.tools import tool
 from langgraph.types import Command
 from pydantic import BaseModel, BeforeValidator
 
-from deerflow.config.agents_config import load_agent_config, preserve_non_managed_fields, validate_agent_name
+from deerflow.config.agents_config import AgentConfig, preserve_non_managed_fields, validate_agent_name
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
 from deerflow.persistence.agents import get_agent_store
@@ -59,6 +59,7 @@ _UI_OWNED_CONFIG_FIELDS: tuple[str, ...] = (
     "thinking_enabled",
     "reasoning_effort",
     "allowed_subagents",
+    "subagent_policy",
 )
 
 
@@ -164,7 +165,8 @@ def update_agent(
 
     # SQL definitions are already owner-scoped; the importer leaves their
     # file-backed sources in place for rollback (#6743).
-    if isinstance(get_agent_store(), FileAgentStore):
+    store = get_agent_store()
+    if isinstance(store, FileAgentStore):
         paths = get_paths()
         agent_dir = paths.user_agent_dir(user_id, agent_name)
         legacy_dir = paths.agent_dir(agent_name)
@@ -173,89 +175,50 @@ def update_agent(
         if not (agent_dir / "config.yaml").exists() and (legacy_dir / "config.yaml").exists():
             return _err(f"Agent '{agent_name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before updating.")
 
+    updated_fields: list[str] = []
+
+    def build_config(existing_cfg: AgentConfig | None) -> dict | None:
+        assert existing_cfg is not None  # require_existing=True
+        # Force the saved name to match the destination even if it had drifted.
+        config_data: dict[str, Any] = {"name": agent_name}
+        for key, value in (("description", description), ("model", model), ("tool_groups", tool_groups), ("skills", skills)):
+            existing_value = getattr(existing_cfg, key)
+            if value is not None and value != existing_value:
+                updated_fields.append(key)
+            resolved = value if value is not None else existing_value
+            if resolved is not None:
+                config_data[key] = resolved
+
+        if not updated_fields:
+            return None
+
+        # UI-owned settings are read under the same lock as our update.
+        for key in _UI_OWNED_CONFIG_FIELDS:
+            value = getattr(existing_cfg, key)
+            if isinstance(value, BaseModel):
+                value = value.model_dump(exclude_none=True) or None
+            if value is not None:
+                config_data[key] = value
+
+        preserved = preserve_non_managed_fields(existing_cfg, new_tool_groups=config_data.get("tool_groups"))
+        for key, value in preserved.items():
+            config_data.setdefault(key, value)
+        if existing_cfg.knowledge_scope is not None and preserved.get("knowledge_scope") is None:
+            updated_fields.append("knowledge_scope")
+        return config_data
+
     try:
-        existing_cfg = load_agent_config(agent_name, user_id=user_id)
+        store.update(agent_name, build_config, soul, user_id=user_id, require_existing=True)
     except FileNotFoundError:
         return _err(f"Agent '{agent_name}' does not exist for the current user. Use setup_agent to create a new agent first.")
     except ValueError as e:
         return _err(f"Agent '{agent_name}' has an unreadable config: {e}")
+    except Exception as e:
+        logger.error("[update_agent] Failed to update agent '%s' (user=%s): %s", agent_name, user_id, e, exc_info=True)
+        return _err(f"Failed to update agent '{agent_name}': {e}")
 
-    if existing_cfg is None:
-        return _err(f"Agent '{agent_name}' could not be loaded.")
-
-    updated_fields: list[str] = []
-
-    # Force the on-disk ``name`` to match the directory we are writing into,
-    # even if ``existing_cfg.name`` had drifted (e.g. from manual yaml edits).
-    config_data: dict[str, Any] = {"name": agent_name}
-    new_description = description if description is not None else existing_cfg.description
-    config_data["description"] = new_description
-    if description is not None and description != existing_cfg.description:
-        updated_fields.append("description")
-
-    new_model = model if model is not None else existing_cfg.model
-    if new_model is not None:
-        config_data["model"] = new_model
-    if model is not None and model != existing_cfg.model:
-        updated_fields.append("model")
-
-    new_tool_groups = tool_groups if tool_groups is not None else existing_cfg.tool_groups
-    if new_tool_groups is not None:
-        config_data["tool_groups"] = new_tool_groups
-    if tool_groups is not None and tool_groups != existing_cfg.tool_groups:
-        updated_fields.append("tool_groups")
-
-    new_skills = skills if skills is not None else existing_cfg.skills
-    if new_skills is not None:
-        config_data["skills"] = new_skills
-    if skills is not None and skills != existing_cfg.skills:
-        updated_fields.append("skills")
-
-    # This tool intentionally does not expose these UI/API-owned fields as
-    # LLM-callable arguments, but it still rewrites config.yaml when any of its
-    # supported fields changes. Carry them forward explicitly so an agent
-    # refining its description/model/skills cannot erase model defaults or its
-    # server-enforced subagent policy.
-    for key in _UI_OWNED_CONFIG_FIELDS:
-        value = getattr(existing_cfg, key, None)
-        if value is None:
-            continue
-        if isinstance(value, BaseModel):
-            dumped = value.model_dump(exclude_none=True)
-            if dumped:
-                config_data[key] = dumped
-        else:
-            config_data[key] = value
-
-    # Preserve every top-level AgentConfig field that this tool does not
-    # expose as an argument (currently ``github:``, plus any future field
-    # added to :class:`AgentConfig`). The same helper is used by the HTTP
-    # ``PUT /api/agents/{name}`` route so the two surfaces stay in lockstep.
-    # Without this, operators who hand-author a ``github:`` block on a custom
-    # agent would silently lose it the next time the agent self-updates via
-    # ``update_agent``.
-    preserved = preserve_non_managed_fields(existing_cfg, new_tool_groups=new_tool_groups)
-    for key, value in preserved.items():
-        config_data.setdefault(key, value)
-
-    if existing_cfg.knowledge_scope is not None and preserved.get("knowledge_scope") is None:
-        updated_fields.append("knowledge_scope")
-
-    config_changed = bool({"description", "model", "tool_groups", "skills"} & set(updated_fields))
     if soul is not None:
         updated_fields.append("soul")
-
-    # Persist config (when a managed field changed) and/or soul through the
-    # store. The db backend commits both in one transaction; the file backend
-    # commits each atomically but sequentially (see this module's docstring).
-    # Nothing to write if the provided values all matched the existing config
-    # and no soul was supplied.
-    if config_changed or soul is not None:
-        try:
-            get_agent_store().update(agent_name, config_data if config_changed else None, soul, user_id=user_id)
-        except Exception as e:
-            logger.error("[update_agent] Failed to update agent '%s' (user=%s): %s", agent_name, user_id, e, exc_info=True)
-            return _err(f"Failed to update agent '{agent_name}': {e}")
 
     if not updated_fields:
         return Command(update={"messages": [ToolMessage(content=f"No changes applied to agent '{agent_name}'. The provided values matched the existing config.", tool_call_id=tool_call_id)]})
