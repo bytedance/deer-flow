@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "community.bookmarks",
+  "category": "workspace",
+  "icon": "bookmark",
   "locales": {
     "zh-CN": {
       "title": "会话书签",

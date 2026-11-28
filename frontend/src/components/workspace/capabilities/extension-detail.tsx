@@ -89,6 +89,9 @@ export function ExtensionDetail({
                   ) : null}
                   {label}
                 </span>
+                <span className="bg-muted/60 text-muted-foreground inline-flex items-center rounded-full px-2.5 py-1 text-xs">
+                  {copy.directory.categories[entry.category]}
+                </span>
               </div>
               <p className="text-muted-foreground mt-3 max-w-2xl text-sm leading-7">
                 {entry.description}
@@ -196,6 +199,14 @@ export function ExtensionDetail({
               <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
             </summary>
             <dl className="mt-4 space-y-3 text-xs">
+              <div>
+                <dt className="text-muted-foreground">
+                  {copy.detail.category}
+                </dt>
+                <dd className="mt-1">
+                  {copy.directory.categories[entry.category]}
+                </dd>
+              </div>
               {!!loaded?.model_tools?.length && (
                 <div>
                   <dt className="text-muted-foreground">{copy.detail.tools}</dt>

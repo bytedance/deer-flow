@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.gateway.routers.plugins import router
-from deerflow.extensions.documentation import FILENAME, validate_documentation
+from deerflow.extensions.documentation import CATEGORIES, FILENAME, ICONS, validate_documentation
 from deerflow.extensions.loader import ExtensionSpec, load_extensions
 from extension_test_fixtures import demo_extensions
 
@@ -53,6 +53,34 @@ def test_new_documentation_requires_meaningful_copy(field):
 def test_documentation_links_are_public_https(url):
     with pytest.raises(ValueError):
         validate_documentation({**PAGE, "docs_url": url})
+
+
+def test_category_and_icon_are_optional_and_allowlisted():
+    validated = validate_documentation(PAGE)
+    assert "category" not in validated
+    assert "icon" not in validated
+    with_meta = validate_documentation({**PAGE, "category": CATEGORIES[0], "icon": ICONS[0]})
+    assert with_meta["category"] == CATEGORIES[0]
+    assert with_meta["icon"] == ICONS[0]
+    for bad in ("", "   ", "unknown", 123, None, ["workspace"], "a" * 65):
+        with pytest.raises(ValueError):
+            validate_documentation({**PAGE, "category": bad})
+        with pytest.raises(ValueError):
+            validate_documentation({**PAGE, "icon": bad})
+
+
+def test_runtime_loader_omits_unrecognized_future_category_and_icon(package):
+    future_doc = {**PAGE, "category": "future-domain", "icon": "future-icon"}
+    package.write_text(json.dumps(future_doc))
+    loaded, diagnostics = load_extensions([ExtensionSpec(use=SOURCE)])
+    assert diagnostics == []
+    assert loaded.documentation == ((SOURCE, PAGE),)
+
+    # Malformed types still fail runtime validation rather than sneaking through.
+    package.write_text(json.dumps({**PAGE, "category": 123}))
+    loaded, diagnostics = load_extensions([ExtensionSpec(use=SOURCE)])
+    assert loaded.documentation == ()
+    assert [(item.level, item.source, item.message) for item in diagnostics] == [("warning", SOURCE, "Extension documentation is invalid.")]
 
 
 def test_loader_projects_only_public_documentation(package):
@@ -185,8 +213,9 @@ def test_bundled_documentation_snapshot_is_current():
     script = runpy.run_path(str(root / "scripts/sync_extension_documentation.py"))
     assert script["DESTINATION"].read_text(encoding="utf-8") == script["render"]()
     pages = json.loads(script["render"]())
-    assert len(pages) == 18
+    assert len(pages) == 19
     assert pages["deerflow-extension-office-preview"]["id"] == "office-preview"
+    assert all(page.get("category") in CATEGORIES and page.get("icon") in ICONS for page in pages.values())
 
 
 @pytest.mark.parametrize("collision", [False, True])

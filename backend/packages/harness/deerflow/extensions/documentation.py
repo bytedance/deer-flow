@@ -10,10 +10,43 @@ from urllib.parse import urlsplit
 
 FILENAME = "deerflow-extension.json"
 MAX_BYTES = 65536
+CATEGORIES = (
+    "orchestration",
+    "knowledge",
+    "workspace",
+    "governance",
+    "examples",
+)
+ICONS = (
+    "activity",
+    "bell",
+    "book-open",
+    "bookmark",
+    "code-2",
+    "database",
+    "download",
+    "file-json",
+    "file-search",
+    "file-text",
+    "file-up",
+    "flask-conical",
+    "folder-tree",
+    "git-branch",
+    "pen-line",
+    "puzzle",
+    "scissors",
+    "search",
+    "shield-alert",
+    "sparkles",
+    "tags",
+    "users",
+    "waypoints",
+    "wrench",
+)
 
 
-def validate_documentation(value: object) -> dict:
-    """Validate v1; requirements and documentation links are optional."""
+def validate_documentation(value: object, *, strict_metadata: bool = True) -> dict:
+    """Validate v1; category, icon, requirements and documentation links are optional."""
 
     def text(value: object) -> bool:
         return isinstance(value, str) and bool(value.strip()) and len(value) <= 4000
@@ -25,7 +58,25 @@ def validate_documentation(value: object) -> dict:
     locales = value.get("locales")
     if not isinstance(locales, dict) or not locales or len(locales) > 20:
         raise ValueError("documentation requires at least one locale")
-    result = {"schema_version": 1, "id": value["id"], "locales": {}}
+    result: dict[str, object] = {"schema_version": 1, "id": value["id"]}
+    if "category" in value:
+        category = value["category"]
+        if not isinstance(category, str) or not category.strip() or len(category) > 64:
+            raise ValueError("documentation category must be a supported category")
+        if category in CATEGORIES:
+            result["category"] = category
+        elif strict_metadata:
+            raise ValueError("documentation category must be a supported category")
+    if "icon" in value:
+        icon = value["icon"]
+        if not isinstance(icon, str) or not icon.strip() or len(icon) > 64:
+            raise ValueError("documentation icon must be a supported icon name")
+        if icon in ICONS:
+            result["icon"] = icon
+        elif strict_metadata:
+            raise ValueError("documentation icon must be a supported icon name")
+    localized_entries: dict[str, object] = {}
+    result["locales"] = localized_entries
     for locale, copy in locales.items():
         if not re.fullmatch(r"[a-z]{2}(?:-[A-Za-z]{2,8})?", locale) or not isinstance(copy, dict):
             raise ValueError("invalid documentation locale")
@@ -43,7 +94,7 @@ def validate_documentation(value: object) -> dict:
                 raise ValueError("requirements must be a list of nonempty descriptions")
             if requirements:
                 public["requirements"] = requirements
-        result["locales"][locale] = public
+        localized_entries[locale] = public
     if "docs_url" in value:
         url = value["docs_url"]
         parsed = urlsplit(url) if isinstance(url, str) else None
@@ -75,4 +126,6 @@ def read_documentation(source: str) -> dict | None:
         return None
     if len(raw) > MAX_BYTES:
         raise ValueError("extension documentation exceeds 64 KiB")
-    return validate_documentation(json.loads(raw))
+    # Omit unrecognized future category/icon tokens at runtime so older hosts
+    # degrade cleanly to "other" / default icon instead of dropping the whole doc.
+    return validate_documentation(json.loads(raw), strict_metadata=False)

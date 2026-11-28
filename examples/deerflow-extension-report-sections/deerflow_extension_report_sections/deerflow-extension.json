@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "community.report-sections",
+  "category": "workspace",
+  "icon": "pen-line",
   "locales": {
     "zh-CN": {
       "title": "分段长文写作",

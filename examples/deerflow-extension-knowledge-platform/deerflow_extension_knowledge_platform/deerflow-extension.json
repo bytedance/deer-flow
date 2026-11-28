@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "knowledge-platform",
+  "category": "knowledge",
+  "icon": "folder-tree",
   "locales": {
     "zh-CN": {
       "title": "知识空间与连接",

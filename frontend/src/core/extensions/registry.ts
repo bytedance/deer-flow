@@ -1,11 +1,28 @@
 import {
+  ActivityIcon,
   BellIcon,
   BookmarkIcon,
+  BookOpenIcon,
+  Code2Icon,
+  DatabaseIcon,
   DownloadIcon,
   FileJsonIcon,
+  FileSearchIcon,
   FileTextIcon,
+  FileUpIcon,
+  FlaskConicalIcon,
+  FolderTreeIcon,
+  GitBranchIcon,
+  PenLineIcon,
   PuzzleIcon,
+  ScissorsIcon,
+  SearchIcon,
+  ShieldAlertIcon,
+  SparklesIcon,
+  TagsIcon,
   UsersIcon,
+  WaypointsIcon,
+  WrenchIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -15,16 +32,37 @@ import { getBackendBaseURL } from "@/core/config";
 import { importAssetModule } from "./asset-module";
 import type { FrontendContribution, FrontendExtension } from "./contracts";
 
+export const EXTENSION_ICONS: Record<string, LucideIcon> = {
+  activity: ActivityIcon,
+  bell: BellIcon,
+  "book-open": BookOpenIcon,
+  bookmark: BookmarkIcon,
+  "code-2": Code2Icon,
+  database: DatabaseIcon,
+  download: DownloadIcon,
+  "file-json": FileJsonIcon,
+  "file-search": FileSearchIcon,
+  "file-text": FileTextIcon,
+  "file-up": FileUpIcon,
+  "flask-conical": FlaskConicalIcon,
+  "folder-tree": FolderTreeIcon,
+  "git-branch": GitBranchIcon,
+  "pen-line": PenLineIcon,
+  puzzle: PuzzleIcon,
+  scissors: ScissorsIcon,
+  search: SearchIcon,
+  "shield-alert": ShieldAlertIcon,
+  sparkles: SparklesIcon,
+  tags: TagsIcon,
+  users: UsersIcon,
+  waypoints: WaypointsIcon,
+  wrench: WrenchIcon,
+};
+
 export function extensionIcon(name?: string): LucideIcon {
-  const icons: Record<string, LucideIcon> = {
-    bell: BellIcon,
-    users: UsersIcon,
-    bookmark: BookmarkIcon,
-    download: DownloadIcon,
-    "file-json": FileJsonIcon,
-    "file-text": FileTextIcon,
-  };
-  return name && Object.hasOwn(icons, name) ? icons[name]! : PuzzleIcon;
+  return name && Object.hasOwn(EXTENSION_ICONS, name)
+    ? EXTENSION_ICONS[name]!
+    : PuzzleIcon;
 }
 export type LoadedContribution = FrontendContribution & {
   extension?: FrontendExtension;

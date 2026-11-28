@@ -7,7 +7,12 @@ import {
   extensionCatalog,
   extensionDirectory,
 } from "@/core/extensions/catalog";
-import type { LoadedContribution } from "@/core/extensions/registry";
+import { extensionDocumentCategories } from "@/core/extensions/documentation";
+import { pluginPages } from "@/core/extensions/pages";
+import {
+  EXTENSION_ICONS,
+  type LoadedContribution,
+} from "@/core/extensions/registry";
 import { enUS } from "@/core/i18n/locales/en-US";
 import { zhCN } from "@/core/i18n/locales/zh-CN";
 
@@ -277,4 +282,134 @@ test("documentation matches language tags by case-insensitive exact match then l
       )?.title,
     ).toBe(title);
   }
+});
+
+test("carries documentation category and icon metadata with safe fallbacks", () => {
+  const catalogEntries = extensionDirectory([], enUS.extensions.catalog);
+  expect(
+    catalogEntries.find((item) => item.id === "community.agent-teams"),
+  ).toMatchObject({ category: "orchestration", icon: "users" });
+  expect(
+    catalogEntries.find((item) => item.id === "catalog/workspaceSearch"),
+  ).toMatchObject({ category: "workspace", icon: "search" });
+  expect(
+    catalogEntries.find((item) => item.id === "catalog/example"),
+  ).toMatchObject({ category: "examples", icon: "code-2" });
+  expect(
+    catalogEntries.find((item) => item.id === "community.run-postmortem"),
+  ).toMatchObject({ category: "governance", icon: "activity" });
+  expect(
+    catalogEntries.find((item) => item.id === "catalog/knowledge"),
+  ).toMatchObject({ category: "examples", icon: "sparkles" });
+  // User-facing governance page appears first within its category.
+  expect(
+    catalogEntries.find((item) => item.category === "governance")?.id,
+  ).toBe("community.run-postmortem");
+
+  // Installed bundled package without category/icon retains catalog metadata.
+  const legacyBookmarks: LoadedContribution = {
+    ...contribution,
+    documentation: {
+      schema_version: 1,
+      id: contribution.namespace,
+      locales: {
+        "en-US": {
+          title: "Legacy Bookmarks",
+          description: "Old package",
+          usage: [{ title: "Start", description: "Use it" }],
+        },
+      },
+    },
+  };
+  expect(
+    extensionDirectory([legacyBookmarks], enUS.extensions.catalog).find(
+      (item) => item.id === contribution.namespace,
+    ),
+  ).toMatchObject({ category: "workspace", icon: "bookmark" });
+
+  // Custom extension with documented metadata uses it; undocumented falls back to "other".
+  const documentedCustom: LoadedContribution = {
+    ...contribution,
+    namespace: "company.audit",
+    documentation: {
+      schema_version: 1,
+      id: "company.audit",
+      category: "governance",
+      icon: "shield-alert",
+      locales: {
+        "en-US": {
+          title: "Audit helper",
+          description: "Checks runs.",
+          usage: [{ title: "Run", description: "Works automatically." }],
+        },
+      },
+    },
+  };
+  const undocumentedCustom: LoadedContribution = {
+    ...contribution,
+    namespace: "company.legacy",
+  };
+  const merged = extensionDirectory(
+    [documentedCustom, undocumentedCustom],
+    enUS.extensions.catalog,
+  );
+  expect(merged.find((item) => item.id === "company.audit")).toMatchObject({
+    category: "governance",
+    icon: "shield-alert",
+  });
+  expect(merged.find((item) => item.id === "company.legacy")).toMatchObject({
+    category: "other",
+  });
+});
+
+test("frontend categories and icons stay in lockstep with backend documentation contract", () => {
+  const source = readFileSync(
+    resolve(
+      process.cwd(),
+      "../backend/packages/harness/deerflow/extensions/documentation.py",
+    ),
+    "utf8",
+  );
+  const parseTuple = (name: string) => {
+    const match = new RegExp(`${name}\\s*=\\s*\\(([\\s\\S]*?)\\)`).exec(source);
+    expect(match, `${name} tuple not found`).toBeTruthy();
+    return [...match![1]!.matchAll(/"([^"]+)"/g)].map((item) => item[1]);
+  };
+  expect([...extensionDocumentCategories]).toEqual(parseTuple("CATEGORIES"));
+  expect(Object.keys(EXTENSION_ICONS).sort()).toEqual(
+    parseTuple("ICONS").sort(),
+  );
+});
+
+test("pluginPages falls back to documentation icon when frontend module omits one", () => {
+  const loaded: LoadedContribution = {
+    ...contribution,
+    namespace: "community.agent-teams",
+    settings: { enabled: true },
+    documentation: {
+      schema_version: 1,
+      id: "community.agent-teams",
+      icon: "users",
+      locales: {
+        "en-US": {
+          title: "Agent teams",
+          description: "Collaborate",
+          usage: [{ title: "Start", description: "Use it" }],
+        },
+      },
+    },
+    extension: {
+      apiVersion: 1,
+      module: "teams.v1",
+      surfaces: [
+        {
+          id: "teams",
+          slot: "page",
+          title: "Teams",
+          mount: () => ({ dispose: () => undefined }),
+        },
+      ],
+    },
+  };
+  expect(pluginPages([loaded])[0]?.icon).toBe("users");
 });

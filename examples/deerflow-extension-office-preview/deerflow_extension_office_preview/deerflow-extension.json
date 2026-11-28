@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "office-preview",
+  "category": "workspace",
+  "icon": "file-text",
   "locales": {
     "en-US": {
       "title": "Office file preview",

@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "community.workflows",
+  "category": "orchestration",
+  "icon": "git-branch",
   "locales": {
     "zh-CN": {
       "title": "脚本工作流",

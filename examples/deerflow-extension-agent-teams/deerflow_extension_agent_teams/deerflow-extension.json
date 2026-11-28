@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "community.agent-teams",
+  "category": "orchestration",
+  "icon": "users",
   "locales": {
     "zh-CN": {
       "title": "Agent 团队",

@@ -250,16 +250,167 @@ describe("extension detail", () => {
 });
 
 describe("extension directory", () => {
-  it("keeps the reload action beside the deployment hint", () => {
+  it("groups catalog entries by scenario and collapses developer examples by default", () => {
     galleryMock.search = "tab=extensions";
     render(<ExtensionGallery />);
 
-    const reload = screen.getByRole("button", { name: copy.reloadAll });
-    expect(reload.parentElement).toBe(
-      screen.getByText(copy.deploymentHint).parentElement,
-    );
+    expect(screen.getByRole("button", { name: copy.reloadAll })).toBeTruthy();
+    expect(screen.getByText(copy.deploymentHint)).toBeTruthy();
+    expect(
+      screen.getByRole("heading", { name: copy.directory.catalogTitle }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("heading", { name: copy.directory.installedTitle }),
+    ).toBeNull();
+    // 16 production catalog entries visible; 3 developer examples start collapsed.
+    const productionCount = extensionCatalog.filter(
+      (item) =>
+        item.key !== "example" &&
+        item.key !== "retrieval" &&
+        item.key !== "knowledge",
+    ).length;
+    expect(screen.getAllByRole("article")).toHaveLength(productionCount);
+
+    const toggle = screen.getByRole("button", {
+      name: new RegExp(copy.directory.examplesTitle),
+    });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
     expect(screen.getAllByRole("article")).toHaveLength(
       extensionCatalog.length,
     );
+  });
+
+  it("pins installed extensions above the catalog with status ordering and direct page links", () => {
+    galleryMock.search = "tab=extensions";
+    galleryMock.loaded = [
+      contribution({
+        namespace: "community.bookmarks",
+        settings: { enabled: false },
+      }),
+      contribution({
+        namespace: "community.agent-teams",
+        settings: { enabled: true },
+        extension: {
+          apiVersion: 1,
+          module: "teams.v1",
+          surfaces: [
+            {
+              id: "teams",
+              slot: "page",
+              title: "Teams",
+              mount: () => ({ dispose: () => undefined }),
+            },
+          ],
+        },
+      }),
+      contribution({
+        namespace: "acme.broken",
+        title: "Broken internal plugin",
+        description: "Failed to load browser bundle.",
+        error: "failed",
+      }),
+    ];
+    render(<ExtensionGallery />);
+
+    const installedSection = screen
+      .getByRole("heading", { name: copy.directory.installedTitle })
+      .closest("section")!;
+    const installedCards = within(installedSection).getAllByRole("article");
+    expect(installedCards).toHaveLength(3);
+    // Ordered: failed -> enabled -> disabled.
+    expect(installedCards[0]!.textContent).toContain("Broken internal plugin");
+    expect(installedCards[1]!.textContent).toContain(
+      copy.catalog.agentTeams.title,
+    );
+    expect(installedCards[2]!.textContent).toContain(
+      copy.catalog.bookmarks.title,
+    );
+    expect(
+      within(installedCards[1]!)
+        .getByRole("link", { name: copy.open(copy.catalog.agentTeams.title) })
+        .getAttribute("href"),
+    ).toBe("/workspace/extensions/community.agent-teams/teams");
+
+    // Installed catalog items are not duplicated in the available catalog section.
+    const catalogSection = screen
+      .getByRole("heading", { name: copy.directory.catalogTitle })
+      .closest("section")!;
+    expect(
+      within(catalogSection).queryByText(copy.catalog.agentTeams.title),
+    ).toBeNull();
+    expect(
+      within(catalogSection).queryByText(copy.catalog.bookmarks.title),
+    ).toBeNull();
+
+    // Uncategorized custom plugin reveals the "Other" category pill.
+    const otherPill = screen.getByRole("button", {
+      name: copy.directory.categories.other,
+    });
+    fireEvent.click(otherPill);
+    expect(screen.getAllByRole("article")).toHaveLength(1);
+    expect(screen.getByText("Broken internal plugin")).toBeTruthy();
+  });
+
+  it("auto-expands developer examples when search matches them", () => {
+    galleryMock.search = "tab=extensions";
+    render(<ExtensionGallery query="sample documents" />);
+
+    expect(screen.getByText(copy.catalog.knowledge.title)).toBeTruthy();
+    const toggle = screen.getByRole("button", {
+      name: new RegExp(copy.directory.examplesTitle),
+    });
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("reveals the Examples filter pill when an example extension is installed and lets filtered empty states reset", () => {
+    galleryMock.search = "tab=extensions";
+    galleryMock.loaded = [
+      contribution({
+        namespace: "example.retrieval",
+        settings: { enabled: true },
+      }),
+    ];
+    render(<ExtensionGallery />);
+
+    const examplesPill = screen.getByRole("button", {
+      name: copy.directory.categories.examples,
+    });
+    fireEvent.click(examplesPill);
+    const installedSection = screen
+      .getByRole("heading", { name: copy.directory.installedTitle })
+      .closest("section")!;
+    expect(
+      within(installedSection).getByText(copy.catalog.retrieval.title),
+    ).toBeTruthy();
+    // Remaining uninstalled examples stay accessible and expanded under the Examples pill.
+    expect(screen.getByText(copy.catalog.example.title)).toBeTruthy();
+
+    // Filtering Installed view to a category with 0 installed matches offers a reset button.
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: copy.directory.categories.knowledge,
+      }),
+    );
+    const installedTab = screen.getByRole("tab", {
+      name: new RegExp(copy.directory.installed),
+    });
+    fireEvent.mouseDown(installedTab, { button: 0, ctrlKey: false });
+    fireEvent.click(installedTab);
+    const emptySection = screen
+      .getByRole("heading", { name: copy.directory.installedTitle })
+      .closest("section")!;
+    expect(
+      within(emptySection).getByText(copy.directory.installedFilteredEmpty),
+    ).toBeTruthy();
+    fireEvent.click(
+      within(emptySection).getByRole("button", {
+        name: copy.directory.allCategories,
+      }),
+    );
+    expect(
+      within(emptySection).getByText(copy.catalog.retrieval.title),
+    ).toBeTruthy();
   });
 });
