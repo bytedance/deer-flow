@@ -72,6 +72,15 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **persistence:** The SQL agent and managed-subagent catalogs now skip a stored
+  row with invalid JSON or a payload that no longer validates, instead of
+  failing the whole listing: `SqlAgentStore.list`/`list_all` and
+  `SqlManagedSubagentStore.list` decode each document inside a per-row guard and
+  answer with the rows they can read, matching what `FileAgentStore` and
+  `FileManagedSubagentStore` already do ("one bad agent must not hide the rest").
+  Reading a damaged entry by name still raises, while the row stays inspectable
+  for existence/soul, repairable via update, and removable. ([#7740])
+
 - **agents:** A todo list revised after the last `write_todos` call (for
   example an approved plan edited on resume) is shown to the model again
   instead of being silently skipped, and a stale injected reminder is
@@ -358,7 +367,7 @@ This section accumulates work toward the **2.3.0** milestone
   fits, and a longer final answer continues in up to 10 cards replied to the
   same message, split at line breaks; a retry resumes after the cards already
   delivered. ([#7798])
-  
+
 - **channels:** WeCom group messages now have their own conversation. Every
   message used the sender's userid as both chat and topic ID, so a member's
   private chat and every group they wrote in shared one DeerFlow thread
@@ -16431,6 +16440,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
+[#7740]: https://github.com/bytedance/deer-flow/pull/7740
 [#7746]: https://github.com/bytedance/deer-flow/pull/7746
 [#7762]: https://github.com/bytedance/deer-flow/pull/7762
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
