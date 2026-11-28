@@ -265,6 +265,10 @@ postgresql:
   image:
     repository: postgres
     tag: "16"
+    # Auto-detect official postgres:16 and numeric minor tags, including mirrors
+    # at <registry>/library/postgres. Set true for other compatible references
+    # or false to retain the image entrypoint. An explicit value overrides detection.
+    # useChartDataDirectory: true
   auth:
     database: deerflow
     username: deerflow

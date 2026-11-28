@@ -552,6 +552,6 @@ else
 fi
 echo ""
 echo "  Manage:"
-echo "    make down        — stop and remove containers"
-echo "    make docker-logs — view logs"
+echo "    make down      — stop and remove containers"
+echo "    make prod-logs — view production logs"
 echo ""

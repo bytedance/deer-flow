@@ -1873,6 +1873,7 @@ POST   /api/scheduled-tasks/preview-cron
 
 | Field | Type | Notes |
 |---|---|---|
+| `subagent_enabled` | boolean | Opt in to delegation for automatic and manual runs. Defaults to false on create. PATCH omission or null preserves the setting. Agent allowlists and runtime capacity limits still apply. |
 | `goal_objective` | string \| null | What one run must achieve (at most 4000 characters after whitespace normalization); requires `fresh_thread_per_run`. |
 | `max_runs` | integer \| null | Safety cap: automatic runs over the task's lifetime (trial runs excluded); at least 1. |
 | `end_at` | date-time \| null | Safety cap: no automatic run after this time. Without a UTC offset it is wall-clock time in the task's timezone. |
@@ -2182,6 +2183,24 @@ X-Accel-Buffering: no
 when the frontend runs with `pnpm start` and no nginx) from gzipping and therefore
 buffering the stream; `X-Accel-Buffering: no` does the same for nginx. A reverse
 proxy you put in front of the Gateway should not compress `text/event-stream`.
+
+### SSE run errors
+
+An `error` event from the run worker carries a JSON object with `message` and
+`name`. If the error supplies a string `code`, the event also includes that code
+and any of these fields that have the expected type.
+
+| Field | When included |
+|---|---|
+| `retryable` | The error supplies a boolean indicating whether retrying may help. |
+| `retry_after_seconds` | The error supplies a finite number of seconds to wait before retrying. Missing values, booleans, `NaN`, and infinities are omitted. |
+
+Errors without a string `code` carry only `message` and `name`. Sandbox capacity
+errors use `SANDBOX_CAPACITY_EXCEEDED`.
+
+The JavaScript LangGraph SDK's `StreamError` exposes `message` and `name` from
+the payload. To use the optional fields, read the JSON `data` from the raw SSE
+`error` event.
 
 ### SSE replay retention and gaps
 

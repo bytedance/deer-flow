@@ -2,6 +2,14 @@
 
 Tool steps mark explicit execution failures. Scheduled-task steps show completed
 operations only after a valid response, rather than when the request is issued.
+MCP and other unrecognized tool steps, and the `ls`, `read_file`, `write_file`,
+`str_replace` and `bash` steps, take their label from the call's `description`
+argument when it is a non-empty string. When it is missing, empty or another
+type, such as an object, the step shows its default label; for an MCP tool that
+is `Use "<tool>" tool`. Search, web fetch and the other built-in steps keep
+their own labels. A running subagent's card header shows a search call's
+`query`, and without a string `query` it shows the description or the tool
+name.
 
 In the chat UI, enable **Token Usage → Debug** to inspect generic/MCP tool calls.
 Each **Tool details** panel starts collapsed and shows the tool name, call ID,
@@ -43,7 +51,8 @@ message's run starts, keeping the original names when available. If publication
 fails, **Send again** reuses the staged files. Removing the message discards them.
 Managed worker updates accept text only. Native subagents pause at a safe boundary
 while the main Agent handles the update; active tool calls finish first. Stop
-keeps the Goal, while explicitly replacing the work can clear it. Unapplied
+keeps the Goal. Replacing the work clears its Goal and old todos. A plan saved
+while the run is paused is preserved when the run resumes. Unapplied
 messages survive database-backed Gateway restarts and require **Send again**;
 interrupted child side effects are not replayed automatically. Existing execution
 limits still apply.

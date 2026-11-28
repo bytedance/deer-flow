@@ -1729,6 +1729,8 @@ export const enUS: Translations = {
     branchFailed: "Failed to branch conversation.",
     streamReplayGap:
       "Some live updates expired. The conversation was restored from saved state.",
+    sandboxBusy:
+      "Sandboxes are temporarily unavailable. Please try again shortly.",
     streamServerError: (status) =>
       `The service is temporarily unavailable (HTTP ${status}). Please try again.`,
     outlineLabel: "Conversation outline",

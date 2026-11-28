@@ -859,6 +859,42 @@ describe("MessageGroup tool links", () => {
     expect(html).not.toContain("<a");
   });
 
+  // A tool's schema can make a display arg an object or an array (rich text,
+  // for example), and the call stays in the thread history, so a throw here
+  // would break the thread on every reload.
+  it.each([
+    ["mcp_lookup", "description", "Use &quot;mcp_lookup&quot; tool"],
+    ["ls", "description", "List folder"],
+    ["ls", "path", "Inspect"],
+    ["read_file", "description", "Read file"],
+    ["read_file", "path", "Inspect"],
+    ["write_file", "description", "Write file"],
+    ["str_replace", "description", "Write file"],
+    ["bash", "description", "Execute command"],
+    ["bash", "command", "Inspect"],
+  ])("renders a %s step whose %s arg is not a string", (name, key, label) => {
+    for (const value of [
+      { text: "Roadmap" },
+      [{ type: "text", text: { content: "Roadmap" } }],
+    ]) {
+      const html = renderToolCall(name, {
+        description: "Inspect",
+        path: "/mnt/user-data/workspace",
+        command: "ls",
+        [key]: value,
+      });
+
+      expect(html).toContain(label);
+      expect(html).not.toContain("Roadmap");
+    }
+  });
+
+  it("labels a generic step with an empty description by its tool name", () => {
+    const html = renderToolCall("mcp_lookup", { description: "" });
+
+    expect(html).toContain("Use &quot;mcp_lookup&quot; tool");
+  });
+
   // Persisted or mid-stream tool calls can arrive without an args object;
   // every specialized branch reads args, so none may throw on its absence.
   it.each([

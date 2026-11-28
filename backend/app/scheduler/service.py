@@ -788,6 +788,7 @@ class ScheduledTaskService:
             result = await self._launch_run(
                 thread_id=execution_thread_id,
                 assistant_id=task.get("assistant_id"),
+                subagent_enabled=task.get("subagent_enabled", False),
                 prompt=prompt,
                 owner_user_id=task.get("user_id"),
                 metadata=metadata,

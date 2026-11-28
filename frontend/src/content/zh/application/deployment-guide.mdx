@@ -97,14 +97,12 @@ BETTER_AUTH_SECRET=your-secret-here-min-32-chars
 
 ### 数据持久化
 
-线程数据存储在 `backend/.deer-flow/threads/`。在 Docker 部署中，此目录会绑定挂载到 gateway 容器中。
+两套 Compose 配置都使用 `/app/backend/.deer-flow` 作为 Gateway 容器内的运行目录。宿主机上的路径取决于启动方式。
 
-为避免容器重建时数据丢失：
+- 开发 Compose（`make docker-start`）将仓库的 `backend/` 绑定挂载到 `/app/backend/`，因此运行文件位于宿主机的 `backend/.deer-flow/`。
+- 生产 Compose（`make up`）将 `DEER_FLOW_HOME` 指定的宿主机目录绑定挂载到 `/app/backend/.deer-flow`。启动脚本默认使用仓库的 `backend/.deer-flow/`。如需更改，请在 shell 中传入宿主机上可写的绝对路径，例如 `DEER_FLOW_HOME=/srv/deer-flow-data make up`。
 
-1. 将 `DEER_FLOW_ROOT` 设置为仓库根目录的绝对路径。
-2. 验证 `threads/` 和 `skills/` 目录挂载正确。
-
-对于生产环境，使用命名卷或持久化卷声明（PVC）代替主机绑定挂载。
+请保留并备份整个宿主机运行目录。按用户隔离的会话文件位于 `users/<user-id>/threads/`，旧版会话文件位于 `threads/`。
 
 ## 生产部署注意事项
 
@@ -115,6 +113,7 @@ BETTER_AUTH_SECRET=your-secret-here-min-32-chars
 | `LocalSandboxProvider`                 | 单用户、受信任的本地工作流 |
 | `AioSandboxProvider`（Docker）         | 多用户、中等隔离需求       |
 | `E2BSandboxProvider`（e2b 云）         | 托管/Serverless、无需运维 Docker/K8s、开箱即用 Jupyter |
+| `VeFaaSSandboxProvider`（[BytePlus veFaaS 云](https://www.byteplus.com/en/product/vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)） | Serverless AIO 云端沙箱，支持预热、空闲暂停/唤醒、快照与 TOS 挂载 |
 | `AioSandboxProvider` + K8s Provisioner | 生产环境、强隔离、多用户   |
 
 对于有多个并发用户的任何部署，使用基于容器的沙箱，防止用户之间的执行环境相互干扰。

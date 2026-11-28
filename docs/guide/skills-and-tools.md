@@ -56,6 +56,8 @@ and leading-zero identifiers while importing cell values into DuckDB. See the
 [data-analysis setup instructions](../../skills/public/data-analysis/SKILL.md)
 for the additional dependencies. Legacy `.xls` and CSV input do not require
 DuckDB extensions and can be analyzed offline with an empty extension cache.
+CSV paths passed to `--files` select individual files. For example, quote
+`'orders[1].csv'` in the shell to import that file even beside `orders1.csv`.
 The `.xlsx` reader continues to use the spatial extension. Legacy workbooks that
 cannot be opened are reported and skipped while other input files continue;
 analysis fails if no tables can be loaded.
@@ -160,6 +162,20 @@ recorded in the [acceptance report](../../examples/deerflow-extension-knowledge-
 Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
+
+For BytePlus Agent Plan, the [video-generation skill](../../skills/public/video-generation/SKILL.md)
+accepts `BYTEPLUS_AGENTPLAN_API_KEY` (auto-selected when neither Gemini nor
+MiniMax keys are set, or forced with `VIDEO_GENERATION_PROVIDER=byteplus_agentplan`)
+and submits Seedance 2.5 tasks to `https://ark.ap-southeast.bytepluses.com/api/plan/v3/contents/generations/tasks`
+(default model `dreamina-seedance-2.5`; override with `BYTEPLUS_AGENTPLAN_VIDEO_MODEL`,
+`BYTEPLUS_AGENTPLAN_VIDEO_RESOLUTION`, `BYTEPLUS_AGENTPLAN_VIDEO_DURATION` in
+`4..30` or `-1`, and `BYTEPLUS_AGENTPLAN_GENERATE_AUDIO`). All `--reference-images`
+are forwarded as `role: "reference_image"` data URLs. Video downloads trust
+BytePlus Ark TOS storage endpoints by default (`tos-ap-southeast-1.volces.com`,
+`tos-ap-southeast-1.bytepluses.com`, `tos-cn-beijing.volces.com`) and honor
+exact extra hostnames listed in `BYTEPLUS_AGENTPLAN_VIDEO_DOWNLOAD_HOSTS`.
+Seedance 2.5 video generation requires BytePlus Agent Plan Large, Max, or
+Enterprise Shared Package; HTTP 403 tier rejections surface an upgrade hint.
 
 For MiniMax, the [video-generation skill](../../skills/public/video-generation/SKILL.md)
 accepts `MINIMAX_VIDEO_RESOLUTION` and `MINIMAX_VIDEO_DURATION` (integer seconds).
@@ -304,16 +320,20 @@ Skill projection manifest saves preserve the original error or interruption even
 └── lark-cli/lark-doc/SKILL.md      ← managed, read-only
 ```
 
-The built-in `image-generation` skill supports Gemini, MiniMax, and
-OpenAI-compatible Images APIs. Select the latter with
-`IMAGE_GENERATION_PROVIDER=openai`, then configure
+The built-in `image-generation` skill supports Gemini, MiniMax,
+OpenAI-compatible Images APIs, and BytePlus Agent Plan (Seedream). Select
+OpenAI-compatible with `IMAGE_GENERATION_PROVIDER=openai`, then configure
 `IMAGE_GENERATION_API_KEY`, `IMAGE_GENERATION_BASE_URL`, and
-`IMAGE_GENERATION_MODEL`. If the explicitly selected provider's API key is missing,
+`IMAGE_GENERATION_MODEL`. For BytePlus Agent Plan, set
+`BYTEPLUS_AGENTPLAN_API_KEY` (and optionally `IMAGE_GENERATION_PROVIDER=byteplus_agentplan`,
+`BYTEPLUS_AGENTPLAN_IMAGE_MODEL` defaulting to `dola-seedream-5.0-pro`, and
+`BYTEPLUS_AGENTPLAN_IMAGE_SIZE`) — the same key also powers `ppt-generation`
+slide rendering. If the explicitly selected provider's API key is missing,
 the CLI reports the missing key on stderr and exits with status 1.
 Run the skill's script in an isolated sandbox such as
-Docker/AIO, the Kubernetes provisioner, or E2B, and pass the variables through
-`sandbox.environment`. Sandbox commands do not inherit API keys from the Gateway
-process.
+Docker/AIO, the Kubernetes provisioner, E2B, or veFaaS, and pass the variables
+through `sandbox.environment`. Sandbox commands do not inherit API keys from
+the Gateway process.
 
 The local provider applies the skill view through its workspace file tools.
 Script-based skills require an isolated sandbox provider on Windows as well.
@@ -455,6 +475,8 @@ DeerFlow also ships with **skill-reviewer**, a public skill for read-only skill 
 cd backend
 uv run python -m deerflow.skills.review.cli ../skills/public/data-analysis --format text --fail-on error --fail-on-incomplete
 ```
+
+Invalid YAML dates or timestamps in frontmatter produce a `structure.invalid-frontmatter` blocker in the review report. Quote a date-like metadata value if it is intended as literal text.
 
 Public-skill CI waivers are exact, expiring exceptions in `.github/skill-review-waivers.v1.json`. Because only the trusted base manifest can suppress a finding, a file-changing pull request can be preauthorized safely by first merging a manifest-only change that lists the reviewed future full-file SHA-256 in `preapproved_file_sha256s`; the file change can then land in a later pull request.
 

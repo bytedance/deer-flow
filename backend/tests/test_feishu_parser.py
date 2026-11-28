@@ -1283,6 +1283,43 @@ def test_feishu_post_with_text_and_top_level_files_extracts_attachments():
         assert mock_make_inbound.call_args[1]["files"] == [{"file_key": "file_inv_a"}, {"file_key": "file_inv_b"}, {"file_key": "file_po"}]
 
 
+@pytest.mark.parametrize(
+    ("coordination_enabled", "caption"),
+    [
+        pytest.param(False, "/task Summarize [file]", id="disabled-skill"),
+        pytest.param(True, "/task Summarize [file]", id="enabled-skill"),
+        pytest.param(False, "/task start the migration", id="disabled-start"),
+    ],
+)
+def test_feishu_task_skill_post_preserves_attachments(monkeypatch, coordination_enabled, caption):
+    bus = MessageBus()
+    bus.coordination_tasks_enabled = coordination_enabled
+    channel = FeishuChannel(bus, {})
+    event = _make_post_event(
+        {
+            "content": [[{"tag": "text", "text": caption}]],
+            "files": [{"file_key": "file_notes", "file_name": "notes.txt", "is_folder": False}],
+        }
+    )
+    schedule = MagicMock()
+    monkeypatch.setattr(channel, "_schedule_prepare_inbound", schedule)
+    path = "/mnt/user-data/uploads/notes.txt"
+    receive = AsyncMock(return_value=path)
+    monkeypatch.setattr(channel, "_receive_single_file", receive)
+
+    channel._on_message(event)
+
+    schedule.assert_called_once()
+    _, inbound = schedule.call_args.args
+    assert inbound.msg_type == InboundMessageType.CHAT
+    assert inbound.text == f"{caption}\n\n[file]"
+    assert inbound.files == [{"file_key": "file_notes"}]
+    assert inbound.metadata[feishu_module._POST_FILES_COUNT_METADATA_KEY] == 1
+    result = _run(channel.receive_file(inbound, "thread_1"))
+    assert result.text == f"{caption}\n\n{path}"
+    receive.assert_awaited_once()
+
+
 def test_feishu_post_keeps_links_and_code_blocks():
     """Feishu sends a message with a hyperlink or a code block as a post with ``a`` and ``code_block`` elements."""
     channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
@@ -2109,3 +2146,43 @@ def test_feishu_leading_mention_before_chat_keeps_mention():
         mock_make_inbound.assert_called_once()
         assert mock_make_inbound.call_args[1]["msg_type"].value == "chat"
         assert mock_make_inbound.call_args[1]["text"] == "@_user_1 please summarise this"
+
+
+@pytest.mark.parametrize(
+    ("coordination_enabled", "text", "msg_type", "expected_text"),
+    [
+        (True, "@_user_1 /task Summarize notes", InboundMessageType.CHAT, "@_user_1 /task Summarize notes"),
+        (True, "@_user_1 /task start Write a report", InboundMessageType.COMMAND, "/task start Write a report"),
+        (False, "@_user_1 /task start Write a report", InboundMessageType.CHAT, "@_user_1 /task start Write a report"),
+    ],
+)
+def test_feishu_task_routing_preserves_chat_mentions(monkeypatch, coordination_enabled, text, msg_type, expected_text):
+    bus = MessageBus()
+    bus.coordination_tasks_enabled = coordination_enabled
+    channel = FeishuChannel(bus, {})
+    event = _make_text_event(text)
+    event.event.message.chat_type = "group"
+    schedule = MagicMock()
+    monkeypatch.setattr(channel, "_schedule_prepare_inbound", schedule)
+
+    channel._on_message(event)
+
+    schedule.assert_called_once()
+    _, inbound = schedule.call_args.args
+    assert inbound.msg_type == msg_type
+    assert inbound.text == expected_text
+
+
+@pytest.mark.parametrize("bus_factory", [MagicMock, SimpleNamespace])
+def test_feishu_task_start_stays_chat_on_bus_without_capability(monkeypatch, bus_factory):
+    channel = FeishuChannel(bus_factory(), {})
+    text = "/task start Write a report"
+    schedule = MagicMock()
+    monkeypatch.setattr(channel, "_schedule_prepare_inbound", schedule)
+
+    channel._on_message(_make_text_event(text))
+
+    schedule.assert_called_once()
+    _, inbound = schedule.call_args.args
+    assert inbound.msg_type == InboundMessageType.CHAT
+    assert inbound.text == text

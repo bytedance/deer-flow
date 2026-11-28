@@ -14,6 +14,12 @@ Use the table below as a practical starting point when choosing how to run DeerF
 - Linux plus Docker is the recommended deployment target for a persistent server. macOS and Windows are best treated as development or evaluation environments.
 - If CPU or memory usage stays pinned, reduce concurrent runs first, then move to the next sizing tier.
 
+The Helm chart manages the data directory for the official `postgres:16` image and numeric minor tags such as `16.16`. When a mirror keeps the canonical path (for example, `registry.example.com/library/postgres`), change only `postgresql.image.repository`. You can append `@sha256:<hash>` to the tag to pin the image.
+
+For a copy of the same image under another repository path or tag (for example, `registry.example.com/team/postgres` or `postgres:16-trixie`), set `postgresql.image.useChartDataDirectory: true` to keep using the same volume layout. This overrides both repository and tag detection and runs `docker-entrypoint.sh postgres` as UID 999. Custom repositories such as `team/postgres` keep their own entrypoint by default. Set the option to `false` if a custom image occupies a canonical path and needs its own entrypoint.
+
+With chart-managed storage, a new database starts in `pgdata/`, including on a volume with a storage-managed `.snapshot/` directory. An existing database at the volume root stays there. Run `readlink -f "$PGDATA"` in the database Pod to find the physical directory. Use that directory when switching images or taking a file-level backup after a clean shutdown.
+
 Before uninstalling a Kubernetes release, check the home PVC retention policy
 if persistence is enabled. To restore the workspace on reinstall, export the
 installed release's user-supplied values and preserve the database credentials
@@ -35,6 +41,7 @@ make docker-logs    # View logs
 ```
 
 `make docker-start` starts `provisioner` only when `config.yaml` uses provisioner mode (`sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` with `provisioner_url`). Direct Compose users can add `--profile provisioner` to the dev command for the same mode; the default stack does not require Kubernetes.
+The Gateway and the provisioner compare `PROVISIONER_API_KEY` after stripping surrounding whitespace from the configured value on each side, so a key that arrives with a trailing newline (for example from a Kubernetes Secret created with `kubectl create secret --from-file`) still authenticates; see the [Helm architecture notes](../../deploy/helm/deer-flow/README.md#architecture-notes).
 With `USERDATA_PVC_NAME`, sandbox data, extra mounts and Lark broker credentials share one `user-data` volume with separate `subPath` mounts, avoiding duplicate references to the same claim on NFS CSI drivers.
 
 Docker builds use the upstream `uv` registry by default. The gateway image installs with `uv sync --locked`, and `uv.lock` pins `https://pypi.org/simple`, so `UV_INDEX_URL` has to keep that value: exporting a mirror such as `https://pypi.tuna.tsinghua.edu.cn/simple` fails the build with ``The lockfile at `uv.lock` needs to be updated, but `--locked` was provided`` (reproduce in an already-synced environment with `cd backend && UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple uv sync --locked --check`; if the environment itself is stale, `--check` reports that instead for either index, so use `uv lock --check` to see it without syncing). Installing from a mirror requires regenerating the lock or dropping `--locked`, and both change what the image installs, so keep the default index for a checkout you intend to contribute back. `NPM_REGISTRY=https://registry.npmmirror.com` is independent of this: it applies to the frontend image's `pnpm` install and to the gateway image's Lark CLI install (`@larksuite/cli`, which `backend/Dockerfile` installs with npm).
@@ -111,13 +118,15 @@ for the retention constraints.
 **Production** (builds images locally, mounts runtime config and data):
 
 ```bash
-make up     # Build images and start all production services
-make down   # Stop and remove containers
+make up         # Build images and start all production services
+make prod-logs  # Follow production container logs
+make down       # Stop and remove containers
 ```
 
 Access: http://localhost:2026
 
-`make up` waits for the Gateway `/health` endpoint before reporting success.
+`make up` uses Docker Compose to wait for the services to start and for the
+Gateway's `/health/ready` probe to pass before reporting success.
 If the Gateway does not become healthy within the startup window, deployment
 exits non-zero and prints the container status plus recent Gateway logs. The
 production image starts from its already-built environment and never resolves

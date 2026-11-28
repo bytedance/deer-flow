@@ -1,4 +1,5 @@
 import base64
+import errno
 import json
 import logging
 import math
@@ -11,12 +12,12 @@ from dataclasses import dataclass, field
 import httpx
 from agent_sandbox import Sandbox as AioSandboxClient
 from agent_sandbox.core.api_error import ApiError
-from pydantic import ValidationError
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.command_scope import COMMAND_OWNER_ENV, CommandScopeCancelled, command_lock, current_command_scope
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
 from deerflow.sandbox.download import download_limit, read_download_stream
+from deerflow.sandbox.read_file_contract import slice_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
@@ -1208,33 +1209,62 @@ class AioSandbox(Sandbox):
     ) -> str:
         """Read the content of a file in the sandbox.
 
+        A full read returns line endings as stored. A ranged read ends lines
+        only at ``"\\n"``, drops the ``"\\r"`` characters that end a line and
+        joins the selected lines with ``"\\n"``, as ``LocalSandbox.read_file``
+        does.
+
         Args:
             path: The absolute path of the file to read.
+            start_line: Optional starting line number (1-indexed, inclusive).
+            end_line: Optional ending line number (1-indexed, inclusive).
 
         Returns:
-            The content of the file.
+            The content of the file, or an ``Error: ...`` string.
+
+        Raises:
+            OSError: If the file is larger than the download limit.
         """
+        unreadable = f"Error: file not found or unreadable: {path}"
         try:
-            kwargs = {}
-            if start_line is not None:
-                kwargs["start_line"] = max(start_line - 1, 0)
-            if end_line is not None:
-                kwargs["end_line"] = max(end_line, 0)
-            result = self._client.file.read_file(file=path, **kwargs)
-            return result.data.content if result.data else ""
-        except ValidationError as e:
-            # The server reports read failures (e.g. ENOENT) as an error
-            # envelope with ``data: {}``, which cannot satisfy the required
-            # ``content``/``file`` fields of the SDK's FileReadResult model,
-            # so the SDK raises a ValidationError. A missing file is an
-            # expected outcome (ReadBeforeWrite probes every new-file write),
-            # so log quietly and return an explicit, model-actionable result
-            # instead of leaking the pydantic error text.
-            logger.debug("Sandbox read_file validation failure for %r: %s", path, e)
-            return f"Error: file not found or unreadable: {path}"
+            # /v1/file/read turns every line ending into "\n", so str_replace
+            # wrote a CRLF file back as LF, and its line ranges also end at a
+            # bare "\r", \f and Unicode separators. The download route returns
+            # the stored bytes. No self._lock: it would make a read wait for a
+            # running shell command, and a read cut off by close() still ends
+            # in an error result below.
+            content = read_download_stream(self._client.file.download_file(path=path), _MAX_DOWNLOAD_SIZE, path).decode("utf-8")
+        except ApiError as e:
+            if e.status_code in (400, 404):
+                # 404 is a missing file, an expected outcome because
+                # ReadBeforeWrite probes every new-file write; 400 is a
+                # directory. Log quietly and return a model-actionable result.
+                logger.debug("Sandbox read_file of %r returned HTTP %s", path, e.status_code)
+                return unreadable
+            logger.error("Failed to read file %r in sandbox: HTTP %s", path, e.status_code)
+            return f"Error: failed to read {path} (HTTP {e.status_code})"
+        except httpx.RemoteProtocolError as e:
+            # The server sends the response headers before it opens the file,
+            # so a file it may not read (e.g. root-owned) ends the body early.
+            logger.warning("Sandbox read_file of %r ended early: %s", path, e)
+            return unreadable
+        except UnicodeDecodeError:
+            logger.debug("Sandbox read_file of %r is not UTF-8 text", path)
+            return unreadable
+        except OSError as e:
+            if e.errno == errno.EFBIG:
+                # Raise instead of returning an error string: str_replace
+                # would replace text inside the string and write it over the
+                # file whenever old_str happens to occur in it.
+                raise OSError(errno.EFBIG, f"File is larger than {_MAX_DOWNLOAD_SIZE // (1024 * 1024)} MB; read part of it with bash (head, tail or sed -n)", path) from None
+            logger.error(f"Failed to read file in sandbox: {e}")
+            return f"Error: {e}"
         except Exception as e:
             logger.error(f"Failed to read file in sandbox: {e}")
             return f"Error: {e}"
+        if start_line is None and end_line is None:
+            return content
+        return slice_file_lines(content, start_line, end_line)
 
     def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
         """Download file bytes from the sandbox.

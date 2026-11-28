@@ -410,6 +410,10 @@ class ThreadTokenUsageResponse(BaseModel):
     total_input_tokens: int = 0
     total_output_tokens: int = 0
     total_runs: int = 0
+    total_batch_items: int = Field(
+        default=0,
+        description="Subagent batch items whose stored token usage is included in the totals, by_model and by_caller.subagent (they are not runs).",
+    )
     by_model: dict[str, ThreadTokenUsageModelBreakdown] = Field(default_factory=dict)
     by_caller: ThreadTokenUsageCallerBreakdown = Field(default_factory=ThreadTokenUsageCallerBreakdown)
     context_usage: ThreadContextUsage | None = None
@@ -2048,6 +2052,30 @@ async def get_run_workspace_changes(
     )
 
 
+async def _add_batch_item_usage(request: Request, agg: dict[str, Any], thread_id: str, user_id: str | None) -> dict[str, Any]:
+    """Add the thread's subagent batch items to a run-based token aggregate.
+
+    Batch items run outside any run, so the run store never sees their tokens.
+    They count as subagent work; ``runs`` per model stays a count of runs.
+    """
+    repo = getattr(request.app.state, "subagent_batch_repo", None)
+    if repo is None:
+        return agg
+    items = await repo.list_item_token_usage(user_id=user_id, thread_id=thread_id)
+    if not items:
+        return agg
+    agg = {**agg, "by_model": {model: dict(entry) for model, entry in agg.get("by_model", {}).items()}, "by_caller": dict(agg.get("by_caller", {}))}
+    for item in items:
+        agg["total_tokens"] = agg.get("total_tokens", 0) + item["total_tokens"]
+        agg["total_input_tokens"] = agg.get("total_input_tokens", 0) + item["input_tokens"]
+        agg["total_output_tokens"] = agg.get("total_output_tokens", 0) + item["output_tokens"]
+        agg["by_caller"]["subagent"] = agg["by_caller"].get("subagent", 0) + item["total_tokens"]
+        entry = agg["by_model"].setdefault(item["model_name"] or "unknown", {"tokens": 0, "runs": 0})
+        entry["tokens"] = entry.get("tokens", 0) + item["total_tokens"]
+    agg["total_batch_items"] = len({item["item_id"] for item in items})
+    return agg
+
+
 @router.get("/{thread_id}/token-usage", response_model=ThreadTokenUsageResponse)
 @require_permission("threads", "read", owner_check=True)
 async def thread_token_usage(
@@ -2062,5 +2090,6 @@ async def thread_token_usage(
         agg = await run_store.aggregate_tokens_by_thread(thread_id, include_active=True, user_id=scope_user_id)
     else:
         agg = await run_store.aggregate_tokens_by_thread(thread_id, user_id=scope_user_id)
+    agg = await _add_batch_item_usage(request, agg, thread_id, scope_user_id)
     context_usage = await build_context_usage(request, thread_id, run_store, user_id=scope_user_id)
     return ThreadTokenUsageResponse(thread_id=thread_id, context_usage=context_usage, **agg)

@@ -9,7 +9,7 @@ import pytest_asyncio
 from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
-from sqlalchemy import inspect, text
+from sqlalchemy import event, inspect, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from support.postgres import asyncpg_test_url
 
@@ -17,7 +17,12 @@ from deerflow.persistence import bootstrap
 from deerflow.persistence.base import Base
 from deerflow.persistence.coordination.model import TaskStatus
 from deerflow.persistence.coordination.sql import CoordinationTaskRepository, TaskConflict, TaskNotFound
+from deerflow.persistence.coordination.workers import CoordinationWorkerRepository
+from deerflow.persistence.notification_deliveries.model import NotificationDeliveryRow
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
+from deerflow.persistence.user.im_notifications import DISABLED_BY_OWNER, ImNotificationPreferencesRepository
+
+_FEISHU_ORIGIN = {"provider": "feishu", "account_id": "ou_owner", "chat_id": "oc_private"}
 
 
 @pytest_asyncio.fixture(params=["sqlite", "postgres"])
@@ -50,16 +55,100 @@ async def repo(database):
     return CoordinationTaskRepository(async_sessionmaker(engine))
 
 
-async def _finish(repo, task, *, covered_input_seq=None):
+async def _finish(repo, task, *, covered_input_seq=None, outcome=TaskStatus.SUCCEEDED):
     return await repo.finish(
         "alice",
         task["id"],
         expected_revision=task["revision"],
         execution_epoch=task["execution_epoch"],
         covered_input_seq=task["latest_input_seq"] if covered_input_seq is None else covered_input_seq,
-        outcome=TaskStatus.SUCCEEDED,
+        outcome=outcome,
         result_ref="result-1",
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", [TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, "worker-error"])
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_channel_completion_obeys_preference_at_settlement(repo, outcome, enabled):
+    workers = CoordinationWorkerRepository(repo._sessions)
+    preferences = ImNotificationPreferencesRepository(repo._sessions)
+    task = await workers.create("alice", request_id="feishu", objective="Review", coordinator=True, channel_origin=_FEISHU_ORIGIN)
+    task_id = task["id"]
+    await preferences.patch("alice", {"feishu": enabled})
+    if outcome == "worker-error":
+        _, execution, _ = await workers.prepare("alice", task_id, "lead_agent")
+        assert await workers.settle("alice", task_id, execution["id"], None, "error", [])
+        outcome = TaskStatus.FAILED
+    elif outcome == TaskStatus.CANCELLED:
+        cancelling = await workers.request_cancel("alice", task_id, expected_revision=task["revision"])
+        await workers.confirm_cancel("alice", task_id, execution_epoch=cancelling["execution_epoch"])
+    else:
+        running = await workers.start("alice", task_id, expected_revision=task["revision"])
+        await _finish(workers, running, outcome=outcome)
+    await preferences.patch("alice", {"feishu": True})
+
+    assert (await workers.get("alice", task_id))["status"] == outcome
+    async with repo._sessions() as session:
+        rows = (await session.scalars(select(NotificationDeliveryRow))).all()
+    assert [(row.source_key, row.event, row.status) for row in rows] == ([(task_id, outcome, "pending")] if enabled else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first", ["opt-out", "settlement"])
+@pytest.mark.parametrize("outcome", [TaskStatus.SUCCEEDED, TaskStatus.CANCELLED])
+async def test_channel_completion_serializes_with_opt_out(repo, database, monkeypatch, first, outcome):
+    engine, dialect, _ = database
+    preferences = ImNotificationPreferencesRepository(repo._sessions)
+    task = await repo.create("alice", request_id="feishu", objective="Review", coordinator=True, channel_origin=_FEISHU_ORIGIN)
+    if outcome == TaskStatus.CANCELLED:
+        task = await repo.request_cancel("alice", task["id"], expected_revision=task["revision"])
+    else:
+        task = await repo.start("alice", task["id"], expected_revision=task["revision"])
+
+    async def settle():
+        if outcome == TaskStatus.CANCELLED:
+            return await repo.confirm_cancel("alice", task["id"], execution_epoch=task["execution_epoch"])
+        return await _finish(repo, task)
+
+    held = asyncio.Event()
+    contending = asyncio.Event()
+    read_preferences = ImNotificationPreferencesRepository.get_in_session
+
+    async def pause_after_lock(session, user_id, *, lock_owner=False):
+        actor = asyncio.current_task().get_name()
+        if actor == "settlement":
+            assert lock_owner
+        result = await read_preferences(session, user_id, lock_owner=lock_owner)
+        if actor == first and lock_owner:
+            held.set()
+            await contending.wait()
+        return result
+
+    def observe_contender(_conn, _cursor, statement, *_):
+        actor = asyncio.current_task().get_name()
+        if actor == first or actor not in ("opt-out", "settlement"):
+            return
+        if statement.startswith("INSERT INTO im_notification_preferences") or (dialect == "sqlite" and statement == "BEGIN IMMEDIATE"):
+            contending.set()
+
+    monkeypatch.setattr(ImNotificationPreferencesRepository, "get_in_session", staticmethod(pause_after_lock))
+    operations = {"opt-out": lambda: preferences.patch("alice", {"feishu": False}), "settlement": settle}
+    second = "settlement" if first == "opt-out" else "opt-out"
+    event.listen(engine.sync_engine, "before_cursor_execute", observe_contender)
+    try:
+        async with asyncio.timeout(10), asyncio.TaskGroup() as group:
+            group.create_task(operations[first](), name=first)
+            await held.wait()
+            group.create_task(operations[second](), name=second)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", observe_contender)
+
+    assert (await repo.get("alice", task["id"]))["status"] == outcome
+    await preferences.patch("alice", {"feishu": True})
+    async with repo._sessions() as session:
+        rows = (await session.scalars(select(NotificationDeliveryRow))).all()
+    assert [(row.event, row.status, row.last_error, row.claim_token) for row in rows] == ([(outcome, "failed", DISABLED_BY_OWNER, None)] if first == "settlement" else [])
 
 
 @pytest.mark.asyncio
@@ -179,7 +268,8 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
     config = bootstrap._get_alembic_config(engine, postgres_schema=schema)
     previous = "0059_coordination_grants"
     run_settings_revision = "0060_coordination_run_settings"
-    revision = "0061_coordination_coordinator"
+    scheduled_task_subagents_revision = "0063_scheduled_task_subagents"
+    revision = "0064_coordination_channel_origin"
     await asyncio.to_thread(command.upgrade, config, "0055_thread_shares")
     await asyncio.to_thread(command.upgrade, config, previous)
     async with engine.begin() as conn:
@@ -191,6 +281,7 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
         )
     repo = CoordinationTaskRepository(async_sessionmaker(engine))
     await asyncio.to_thread(command.upgrade, config, run_settings_revision)
+    await asyncio.to_thread(command.upgrade, config, scheduled_task_subagents_revision)
     await asyncio.to_thread(command.upgrade, config, revision)
     async with engine.connect() as conn:
 
@@ -212,6 +303,17 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
     configured = await repo.create("alice", request_id="configured", objective="Review", coordinator=True, run_settings=settings)
     assert configured["coordinator"] is True
     assert (await repo.get("alice", configured["id"]))["run_settings"] == settings
+
+    await asyncio.to_thread(command.downgrade, config, scheduled_task_subagents_revision)
+    async with engine.connect() as conn:
+        columns = await conn.run_sync(lambda sync: {item["name"] for item in inspect(sync).get_columns("coord_tasks")})
+        scheduled_columns = await conn.run_sync(lambda sync: {item["name"] for item in inspect(sync).get_columns("scheduled_tasks")})
+        assert "channel_origin" not in columns
+        assert await conn.run_sync(lambda sync: inspect(sync).has_table("mcp_agent_grants"))
+        assert "subagent_enabled" in scheduled_columns
+        assert "coordinator" in columns
+    await asyncio.to_thread(command.upgrade, config, revision)
+    assert (await repo.get("alice", configured["id"]))["coordinator"] is True
 
     await asyncio.to_thread(command.downgrade, config, run_settings_revision)
     async with engine.connect() as conn:
@@ -301,10 +403,14 @@ async def test_coordinator_decision_is_atomic_idempotent_and_fenced(database, ch
 
 
 @pytest.mark.asyncio
-async def test_coordinator_settles_only_the_current_decision(database):
+async def test_coordinator_settles_only_the_current_decision(database, monkeypatch):
     from time import time
 
+    from sqlalchemy import select
+
     from deerflow.persistence.coordination.workers import RUN_GRANT_METADATA, RUN_KEY_PREFIX, CoordinationWorkerRepository
+    from deerflow.persistence.notification_deliveries import NotificationDeliveryRepository
+    from deerflow.persistence.notification_deliveries.model import NotificationDeliveryRow
     from deerflow.persistence.run import RunRepository
     from deerflow.persistence.user.model import UserRow
 
@@ -314,7 +420,8 @@ async def test_coordinator_settles_only_the_current_decision(database):
     workers, runs = CoordinationWorkerRepository(sessions), RunRepository(sessions)
     async with sessions.begin() as session:
         session.add(UserRow(id="alice", email="alice@example.com"))
-    root = await workers.create("alice", request_id="plan", objective="Research", coordinator=True)
+    origin = dict(provider="feishu", account_id="ou_test", chat_id="oc_test", id="connection", updated_at="version")
+    root = await workers.create("alice", request_id="plan", objective="Research", coordinator=True, channel_origin=origin)
     task_id = root["id"]
     grant = {"id": "grant", "authority": {"token_version": 0, "source": "session", "permissions": ["runs:create"]}, "channel": None, "expires_at": time() + 100}
 
@@ -352,11 +459,33 @@ async def test_coordinator_settles_only_the_current_decision(database):
     assert not await workers.settle("alice", task_id, second, "plan-2", "success", [])
     new_worker = await admit(new_child, "worker-2")
     await runs.update_status("worker-2", "success")
-    assert await workers.settle("alice", new_child, new_worker, "worker-2", "success", [])
+    assert await workers.settle("alice", new_child, new_worker, "worker-2", "success", [("report.txt", "hash", b"report")], result_text="New result")
+    enqueue = NotificationDeliveryRepository.enqueue_in_session
+
+    async def fail_attachment(self, session, **kwargs):
+        if "artifact_id" in kwargs["payload"]:
+            raise RuntimeError("outbox write failed")
+        return await enqueue(self, session, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(NotificationDeliveryRepository, "enqueue_in_session", fail_attachment)
+        with pytest.raises(RuntimeError, match="outbox write failed"):
+            await workers.settle("alice", task_id, second, "plan-2", "success", [])
+    assert (await workers.get("alice", task_id))["status"] == TaskStatus.RUNNING
+    async with sessions() as session:
+        assert (await session.scalars(select(NotificationDeliveryRow.id))).all() == []
     assert await workers.settle("alice", task_id, second, "plan-2", "success", [])
     view = await workers.view("alice", task_id)
     assert view["task"]["status"] == TaskStatus.SUCCEEDED
     assert {row["id"]: row["status"] for row in view["children"]} == {old_child: TaskStatus.FAILED, new_child: TaskStatus.SUCCEEDED}
+
+    assert await workers.settle("alice", task_id, second, "plan-2", "success", [])
+    async with sessions() as session:
+        rows = (await session.scalars(select(NotificationDeliveryRow).order_by(NotificationDeliveryRow.source_key))).all()
+        card, file = rows
+        assert card.payload_json["results"] == ["New result"]
+        assert file.payload_json["worker_task_id"] == new_child
+        assert card.payload_json["task_id"] == file.payload_json["task_id"] == task_id
 
 
 @pytest.mark.asyncio
