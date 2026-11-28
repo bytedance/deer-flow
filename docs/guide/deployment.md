@@ -14,6 +14,12 @@ Use the table below as a practical starting point when choosing how to run DeerF
 - Linux plus Docker is the recommended deployment target for a persistent server. macOS and Windows are best treated as development or evaluation environments.
 - If CPU or memory usage stays pinned, reduce concurrent runs first, then move to the next sizing tier.
 
+The Helm chart manages the data directory for the official `postgres:16` image and numeric minor tags such as `16.16`. When a mirror keeps the canonical path (for example, `registry.example.com/library/postgres`), change only `postgresql.image.repository`. You can append `@sha256:<hash>` to the tag to pin the image.
+
+For a copy of the same image under another repository path or tag (for example, `registry.example.com/team/postgres` or `postgres:16-trixie`), set `postgresql.image.useChartDataDirectory: true` to keep using the same volume layout. This overrides both repository and tag detection and runs `docker-entrypoint.sh postgres` as UID 999. Custom repositories such as `team/postgres` keep their own entrypoint by default. Set the option to `false` if a custom image occupies a canonical path and needs its own entrypoint.
+
+With chart-managed storage, a new database starts in `pgdata/`, including on a volume with a storage-managed `.snapshot/` directory. An existing database at the volume root stays there. Run `readlink -f "$PGDATA"` in the database Pod to find the physical directory. Use that directory when switching images or taking a file-level backup after a clean shutdown.
+
 ## Option 1: Docker (Recommended)
 
 Requires Docker Desktop / Docker Engine and **Docker Compose v2.24+**
