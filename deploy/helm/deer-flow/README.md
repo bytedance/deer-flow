@@ -258,6 +258,9 @@ kubectl -n deer-flow get pods
 kubectl -n deer-flow port-forward svc/nginx 2026:2026
 curl http://localhost:2026/health          # gateway liveness via nginx
 curl http://localhost:2026/health/ready    # readiness: database, checkpointer, stream_bridge, provisioner
+
+If you changed `nginx.service.port` in your values, use that port on both
+sides of `port-forward` and in the URLs above.
 ```
 
 `/health/ready` is what the gateway `readinessProbe` hits. It answers 503 while

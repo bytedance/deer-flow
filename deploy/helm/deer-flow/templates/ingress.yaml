@@ -33,5 +33,5 @@ spec:
               service:
                 name: nginx
                 port:
-                  number: 2026
+                  name: http
 {{- end -}}
