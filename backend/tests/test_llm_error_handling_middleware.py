@@ -466,6 +466,14 @@ async def test_async_empty_stop_retries_once(monkeypatch: pytest.MonkeyPatch) ->
             response_metadata={"finish_reason": "tool_calls"},
         ),
         AIMessage(content="", response_metadata={"finish_reason": "length"}),
+        # A Codex refusal-only turn carries no output_text but stamps
+        # finish_reason="refusal"; it must pass through instead of being
+        # retried away as an empty response.
+        AIMessage(
+            content="",
+            additional_kwargs={"refusal": "I cannot help with that request."},
+            response_metadata={"finish_reason": "refusal"},
+        ),
     ],
 )
 def test_nonempty_or_non_stop_response_is_not_classified_as_empty(message: AIMessage) -> None:
