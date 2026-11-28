@@ -90,6 +90,16 @@ client or the real storage, because the payload shape is the contract.
   decides the turn: a refused write under `log_and_drop` must not fail the run.
 - **Shutdown drains active work** before it closes a client.
 
+## Extraction model
+
+- **Re-armed while the backend has none** — `MemoryManager.needs_host_model()`,
+  not "the config lists models": an entry that fails to build recovers like a
+  fresh install, and a backend that owns its model keeps the default `False`.
+- **A failed rebuild keeps the last good client**, retried per model set with a
+  rate limit. An explicit `backend_config.model` is never replaced, and an armed
+  manager keeps its client until a restart.
+- **One config read per re-arm** — digest and client come from the same snapshot.
+
 ## Injection
 
 - Gateway input handling removes forged dynamic-context markers. Only output of
