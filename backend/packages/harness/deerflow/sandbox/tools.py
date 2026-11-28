@@ -1648,6 +1648,8 @@ def _literal_command_file_operands(name: str, arguments: list[_ShellWord]) -> li
             has_explicit_expression = True
             if reads_file:
                 option_files.append(value)
+        elif name in {"head", "tail"} and index == 1 and re.fullmatch(r"-[0-9]+", word):
+            continue  # The legacy numeric count is accepted only as the first argument.
         elif name in {"head", "tail"} and (count := _COUNT_OPTION.fullmatch(word)):
             if count[1] is None:
                 if index >= len(words) or not re.fullmatch(r"[+-]?\d+", words[index]):
