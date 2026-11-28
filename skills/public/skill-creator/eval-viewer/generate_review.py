@@ -15,6 +15,7 @@ No dependencies beyond the Python stdlib are required.
 import argparse
 import base64
 import json
+import math
 import mimetypes
 import re
 import sys
@@ -53,11 +54,33 @@ def get_mime_type(path: Path) -> str:
     return mime or "application/octet-stream"
 
 
+def _eval_sort_key(run: dict) -> tuple[int, int | float | str, str]:
+    """Return a total-order sort key tolerant of missing or mixed eval_ids."""
+    eval_id = run.get("eval_id")
+    if isinstance(eval_id, (int, float)) and not isinstance(eval_id, bool) and math.isfinite(eval_id):
+        return (0, eval_id, run["id"])
+    if isinstance(eval_id, str):
+        return (1, eval_id, run["id"])
+    return (2, 0, run["id"])
+
+
+def _ancestors_within(root: Path, start: Path) -> list[Path]:
+    """Return directories from *start* up to *root* (inclusive), never escaping *root*."""
+    dirs: list[Path] = []
+    current = start
+    while True:
+        dirs.append(current)
+        if current == root or current.parent == current:
+            break
+        current = current.parent
+    return dirs
+
+
 def find_runs(workspace: Path) -> list[dict]:
     """Recursively find directories that contain an outputs/ subdirectory."""
     runs: list[dict] = []
     _find_runs_recursive(workspace, workspace, runs)
-    runs.sort(key=lambda r: (r.get("eval_id", float("inf")), r["id"]))
+    runs.sort(key=_eval_sort_key)
     return runs
 
 
@@ -83,13 +106,19 @@ def build_run(root: Path, run_dir: Path) -> dict | None:
     prompt = ""
     eval_id = None
 
-    # Try eval_metadata.json
-    for candidate in [run_dir / "eval_metadata.json", run_dir.parent / "eval_metadata.json"]:
+    ancestors = _ancestors_within(root, run_dir)
+
+    # Try eval_metadata.json from run_dir up to workspace root so nested
+    # eval-N/<config>/run-M/outputs/ layouts find eval-N/eval_metadata.json
+    # without escaping above the workspace root.
+    for candidate in (directory / "eval_metadata.json" for directory in ancestors):
         if candidate.exists():
             try:
                 metadata = json.loads(candidate.read_text(encoding="utf-8"))
-                prompt = metadata.get("prompt", "")
-                eval_id = metadata.get("eval_id")
+                if isinstance(metadata, dict):
+                    prompt = metadata.get("prompt", "") or prompt
+                    if eval_id is None and "eval_id" in metadata:
+                        eval_id = metadata.get("eval_id")
             except (json.JSONDecodeError, OSError):
                 pass
             if prompt:
@@ -122,9 +151,9 @@ def build_run(root: Path, run_dir: Path) -> dict | None:
             if f.is_file() and f.name not in METADATA_FILES:
                 output_files.append(embed_file(f))
 
-    # Load grading if present
+    # Load grading if present (bounded to workspace root)
     grading = None
-    for candidate in [run_dir / "grading.json", run_dir.parent / "grading.json"]:
+    for candidate in (directory / "grading.json" for directory in ancestors[:2]):
         if candidate.exists():
             try:
                 grading = json.loads(candidate.read_text(encoding="utf-8"))
@@ -243,6 +272,18 @@ def load_previous_iteration(workspace: Path) -> dict[str, dict]:
     return result
 
 
+def _json_for_script(value: object) -> str:
+    """Serialize *value* as JSON safe to embed inside an HTML <script> block."""
+    return (
+        json.dumps(value)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
 def generate_html(
     runs: list[dict],
     skill_name: str,
@@ -272,7 +313,7 @@ def generate_html(
     if benchmark:
         embedded["benchmark"] = benchmark
 
-    data_json = json.dumps(embedded)
+    data_json = _json_for_script(embedded)
 
     return template.replace("/*__EMBEDDED_DATA__*/", f"const EMBEDDED_DATA = {data_json};")
 
