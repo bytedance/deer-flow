@@ -166,7 +166,28 @@ writes from workers that were already running. A terminal batch is `failed` when
 all finished work failed and no item succeeded; mixed success/failure is
 `completed`, preserving item-level failure counts for partial-result consumers.
 
-Submission is idempotent per `(user_id, submission_key)`, where model submissions use the stable `run_id:tool_call_id` identity. Item keys must be unique within a batch and survive retries.
+Submission is idempotent per `(user_id, submission_key)`. For model calls the
+key is a versioned hash of the thread ID, its incarnation when available, the
+originating AI message ID, and the tool-call ID. The run ID records ownership.
+The tool requires exactly one matching call in the originating message and a
+nonempty message ID.
+
+The parent row stores an internal digest of the normalized title, subagent
+type, ordered items with prompts, acceptance criteria and dependencies,
+explicit limits, and follow-up prompt. Equivalent replays return the original
+batch ID and current stored statuses. A different digest returns a submission
+conflict. Replay checks the current authorization and applies capacity limits
+only to new batches. A cancelled batch can be submitted again in a fresh
+dispatch after the user explicitly requests it. Execution and
+authorization snapshots and resolved configuration defaults are independent
+of the digest. The parent, items, and dependencies commit atomically.
+
+Existing rows remain accessible by their original IDs. During upgrade replay,
+a receipt in the checkpoint can tie a legacy run-scoped row to its model
+response. The stored request must also match. If the checkpoint pairs a row
+with an earlier response, a new response may reuse that call ID. Ambiguous
+legacy rows cause a submission conflict before any new batch is written.
+Item keys must be unique within a batch and survive retries.
 
 Execution is **at least once**, not exactly once. An external side effect can complete immediately before a worker crashes and before DeerFlow commits the result. Batch items therefore must be read-only or use their stable item key as an idempotency key at the external system.
 

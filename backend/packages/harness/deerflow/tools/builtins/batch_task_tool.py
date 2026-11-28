@@ -5,16 +5,20 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import asdict, replace
+from functools import partial
 from typing import Annotated, Any, cast
 
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 from langchain.tools import InjectedToolCallId, tool
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool
+from langgraph.runtime import ExecutionInfo
 from langgraph.types import Command
 from pydantic import BaseModel, Field, StrictInt, create_model
 
@@ -27,17 +31,28 @@ from deerflow.mcp_scope import (
     THREAD_INCARNATION_METADATA_GUARD_KEY,
     runtime_thread_incarnation,
 )
+from deerflow.runtime.checkpoint_history import task_checkpoint_ancestors
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.subagents.batch_runtime import (
+    BATCH_PREVIOUS_RECEIPT_IDS_KEY,
+    BATCH_RECEIPT_ID_KEY,
+    BatchDispatchReceipts,
     BatchItemInput,
     BatchSubmitRequest,
     SubagentBatchSubmitter,
+    compacted_batch_receipt_ids,
     get_subagent_batch_submitter,
+    iter_batch_dispatch_receipts,
+    verified_previous_batch_receipt_ids,
 )
 from deerflow.subagents.registry import get_available_subagent_names, get_subagent_config
 from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 from deerflow.utils.assembly_io import run_assembly
+from deerflow.utils.messages import find_tool_call_message
+
+logger = logging.getLogger(__name__)
+_RECEIPT_HISTORY_TIMEOUT_SECONDS = 30
 
 
 class BatchTaskItem(BaseModel):
@@ -129,16 +144,22 @@ def restrict_batch_continuation(tools: list[BaseTool], *, available: bool) -> li
     return [_BatchTaskWithoutAdvertisedContinuation(**dict(tool)) if tool.name == batch_task.name and tool.args_schema is batch_task.args_schema else tool for tool in tools]
 
 
-def _result(tool_call_id: str, *, content: str, batch: dict[str, Any] | None = None, error: bool = False) -> Command:
+def _result(tool_call_id: str, *, content: str, batch: dict[str, Any] | None = None, error: bool = False, verified_previous: set[str] | None = None) -> Command:
     metadata: dict[str, Any] = {"subagent_batch_error": error}
     if batch is not None:
         metadata.update(
             {
-                "subagent_batch_id": batch["id"],
+                BATCH_RECEIPT_ID_KEY: batch["id"],
                 "subagent_batch_status": batch["status"],
                 "subagent_batch_total_items": batch["total_items"],
             }
         )
+        if batch.get("continuation_status") is not None:
+            metadata["subagent_batch_continuation_status"] = batch["continuation_status"]
+        if verified_previous and not error:
+            # Carry the verified IDs with this receipt so parallel tool calls
+            # and SDK graphs with custom state schemas retain their own evidence.
+            metadata[BATCH_PREVIOUS_RECEIPT_IDS_KEY] = sorted(verified_previous)
     return Command(
         update={
             "messages": [
@@ -163,6 +184,47 @@ def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -
     return [name for name in child if name in allowed]
 
 
+async def _confirm_previous_receipts(
+    config: RunnableConfig,
+    execution: ExecutionInfo,
+    thread_id: str,
+    dispatch_id: str | None,
+    tool_call_id: str,
+    verified_previous: set[str],
+    candidates: frozenset[str],
+) -> bool:
+    previous = set()
+    try:
+        async with asyncio.timeout(_RECEIPT_HISTORY_TIMEOUT_SECONDS):
+            async for snapshot in task_checkpoint_ancestors(config, execution, thread_id=thread_id):
+                for issuer, receipt, batch_id in iter_batch_dispatch_receipts(snapshot.values.get("messages", ())):
+                    if batch_id not in candidates or receipt.tool_call_id != tool_call_id:
+                        continue
+                    if issuer.id == dispatch_id:
+                        return False
+                    if isinstance(issuer.id, str) and issuer.id.strip():
+                        previous.add(batch_id)
+                if previous == candidates:
+                    verified_previous.update(previous)
+                    return True
+    except Exception:
+        logger.warning("Could not verify legacy batch receipts in checkpoint history", exc_info=True)
+    return False
+
+
+def _dispatch_receipts(runtime: Runtime, thread_id: str, dispatch: AIMessage, tool_call_id: str, verified_previous: set[str]) -> BatchDispatchReceipts:
+    state = runtime.state
+    messages = state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
+    previous, current = compacted_batch_receipt_ids(state), set()
+    for issuer, receipt, batch_id in iter_batch_dispatch_receipts(messages or ()):
+        if receipt.tool_call_id == tool_call_id:
+            (current if issuer is dispatch else previous).add(batch_id)
+            previous.update(verified_previous_batch_receipt_ids(receipt))
+    execution = getattr(runtime, "execution_info", None)
+    confirm_previous = partial(_confirm_previous_receipts, runtime.config, execution, thread_id, dispatch.id, tool_call_id, verified_previous) if execution is not None else None
+    return BatchDispatchReceipts(current=frozenset(current), previous=frozenset(previous), confirm_previous=confirm_previous)
+
+
 @tool("batch_task", parse_docstring=True)
 async def batch_task(
     runtime: Runtime,
@@ -182,6 +244,8 @@ async def batch_task(
     This tool returns a batch
     identifier immediately; it never inserts thousands of results into the lead
     agent context. Use ``batch_status`` for a compact progress snapshot.
+    A replay can report a previously cancelled batch. Submit cancelled work as
+    a fresh call only when the user explicitly requests a new submission.
 
     Each item may carry ``acceptance_criteria`` using the same deterministic
     checks as ``task``: ``file:<path> exists|non-empty``, ``file_written:<path>``,
@@ -222,6 +286,12 @@ async def batch_task(
     context = runtime.context if runtime is not None and isinstance(runtime.context, dict) else {}
     if context.get(THREAD_INCARNATION_METADATA_GUARD_KEY) is True:
         runtime_thread_incarnation(runtime)
+    state = getattr(runtime, "state", None)
+    dispatch = find_tool_call_message(state, tool_call_id)
+    if not tool_call_id or dispatch is None or not isinstance(dispatch.id, str) or not dispatch.id.strip():
+        return _result(tool_call_id, content="Batch submission requires an originating model message with an ID.", error=True)
+    if sum(isinstance(call, dict) and call.get("id") == tool_call_id for call in dispatch.tool_calls) != 1:
+        return _result(tool_call_id, content="Batch submission requires a unique tool call ID within the originating model message.", error=True)
     metadata = runtime.config.get("metadata", {}) if runtime is not None else {}
     app_config = _batch_app_config(runtime)
     allowed_subagents = metadata.get("allowed_subagents")
@@ -251,7 +321,6 @@ async def batch_task(
     user_id = resolve_runtime_user_id(runtime)
     continuation_context = None
     if continuation:
-        state = getattr(runtime, "state", None)
         goal = state.get("goal") if isinstance(state, dict) else None
         continuation_context = {
             "goal": {key: goal.get(key) for key in ("created_at", "status", "objective")} if isinstance(goal, dict) else None,
@@ -261,7 +330,8 @@ async def batch_task(
         if metadata.get("model_name"):
             continuation_context["context"]["model_name"] = metadata["model_name"]
     run_id = context.get("run_id")
-    submission_key = f"{run_id or thread_id}:{tool_call_id}"
+    identity = json.dumps((str(thread_id), context.get(THREAD_INCARNATION_CONTEXT_KEY), dispatch.id, tool_call_id), separators=(",", ":"))
+    submission_key = "batch-v1:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
     execution_spec = {
         "subagent_config": {**asdict(config), "prompt_overlay": config.prompt_overlay.model_dump()},
         "parent_model": metadata.get("model_name"),
@@ -283,6 +353,7 @@ async def batch_task(
     agent_authority = export_agent_authority(runtime_agent_authority(runtime))
     if agent_authority is not None:
         execution_spec["mcp_agent_auth"] = agent_authority
+    verified_previous: set[str] = set()
     try:
         batch = await submitter.submit(
             BatchSubmitRequest(
@@ -291,7 +362,7 @@ async def batch_task(
                 run_id=str(run_id) if run_id else None,
                 tool_call_id=tool_call_id,
                 submission_key=submission_key,
-                title=title.strip()[:256] or "Subagent batch",
+                title=title,
                 subagent_type=subagent_type,
                 items=[cast(BatchItemInput, item.model_dump(exclude_none=True)) for item in items],
                 max_live_items=max_live_items,
@@ -300,19 +371,23 @@ async def batch_task(
                 continuation=continuation,
                 continuation_authority=context.get(AGENT_RUNS_CONTEXT_KEY) if continuation else None,
                 continuation_context=continuation_context if continuation else None,
+                dispatch_receipts=_dispatch_receipts(runtime, str(thread_id), dispatch, tool_call_id, verified_previous),
             )
         )
     except Exception as exc:
         return _result(tool_call_id, content=f"Batch submission failed: {exc}", error=True)
-    return _result(
-        tool_call_id,
-        batch=batch,
-        content=(
-            f"Batch {batch['id']} accepted with {batch['total_items']} items. It is running independently and survives Gateway restarts. "
-            + ("The requested follow-up is scheduled after completion; this turn can finish without polling. " if continuation else "Use batch_status for progress. ")
-            + "Do not launch ordinary task calls for these items."
-        ),
-    )
+    status = batch["status"]
+    followup_status = batch.get("continuation_status")
+    content = f"Batch {batch['id']} has {batch['total_items']} items. Current status: {status}. "
+    if followup_status is not None:
+        content += f"Automatic follow-up status: {followup_status}. "
+    if followup_status in ("pending", "dispatching"):
+        content += "This turn can finish without polling. "
+    if status == "cancelled":
+        content += "Submit a fresh batch_task call only if the user explicitly requests a new submission."
+    else:
+        content += "Use batch_status to inspect progress. Do not launch ordinary task calls for these items."
+    return _result(tool_call_id, batch=batch, content=content, error=status == "cancelled", verified_previous=verified_previous)
 
 
 _BATCH_MODEL_SCHEMA = cast(type[BaseModel], batch_task.tool_call_schema)

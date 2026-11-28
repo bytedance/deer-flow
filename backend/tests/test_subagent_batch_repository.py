@@ -1,15 +1,23 @@
+import asyncio
+import os
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import event
+from sqlalchemy import event, func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.schema import DropSchema
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.persistence.engine import close_engine, get_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.subagent_batches import SubagentBatchRepository
-from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow
+from deerflow.persistence.subagent_batches.model import SubagentBatchDependencyRow, SubagentBatchItemRow, SubagentBatchRow
+from deerflow.persistence.subagent_batches.sql import BatchSubmissionConflictError
+from deerflow.subagents.batch_runtime import BatchDispatchReceipts, BatchSubmitRequest
 
 _MISSING = object()
 
@@ -25,6 +33,23 @@ async def _repo(tmp_path) -> SubagentBatchRepository:
     sf = get_session_factory()
     assert sf is not None
     return SubagentBatchRepository(sf)
+
+
+@pytest_asyncio.fixture(params=["sqlite", "postgres"])
+async def submission_repo(tmp_path, request):
+    if request.param == "sqlite":
+        yield await _repo(tmp_path)
+        return
+    uri = os.environ.get("TEST_POSTGRES_URI")
+    if not uri:
+        pytest.skip("requires TEST_POSTGRES_URI")
+    schema = "batch_submission_" + uuid4().hex
+    await init_engine_from_config(DatabaseConfig(backend="postgres", postgres_url=uri, postgres_schema=schema))
+    try:
+        yield SubagentBatchRepository(get_session_factory())
+    finally:
+        async with get_engine().begin() as connection:
+            await connection.execute(DropSchema(schema, cascade=True))
 
 
 async def _create(
@@ -658,29 +683,148 @@ async def test_item_list_selects_only_the_heavy_columns_it_returns(tmp_path) -> 
 
 
 @pytest.mark.asyncio
-async def test_duplicate_submission_key_returns_original_batch(tmp_path) -> None:
-    repo = await _repo(tmp_path)
-    original = await _create(repo, count=1)
-    duplicate = await repo.create_batch(
-        batch_id="batch-2",
+@pytest.mark.parametrize("same_request", [True, False], ids=["replay", "conflict"])
+@pytest.mark.parametrize("use_digest", [True, False], ids=["digest", "digestless"])
+async def test_concurrent_submission_key_has_one_winner(submission_repo, same_request, use_digest) -> None:
+    repo = submission_repo
+    barrier = asyncio.Barrier(2)
+
+    async def submit(batch_id, items, digest):
+        await barrier.wait()
+        return await _submit(repo, batch_id, items, submission_digest=digest if use_digest else None)
+
+    first_items = [{"key": "one", "prompt": "First request"}]
+    second_items = first_items if same_request else [{"key": "two", "prompt": "Second request"}]
+    outcomes = await asyncio.gather(
+        submit("batch-1", first_items, "digest-one"),
+        submit("batch-2", second_items, "digest-one" if same_request else "digest-two"),
+        return_exceptions=True,
+    )
+    batches = await repo.list_by_thread("thread-1", user_id="user-1")
+    assert len(batches) == 1
+    batch_id = batches[0]["id"]
+    if same_request:
+        assert [outcome["id"] for outcome in outcomes] == [batch_id, batch_id]
+    else:
+        winner, loser = outcomes if batch_id == "batch-1" else outcomes[::-1]
+        assert winner["id"] == batch_id
+        assert isinstance(loser, BatchSubmissionConflictError)
+        assert "Batch submission conflict" in str(loser)
+
+    expected = first_items if batch_id == "batch-1" else second_items
+    items = await repo.list_items(batch_id, user_id="user-1", include_prompt=True)
+    assert [(item["batch_id"], item["item_key"], item["prompt"]) for item in items] == [(batch_id, expected[0]["key"], expected[0]["prompt"])]
+
+
+async def _submit(repo, batch_id, items, **kwargs):
+    return await repo.create_batch(
+        batch_id=batch_id,
         user_id="user-1",
         thread_id="thread-1",
         run_id="run-1",
         tool_call_id="call-1",
-        submission_key="run-1:call-1",
-        title="Duplicate retry",
+        submission_key="batch-v1:submission",
+        title="Records",
         subagent_type="general-purpose",
-        items=[{"key": "different", "prompt": "Must not be inserted"}],
+        items=items,
         max_live_items=1,
         max_running_items=1,
-        max_attempts=2,
-        execution_spec={"subagent_config": {"name": "general-purpose", "description": "test"}},
+        max_attempts=1,
+        execution_spec={},
+        **kwargs,
     )
 
-    assert duplicate["id"] == original["id"] == "batch-1"
+
+@pytest.mark.asyncio
+async def test_legacy_batch_remains_readable_by_original_id(submission_repo) -> None:
+    repo = submission_repo
+    original = await _create(repo, count=1)
+    assert await repo.get_batch("batch-1", user_id="user-1") == original
     items = await repo.list_items("batch-1", user_id="user-1", include_prompt=True)
-    assert items is not None
-    assert [item["item_key"] for item in items] == ["item-0"]
+    assert [(item["item_key"], item["prompt"]) for item in items] == [("item-0", "Process 0")]
+
+
+@pytest.mark.asyncio
+async def test_legacy_receipt_checks_request_and_thread_scope(submission_repo) -> None:
+    repo = submission_repo
+    items = [{"key": "one", "prompt": "Read"}, {"key": "two", "prompt": "Summarize", "depends_on": ["one"]}]
+    spec = {THREAD_INCARNATION_CONTEXT_KEY: "incarnation-1"}
+    title_prefix = "x" * 255
+    legacy = await repo.create_batch(
+        batch_id="legacy-batch",
+        user_id="user-1",
+        thread_id="thread-1",
+        run_id="old-run",
+        tool_call_id="call-1",
+        submission_key="old-run:call-1",
+        title=f"{title_prefix} ",
+        subagent_type="general-purpose",
+        items=items,
+        max_live_items=2,
+        max_running_items=1,
+        max_attempts=1,
+        execution_spec=spec,
+    )
+    request = BatchSubmitRequest(
+        user_id="user-1",
+        thread_id="thread-1",
+        run_id="new-run",
+        tool_call_id="call-1",
+        submission_key="batch-v1:dispatch",
+        title=f"{title_prefix} more text",
+        subagent_type="general-purpose",
+        items=items,
+        max_live_items=None,
+        max_running_items=None,
+        execution_spec=spec,
+        dispatch_receipts=BatchDispatchReceipts(current=frozenset({legacy["id"]}), previous=frozenset()),
+    )
+
+    async def find(submission):
+        return await repo.find_submission(submission, title=submission.title, submission_digest="digest")
+
+    assert await find(request) == legacy
+    assert await find(replace(request, title=title_prefix)) == legacy
+    assert await find(replace(request, user_id="another-owner")) is None
+    assert await find(replace(request, thread_id="another-thread")) is None
+    assert await find(replace(request, execution_spec={THREAD_INCARNATION_CONTEXT_KEY: "incarnation-2"})) is None
+    earlier_receipt = frozenset({legacy["id"]})
+    assert await find(replace(request, dispatch_receipts=BatchDispatchReceipts(current=frozenset(), previous=earlier_receipt))) is None
+    with pytest.raises(BatchSubmissionConflictError):
+        await find(replace(request, dispatch_receipts=BatchDispatchReceipts(current=earlier_receipt, previous=earlier_receipt)))
+    with pytest.raises(BatchSubmissionConflictError):
+        await find(replace(request, execution_spec={}))
+    with pytest.raises(BatchSubmissionConflictError):
+        await find(replace(request, title="Different title"))
+    with pytest.raises(BatchSubmissionConflictError):
+        await find(replace(request, items=[items[0], {**items[1], "depends_on": []}]))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_table", ["subagent_batch_items", "subagent_batch_dependencies"], ids=["item", "dependency"])
+async def test_child_insert_failure_rolls_back_the_batch(submission_repo, failed_table) -> None:
+    repo = submission_repo
+    items = [{"key": "one", "prompt": "Read"}, {"key": "two", "prompt": "Summarize", "depends_on": ["one"]}]
+    failure = IntegrityError(None, None, RuntimeError("Injected child insert failure"))
+
+    def reject_insert(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if statement.startswith(f"INSERT INTO {failed_table} "):
+            raise failure
+
+    sync_engine = get_engine().sync_engine
+    event.listen(sync_engine, "before_cursor_execute", reject_insert)
+    try:
+        with pytest.raises(IntegrityError) as exc_info:
+            await _submit(repo, "batch-1", items, submission_digest="digest-one")
+        assert exc_info.value is failure
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", reject_insert)
+
+    async with get_session_factory()() as session:
+        for row in (SubagentBatchRow, SubagentBatchItemRow, SubagentBatchDependencyRow):
+            assert await session.scalar(select(func.count()).select_from(row)) == 0
+    created = await _submit(repo, "batch-1", items, submission_digest="digest-one")
+    assert created["counts"]["pending"] == 2
 
 
 @pytest.mark.asyncio

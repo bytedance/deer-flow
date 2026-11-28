@@ -30,6 +30,7 @@ from deerflow.agents.middlewares.message_utils import is_genuine_user_message
 from deerflow.agents.middlewares.model_length_termination_detectors import OllamaLengthDetector, default_detectors
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
 from deerflow.agents.middlewares.todo_middleware import TODO_REMINDER_MESSAGE_NAME
+from deerflow.agents.thread_state import BatchReceiptState
 from deerflow.config.app_config import get_app_config
 from deerflow.config.summarization_config import DEFAULT_KEEP
 from deerflow.config.task_continuity_config import TaskContinuityConfig
@@ -38,6 +39,7 @@ from deerflow.models import create_chat_model
 from deerflow.models.reasoning import resolve_reasoning_contract
 from deerflow.models.vllm_provider import VllmChatModel, count_tokens_with_replayed_reasoning
 from deerflow.runtime.events.catalog import MIDDLEWARE_SUMMARIZE_TAG
+from deerflow.subagents.batch_runtime import compacted_batch_receipt_update
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
 
@@ -186,6 +188,8 @@ def _resolve_agent_name(runtime: Runtime) -> str | None:
 
 class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     """Summarization middleware with pre-compression hook dispatch."""
+
+    state_schema = BatchReceiptState
 
     def __init__(
         self,
@@ -1089,6 +1093,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 *result.preserved_messages,
             ],
             "summary_text": result.summary_text,
+            **compacted_batch_receipt_update(state, result.messages_to_summarize),
             **({"task_history": result.task_history} if result.task_history is not None else {}),
         }
 
@@ -1102,6 +1107,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 *result.preserved_messages,
             ],
             "summary_text": result.summary_text,
+            **compacted_batch_receipt_update(state, result.messages_to_summarize),
             **({"task_history": result.task_history} if result.task_history is not None else {}),
         }
 

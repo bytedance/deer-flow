@@ -122,6 +122,102 @@ async def test_followup_runs_once_and_reconciles_an_unknown_admission(batch_host
 
 
 @pytest.mark.asyncio
+async def test_cross_run_replay_reports_cancelled_batch_and_allows_a_fresh_submission(runtime, repo, monkeypatch, tmp_path):
+    from langchain.agents import create_agent
+    from langchain.agents.middleware import wrap_tool_call
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    from langchain_core.messages import ToolMessage
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    from app.gateway import services
+    from app.subagent_batches.continuation import BatchContinuations
+    from deerflow.config.subagent_batches_config import SubagentBatchesConfig
+    from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+    from deerflow.persistence.engine import get_session_factory
+    from deerflow.persistence.run.sql import RunRepository
+    from deerflow.runtime import RunManager
+    from deerflow.subagents.batch_service import SubagentBatchService
+    from deerflow.tools.builtins.batch_task_tool import bind_batch_tools
+
+    class BatchModel(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    class ObservedContinuations(BatchContinuations):
+        async def source_finished(self, record):
+            await super().source_finished(record)
+            if record.status == "error":
+                cleaned_up.set()
+
+    def dispatch(message_id):
+        args = {"title": "Read records", "items": [{"key": "a", "prompt": "Read A"}], "subagent_type": "general-purpose", "continuation": "Present results"}
+        return AIMessage(content="", id=message_id, tool_calls=[{"name": "batch_task", "id": "reused-call", "args": args}])
+
+    runs, state, request, _, _ = runtime
+    state.run_store = RunRepository(get_session_factory())
+    state.run_manager = RunManager(store=state.run_store)
+    state.subagent_batch_repo = repo
+    cleaned_up = asyncio.Event()
+    controller = ObservedContinuations(request.app)
+    state.batch_continuations = controller
+    service = SubagentBatchService(
+        repository=repo, config=SubagentBatchesConfig(), runtime_config=SubagentRuntimeConfig(), prepare_continuation=controller.prepare, dispatch_continuation=controller.dispatch, cancel_continuation=controller.cancel
+    )
+    state.subagent_batch_service = service
+    receipts = []
+
+    @wrap_tool_call
+    async def lose_first_receipt(request, handler):
+        command = await handler(request)
+        [receipt] = command.update["messages"]
+        assert isinstance(receipt, ToolMessage)
+        receipts.append(receipt)
+        if len(receipts) == 1:
+            raise RuntimeError("Lost receipt before checkpoint")
+        return command
+
+    factory = services.resolve_agent_factory("lead_agent")
+    model = BatchModel(messages=iter([dispatch("original-dispatch"), AIMessage(content="Recovery complete"), dispatch("fresh-dispatch"), AIMessage(content="Submitted again")]))
+
+    def build(*, config):
+        return replace(factory(config=config), graph=create_agent(model=model, tools=bind_batch_tools(service), middleware=[lose_first_receipt]))
+
+    monkeypatch.setattr(services, "resolve_agent_factory", lambda _: build)
+    thread = await runs.create_thread(thread_id="batch-replay-after-failure")
+    owner = str(request.state.user.id)
+    checkpoint_path = str(tmp_path / "batch-replay.sqlite")
+    async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
+        state.checkpointer = saver
+        original = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "Read and summarize the records"}]})
+        assert (await runs.wait(thread_id=thread, run_id=original.run_id, timeout=10)).status == "error"
+        await asyncio.wait_for(cleaned_up.wait(), 10)
+    [cancelled] = await repo.list_by_thread(thread, user_id=owner)
+    assert cancelled["status"] == cancelled["continuation_status"] == "cancelled"
+    assert receipts[0].additional_kwargs["subagent_batch_id"] == cancelled["id"]
+
+    async with AsyncSqliteSaver.from_conn_string(checkpoint_path) as saver:
+        state.checkpointer = saver
+        replay = await runs.start(thread_id=thread, input=None)
+        assert replay.run_id != original.run_id
+        assert (await runs.wait(thread_id=thread, run_id=replay.run_id, timeout=10)).status == "success"
+        assert len(receipts) == 2
+        assert receipts[1].status == "error"
+        assert receipts[1].additional_kwargs["subagent_batch_id"] == cancelled["id"]
+        assert receipts[1].additional_kwargs["subagent_batch_status"] == "cancelled"
+        assert receipts[1].additional_kwargs["subagent_batch_continuation_status"] == "cancelled"
+        assert "explicitly requests" in receipts[1].content
+        assert await repo.list_by_thread(thread, user_id=owner) == [cancelled]
+
+        fresh = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "Submit the cancelled work as a new batch"}]})
+        assert (await runs.wait(thread_id=thread, run_id=fresh.run_id, timeout=10)).status == "success"
+        assert len(receipts) == 3
+        assert receipts[2].status == "success"
+        assert receipts[2].additional_kwargs["subagent_batch_id"] != cancelled["id"]
+        assert receipts[2].additional_kwargs["subagent_batch_continuation_status"] == "pending"
+        assert await repo.get_batch(cancelled["id"], user_id=owner) == cancelled
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("batch_host", [{"model_name": "parent", "model_selection_requested": "parent", "subagent_model_name": "child"}], indirect=True)
 async def test_followup_preserves_explicit_model_controls(batch_host):
     context = batch_host[1]["continuation"]["context"]
@@ -217,11 +313,12 @@ async def test_resumed_native_batch_preserves_admitted_scope_in_followup(batch_h
             interrupt("Continue?")
             record = await state.run_manager.get(runtime.context["run_id"])
             assert record.kwargs["input"] is None
+            dispatch = AIMessage(content="", id="scoped-batch-dispatch", tool_calls=[{"name": "batch_task", "id": "scoped-call", "args": {}}])
             command = await tool_module.batch_task.coroutine(
                 title="Scoped batch",
                 items=[tool_module.BatchTaskItem(key="a", prompt="Read authorized records")],
                 subagent_type="general-purpose",
-                runtime=SimpleNamespace(context=runtime.context, state=values, config=config),
+                runtime=SimpleNamespace(context=runtime.context, state={**values, "messages": [*values["messages"], dispatch]}, config=config),
                 tool_call_id="scoped-call",
                 continuation="Present the result",
             )

@@ -7,8 +7,9 @@ machinery). Anchored from ``deerflow.agents.thread_state`` so every process
 that builds a DeerFlow graph (gateway, workers, in-process LangGraph
 runtime, tests) runs with the fixes in place.
 
-One patch remains: ``BinaryOperatorAggregate`` unwrapping an ``Overwrite``
-first write into an empty (MISSING) channel (#4380). The former
+The patches unwrap the first ``Overwrite`` write into an empty
+``BinaryOperatorAggregate`` channel (#4380) and carry the loaded checkpoint
+address into tasks that run with exit durability. The former
 ``InMemorySaver`` delta-history patch was removed: upstream fixed the dropped
 first post-migration write in ``langgraph-checkpoint`` 4.2.0 (upstream #8526)
 while keeping its own override, so a behavioural probe cannot see the fix.
@@ -25,10 +26,15 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass
+from functools import wraps
 from typing import Any
 
+from langgraph._internal._config import patch_configurable
+from langgraph._internal._constants import CONF, CONFIG_KEY_CHECKPOINT_ID, CONFIG_KEY_CHECKPOINT_NS, CONFIG_KEY_THREAD_ID
 from langgraph.channels.binop import BinaryOperatorAggregate
 from langgraph.errors import ErrorCode, InvalidUpdateError, create_error_message
+from langgraph.pregel._loop import PregelLoop
 from langgraph.types import Overwrite
 
 logger = logging.getLogger(__name__)
@@ -36,6 +42,38 @@ logger = logging.getLogger(__name__)
 
 _BINOP_PATCH_FLAG = "_deerflow_overwrite_first_write_patched"
 _unpatched_binop_update = BinaryOperatorAggregate.update
+RUN_START_CHECKPOINT_KEY = "__deerflow_run_start_checkpoint"
+
+
+@dataclass(frozen=True)
+class RunStartCheckpoint:
+    thread_id: str
+    namespace: str
+    checkpoint_id: str
+
+
+def ensure_run_start_checkpoint_patch() -> None:
+    """Expose the persisted base selected by the sync or async Pregel loop."""
+    first = PregelLoop._first
+    if getattr(first, "_deerflow_run_start_checkpoint_patched", False):
+        return
+
+    @wraps(first)
+    def with_run_start_checkpoint(self: PregelLoop, *, input_keys: str | Sequence[str], updated_channels: set[str] | None) -> set[str] | None:
+        if self.durability == "exit":
+            # Both loops call _first immediately after loading the selected
+            # checkpoint and before creating new, in-memory checkpoints.
+            loaded = self.checkpoint_config[CONF]
+            checkpoint_id = loaded.get(CONFIG_KEY_CHECKPOINT_ID)
+            thread_id = loaded.get(CONFIG_KEY_THREAD_ID)
+            anchor = None
+            if self.checkpointer is not None and thread_id and checkpoint_id == self.checkpoint["id"]:
+                anchor = RunStartCheckpoint(thread_id, loaded.get(CONFIG_KEY_CHECKPOINT_NS, ""), checkpoint_id)
+            self.config = patch_configurable(self.config, {RUN_START_CHECKPOINT_KEY: anchor})
+        return first(self, input_keys=input_keys, updated_channels=updated_channels)
+
+    setattr(with_run_start_checkpoint, "_deerflow_run_start_checkpoint_patched", True)
+    PregelLoop._first = with_run_start_checkpoint  # type: ignore[method-assign]
 
 
 def _as_overwrite(value: Any) -> tuple[bool, Any]:
@@ -123,3 +161,4 @@ def ensure_binop_overwrite_first_write_patch() -> None:
 
 
 ensure_binop_overwrite_first_write_patch()
+ensure_run_start_checkpoint_patch()

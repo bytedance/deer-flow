@@ -23,7 +23,7 @@ from deerflow.agents.features import RuntimeFeatures
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
-from deerflow.agents.thread_state import adapt_state_schema_for_mode, get_thread_state_schema, normalize_middleware_state_schemas
+from deerflow.agents.thread_state import adapt_state_schema_for_mode, get_thread_state_schema, normalize_middleware_state_schemas, with_batch_receipt_state
 from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.tools.builtins import ask_clarification_tool
 
@@ -112,7 +112,8 @@ def create_deerflow_agent(
     plan_mode:
         Enable TodoMiddleware for task tracking.
     state_schema:
-        LangGraph state type.  Defaults to ``ThreadState``.
+        LangGraph state type. Defaults to ``ThreadState``. Graphs that include
+        ``batch_task`` retain the private batch receipt channel in custom state.
     checkpoint_channel_mode:
         Checkpoint representation for accumulating channels.  Defaults to the
         full-state compatibility schema.  ``"delta"`` requires the guarded
@@ -185,6 +186,11 @@ def create_deerflow_agent(
             if t.name not in existing_names:
                 effective_tools.append(t)
                 existing_names.add(t.name)
+
+    if state_schema is not None:
+        middleware_tools = [tool for item in effective_middleware for tool in getattr(item, "tools", ())]
+        if any(getattr(tool, "name", None) == "batch_task" for tool in [*effective_tools, *middleware_tools]):
+            effective_state = with_batch_receipt_state(effective_state)
 
     effective_middleware = normalize_middleware_state_schemas(
         effective_middleware,

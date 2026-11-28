@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import inspect
+import json
 import logging
 import socket
 import uuid
@@ -18,7 +21,7 @@ from deerflow.extensions import LoadedExtensions, get_loaded_extensions
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.subagents.batch_acceptance import check_batch_acceptance
 from deerflow.subagents.batch_lease import BatchItemLease
-from deerflow.subagents.batch_runtime import BatchSubmitRequest
+from deerflow.subagents.batch_runtime import BATCH_SUBMISSION_DIGEST_KEY, BatchSubmitRequest
 from deerflow.subagents.capacity import SubagentExecutionCapacity
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
 from deerflow.subagents.executor import (
@@ -44,6 +47,30 @@ _BROWSER_EVIDENCE_FIELDS = (
     "document_name",
     "text",
 )
+
+
+def _submission_digest(request: BatchSubmitRequest) -> str:
+    """Hash the requested work independently of the run and execution snapshot."""
+    payload = {
+        "title": request.title,
+        "subagent_type": request.subagent_type,
+        "items": [
+            {
+                "key": item["key"],
+                "prompt": item["prompt"],
+                "acceptance_criteria": item.get("acceptance_criteria") or [],
+                "depends_on": item.get("depends_on") or [],
+            }
+            for item in request.items
+        ],
+        "max_live_items": request.max_live_items,
+        "max_running_items": request.max_running_items,
+        "continuation": request.continuation,
+    }
+    digest = hashlib.sha256()
+    for chunk in json.JSONEncoder(separators=(",", ":")).iterencode(payload):
+        digest.update(chunk.encode("utf-8"))
+    return digest.hexdigest()
 
 
 def _browser_evidence_snapshot(artifact: object) -> dict[str, Any] | None:
@@ -314,6 +341,35 @@ class SubagentBatchService:
             )
 
     async def submit(self, request: BatchSubmitRequest) -> dict[str, Any]:
+        continuation = None
+        if request.continuation:
+            if self._prepare_continuation is None or self._dispatch_continuation is None:
+                raise ValueError("Automatic follow-up requires an authorized Gateway runtime")
+            continuation = await self._prepare_continuation(request)
+
+        create_batch = self._repository.create_batch
+        # SDK adapters shipped before digests may have the original signature
+        # or forward **kwargs to it. Pass the new keyword only on explicit opt-in.
+        try:
+            digest_parameter = inspect.signature(create_batch).parameters.get("submission_digest")
+        except (TypeError, ValueError):
+            digest_parameter = None
+        find_submission = getattr(self._repository, "find_submission", None)
+        digest = await run_assembly(_submission_digest, request)
+        if callable(find_submission):
+            existing = await find_submission(request, title=request.title, submission_digest=digest)
+            if existing is not None:
+                return existing
+
+        execution_spec = request.execution_spec
+        submission_fields = {}
+        if digest_parameter is not None and digest_parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+            submission_fields["submission_digest"] = digest
+        else:
+            # Old adapters can forward the fingerprint through their existing
+            # JSON execution snapshot, including when they expose only create_batch.
+            execution_spec = {**execution_spec, BATCH_SUBMISSION_DIGEST_KEY: digest}
+
         total = len(request.items)
         if total < 1 or total > self._config.max_items_per_batch:
             raise ValueError(f"Batch item count must be between 1 and {self._config.max_items_per_batch}")
@@ -328,12 +384,7 @@ class SubagentBatchService:
             raise ValueError(f"max_running_items must be between 1 and {self._config.max_running_items_per_batch}")
         if max_running > max_live:
             raise ValueError("max_running_items must not exceed max_live_items")
-        continuation = None
-        if request.continuation:
-            if self._prepare_continuation is None or self._dispatch_continuation is None:
-                raise ValueError("Automatic follow-up requires an authorized Gateway runtime")
-            continuation = await self._prepare_continuation(request)
-        return await self._repository.create_batch(
+        return await create_batch(
             batch_id=f"subagent-batch-{uuid.uuid4().hex}",
             user_id=request.user_id,
             thread_id=request.thread_id,
@@ -346,7 +397,8 @@ class SubagentBatchService:
             max_live_items=max_live,
             max_running_items=max_running,
             max_attempts=self._config.max_attempts,
-            execution_spec=request.execution_spec,
+            execution_spec=execution_spec,
+            **submission_fields,
             **({"continuation": continuation} if continuation is not None else {}),
         )
 

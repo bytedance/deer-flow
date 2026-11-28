@@ -5,7 +5,7 @@ from typing import Annotated, NotRequired, TypedDict
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.message import add_messages
 from langgraph.types import Overwrite
@@ -16,6 +16,7 @@ from deerflow.runtime import context_compaction
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_compaction import ContextCompactionFailed, ContextCompactionPendingWork, compact_thread_context
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE
+from deerflow.subagents.batch_runtime import BATCH_RECEIPT_ID_KEY, COMPACTED_BATCH_RECEIPTS_CHANNEL
 
 
 class _FakeAccessor:
@@ -82,13 +83,15 @@ class _FakeCompactionMiddleware:
 async def test_compact_thread_context_reads_materialized_state_and_overwrites_messages(monkeypatch):
     messages = [
         HumanMessage(content="old question"),
-        AIMessage(content="old answer"),
+        AIMessage(content="", tool_calls=[{"name": "batch_task", "args": {}, "id": "call_0"}]),
+        ToolMessage(content="submitted", name="batch_task", tool_call_id="call_0", additional_kwargs={BATCH_RECEIPT_ID_KEY: "batch-2"}),
         HumanMessage(content="latest question"),
     ]
     accessor = _FakeAccessor(
         {
             "messages": messages,
             "summary_text": "OLD SUMMARY",
+            COMPACTED_BATCH_RECEIPTS_CHANNEL: ["batch-1"],
             "sandbox": object(),
         }
     )
@@ -111,7 +114,7 @@ async def test_compact_thread_context_reads_materialized_state_and_overwrites_me
     )
 
     assert result.compacted is True
-    assert result.removed_message_count == 2
+    assert result.removed_message_count == 3
     assert result.preserved_message_count == 1
     assert result.summary_updated is True
     assert result.checkpoint_id == "ckpt-compacted"
@@ -123,6 +126,7 @@ async def test_compact_thread_context_reads_materialized_state_and_overwrites_me
     assert isinstance(written_values["messages"], Overwrite)
     assert written_values["messages"].value == [messages[-1]]
     assert written_values["summary_text"] == "COMPRESSED SUMMARY"
+    assert written_values[COMPACTED_BATCH_RECEIPTS_CHANNEL] == ["batch-1", "batch-2"]
     assert as_node == "manual_compaction"
     assert middleware.prepare_calls == 1
     assert middleware.runtime_contexts == [

@@ -343,6 +343,36 @@ cancellation independently. A failed cancellation logs the batch and run IDs.
 
 Ordinary `task` delegation and explicit durable `batch_task` execution share the startup-scoped `subagent_runtime` process capacity. Batch mode keeps large independent item sets in SQL with separate total, live, and running limits, restart recovery, bounded results, and a thread-scoped Web UI panel. The panel pages through bounded previews on demand and opens a selected item’s stored report and captured evidence for review. Citations open the matching saved excerpt without contacting the provider, and an open result refreshes until the item finishes and when the item list observes a later retry. Closed result dialogs do not fetch full details. Bulk stored results remain available through the owner-scoped JSONL export, while internal execution and authorization context never enters owner-facing responses. If the batch worker is later stopped or disabled, threads with persisted batches retain read-only item inspection and JSONL export; execution controls remain disabled until the worker is running again. See `config.example.yaml` and [the implementation contract](../../docs/plans/2026-08-24-subagent-batch-capacity-implementation.md) for limits and recovery semantics.
 
+Each model response can submit its own batch even when the provider reuses a
+tool-call ID. If a checkpoint replays the same submission with the same
+request, `batch_task` returns the original batch ID, including after a run
+change or a reduction in the limits for new batches. Replaying that submission
+with different work returns a submission conflict. The receipt reports the
+stored batch and automatic follow-up statuses. If a failed or cancelled source
+run cancelled the batch, replay leaves it cancelled. The user can explicitly
+request a new batch in a later turn. A new submission goes through the current
+authorization and capacity checks.
+
+Existing batches remain available for lookup, execution, and management by
+their original IDs. Older versions keyed submissions by tool-call ID and run
+ID, or by thread ID in SDK graphs without a run ID. After an upgrade, a
+checkpoint receipt paired with the original model response can recover the
+old ID if the stored request matches. If an older
+batch may belong to the resumed call and the checkpoint cannot establish its
+origin, `batch_task` returns a submission conflict. Inspect the batches on the
+thread to find any work already stored. A later model response can reuse the
+same tool-call ID when the checkpoint attributes the old batch to an earlier
+dispatch. When automatic or manual context compaction removes a dispatch and
+its successful receipt, the checkpoint retains the batch ID. Later turns can
+then reuse the tool-call ID after the earlier receipt leaves the conversation.
+For threads compacted before batch IDs were retained, DeerFlow checks the
+current checkpoint's ancestors for the original dispatch and successful
+receipt. With SDK exit durability, the lookup starts at the persisted
+checkpoint selected at the start of the run. A successful submission records
+the verified older batch IDs in its receipt. Later calls reuse that evidence,
+which is retained in the checkpoint when compaction removes the receipt. If
+the evidence is unavailable, the submission returns a conflict.
+
 Queued requests finish removing their queue entry and returning any transferred
 slot before cancellation propagates. The cleanup waits for the capacity lock
 without its own deadline. Cancellation during timeout cleanup takes precedence
@@ -383,6 +413,26 @@ async with runtime:
 ```
 
 `SubagentRuntime.stop()` waits for its owned batch service to finish before propagating caller cancellation, including repeated cancellation. This drain has no timeout; repository operations and child cleanup must terminate. If service shutdown also fails or is cancelled, the first caller cancellation is preserved with the service failure as its cause.
+
+When a graph includes `batch_task`, `create_deerflow_agent` keeps the private
+`compacted_batch_receipt_ids` state field even if summarization is disabled.
+If you assemble the graph directly with LangChain's `create_agent`, inherit
+from `deerflow.agents.thread_state.BatchReceiptState` in your custom state
+schema. Keep that base when rebuilding the graph so resumed threads can reuse
+verified receipts already stored in their checkpoints.
+
+When you pass a custom submitter to `bind_batch_tools`, the request title is
+trimmed of surrounding whitespace and limited to 256 characters. Whitespace
+exposed at the end by truncation is also removed. A blank title becomes
+`Subagent batch`. Copying the request with a new run ID preserves the
+normalized title so the retry can reuse the original receipt.
+
+Custom SDK repositories can keep their original `create_batch` signature. The
+built-in SQL repository verifies submission digests and resolves replays before
+applying new batch limits. Adapters that forward the execution snapshot to SQL
+can replay a submission with the original signature. An adapter can also
+declare the `submission_digest` keyword and expose `find_submission` to resolve
+replays before checking current batch limits.
 
 Gateway run finalization also retains ownership through caller cancellation: it finishes terminal persistence, stream completion, and resource cleanup before propagating the interruption. Backend I/O must terminate or enforce its own timeout. Gateway shutdown includes workers still finalizing after their terminal status commits; an expired shutdown drain budget is logged and does not cancel their outstanding writes.
 

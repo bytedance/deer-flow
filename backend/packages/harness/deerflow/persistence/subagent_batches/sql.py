@@ -6,16 +6,18 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, or_, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased, defer
 
+from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.persistence.extension_leases.model import ExtensionExecutionLeaseRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.subagent_batches.model import SubagentBatchDependencyRow, SubagentBatchItemRow, SubagentBatchRow
 from deerflow.subagents.acceptance_checks import AcceptanceVerdict, validate_acceptance_verdict
 from deerflow.subagents.batch_dependencies import batch_dependencies
-from deerflow.subagents.batch_runtime import BATCH_CONTINUATION_NAMESPACE, BatchItemInput, batch_continuation_key
+from deerflow.subagents.batch_runtime import BATCH_CONTINUATION_NAMESPACE, BATCH_SUBMISSION_DIGEST_KEY, BatchItemInput, BatchSubmitRequest, batch_continuation_key
 from deerflow.subagents.report_contract import normalize_acceptance_criteria
 from deerflow.utils.time import coerce_iso
 
@@ -58,6 +60,29 @@ _ITEM_PUBLIC_FIELDS = (
     "updated_at",
 )
 _ITEM_TIMESTAMP_FIELDS = ("started_at", "completed_at", "created_at", "updated_at")
+
+
+class BatchSubmissionConflictError(ValueError):
+    """A submission identity already belongs to different or unverifiable work."""
+
+
+def _check_submission(batch: SubagentBatchRow, *, thread_id: str, tool_call_id: str | None, incarnation: Any, digest: str | None) -> None:
+    if batch.thread_id != thread_id or batch.tool_call_id != tool_call_id or batch.execution_spec.get(THREAD_INCARNATION_CONTEXT_KEY) != incarnation or digest is None or batch.execution_spec.get(BATCH_SUBMISSION_DIGEST_KEY) != digest:
+        raise BatchSubmissionConflictError("Batch submission conflict: this identity was already used with a different or unverifiable request")
+
+
+def _can_recover_digestless_submission(batch: SubagentBatchRow, request: BatchSubmitRequest) -> bool:
+    # A dispatch-scoped row written by an older adapter can be checked against
+    # its stored items. Run-scoped legacy keys still require checkpoint evidence.
+    return (
+        batch.execution_spec.get(BATCH_SUBMISSION_DIGEST_KEY) is None
+        and request.submission_key.startswith("batch-v1:")
+        and batch.submission_key != f"{batch.run_id or batch.thread_id}:{batch.tool_call_id}"
+        and batch.run_id == request.run_id
+        and batch.thread_id == request.thread_id
+        and batch.tool_call_id == request.tool_call_id
+        and batch.execution_spec.get(THREAD_INCARNATION_CONTEXT_KEY) == request.execution_spec.get(THREAD_INCARNATION_CONTEXT_KEY)
+    )
 
 
 _USAGE_COUNTERS = ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens")
@@ -172,6 +197,75 @@ class SubagentBatchRepository:
                 data[key] = coerce_iso(data[key])
         return data
 
+    async def find_submission(self, request: BatchSubmitRequest, *, title: str, submission_digest: str) -> dict[str, Any] | None:
+        """Resolve a replay before applying the current limits for new batches."""
+        incarnation = request.execution_spec.get(THREAD_INCARNATION_CONTEXT_KEY)
+        async with self._sf() as session:
+            existing = await session.scalar(select(SubagentBatchRow).filter_by(user_id=request.user_id, submission_key=request.submission_key))
+            if existing is not None:
+                return await self._resolve_submission(session, existing, request, title=title, submission_digest=submission_digest)
+
+            receipts = request.dispatch_receipts
+            if receipts is None:
+                return None
+            # A retry can move to a different run. Look for the old key format
+            # across this thread's runs, including SDK writes without a run ID.
+            legacy = select(SubagentBatchRow).filter_by(user_id=request.user_id, thread_id=request.thread_id, tool_call_id=request.tool_call_id)
+            legacy = legacy.where(SubagentBatchRow.submission_key == func.coalesce(SubagentBatchRow.run_id, SubagentBatchRow.thread_id) + f":{request.tool_call_id}")
+            candidates = []
+            for batch in await session.scalars(legacy):
+                stored_incarnation = batch.execution_spec.get(THREAD_INCARNATION_CONTEXT_KEY)
+                # A missing incarnation cannot prove the row is unrelated.
+                if (batch.id in receipts.current or batch.id not in receipts.previous) and (incarnation is None or stored_incarnation in (None, incarnation)):
+                    candidates.append(batch)
+            if not candidates:
+                return None
+            confirmed = [batch for batch in candidates if batch.id in receipts.current]
+            if len(confirmed) == 1:
+                batch = confirmed[0]
+                # The old key could have emitted the same receipt for two dispatches.
+                if batch.id not in receipts.previous and batch.execution_spec.get(THREAD_INCARNATION_CONTEXT_KEY) == incarnation and await self._matches_legacy_request(session, batch, request, title):
+                    return await self._with_counts(session, batch)
+        # Reading the graph history can take several checkpoint reads. Release
+        # the repository session before consulting that independent store.
+        if not confirmed and receipts.confirm_previous is not None and await receipts.confirm_previous(frozenset(batch.id for batch in candidates)):
+            return None
+        raise BatchSubmissionConflictError("Batch submission conflict: a legacy batch may already contain this work. Inspect the existing batches before requesting a new submission.")
+
+    async def _resolve_submission(self, session: AsyncSession, batch: SubagentBatchRow, request: BatchSubmitRequest, *, title: str, submission_digest: str | None) -> dict[str, Any]:
+        if not (_can_recover_digestless_submission(batch, request) and await self._matches_legacy_request(session, batch, request, title)):
+            _check_submission(batch, thread_id=request.thread_id, tool_call_id=request.tool_call_id, incarnation=request.execution_spec.get(THREAD_INCARNATION_CONTEXT_KEY), digest=submission_digest)
+        return await self._with_counts(session, batch)
+
+    async def _matches_legacy_request(self, session: AsyncSession, batch: SubagentBatchRow, request: BatchSubmitRequest, title: str) -> bool:
+        # Older submissions could leave trailing whitespace at the title cutoff.
+        if (
+            batch.title.rstrip() != title.rstrip()
+            or batch.subagent_type != request.subagent_type
+            or batch.total_items != len(request.items)
+            or (batch.continuation_json or {}).get("prompt") != request.continuation
+            or (request.max_live_items is not None and batch.max_live_items != request.max_live_items)
+            or (request.max_running_items is not None and batch.max_running_items != request.max_running_items)
+        ):
+            return False
+        item_row = SubagentBatchItemRow
+        items = (await session.execute(select(item_row.id, item_row.item_key, item_row.prompt, item_row.acceptance_criteria).where(item_row.batch_id == batch.id).order_by(item_row.position))).all()
+        if len(items) != len(request.items) or any(
+            (item.item_key, item.prompt, item.acceptance_criteria or []) != (expected["key"], expected["prompt"], normalize_acceptance_criteria(expected.get("acceptance_criteria")))
+            for item, expected in zip(items, request.items, strict=True)
+        ):
+            return False
+        try:
+            dependencies = batch_dependencies(request.items)
+        except ValueError:
+            return False
+        item_ids = {item.item_key: item.id for item in items}
+        expected_edges = {(item_ids[key], item_ids[required]) for key, required_keys in dependencies.items() for required in required_keys}
+        edges = await session.execute(
+            select(SubagentBatchDependencyRow.item_id, SubagentBatchDependencyRow.prerequisite_id).join(SubagentBatchItemRow, SubagentBatchItemRow.id == SubagentBatchDependencyRow.item_id).where(SubagentBatchItemRow.batch_id == batch.id)
+        )
+        return {tuple(edge) for edge in edges} == expected_edges
+
     async def create_batch(
         self,
         *,
@@ -189,10 +283,14 @@ class SubagentBatchRepository:
         max_attempts: int,
         execution_spec: dict[str, Any],
         continuation: dict[str, Any] | None = None,
+        submission_digest: str | None = None,
     ) -> dict[str, Any]:
+        if submission_digest is None:
+            # Legacy adapters forward the digest inside the execution snapshot.
+            submission_digest = execution_spec.get(BATCH_SUBMISSION_DIGEST_KEY)
         dependencies = batch_dependencies(items)
         now = datetime.now(UTC)
-        batch = SubagentBatchRow(
+        values = dict(
             id=batch_id,
             user_id=user_id,
             thread_id=thread_id,
@@ -206,7 +304,7 @@ class SubagentBatchRepository:
             max_live_items=max_live_items,
             max_running_items=max_running_items,
             max_attempts=max_attempts,
-            execution_spec=execution_spec,
+            execution_spec=execution_spec if submission_digest is None else {**execution_spec, BATCH_SUBMISSION_DIGEST_KEY: submission_digest},
             continuation_json=continuation,
             continuation_status="pending" if continuation is not None else None,
             created_at=now,
@@ -228,34 +326,43 @@ class SubagentBatchRepository:
             )
             for position, item in enumerate(items)
         ]
-        async with self._sf() as session:
-            try:
-                session.add(batch)
-                # The models intentionally do not declare an ORM relationship;
-                # flush the parent explicitly so SQLite's immediate FK check
-                # never observes item inserts before their batch row. Keep the
-                # flush inside the idempotency handler: a duplicate submission
-                # key can fail here before commit.
-                await session.flush()
-                session.add_all(rows)
-                if dependencies:
-                    await session.flush()
-                    identities = {row.item_key: row.id for row in rows}
-                    session.add_all(SubagentBatchDependencyRow(item_id=identities[key], prerequisite_id=identities[dependency]) for key, required in dependencies.items() for dependency in required)
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()
-                existing = (
-                    await session.execute(
-                        select(SubagentBatchRow).where(
-                            SubagentBatchRow.user_id == user_id,
-                            SubagentBatchRow.submission_key == submission_key,
-                        )
+        async with self._sf() as session, session.begin():
+            insert = postgres_insert if session.get_bind().dialect.name == "postgresql" else sqlite_insert
+            statement = insert(SubagentBatchRow).values(**values).on_conflict_do_nothing(index_elements=["user_id", "submission_key"]).returning(SubagentBatchRow)
+            batch = await session.scalar(statement)
+            if batch is None:
+                # The unique constraint arbitrates concurrent writers. A
+                # separate read sees the winner after its transaction commits.
+                existing = await session.scalar(select(SubagentBatchRow).filter_by(user_id=user_id, submission_key=submission_key))
+                if existing is None:
+                    raise RuntimeError("Conflicting batch submission disappeared before it could be read")
+                if tool_call_id is not None and existing.execution_spec.get(BATCH_SUBMISSION_DIGEST_KEY) is None:
+                    request = BatchSubmitRequest(
+                        user_id=user_id,
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        tool_call_id=tool_call_id,
+                        submission_key=submission_key,
+                        title=title,
+                        subagent_type=subagent_type,
+                        items=items,
+                        max_live_items=max_live_items,
+                        max_running_items=max_running_items,
+                        execution_spec=execution_spec,
+                        continuation=(continuation or {}).get("prompt"),
                     )
-                ).scalar_one_or_none()
-                if existing is not None:
-                    return await self._with_counts(session, existing)
-                raise
+                    return await self._resolve_submission(session, existing, request, title=title, submission_digest=submission_digest)
+                _check_submission(existing, thread_id=thread_id, tool_call_id=tool_call_id, incarnation=execution_spec.get(THREAD_INCARNATION_CONTEXT_KEY), digest=submission_digest)
+                return await self._with_counts(session, existing)
+
+            session.add_all(rows)
+            # Flush items before inserting edges because both endpoints are FKs
+            # and the models do not declare ORM relationships.
+            await session.flush()
+            if dependencies:
+                identities = {row.item_key: row.id for row in rows}
+                session.add_all(SubagentBatchDependencyRow(item_id=identities[key], prerequisite_id=identities[dependency]) for key, required in dependencies.items() for dependency in required)
+                await session.flush()
             return await self._with_counts(session, batch)
 
     async def _counts(self, session: AsyncSession, batch_id: str) -> Counter[str]:

@@ -24,7 +24,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from deerflow.config.subagents_config import SubagentsAppConfig
 from deerflow.persistence.managed_subagents import ManagedSubagentDefinition
@@ -179,16 +179,18 @@ async def test_batch_task_registry_reads_resolve_off_loop(monkeypatch, tmp_path)
     tool = batch_task_tool_module.batch_task
     invoke = getattr(tool, "coroutine", None) or getattr(tool, "func", None)
     assert invoke is not None
+    call_id = "tc-batch-registry-offloop"
+    dispatch = AIMessage(content="", id="ai-batch-registry-offloop", tool_calls=[{"name": "batch_task", "id": call_id, "args": {}}])
     result = await invoke(
         runtime=SimpleNamespace(
-            state={},
+            state={"messages": [dispatch]},
             context={},
             config={"configurable": {"thread_id": "thread-1"}},
         ),
         title="batch",
         items=[BatchTaskItem(key="k1", prompt="p")],
         subagent_type="researcher",
-        tool_call_id="tc-batch-registry-offloop",
+        tool_call_id=call_id,
     )
 
     messages = result.update["messages"]

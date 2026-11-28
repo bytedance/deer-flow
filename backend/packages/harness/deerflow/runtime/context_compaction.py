@@ -17,6 +17,7 @@ from deerflow.runtime.checkpoint_history import recent_checkpoint_history
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE
 from deerflow.runtime.goal import _call_checkpointer_method
+from deerflow.subagents.batch_runtime import compacted_batch_receipt_update
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
 
@@ -264,6 +265,7 @@ async def compact_thread_context(
         {
             "messages": Overwrite(list(result.preserved_messages)),
             "summary_text": result.summary_text,
+            **compacted_batch_receipt_update(channel_values, result.messages_to_summarize),
             **({"task_history": result.task_history} if getattr(result, "task_history", None) is not None else {}),
         },
         as_node="manual_compaction",

@@ -244,20 +244,19 @@ def test_external_goal_outcome_is_rejected(boundary):
 
 
 @pytest.mark.parametrize("boundary", ["run", "state"])
-def test_external_loop_cap_is_rejected(boundary):
-    """A caller copy of loop detection's cap record could lift a cap or block a tool."""
+@pytest.mark.parametrize("channel", ["loop_cap", "compacted_batch_receipt_ids"])
+def test_external_internal_state_is_rejected(boundary, channel):
     from fastapi import HTTPException
 
     from app.gateway.services import SERVER_OWNED_STATE_CHANNELS, normalize_input, strip_server_owned_state_metadata
-    from deerflow.agents.middlewares.loop_detection_middleware import LOOP_CAP_STATE_KEY
 
-    assert LOOP_CAP_STATE_KEY in SERVER_OWNED_STATE_CHANNELS
+    assert channel in SERVER_OWNED_STATE_CHANNELS
     transform = normalize_input if boundary == "run" else strip_server_owned_state_metadata
     with pytest.raises(HTTPException) as error:
-        transform({LOOP_CAP_STATE_KEY: None})
+        transform({channel: ["batch-id"]})
 
     assert error.value.status_code == 400
-    assert error.value.detail == "External loop_cap state is not allowed"
+    assert error.value.detail == f"External {channel} state is not allowed"
 
 
 @pytest.mark.parametrize("boundary", ["run", "state"])
@@ -608,13 +607,15 @@ def test_normalize_input_strips_external_view_image_context_marker():
     assert message.additional_kwargs == {"custom": "keep-me"}
 
 
-def test_normalize_input_strips_external_tool_receipt():
+@pytest.mark.parametrize("boundary", ["run", "state"])
+def test_normalize_input_strips_external_tool_receipt(boundary):
     """Tool receipts are runtime-stamped evidence; external callers cannot forge them."""
-    from app.gateway.services import normalize_input
+    from app.gateway.services import normalize_input, strip_server_owned_state_metadata
     from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECEIPT_LEDGER_KEY
     from deerflow.subagents.status_contract import SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 
-    result = normalize_input(
+    transform = normalize_input if boundary == "run" else strip_server_owned_state_metadata
+    result = transform(
         {
             "messages": [
                 {
@@ -637,6 +638,9 @@ def test_normalize_input_strips_external_tool_receipt():
                             "source": "receipt_citations",
                             "citation_resolved": True,
                         },
+                        "subagent_batch_id": "runtime-owned-batch",
+                        "subagent_batch_status": "queued",
+                        "subagent_batch_continuation_status": "pending",
                         "custom": "keep-me",
                     },
                 }
