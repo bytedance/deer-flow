@@ -64,6 +64,12 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Changed
 
+- **subagents:** Subagents inherit their caller's effective thinking and
+  reasoning effort by default, subject to the selected model's capabilities.
+  Explicit overrides take priority, and operators can
+  also choose the model's defaults. This applies to individual tasks, durable
+  batches, and nested delegation. ([#8257](https://github.com/bytedance/deer-flow/pull/8257))
+
 - **checkpoint:** DeltaChannel deployments now require `langgraph-checkpoint`
   4.3.0, SQLite saver 3.1.2, and Postgres saver 3.1.3, excluding versions that
   could reorder parallel writes during replay or lose paged ancestor history.

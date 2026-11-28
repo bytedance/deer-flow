@@ -67,6 +67,7 @@ from deerflow.config.subagents_config import (
 )
 from deerflow.mcp.agent_auth import AGENT_AUTH_CONTEXT_KEY, AgentMcpAuthority
 from deerflow.models import create_chat_model
+from deerflow.models.factory import get_effective_reasoning_effort
 from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
 from deerflow.runtime.checkpoint_mode import (
     INTERNAL_CHECKPOINT_MODE_KEY,
@@ -1198,6 +1199,7 @@ def _assemble_lead_agent(
             "model_name": model_name or "default",
             "thinking_enabled": thinking_enabled,
             "reasoning_effort": reasoning_effort,
+            "reasoning_effort_aliases": dict(reasoning_contract.effort.aliases) if reasoning_contract.effort is not None else {},
             "is_plan_mode": is_plan_mode,
             "subagent_enabled": subagent_enabled,
             "tool_groups": agent_config.tool_groups if agent_config else None,
@@ -1247,6 +1249,7 @@ def _assemble_lead_agent(
             skill_authorization=skill_authorization,
         )
         chat_model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False)
+        config["metadata"]["reasoning_effort"] = get_effective_reasoning_effort(chat_model, None)
         raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config, chat_model=chat_model) + [setup_agent]
         configured_tools = restrict_batch_continuation(raw_tools, available=batch_continuation_available)
         configured_tools = [tool for tool in configured_tools if tool.name not in interaction_policy.disabled_tool_names]
@@ -1400,6 +1403,8 @@ def _assemble_lead_agent(
     extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
     # Resolve the model once so tool guidance uses the same effective settings.
     chat_model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, model_overrides=agent_model_overrides)
+    reasoning_effort = get_effective_reasoning_effort(chat_model, reasoning_effort)
+    config["metadata"]["reasoning_effort"] = reasoning_effort
     raw_tools = get_available_tools(
         model_name=model_name,
         groups=agent_config.tool_groups if agent_config else None,

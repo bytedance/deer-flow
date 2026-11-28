@@ -207,7 +207,7 @@ def _apply_legacy_thinking_settings(
     settings: dict,
     model_config,
     *,
-    thinking_enabled: bool,
+    thinking_enabled: bool | None,
     has_thinking_settings: bool,
     effective_wte: dict,
     requested_reasoning_effort: str | None,
@@ -235,7 +235,7 @@ def _apply_legacy_thinking_settings(
         settings["reasoning_effort"] = requested_reasoning_effort
     if thinking_enabled and has_thinking_settings and effective_wte:
         _merge_thinking_payload(settings, effective_wte)
-    if not thinking_enabled:
+    if thinking_enabled is False:
         if model_config.when_thinking_disabled is not None:
             # User-provided disable settings win on conflicts; profile keys survive.
             _merge_thinking_payload(settings, model_config.when_thinking_disabled)
@@ -256,7 +256,7 @@ def _apply_contract_thinking_settings(
     contract: ReasoningContract,
     model_config,
     *,
-    thinking_enabled: bool,
+    thinking_enabled: bool | None,
     effective_wte: dict,
     requested_reasoning_effort: str | None,
     codex_handles_generic_effort: bool,
@@ -292,11 +292,11 @@ def _apply_contract_thinking_settings(
         if contract.history is not None and dialect == "openai_extra_body":
             payload = _deep_merge_dicts(payload, {"extra_body": {"thinking": {"clear_thinking": contract.history == "clear"}}})
         _merge_thinking_payload(settings, payload)
-    elif model_config.when_thinking_disabled is not None:
+    elif thinking_enabled is False and model_config.when_thinking_disabled is not None:
         _merge_thinking_payload(settings, model_config.when_thinking_disabled)
         if contract.effort is not None and contract.effort.path == "reasoning_effort" and model_config.when_thinking_disabled.get("reasoning_effort") == "none":
             requested_reasoning_effort = None
-    else:
+    elif thinking_enabled is False:
         _merge_thinking_payload(settings, _dialect_payload(dialect, enabled=False, chat_template_kwargs=chat_template_kwargs))
     if contract.effort is None or contract.effort.path != "reasoning_effort":
         # A custom path is the only effort wire format for this contract.
@@ -539,12 +539,19 @@ def _apply_openai_responses_api_default(model_class: type, model_settings_from_c
     )
 
 
-def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, attach_tracing: bool = True, model_overrides: dict | None = None, **kwargs) -> BaseChatModel:
+def get_effective_reasoning_effort(model: BaseChatModel, fallback: str | None) -> str | None:
+    """Read the effort finalized by the factory, including an explicit omission."""
+    effort = getattr(model, "_deerflow_reasoning_effort", fallback)
+    return effort if effort is None or isinstance(effort, str) else fallback
+
+
+def create_chat_model(name: str | None = None, thinking_enabled: bool | None = False, *, app_config: AppConfig | None = None, attach_tracing: bool = True, model_overrides: dict | None = None, **kwargs) -> BaseChatModel:
     """Create a chat model instance from the config.
 
     Args:
         name: The name of the model to create. If None, the first model in the config will be used.
-        thinking_enabled: Enable the model's extended-thinking mode when supported.
+        thinking_enabled: Enable extended thinking; None preserves model/provider defaults.
+            The default remains False for existing utility callers.
         app_config: Explicit application config; falls back to the cached global if omitted.
         model_overrides: Optional per-caller sampling overrides (e.g. a custom
             agent's ``temperature`` / ``max_tokens``) layered on top of the
@@ -676,11 +683,11 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
 
         if codex_handles_generic_effort:
             # Use explicit reasoning_effort from frontend if provided (low/medium/high)
-            if not thinking_enabled:
+            if thinking_enabled is False:
                 model_settings_from_config["reasoning_effort"] = "none"
             elif requested_reasoning_effort in ("low", "medium", "high", "xhigh"):
                 model_settings_from_config["reasoning_effort"] = requested_reasoning_effort
-            elif "reasoning_effort" not in model_settings_from_config:
+            elif thinking_enabled is True and "reasoning_effort" not in model_settings_from_config:
                 model_settings_from_config["reasoning_effort"] = "medium"
 
     # For MindIE models: enforce conservative retry defaults.
@@ -737,6 +744,15 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         for key in ("temperature", "top_p", "top_logprobs"):
             effective_model_settings.pop(key, None)
     model_instance = model_class(**effective_model_settings)
+
+    # Keep the selected provider value with the instance for delegation. It
+    # includes template overrides and disable rules without altering the payload.
+    effort: object = None
+    if contract.effort is not None:
+        effort = effective_model_settings
+        for segment in contract.effort.path.split("."):
+            effort = effort.get(segment) if isinstance(effort, dict) else None
+    object.__setattr__(model_instance, "_deerflow_reasoning_effort", effort if isinstance(effort, str) else None)
 
     if translate_context_window:
         # Applied *after* construction and merged into the provider's inferred

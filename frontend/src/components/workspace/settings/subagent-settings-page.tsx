@@ -35,6 +35,13 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
 import {
+  GENERIC_REASONING_EFFORTS,
+  getReasoningEffortOptions,
+  isThinkingRequired,
+  resolveReasoningEffort,
+  supportsThinking,
+} from "@/core/models/reasoning";
+import {
   useCreateManagedSubagent,
   useDeleteManagedSubagent,
   useSubagents,
@@ -57,6 +64,9 @@ type Draft = {
   description: string;
   systemPrompt: string;
   model: string;
+  reasoningSource: "inherit" | "model";
+  thinking: boolean | null;
+  effort: string | null;
   toolsMode: OptionalNameListMode;
   tools: string;
   skillsMode: OptionalNameListMode;
@@ -71,6 +81,9 @@ const EMPTY_DRAFT: Draft = {
   description: "",
   systemPrompt: "",
   model: "inherit",
+  reasoningSource: "inherit",
+  thinking: null,
+  effort: null,
   toolsMode: "all",
   tools: "",
   skillsMode: "all",
@@ -94,6 +107,9 @@ function draftFrom(subagent: Subagent): Draft {
     description: subagent.description,
     systemPrompt: subagent.system_prompt ?? "",
     model: subagent.model,
+    reasoningSource: subagent.reasoning_source ?? "inherit",
+    thinking: subagent.thinking_enabled ?? null,
+    effort: subagent.reasoning_effort ?? null,
     toolsMode: tools.mode,
     tools: tools.text,
     skillsMode: skills.mode,
@@ -264,9 +280,43 @@ function SubagentEditor({
 
   const isNew = value === "new";
   const pending = create.isPending || update.isPending;
+  const selectedModel = models.find((model) => model.name === draft.model);
+  const effortOptions =
+    draft.model === "inherit"
+      ? [...GENERIC_REASONING_EFFORTS]
+      : getReasoningEffortOptions(selectedModel);
+  const thinkingUnsupported =
+    !!selectedModel && !supportsThinking(selectedModel);
+  const thinkingRequired = isThinkingRequired(selectedModel);
+  const staleThinking =
+    (thinkingUnsupported && draft.thinking === true) ||
+    (thinkingRequired && draft.thinking === false);
+  const staleEffort =
+    draft.effort !== null && !effortOptions.includes(draft.effort);
 
   function set<K extends keyof Draft>(key: K, next: Draft[K]) {
     setDraft((current) => ({ ...current, [key]: next }));
+  }
+
+  function changeModel(name: string) {
+    const model = models.find((item) => item.name === name);
+    setDraft((current) => ({
+      ...current,
+      model: name,
+      // Normalize only a deliberate switch to a known model. Catalog loading
+      // or failure must never rewrite an existing saved override.
+      thinking:
+        model &&
+        ((!supportsThinking(model) && current.thinking === true) ||
+          (isThinkingRequired(model) && current.thinking === false))
+          ? null
+          : current.thinking,
+      effort: model
+        ? (resolveReasoningEffort(model, current.effort ?? undefined, {
+            fallbackToDefault: false,
+          }) ?? null)
+        : current.effort,
+    }));
   }
 
   async function save() {
@@ -284,6 +334,9 @@ function SubagentEditor({
       description: draft.description.trim(),
       system_prompt: draft.systemPrompt.trim(),
       model: draft.model,
+      reasoning_source: draft.reasoningSource,
+      thinking_enabled: draft.thinking,
+      reasoning_effort: draft.effort,
       tools: optionalNameListFromDraft(draft.toolsMode, draft.tools),
       skills: optionalNameListFromDraft(draft.skillsMode, draft.skills),
       max_turns: maxTurns,
@@ -305,7 +358,7 @@ function SubagentEditor({
 
   return (
     <Dialog open={value !== null} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+      <DialogContent className="flex max-h-[90dvh] flex-col overflow-hidden sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>
             {isNew
@@ -316,7 +369,7 @@ function SubagentEditor({
             {t.settings.subagents.description}
           </DialogDescription>
         </DialogHeader>
-        <div className="grid gap-4 py-1 sm:grid-cols-2">
+        <div className="grid min-h-0 gap-4 overflow-y-auto px-1 py-1 sm:grid-cols-2">
           <Field label={t.settings.subagents.name}>
             <Input
               value={draft.name}
@@ -354,26 +407,141 @@ function SubagentEditor({
               onChange={(event) => set("systemPrompt", event.target.value)}
             />
           </Field>
-          <Field label={t.settings.subagents.model}>
-            <Select
-              value={draft.model}
-              onValueChange={(next) => set("model", next)}
-            >
-              <SelectTrigger className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="inherit">
-                  {t.settings.subagents.inheritModel}
-                </SelectItem>
-                {models.map((model) => (
-                  <SelectItem key={model.name} value={model.name}>
-                    {model.display_name || model.name}
+          <fieldset className="grid gap-4 rounded-lg border p-4 sm:col-span-2 sm:grid-cols-2">
+            <legend className="px-1 text-sm font-medium">
+              {t.settings.subagents.modelConfiguration}
+            </legend>
+            <Field label={t.settings.subagents.model}>
+              <Select value={draft.model} onValueChange={changeModel}>
+                <SelectTrigger
+                  className="w-full"
+                  aria-label={t.settings.subagents.model}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="inherit">
+                    {t.settings.subagents.inheritModel}
                   </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
+                  {draft.model !== "inherit" && !selectedModel && (
+                    <SelectItem value={draft.model}>{draft.model}</SelectItem>
+                  )}
+                  {models.map((model) => (
+                    <SelectItem key={model.name} value={model.name}>
+                      {model.display_name || model.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+            <Field label={t.settings.subagents.reasoningDefaults}>
+              <Select
+                value={draft.reasoningSource}
+                onValueChange={(next) =>
+                  set("reasoningSource", next as "inherit" | "model")
+                }
+              >
+                <SelectTrigger
+                  className="w-full"
+                  aria-label={t.settings.subagents.reasoningDefaults}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="inherit">
+                    {t.settings.subagents.inheritReasoning}
+                  </SelectItem>
+                  <SelectItem value="model">
+                    {t.settings.subagents.modelDefaults}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <p className="text-muted-foreground text-xs sm:col-span-2">
+              {t.settings.subagents.reasoningHint}
+            </p>
+            <Field label={t.settings.subagents.thinking}>
+              <Select
+                value={
+                  draft.thinking === null
+                    ? "default"
+                    : draft.thinking
+                      ? "on"
+                      : "off"
+                }
+                onValueChange={(next) =>
+                  set("thinking", next === "default" ? null : next === "on")
+                }
+              >
+                <SelectTrigger
+                  className="w-full"
+                  aria-label={t.settings.subagents.thinking}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="default">
+                    {t.settings.subagents.useDefaults}
+                  </SelectItem>
+                  {(!thinkingUnsupported || draft.thinking === true) && (
+                    <SelectItem value="on">
+                      {t.settings.subagents.thinkingOn}
+                    </SelectItem>
+                  )}
+                  {(!thinkingRequired || draft.thinking === false) && (
+                    <SelectItem value="off">
+                      {t.settings.subagents.thinkingOff}
+                    </SelectItem>
+                  )}
+                </SelectContent>
+              </Select>
+              {staleThinking && (
+                <p className="text-destructive text-xs">
+                  {t.settings.subagents.incompatibleThinking}
+                </p>
+              )}
+            </Field>
+            <Field label={t.settings.subagents.reasoningEffort}>
+              <Select
+                value={
+                  draft.effort === null ? "default" : `effort:${draft.effort}`
+                }
+                onValueChange={(next) =>
+                  set(
+                    "effort",
+                    next === "default" ? null : next.slice("effort:".length),
+                  )
+                }
+              >
+                <SelectTrigger
+                  className="w-full"
+                  aria-label={t.settings.subagents.reasoningEffort}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="default">
+                    {t.settings.subagents.useDefaults}
+                  </SelectItem>
+                  {staleEffort && (
+                    <SelectItem value={`effort:${draft.effort}`}>
+                      {draft.effort}
+                    </SelectItem>
+                  )}
+                  {effortOptions.map((effort) => (
+                    <SelectItem key={effort} value={`effort:${effort}`}>
+                      {effort}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {staleEffort && (
+                <p className="text-muted-foreground text-xs">
+                  {t.settings.subagents.savedEffortHint}
+                </p>
+              )}
+            </Field>
+          </fieldset>
           <Field label={t.settings.subagents.tools}>
             <OptionalNameListField
               mode={draft.toolsMode}

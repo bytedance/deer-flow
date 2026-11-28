@@ -459,6 +459,7 @@ def test_task_tool_forwards_the_run_extension_snapshot_to_executor(monkeypatch):
 def test_task_tool_installs_and_closes_narrow_middleware_recorder(monkeypatch):
     journal = MagicMock()
     runtime = _make_runtime()
+    runtime.config.setdefault("metadata", {}).update(thinking_enabled=False, reasoning_effort="high")
     runtime.context["__run_journal"] = journal
     captured = {}
 
@@ -484,6 +485,8 @@ def test_task_tool_installs_and_closes_narrow_middleware_recorder(monkeypatch):
     _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-journal")
 
     kwargs = captured["executor_kwargs"]
+    assert kwargs["parent_thinking_enabled"] is False
+    assert kwargs["parent_reasoning_effort"] == "high"
     proxy = kwargs["loop_detection_recorder"]
     assert kwargs["tool_promotion_recorder"] is proxy
     assert kwargs["tool_progress_recorder"] is proxy

@@ -91,6 +91,13 @@ describe("getReasoningCapabilities", () => {
 });
 
 describe("resolveReasoningEffort", () => {
+  it("keeps accepted overrides without filling in the model default", () => {
+    const options = { fallbackToDefault: false };
+    expect(resolveReasoningEffort(glm, "xhigh", options)).toBeUndefined();
+    expect(resolveReasoningEffort(glm, "minimal", options)).toBe("low");
+    expect(resolveReasoningEffort(glm, "max", options)).toBe("max");
+  });
+
   it("keeps an unset value unset so the Gateway applies the contract default", () => {
     expect(resolveReasoningEffort(glm, undefined)).toBeUndefined();
   });

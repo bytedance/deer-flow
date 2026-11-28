@@ -178,9 +178,12 @@ def _setup_executor_classes():
         "deerflow.agents.middlewares.tool_error_handling_middleware",
         "deerflow.sandbox.tools",
         "deerflow.sandbox.local.local_sandbox",
+        "deerflow.models.factory",
+        "deerflow.models.openai_codex_provider",
+        "deerflow.agents.assembly_descriptor",
+        "deerflow.agents.lead_agent.agent",
+        "deerflow.subagents.reasoning",
     ):
-        importlib.import_module(module_name)
-    for module_name in ("deerflow.models.factory", "deerflow.models.openai_codex_provider", "deerflow.agents.assembly_descriptor"):
         importlib.import_module(module_name)
 
     # Remove mocked executor if exists (from conftest.py)
@@ -409,18 +412,22 @@ class TestAgentConstruction:
     """Test _create_agent() wiring before execution starts."""
 
     @pytest.mark.parametrize(
-        "thinking,effort,mode,expected_thinking,expected_effort,expected_adjustment",
+        "thinking,effort,mode,expected_thinking,expected_effort,expected_adjustment,parent_request",
         [
-            (None, None, "optional", False, "lite", None),
-            (True, "high", "optional", True, "deep", "effort_aliased"),
-            (False, None, "required", True, "lite", "thinking_forced_on"),
-            (True, None, "unsupported", False, None, "thinking_unsupported"),
-            (True, "unknown", "optional", True, "lite", "effort_unsupported_value"),
-            (True, "high", "legacy", True, "high", None),
-            (True, None, "legacy-unsupported", False, None, None),
+            (None, None, "optional", None, "lite", None, {}),
+            (True, "high", "optional", True, "deep", "effort_aliased", {}),
+            (False, None, "required", True, "lite", "thinking_forced_on", {}),
+            (True, None, "unsupported", False, None, "thinking_unsupported", {}),
+            (True, "unknown", "optional", True, "lite", "effort_unsupported_value", {}),
+            (True, "high", "legacy", True, "high", None, {}),
+            (True, "high", "legacy-template", True, "medium", None, {}),
+            (True, None, "legacy-unsupported", False, None, None, {}),
+            (None, None, "optional", True, "deep", None, {"parent_thinking_enabled": True, "parent_reasoning_effort": "high"}),
+            (False, None, "optional", False, "deep", None, {"parent_thinking_enabled": True, "parent_reasoning_effort": "high"}),
+            (None, None, "required", True, "deep", None, {"parent_thinking_enabled": False, "parent_reasoning_effort": "high"}),
         ],
     )
-    def test_reasoning_factory_and_observer_agree(self, classes, base_config, monkeypatch, caplog, thinking, effort, mode, expected_thinking, expected_effort, expected_adjustment):
+    def test_reasoning_factory_and_observer_agree(self, classes, base_config, monkeypatch, caplog, thinking, effort, mode, expected_thinking, expected_effort, expected_adjustment, parent_request):
         from deerflow.config.app_config import AppConfig
         from deerflow.config.model_config import ModelConfig
         from deerflow.config.sandbox_config import SandboxConfig
@@ -429,12 +436,14 @@ class TestAgentConstruction:
 
         factory = importlib.import_module("deerflow.models.factory")
         profile_settings = {}
-        if mode in {"legacy", "legacy-unsupported"}:
+        if mode in {"legacy", "legacy-template", "legacy-unsupported"}:
             profile_settings = {
-                "supports_thinking": mode == "legacy",
+                "supports_thinking": mode != "legacy-unsupported",
                 "supports_reasoning_effort": True,
                 "when_thinking_enabled": {"extra_body": {"thinking": {"type": "enabled"}}},
             }
+            if mode == "legacy-template":
+                profile_settings["when_thinking_enabled"]["reasoning_effort"] = "medium"
         else:
             reasoning = {"thinking": mode, "dialect": "openai_extra_body"}
             if mode != "unsupported":
@@ -458,7 +467,9 @@ class TestAgentConstruction:
             registry.agent_assembly_observer(Observer())
         monkeypatch.setattr(factory, "resolve_class", lambda *args: RecordingModel)
         monkeypatch.setattr(executor_module, "create_chat_model", factory.create_chat_model)
-        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: SimpleNamespace(get_graph=lambda: SimpleNamespace(nodes={})))
+        graph = _FakeStreamAgent()
+        graph.get_graph = lambda: SimpleNamespace(nodes={})
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: graph)
         monkeypatch.setitem(
             sys.modules,
             "deerflow.agents.middlewares.tool_error_handling_middleware",
@@ -466,7 +477,7 @@ class TestAgentConstruction:
         )
         base_config.thinking_enabled = thinking
         base_config.reasoning_effort = effort
-        executor = classes["SubagentExecutor"](config=base_config, tools=[], app_config=app_config, parent_model="child-model", extensions=registry.build())
+        executor = classes["SubagentExecutor"](config=base_config, tools=[], app_config=app_config, parent_model="child-model", extensions=registry.build(), **parent_request)
         if mode == "legacy-unsupported":
             with pytest.raises(ValueError, match="Model child-model does not support thinking.*supports_thinking"):
                 asyncio.run(executor._create_agent())
@@ -482,8 +493,20 @@ class TestAgentConstruction:
         assert descriptor.thinking_enabled is expected_thinking
         assert descriptor.reasoning_effort == expected_effort
         assert captured.get("reasoning_effort") == expected_effort
-        assert captured["extra_body"]["thinking"]["type"] == ("enabled" if expected_thinking else "disabled")
+        if expected_thinking is None:
+            assert "thinking" not in captured.get("extra_body", {})
+        else:
+            assert captured["extra_body"]["thinking"]["type"] == ("enabled" if expected_thinking else "disabled")
         assert app_config.model_dump() == unchanged
+        # The next permitted delegation sees this child's effective settings,
+        # including normalized effort and explicit False, not its ancestor's.
+        with patch.object(executor, "_create_agent", return_value=graph):
+            asyncio.run(executor._aexecute("Check nested delegation metadata"))
+        assert graph.captured_config is not None
+        metadata = graph.captured_config["metadata"]
+        assert metadata["model_name"] == "child-model"
+        assert metadata["thinking_enabled"] is expected_thinking
+        assert metadata["reasoning_effort"] == expected_effort
 
     def test_required_thinking_rejection_names_model_before_creation(self, classes, base_config, monkeypatch):
         from deerflow.config.app_config import AppConfig
@@ -496,6 +519,7 @@ class TestAgentConstruction:
         app_config = AppConfig(models=[profile], sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
         model_factory = MagicMock(side_effect=AssertionError("model creation must not start"))
         graph_factory = MagicMock(side_effect=AssertionError("graph creation must not start"))
+        base_config.thinking_enabled = False
         monkeypatch.setattr(executor_module, "create_chat_model", model_factory)
         monkeypatch.setattr(executor_module, "create_agent", graph_factory)
         executor = classes["SubagentExecutor"](config=base_config, tools=[], app_config=app_config, parent_model=profile.name)
@@ -571,7 +595,7 @@ class TestAgentConstruction:
         assert captured["middlewares"]["authorization_provider"] is provider
         assert captured["model"] == {
             "name": "parent-model",
-            "thinking_enabled": False,
+            "thinking_enabled": None,
             "reasoning_effort": None,
             "app_config": app_config,
             # attach_tracing=False pairs with graph-root tracing callbacks
@@ -5277,6 +5301,54 @@ async def test_subagent_mcp_uses_captured_thread_incarnation(classes, monkeypatc
         assert result.status == classes["SubagentStatus"].COMPLETED, result.error
         call_remote.assert_awaited_once()
         assert call_remote.await_args.kwargs["scope_key"] == expected_scope
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("child_thinking, child_effort", [(False, "lite"), (None, None)])
+async def test_subagent_graph_preserves_caller_metadata(classes, base_config, monkeypatch, child_thinking, child_effort):
+    from langchain_core.runnables import RunnableConfig
+    from langchain_core.runnables.config import var_child_runnable_config
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [])
+    observed = {}
+
+    def capture_metadata(_state: MessagesState, config: RunnableConfig):
+        observed.update(config["metadata"])
+        return {"messages": [classes["AIMessage"](content="done")]}
+
+    graph = StateGraph(MessagesState, context_schema=dict)
+    graph.add_node("capture_metadata", capture_metadata)
+    graph.add_edge(START, "capture_metadata")
+    graph.add_edge("capture_metadata", END)
+
+    base_config.thinking_enabled = child_thinking
+    base_config.reasoning_effort = child_effort
+    executor = classes["SubagentExecutor"](config=base_config, tools=[], parent_model="child-model")
+    monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(graph.compile()))
+
+    caller_scope = {
+        "allowed_subagents": ["general-purpose"],
+        "tool_groups": ["web"],
+        "mcp_plugins": [],
+        "available_skills": ["example-skill"],
+        "trace_id": "caller-trace",
+    }
+    caller_reasoning = {"model_name": "parent-model", "thinking_enabled": True, "reasoning_effort": "deep"}
+    caller_metadata = {**caller_scope, **caller_reasoning}
+    token = var_child_runnable_config.set({"metadata": caller_metadata})
+    try:
+        result = await executor._aexecute("Record child graph metadata")
+    finally:
+        var_child_runnable_config.reset(token)
+
+    assert result.status == classes["SubagentStatus"].COMPLETED, result.error
+    assert {key: observed[key] for key in caller_scope} == caller_scope
+    assert observed["model_name"] == "child-model"
+    assert observed["thinking_enabled"] is child_thinking
+    assert observed["reasoning_effort"] == child_effort
+    assert caller_metadata == {**caller_scope, **caller_reasoning}
 
 
 class TestSubagentCheckpointLineage:

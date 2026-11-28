@@ -447,7 +447,7 @@ def build_assembly_descriptor(
     effective_model: str,
     model_config: object,
     model_overrides: dict[str, object] | None = None,
-    thinking_enabled: bool,
+    thinking_enabled: bool | None,
     reasoning_effort: object,
     rendered_base_prompt: str,
     prompt_template_id: str = "deerflow-lead-agent-v1",

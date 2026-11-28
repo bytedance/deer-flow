@@ -234,7 +234,7 @@ class AgentAssemblyObserver(Protocol):
 | `requested_model`     | `str \| None`                      | 必填    |
 | `effective_model`     | `str`                              | 必填    |
 | `model_parameters`    | `dict[str, Any]`                   | 必填    |
-| `thinking_enabled`    | `bool`                             | 必填    |
+| `thinking_enabled`    | `bool \| None`                     | 必填    |
 | `reasoning_effort`    | `Any`                              | 必填    |
 | `base_prompt_hash`    | `str`                              | 必填    |
 | `tools`               | `tuple[ToolDescriptor, ...]`       | 必填    |
@@ -243,6 +243,8 @@ class AgentAssemblyObserver(Protocol):
 | `enabled_skills`      | `tuple[str, ...]`                  | 必填    |
 | `effective_policies`  | `dict[str, Any]`                   | 必填    |
 | `build`               | `dict[str, Any]`                   | `{}`    |
+
+`thinking_enabled` 可以为 `None`，表示模型支持可选思考，并采用提供商的默认行为。需要区分默认行为与关闭思考的组装观察器应显式检查 `None` 和 `False`。
 
 `fingerprint: str`（缓存属性）是对一切影响行为的内容做的 `canonical_hash`。工具、延迟工具名和技能会排序；中间件顺序保持不变，因为它决定谁包裹谁。`build` 和 `requested_model` 被排除，所以同一组装重新部署后指纹不变。
 

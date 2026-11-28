@@ -1713,3 +1713,27 @@ def test_internal_make_lead_agent_applies_the_required_thinking_contract(monkeyp
     assert captured == {"thinking_enabled": True, "reasoning_effort": "low"}
     assert config["metadata"]["thinking_enabled"] is True
     assert config["metadata"]["reasoning_effort"] == "low"
+
+
+def test_lead_agent_publishes_the_factory_finalized_effort(monkeypatch):
+    import deerflow.tools as tools_module
+
+    profile = ModelConfig(
+        name="legacy",
+        model="legacy",
+        use="langchain_openai:ChatOpenAI",
+        api_key="test-key",
+        supports_thinking=True,
+        supports_reasoning_effort=True,
+        when_thinking_enabled={"reasoning_effort": "medium"},
+    )
+    app_config = _make_app_config([profile])
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    config = {"configurable": {"model_name": "legacy", "thinking_enabled": True, "reasoning_effort": "high"}}
+    graph = lead_agent_module._make_lead_agent(config, app_config=app_config)
+
+    assert graph["model"].reasoning_effort == "medium"
+    assert config["metadata"]["reasoning_effort"] == "medium"

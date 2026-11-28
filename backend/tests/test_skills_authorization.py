@@ -36,6 +36,26 @@ def _make_app_config() -> AppConfig:
     )
 
 
+def _make_subagent_executor(executor_module, app_config, monkeypatch):
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    monkeypatch.setattr(executor_module, "create_chat_model", lambda **kw: FakeMessagesListChatModel(responses=[]))
+    return executor_module.SubagentExecutor(
+        config=executor_module.SubagentConfig(
+            name="sub",
+            description="Skill authorization test",
+            model=app_config.models[0].name,
+            thinking_enabled=False,
+            max_turns=25,
+        ),
+        tools=[],
+        app_config=app_config,
+        trace_id="test-trace",
+        user_id="user-123",
+        user_role="user",
+    )
+
+
 def _context(**overrides):
     values = {
         "user_id": "user-123",
@@ -1041,9 +1061,9 @@ def test_subagent_chain_arms_skill_activate_check(monkeypatch):
 def test_subagent_executor_resolves_skill_authorization_for_chain(monkeypatch):
     """SubagentExecutor._create_agent passes a resolved ResolvedSkillAuthorization
     into build_subagent_runtime_middlewares, built from the executor identity."""
+    import asyncio
     import importlib
     import sys
-    from types import SimpleNamespace
 
     import deerflow.authz.skill_filter as skill_filter_module
     from deerflow.authz.skill_filter import ResolvedSkillAuthorization
@@ -1053,14 +1073,11 @@ def test_subagent_executor_resolves_skill_authorization_for_chain(monkeypatch):
     # (same pattern as tests/test_delegation_ledger_live.py).
     sys.modules.pop("deerflow.subagents.executor", None)
     executor_module = importlib.import_module("deerflow.subagents.executor")
-    SubagentExecutor = executor_module.SubagentExecutor
 
     app_config = _make_app_config()
     _enable_authz(app_config)
     provider = _rbac_provider({"user": {"skills": {"allow": "*"}}})
     monkeypatch.setattr(skill_filter_module, "resolve_authorization_provider", lambda config: provider)
-    monkeypatch.setattr(executor_module, "create_chat_model", lambda **kw: object())
-    monkeypatch.setattr(executor_module, "resolve_subagent_model_name", lambda *a, **kw: "m")
 
     captured = {}
 
@@ -1073,28 +1090,7 @@ def test_subagent_executor_resolves_skill_authorization_for_chain(monkeypatch):
         _capture_builder,
     )
 
-    executor = SubagentExecutor.__new__(SubagentExecutor)
-    executor.input_gate = None
-    executor.config = SimpleNamespace(name="sub", skills=None, max_turns=25, tools=None, disallowed_tools=["task"])
-    executor.model_name = "m"
-    executor.thinking_enabled = False
-    executor.reasoning_effort = None
-    executor.app_config = app_config
-    executor._resolved_app_config = app_config
-    executor._available_skill_names = None
-    executor.extensions = None
-    executor.user_id = "user-123"
-    executor.trace_id = "test-trace"
-    executor.user_role = "user"
-    executor.oauth_provider = None
-    executor.oauth_id = None
-    executor.channel_user_id = None
-    executor.is_internal = False
-    executor.authz_attributes = None
-    executor.tools = []
-
-    import asyncio
-
+    executor = _make_subagent_executor(executor_module, app_config, monkeypatch)
     asyncio.run(executor._create_agent(tools=[]))
 
     wired = captured["skill_authorization"]
@@ -1399,7 +1395,6 @@ def test_subagent_executor_shares_one_skill_authorization_instance(monkeypatch):
 
     sys.modules.pop("deerflow.subagents.executor", None)
     executor_module = importlib.import_module("deerflow.subagents.executor")
-    SubagentExecutor = executor_module.SubagentExecutor
 
     resolved_providers: list = []
 
@@ -1437,34 +1432,9 @@ def test_subagent_executor_shares_one_skill_authorization_instance(monkeypatch):
         "deerflow.agents.middlewares.tool_error_handling_middleware.build_subagent_runtime_middlewares",
         _capture_builder,
     )
-    monkeypatch.setattr(executor_module, "create_chat_model", lambda **kw: object())
 
-    executor = SubagentExecutor.__new__(SubagentExecutor)
-    executor.input_gate = None
-    executor.config = SimpleNamespace(name="sub", skills=None, max_turns=25, tools=None, disallowed_tools=["task"])
-    executor.model_name = "m"
-    executor.thinking_enabled = False
-    executor.reasoning_effort = None
-    executor.app_config = app_config
-    executor._resolved_app_config = app_config
-    executor._available_skill_names = None
-    executor._skill_authorization = None
-    executor._stop_reason_middlewares = []
-    executor.extensions = None
-    executor.trace_id = "test-trace"
-    executor.user_id = "user-123"
-    executor.trace_id = "test-trace"
-    executor.user_role = "user"
-    executor.oauth_provider = None
-    executor.oauth_id = None
-    executor.channel_user_id = None
-    executor.is_internal = False
-    executor.authz_attributes = None
-    executor.tools = []
-
+    executor = _make_subagent_executor(executor_module, app_config, monkeypatch)
     asyncio.run(executor._load_skills())
-    import asyncio
-
     asyncio.run(executor._create_agent(tools=[]))
 
     layer1 = filter_captured["authorization"]

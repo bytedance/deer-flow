@@ -37,6 +37,7 @@ class SubagentResponse(BaseModel):
     model: str = "inherit"
     thinking_enabled: bool | None = None
     reasoning_effort: str | None = None
+    reasoning_source: Literal["inherit", "model"] = "inherit"
     max_turns: int = 50
     timeout_seconds: int = 900
     enabled: bool = True
@@ -61,6 +62,7 @@ class ManagedSubagentCreateRequest(BaseModel):
     model: str = "inherit"
     thinking_enabled: bool | None = None
     reasoning_effort: str | None = None
+    reasoning_source: Literal["inherit", "model"] = "inherit"
     max_turns: int = Field(default=50, ge=1)
     timeout_seconds: int = Field(default=900, ge=1)
     enabled: bool = True
@@ -76,6 +78,7 @@ class ManagedSubagentUpdateRequest(BaseModel):
     model: str | None = None
     thinking_enabled: bool | None = None
     reasoning_effort: str | None = None
+    reasoning_source: Literal["inherit", "model"] | None = None
     max_turns: int | None = Field(default=None, ge=1)
     timeout_seconds: int | None = Field(default=None, ge=1)
     enabled: bool | None = None
@@ -100,7 +103,7 @@ def _explicit_overrides(name: str, app_config) -> dict[str, Any]:
     if override is None:
         return {}
     result: dict[str, Any] = {}
-    for field in ("timeout_seconds", "max_turns", "model", "thinking_enabled", "reasoning_effort", "skills"):
+    for field in ("timeout_seconds", "max_turns", "model", "thinking_enabled", "reasoning_effort", "reasoning_source", "skills"):
         if field not in override.model_fields_set:
             continue
         value = getattr(override, field)
@@ -127,6 +130,7 @@ def _catalog(include_system_prompt: bool) -> SubagentsListResponse:
                 model=definition.model,
                 thinking_enabled=definition.thinking_enabled,
                 reasoning_effort=definition.reasoning_effort,
+                reasoning_source=definition.reasoning_source,
                 max_turns=definition.max_turns,
                 timeout_seconds=definition.timeout_seconds,
                 source="builtin",
@@ -146,6 +150,7 @@ def _catalog(include_system_prompt: bool) -> SubagentsListResponse:
                 model=definition.model,
                 thinking_enabled=definition.thinking_enabled,
                 reasoning_effort=definition.reasoning_effort,
+                reasoning_source=definition.reasoning_source,
                 max_turns=definition.max_turns,
                 timeout_seconds=definition.timeout_seconds,
                 source="config",

@@ -14,7 +14,7 @@ from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextvars import Context, copy_context
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -40,6 +40,7 @@ from deerflow.config.app_config import AppConfig
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.models import create_chat_model
+from deerflow.models.factory import get_effective_reasoning_effort
 from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.skills.types import Skill
@@ -1008,6 +1009,10 @@ class SubagentExecutor:
         input_gate: Any | None = None,
         agent_mcp_authority: Any | None = None,
         principal_resolver: Callable[[], Awaitable[Principal]] | None = None,
+        *,
+        parent_thinking_enabled: bool | None = None,
+        parent_reasoning_effort: str | None = None,
+        parent_effort_aliases: dict[str, str] | None = None,
     ):
         """Initialize the executor.
 
@@ -1018,6 +1023,9 @@ class SubagentExecutor:
                 back to ``get_app_config()`` (matches the lead-agent factory's
                 pattern).
             parent_model: The parent agent's model name for inheritance.
+            parent_thinking_enabled: Parent's effective thinking preference at dispatch.
+            parent_reasoning_effort: Parent's effective effort at dispatch.
+            parent_effort_aliases: Parent's generic effort aliases captured at dispatch.
             sandbox_state: Sandbox state from parent agent.
             thread_data: Thread data from parent agent.
             uploaded_files: Snapshot of files uploaded in the parent's current
@@ -1078,9 +1086,12 @@ class SubagentExecutor:
             self.model_name: str | None = resolve_subagent_model_name(config, parent_model, app_config=app_config)
         else:
             self.model_name = None
-        # Resolve thinking_enabled: config explicit > False
-        self.thinking_enabled = config.thinking_enabled if config.thinking_enabled is not None else False
-        # Resolve reasoning_effort: config explicit > None
+        self.parent_thinking_enabled = parent_thinking_enabled
+        self.parent_reasoning_effort = parent_reasoning_effort
+        self.parent_effort_aliases = parent_effort_aliases
+        self._effective_reasoning = None
+        self._effort_aliases: dict[str, str] | None = None
+        self.thinking_enabled = config.thinking_enabled
         self.reasoning_effort = config.reasoning_effort
 
         self.sandbox_state = sandbox_state
@@ -1202,13 +1213,27 @@ class SubagentExecutor:
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
         from deerflow.models.reasoning import ReasoningPolicyError, resolve_reasoning_contract, resolve_reasoning_request
+        from deerflow.subagents.reasoning import resolve_subagent_reasoning
 
         get_model_config = getattr(app_config, "get_model_config", None)
         model_config = get_model_config(self.model_name) if callable(get_model_config) else None
         if model_config is None:
             model_config = next((profile for profile in getattr(app_config, "models", []) if profile.name == self.model_name), None)
         try:
-            effective_reasoning = resolve_reasoning_request(resolve_reasoning_contract(model_config), thinking_enabled=self.thinking_enabled, reasoning_effort=self.reasoning_effort)
+            parent_model_config = get_model_config(self.parent_model) if self.parent_effort_aliases is None and callable(get_model_config) and self.parent_model else None
+            request = resolve_subagent_reasoning(
+                self.config,
+                model_config,
+                parent_model_config=parent_model_config,
+                parent_model_name=self.parent_model,
+                parent_thinking_enabled=self.parent_thinking_enabled,
+                parent_reasoning_effort=self.parent_reasoning_effort,
+                parent_effort_aliases=self.parent_effort_aliases,
+            )
+            self.thinking_enabled = request.thinking_enabled
+            self.reasoning_effort = request.reasoning_effort
+            contract = resolve_reasoning_contract(model_config)
+            effective_reasoning = resolve_reasoning_request(contract, thinking_enabled=self.thinking_enabled, reasoning_effort=self.reasoning_effort)
         except ReasoningPolicyError as exc:
             raise ValueError(f"Model {self.model_name}: {exc}") from exc
         # Preserve the original request for the factory's validation and logs.
@@ -1222,6 +1247,9 @@ class SubagentExecutor:
             app_config=app_config,
             attach_tracing=False,
         )
+        effective_reasoning = replace(effective_reasoning, reasoning_effort=get_effective_reasoning_effort(model, effective_reasoning.reasoning_effort))
+        self._effective_reasoning = effective_reasoning
+        self._effort_aliases = dict(contract.effort.aliases) if contract.effort is not None else {}
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
@@ -1998,6 +2026,14 @@ class SubagentExecutor:
                 "recursion_limit": self._recursion_limit if self._recursion_limit is not None else self.config.max_turns,
                 "callbacks": [collector],
                 "tags": [collector_caller],
+                # LangGraph merges these keys into the parent's metadata so
+                # nested delegation keeps the caller's scope and tracing.
+                "metadata": {
+                    "model_name": self.model_name,
+                    "thinking_enabled": self._effective_reasoning.thinking_enabled if self._effective_reasoning else self.thinking_enabled,
+                    "reasoning_effort": self._effective_reasoning.reasoning_effort if self._effective_reasoning else self.reasoning_effort,
+                    "reasoning_effort_aliases": self._effort_aliases,
+                },
             }
 
             # Inject tracing callbacks at the graph level so a single subagent run
