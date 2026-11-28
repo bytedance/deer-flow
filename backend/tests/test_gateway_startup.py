@@ -69,7 +69,7 @@ def test_production_gateway_has_a_real_readiness_probe() -> None:
     compose = _read("docker/docker-compose.yaml")
 
     assert "healthcheck:" in compose
-    assert "http://127.0.0.1:8001/health" in compose
+    assert "'http://127.0.0.1:8001/health/ready'" in compose
     assert "gateway:\n        condition: service_healthy" in compose
 
 
@@ -96,6 +96,7 @@ def test_deploy_waits_for_gateway_readiness_before_success(tmp_path: Path) -> No
     assert "--wait" in args
     assert "--wait-timeout" in args
     assert "DeerFlow is running!" in result.stdout
+    assert "make prod-logs" in result.stdout
 
 
 @requires_script_bash

@@ -147,6 +147,14 @@ DeerFlow がまだ clone されていなければ先に clone してから、htt
        api_key: $OPPER_API_KEY
        base_url: https://api.opper.ai/v3/compat
 
+     - name: nvidia-nemotron-3.5-super-vl
+       display_name: Nemotron 3.5 Super VL 120B (NVIDIA NIM)
+       use: langchain_openai:ChatOpenAI
+       model: nvidia/nemotron-3.5-super-vl-120b-a12b
+       api_key: $NVIDIA_API_KEY
+       base_url: https://integrate.api.nvidia.com/v1
+       supports_vision: true
+
      - name: gpt-5-responses
        display_name: GPT-5 (Responses API)
        use: langchain_openai:ChatOpenAI

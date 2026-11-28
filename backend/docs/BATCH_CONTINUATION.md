@@ -43,11 +43,11 @@ Inspect the external system before arranging further work.
 Migration `0053_batch_recovery` adds nullable policy, attempt and dispatch fields;
 legacy batches retain `retry`. Upgrade all batch workers before enabling this
 policy. Downgrade is refused while conservative work or unknown outcomes remain
-outstanding. To roll back from `0061_merge_batch_recovery` to the upstream
-`0060_coordination_run_settings` schema, use the Alembic downgrade target
+outstanding. To roll back from `0065_merge_batch_recovery` to the upstream
+`0064_coordination_channel_origin` schema, use the Alembic downgrade target
 `0053_batch_recovery@0052_batch_continuation`. This removes the batch recovery
-columns and keeps the sharing, coordination run settings, and MCP browser OAuth
-tables.
+columns while preserving the upstream schema, including coordination task
+channel origins.
 
 There is no guarantee of exactly-once external effects: the regression
 establishes that this crash recovery path does not repeat the write.

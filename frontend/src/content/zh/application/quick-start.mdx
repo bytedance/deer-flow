@@ -16,13 +16,7 @@ import { Callout, Steps } from "nextra/components";
 
 ## 前置条件
 
-检查所有必需工具是否已安装：
-
-```bash
-make check
-```
-
-必需工具：
+安装 Git、Make 和以下工具：
 
 | 工具    | 最低版本     |
 | ------- | ------------ |
@@ -45,6 +39,14 @@ git clone https://github.com/bytedance/deer-flow.git
 cd deer-flow
 ```
 
+### 检查工具
+
+在仓库根目录运行：
+
+```bash
+make check
+```
+
 ### 安装依赖
 
 ```bash
@@ -56,8 +58,11 @@ make install
 ### 创建配置文件
 
 ```bash
-cp config.example.yaml config.yaml
+make config
 ```
+
+此命令会从模板创建 `config.yaml`，并在仓库根目录和前端目录中创建缺失的
+`.env` 文件。
 
 然后编辑 `config.yaml` 至少添加一个模型：
 

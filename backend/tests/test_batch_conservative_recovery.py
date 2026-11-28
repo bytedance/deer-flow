@@ -200,7 +200,11 @@ async def test_supervisor_uncertainty_requires_current_dispatched_claim(repo):
     assert await repo.mark_item_dispatch_started(item["id"], lease_owner="worker", now=now)
     assert not await repo.mark_item_dispatch_started(item["id"], lease_owner="worker", now=now)
     assert not await repo.mark_item_outcome_unknown(item["id"], lease_owner="other", error="lost result", now=now)
-    assert await repo.mark_item_outcome_unknown(item["id"], lease_owner="worker", error="lost result", now=now)
+    unknown_attempt = dict(lease_owner="worker", error="lost result", now=now, token_usage={"total_tokens": 17}, model_name="child-model")
+    assert await repo.mark_item_outcome_unknown(item["id"], **unknown_attempt)
+    assert not await repo.mark_item_outcome_unknown(item["id"], **unknown_attempt)
+    [usage] = await repo.list_item_token_usage(user_id="owner", thread_id="thread")
+    assert usage["total_tokens"] == 17 and usage["model_name"] == "child-model"
     saved = (await repo.list_items("batch", user_id="owner"))[0]
     assert saved["status"] == "outcome_unknown" and saved["error"] == "lost result"
     cancelled = await repo.cancel_batch("batch", user_id="owner")

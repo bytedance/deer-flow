@@ -59,6 +59,21 @@ def _blank_to_none(value: str | None) -> str | None:
     return stripped or None
 
 
+DEFAULT_GITHUB_AUTHOR_ASSOCIATIONS: tuple[str, ...] = ("OWNER", "MEMBER", "COLLABORATOR")
+VALID_GITHUB_AUTHOR_ASSOCIATIONS: frozenset[str] = frozenset(
+    {
+        "OWNER",
+        "MEMBER",
+        "COLLABORATOR",
+        "CONTRIBUTOR",
+        "FIRST_TIME_CONTRIBUTOR",
+        "FIRST_TIMER",
+        "MANNEQUIN",
+        "NONE",
+    }
+)
+
+
 class GitHubTriggerConfig(BaseModel):
     """Per-event trigger filter inside a :class:`GitHubBinding`."""
 
@@ -69,9 +84,17 @@ class GitHubTriggerConfig(BaseModel):
     # If True, comment events only fire when the bot login is @-mentioned in
     # the comment body. Ignored on non-comment events.
     require_mention: bool = False
-    # GitHub logins whose events bypass require_mention. Lets a repo owner
-    # talk to the bot without typing the handle every time.
+    # GitHub logins explicitly authorized to trigger this agent. Case-insensitive.
     allow_authors: list[str] = Field(default_factory=list)
+    # Whether logins in allow_authors bypass require_mention. Defaults to True
+    # for backward compatibility; set to False to use allow_authors strictly as
+    # an authorization allowlist while still requiring an @mention.
+    allow_authors_bypass_mention: bool = True
+    # GitHub author_association values authorized to trigger this agent when
+    # the webhook sender is not listed in allow_authors. Defaults to
+    # repository owners, org members, and collaborators (fail-closed for
+    # external users). Set to [] to require an explicit allow_authors match.
+    allow_author_associations: list[str] = Field(default_factory=lambda: list(DEFAULT_GITHUB_AUTHOR_ASSOCIATIONS))
     # Override the global default bot mention login for this trigger only.
     # Useful when one agent answers as @bot-a and another as @bot-b. A
     # whitespace-only value is normalized to None (see ``_blank_to_none``) so
@@ -83,6 +106,34 @@ class GitHubTriggerConfig(BaseModel):
     @classmethod
     def _normalize_mention_login(cls, value: str | None) -> str | None:
         return _blank_to_none(value)
+
+    @field_validator("allow_authors", mode="before")
+    @classmethod
+    def _coerce_null_allow_authors(cls, value: object) -> object:
+        return [] if value is None else value
+
+    @field_validator("allow_authors")
+    @classmethod
+    def _normalize_allow_authors(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for entry in value:
+            stripped = entry.strip()
+            if stripped:
+                normalized.append(stripped)
+        return normalized
+
+    @field_validator("allow_author_associations")
+    @classmethod
+    def _normalize_allow_author_associations(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for entry in value:
+            association = entry.strip().upper()
+            if association not in VALID_GITHUB_AUTHOR_ASSOCIATIONS:
+                valid = ", ".join(sorted(VALID_GITHUB_AUTHOR_ASSOCIATIONS))
+                raise ValueError(f"Unknown GitHub author_association {entry!r}; expected one of: {valid}")
+            if association not in normalized:
+                normalized.append(association)
+        return normalized
 
 
 class GitHubBinding(BaseModel):

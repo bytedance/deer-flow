@@ -136,4 +136,6 @@ jobs:
           # exercised in CI.
           DEERFLOW_TEST_WORKFLOW_POSTGRES: ${{ env.TEST_POSTGRES_URI }}
           DEDUPE_TEST_POSTGRES_URL: ${{ env.TEST_POSTGRES_URI }}
+          # Exercise the bundled chart with its own PostgreSQL image and disposable volumes.
+          DEERFLOW_TEST_HELM_POSTGRES: "1"
         run: make test-shard SPLITS=${{ strategy.job-total }} GROUP=${{ matrix.shard }}

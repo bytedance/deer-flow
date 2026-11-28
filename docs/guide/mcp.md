@@ -2,6 +2,14 @@
 
 Tool steps mark explicit execution failures. Scheduled-task steps show completed
 operations only after a valid response, rather than when the request is issued.
+MCP and other unrecognized tool steps, and the `ls`, `read_file`, `write_file`,
+`str_replace` and `bash` steps, take their label from the call's `description`
+argument when it is a non-empty string. When it is missing, empty or another
+type, such as an object, the step shows its default label; for an MCP tool that
+is `Use "<tool>" tool`. Search, web fetch and the other built-in steps keep
+their own labels. A running subagent's card header shows a search call's
+`query`, and without a string `query` it shows the description or the tool
+name.
 
 In the chat UI, enable **Token Usage → Debug** to inspect generic/MCP tool calls.
 Each **Tool details** panel starts collapsed and shows the tool name, call ID,
@@ -31,18 +39,23 @@ For stdio file outputs, a bare filename is linked to a uniquely matching file cr
 For HTTP/SSE background-task calls, `session_init_timeout` separately bounds connection setup (including the SSE endpoint event) and MCP initialization together; it stops applying once the tool call begins. Initialization deadline errors identify the server and configured time limit.
 Ordinary `task` subagents retain the parent run's captured thread incarnation for MCP calls, including legacy threads, so delegation preserves the same lifecycle scope.
 MCP tool names are prefixed with `<server_name>_` by default to prevent collisions across servers. If a server already namespaces its own tools, set `tool_name_prefix: false` on that server in `extensions_config.json` to keep the original names. Disable the prefix only when the resulting names remain unique across all enabled servers.
-Signed-in users' notification toggle, default model, conversation mode, and reasoning effort are saved to their account and restored on other browsers or after clearing browser storage. Browser notification permission still needs to be granted on each device. Changes retry after network failures; unsent changes survive a reload in the same tab. Concurrent edits to different fields are preserved; for the same field, the last server write wins. Existing unscoped browser preferences are not uploaded automatically because they have no account owner; reselect those settings once after upgrading. Static demos and auth-disabled development keep browser-local settings. Thread-specific model overrides and other display preferences remain local.
+Signed-in users' notification toggle, default model, conversation mode, and reasoning effort are saved to their account and restored on other browsers or after clearing browser storage. Browser notification permission still needs to be granted on each device. When a run finishes while the chat is in the background, the browser notification is skipped if the browser refuses to create it. Chrome for Android, for example, creates notifications only from a service worker, and DeerFlow does not register one. The finished run is unaffected. Changes retry after network failures; unsent changes survive a reload in the same tab. Concurrent edits to different fields are preserved; for the same field, the last server write wins. Existing unscoped browser preferences are not uploaded automatically because they have no account owner; reselect those settings once after upgrading. Static demos and auth-disabled development keep browser-local settings. Thread-specific model overrides and other display preferences remain local.
 
 In a new chat, the submitted question stays above its streamed reasoning and
 tool steps while the server creates the conversation and confirms the message.
 
-While a Web task is running, choose **Queue** to send text for the next turn or
-**Steer** to update the current work. Native subagents pause at a safe boundary
+While a Web task is running, choose **Queue** to send a message for the next turn or
+**Steer** to update the current work with text. A queued Web chat message can include
+uploaded files. The queue shows their names and makes them available when that
+message's run starts, keeping the original names when available. If publication
+fails, **Send again** reuses the staged files. Removing the message discards them.
+Managed worker updates accept text only. Native subagents pause at a safe boundary
 while the main Agent handles the update; active tool calls finish first. Stop
-keeps the Goal, while explicitly replacing the work can clear it. Unapplied
+keeps the Goal. Replacing the work clears its Goal and old todos. A plan saved
+while the run is paused is preserved when the run resumes. Unapplied
 messages survive database-backed Gateway restarts and require **Send again**;
 interrupted child side effects are not replayed automatically. Existing execution
-limits still apply. Busy input currently accepts text only.
+limits still apply.
 If a run rejects an update because it has finished, retrying the retained draft
 during the next run targets that run. Uncertain network failures retain the
 original submission identity so retries can reconcile the same accepted input.

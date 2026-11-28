@@ -411,6 +411,33 @@ def _validate_agent_storage(config: AppConfig) -> None:
         )
 
 
+def _validate_provisioner_environment(config: AppConfig) -> None:
+    """Refuse a ``sandbox.environment`` map the provisioner would reject.
+
+    The sandbox provider is built lazily, so the map used to pass startup and
+    fail on the first sandbox create instead: no Pod appeared, the upload path
+    turned the resulting ``ValueError`` into a 400 against a request that was
+    fine, and ``/health/ready`` still reported ready. The limits checked here
+    are the provisioner's own, applied to the same filtered map the backend
+    forwards, and sandbox allocation itself stays lazy.
+    """
+    from app.gateway.health import resolve_provisioner_url
+
+    sandbox = getattr(config, "sandbox", None)
+    if resolve_provisioner_url(config) is None or not str(getattr(sandbox, "use", "")).endswith(":AioSandboxProvider"):
+        return
+    environment = dict(getattr(sandbox, "environment", None) or {})
+    if not environment:
+        return
+
+    from deerflow.community.aio_sandbox.remote_backend import check_provisioner_environment, operator_provisioner_environment
+
+    try:
+        check_provisioner_environment(operator_provisioner_environment(environment))
+    except ValueError as exc:
+        raise SystemExit(f"{exc}. Correct sandbox.environment in config.yaml, or remove it to use the image defaults.") from None
+
+
 def _probe_managed_subagent_file_storage() -> None:
     """Warn early if this volume cannot support create-only publication."""
     from deerflow.config.paths import get_paths
@@ -868,6 +895,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     # Reject agent_storage.backend='db' on a non-durable database, and warn on
     # node-divergent file storage under multi-worker Postgres.
     _validate_agent_storage(startup_config)
+    # Reject a sandbox.environment map the provisioner cannot accept while the
+    # provider is still unbuilt, so the failure lands on the setting upstream of
+    # the first sandbox create instead of on a request that did nothing wrong.
+    _validate_provisioner_environment(startup_config)
     if getattr(getattr(startup_config, "agent_storage", None), "backend", None) == "file":
         await asyncio.to_thread(_probe_managed_subagent_file_storage)
     # Warn when login lockouts stay per-process under several Gateway processes.

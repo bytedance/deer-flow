@@ -53,6 +53,26 @@ def test_model_command_is_a_known_channel_command():
     assert not is_known_channel_command("/modeling stuff")
 
 
+@pytest.mark.parametrize(
+    ("text", "is_command"),
+    [
+        ("/task start Write a report", True),
+        ("/task START Write a report", True),
+        ("/TASK start", True),
+        ("/task   start\nline2", True),
+        ("/task", False),
+        ("/task Summarize the meeting notes", False),
+        ("/task starting now", False),
+        (" /task start x", False),
+        ("/tasks start x", False),
+    ],
+)
+def test_feishu_task_command_requires_exact_start_subcommand(text, is_command):
+    from app.channels.commands import is_feishu_task_command
+
+    assert is_feishu_task_command(text) is is_command
+
+
 def test_strip_leading_mentions_only_drops_flush_leading_mentions():
     from app.channels.commands import is_known_channel_command, strip_leading_mentions
 
@@ -175,6 +195,9 @@ async def _wait_for(condition, *, timeout=5.0, interval=0.05):
 
 
 class TestMessageBus:
+    def test_coordination_tasks_are_disabled_by_default(self):
+        assert MessageBus().coordination_tasks_enabled is False
+
     def test_publish_and_get_inbound(self):
         bus = MessageBus()
 
@@ -3079,6 +3102,47 @@ class TestChannelManager:
 
             assert outbound_received[0].text == "Active thread: topic-thread"
             assert outbound_received[0].thread_id == "topic-thread"
+
+        _run(go())
+
+    @pytest.mark.parametrize(
+        ("coordination_enabled", "text"),
+        [
+            (False, "/task Summarize the meeting notes"),
+            (True, "/task Summarize the meeting notes"),
+            (False, "/task start the migration"),
+        ],
+    )
+    def test_feishu_task_command_falls_back_to_enabled_skill(self, tmp_path, coordination_enabled, text):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            dispatch = AsyncMock() if coordination_enabled else None
+            manager = ChannelManager(bus=bus, store=JsonChannelStore(tmp_path / "store.json"), dispatch_coordination_task=dispatch)
+            manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "task")])
+            manager._handle_chat = AsyncMock()
+            outbound = AsyncMock()
+            bus.subscribe_outbound(outbound)
+            msg = InboundMessage(
+                channel_name="feishu",
+                chat_id="chat",
+                user_id="user",
+                text=text,
+                msg_type=InboundMessageType.COMMAND,
+                metadata={"chat_type": "p2p"},
+            )
+
+            await manager._handle_command(msg)
+
+            manager._handle_chat.assert_awaited_once()
+            (chat_msg,), kwargs = manager._handle_chat.await_args
+            assert kwargs == {"bound_identity_checked": True}
+            assert chat_msg.msg_type == InboundMessageType.CHAT
+            assert chat_msg.text == text
+            outbound.assert_not_awaited()
+            if dispatch is not None:
+                dispatch.assert_not_awaited()
 
         _run(go())
 
@@ -8502,6 +8566,77 @@ class TestDiscordChannel:
 
 
 class TestFeishuChannel:
+    @pytest.mark.parametrize(
+        ("coordination_enabled", "text", "chat_type", "reply"),
+        [
+            pytest.param(False, "/task Summarize the meeting notes", "p2p", None, id="disabled-skill"),
+            pytest.param(False, "/task start the migration", "p2p", None, id="disabled-start"),
+            pytest.param(True, "/task Summarize the meeting notes", "p2p", None, id="enabled-skill"),
+            pytest.param(True, "/task", "p2p", None, id="enabled-bare-task"),
+            pytest.param(True, "/task start", "p2p", "Usage: /task start <objective> (up to 16,384 characters)", id="missing-objective"),
+            pytest.param(True, "/task start " + "x" * 16385, "p2p", "Usage: /task start <objective> (up to 16,384 characters)", id="oversized-objective"),
+            pytest.param(True, "/task START Write a report", "p2p", "Task ID: task-1\nStatus: queued", id="start-task"),
+            pytest.param(True, "@_user_1 /task start Write a report", "group", "Tasks are available in bound Feishu private chats.", id="group-start"),
+        ],
+    )
+    def test_feishu_task_command_routes_to_chat_or_coordination(self, tmp_path, coordination_enabled, text, chat_type, reply):
+        from app.channels.feishu import FeishuChannel
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            dispatch = AsyncMock(return_value={"task": {"id": "task-1", "status": "queued"}, "authorization_required": False}) if coordination_enabled else None
+            manager = ChannelManager(bus=bus, store=JsonChannelStore(tmp_path / "store.json"), dispatch_coordination_task=dispatch)
+            manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "task")])
+            manager._handle_message = AsyncMock(wraps=manager._handle_message)
+            client = _make_mock_langgraph_client()
+            client.runs.stream.return_value = _make_async_iterator([_make_stream_part("values", {"messages": [{"type": "ai", "content": "Hello from agent!"}]})])
+            manager._client = client
+            channel = FeishuChannel(bus, {})
+            channel._main_loop = asyncio.get_running_loop()
+            channel._open_threadsafe_future_intake()
+            event = MagicMock()
+            event.event.message.chat_id = "oc_chat"
+            event.event.message.chat_type = chat_type
+            event.event.message.message_id = "om_message"
+            event.event.message.root_id = event.event.message.parent_id = event.event.message.thread_id = None
+            event.event.message.content = json.dumps({"text": text})
+            event.event.sender.sender_id.open_id = "ou_user"
+            replies = asyncio.Queue()
+
+            async def capture_final(msg):
+                if msg.is_final:
+                    replies.put_nowait(msg.text)
+
+            bus.subscribe_outbound(capture_final)
+            await manager.start()
+            try:
+                await asyncio.to_thread(channel._on_message, event)
+                actual_reply = await asyncio.wait_for(replies.get(), timeout=5)
+            finally:
+                await channel.stop()
+                await manager.stop()
+
+            manager._handle_message.assert_awaited_once()
+            (inbound,) = manager._handle_message.await_args.args
+            if reply is None:
+                assert inbound.msg_type == InboundMessageType.CHAT
+                client.runs.stream.assert_called_once()
+                assert client.runs.stream.call_args.kwargs["input"]["messages"][0]["content"] == text
+                assert actual_reply == "Hello from agent!"
+            else:
+                assert inbound.msg_type == InboundMessageType.COMMAND
+                client.runs.stream.assert_not_called()
+                assert actual_reply == reply
+
+            if dispatch is not None:
+                if text == "/task START Write a report":
+                    dispatch.assert_awaited_once_with(inbound, request_id=manager._run_idempotency_key(inbound), objective="Write a report", notify_completion=True)
+                else:
+                    dispatch.assert_not_awaited()
+
+        _run(go())
+
     def test_prepare_inbound_publishes_without_waiting_for_running_card(self):
         from app.channels.feishu import FeishuChannel
 
@@ -10724,6 +10859,52 @@ class TestChannelService:
         assert not warning_records
 
     # -- restart_channel config reload tests (issue #3497) --
+
+    @pytest.mark.parametrize("coordination_enabled", [True, False])
+    def test_feishu_coordination_capability_survives_restart_and_reconfigure(self, monkeypatch, tmp_path, coordination_enabled):
+        from app.channels.feishu import FeishuChannel
+        from app.channels.service import ChannelService
+
+        initial_config = {"enabled": True, "app_id": "initial", "app_secret": "test"}
+        updated_config = {**initial_config, "app_id": "updated"}
+        dispatch = AsyncMock() if coordination_enabled else None
+        service = ChannelService(
+            channels_config={"feishu": initial_config},
+            store=JsonChannelStore(tmp_path / "store.json"),
+            dispatch_coordination_task=dispatch,
+        )
+
+        async def start_offline(channel):
+            channel._running = True
+            channel._thread = MagicMock()
+            channel._thread.is_alive.side_effect = lambda: channel._running
+
+        monkeypatch.setattr(FeishuChannel, "start", start_offline)
+        monkeypatch.setattr(service, "_load_channel_config", lambda name: initial_config)
+
+        async def go():
+            await service.start()
+            try:
+                original = service.get_channel("feishu")
+                assert original.bus is service.bus
+                assert original.bus.coordination_tasks_enabled is coordination_enabled
+
+                assert await service.restart_channel("feishu")
+                restarted = service.get_channel("feishu")
+                assert restarted is not original
+                assert restarted.bus is original.bus
+                assert restarted.bus.coordination_tasks_enabled is coordination_enabled
+
+                assert await service.configure_channel("feishu", updated_config)
+                reconfigured = service.get_channel("feishu")
+                assert reconfigured is not restarted
+                assert reconfigured.config["app_id"] == "updated"
+                assert reconfigured.bus is restarted.bus
+                assert reconfigured.bus.coordination_tasks_enabled is coordination_enabled
+            finally:
+                await service.stop()
+
+        _run(go())
 
     def test_restart_channel_reloads_config_from_disk(self, monkeypatch):
         """restart_channel reads the latest config via get_app_config()."""

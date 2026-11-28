@@ -101,14 +101,12 @@ The `docker-compose*.yaml` files include an `env_file: ../.env` directive that l
 
 ### Data persistence
 
-Thread data is stored in `backend/.deer-flow/threads/`. In Docker deployments, this directory is bind-mounted into the gateway container.
+Both bundled Compose stacks use `/app/backend/.deer-flow` as the Gateway's runtime directory. The host path depends on how you start the stack.
 
-To avoid data loss when containers are recreated:
+- With development Compose (`make docker-start`), the checkout's `backend/` directory is bind-mounted at `/app/backend/`, so runtime files are under `backend/.deer-flow/` on the host.
+- With production Compose (`make up`), the host directory selected by `DEER_FLOW_HOME` is bind-mounted at `/app/backend/.deer-flow`. The launcher defaults to the checkout's `backend/.deer-flow/`. To use a different location, pass an absolute, writable host path in the shell, for example `DEER_FLOW_HOME=/srv/deer-flow-data make up`.
 
-1. Set `DEER_FLOW_ROOT` to the absolute repo root path (or a stable host path).
-2. Verify the `threads/` and `skills/` directories are mounted correctly.
-
-For production, use a named volume or a Persistent Volume Claim (PVC) instead of a host bind-mount.
+Keep and back up the entire host runtime directory. It contains user-scoped thread files under `users/<user-id>/threads/` and legacy thread files under `threads/`.
 
 ## Production deployment considerations
 
@@ -119,6 +117,7 @@ For production, use a named volume or a Persistent Volume Claim (PVC) instead of
 | `LocalSandboxProvider`                 | Single-user, trusted local workflows       |
 | `AioSandboxProvider` (Docker)          | Multi-user, moderate isolation requirement |
 | `E2BSandboxProvider` (e2b cloud)       | Hosted/serverless, no Docker/K8s ops, instant Jupyter |
+| `VeFaaSSandboxProvider` ([BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)) | Serverless AIO cloud sandbox with prewarm, pause/resume, snapshots, and TOS mounts |
 | `AioSandboxProvider` + K8s Provisioner | Production, strong isolation, multi-user   |
 
 For any deployment with more than one concurrent user, use a container-based sandbox to prevent users from interfering with each other's execution environments.
@@ -227,17 +226,13 @@ openssl rand -base64 32
 
 ## Deployment verification
 
-After starting, verify the deployment:
+From the host, check Gateway readiness through the nginx address you use for the workspace. The example uses the default `localhost:2026`. If you changed the Compose port, use the host port reported by `docker port deer-flow-nginx 2026/tcp`.
 
 ```bash
-# Check Gateway health
-curl http://localhost:8001/health
-
-# List configured models (through nginx)
-curl http://localhost:2026/api/models
+curl -i http://localhost:2026/health/ready
 ```
 
-A working deployment returns a `200` response from each endpoint. The `/api/models` call returns the list of models from your `config.yaml`.
+A ready Gateway returns HTTP 200 and `"status": "ready"`. HTTP 503 with `"status": "degraded"` means a required dependency check failed. This endpoint is public. Listing models at `/api/models` requires credentials when authentication is enabled.
 
 <Cards num={2}>
   <Cards.Card title="Configuration" href="/docs/application/configuration" />

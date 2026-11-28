@@ -6,6 +6,7 @@ Supports schema inspection, SQL queries, statistical summaries, and result expor
 """
 
 import argparse
+import glob
 import hashlib
 import json
 import logging
@@ -43,13 +44,17 @@ CACHE_DIR = os.path.join(tempfile.gettempdir(), ".data-analysis-cache")
 
 def compute_files_hash(files: list[str]) -> str:
     """Hash the ordered names and contents that determine the loaded table map."""
-    # A new namespace also prevents reuse of maps built by the old allocator.
-    hasher = hashlib.sha256(b"data-analysis-inputs-v2\0")
+    # Older generations could silently omit a requested input.
+    hasher = hashlib.sha256(b"data-analysis-inputs-v3\0")
     for file_path in files:
         name = os.fsencode(os.path.basename(file_path))
         hasher.update(len(name).to_bytes(8, "big"))
         hasher.update(name)
-        if os.path.splitext(file_path)[1].lower() == ".xls":
+        extension = os.path.splitext(file_path)[1].lower()
+        if extension == ".csv":
+            # Older generations may contain rows from a glob-matched neighbor.
+            hasher.update(b"literal-csv-path\0")
+        elif extension == ".xls":
             # Rebuild legacy caches that might have dropped a mixed-type sheet.
             hasher.update(b"legacy-xls-v2\0")
         file_hasher = hashlib.sha256()
@@ -246,8 +251,7 @@ def load_files(con: duckdb.DuckDBPyConnection, files: list[str]) -> dict[str, st
 
     for file_path in files:
         if not os.path.exists(file_path):
-            logger.error(f"File not found: {file_path}")
-            continue
+            raise ValueError(f"File not found: {file_path}")
 
         ext = os.path.splitext(file_path)[1].lower()
 
@@ -256,7 +260,7 @@ def load_files(con: duckdb.DuckDBPyConnection, files: list[str]) -> dict[str, st
         elif ext == ".csv":
             _load_csv(con, file_path, table_map)
         else:
-            logger.warning(f"Unsupported file format: {ext} ({file_path})")
+            raise ValueError(f"Unsupported file format: {ext} ({file_path})")
 
     return table_map
 
@@ -359,6 +363,29 @@ def _load_legacy_excel(
                 logger.warning(f"  Failed to load sheet '{sheet_name}': {e}")
 
 
+@contextmanager
+def _csv_source(file_path: str):
+    """Give DuckDB one local file, even when its name looks like a glob."""
+    path = str(Path(file_path).absolute())
+    pattern = glob.escape(path)
+    if pattern == path:
+        yield path
+    elif int(duckdb.__version__.split(".")[0]) >= 2:
+        # DuckDB accepts a list of explicit file entries without expanding globs.
+        yield [{"filename": path}]
+    elif os.name == "nt" or "\\" not in path:
+        yield pattern
+    else:
+        # Older glob readers split even POSIX filenames on literal backslashes.
+        with tempfile.TemporaryDirectory() as directory:
+            alias = Path(directory) / "input.csv"
+            try:
+                alias.symlink_to(path)
+            except OSError:
+                shutil.copyfile(path, alias)
+            yield glob.escape(str(alias))
+
+
 def _load_csv(
     con: duckdb.DuckDBPyConnection, file_path: str, table_map: dict[str, str]
 ) -> None:
@@ -367,13 +394,11 @@ def _load_csv(
     alias, table_name = _allocate_table_names(base_name, table_map)
 
     try:
-        con.execute(
-            f"""
-            CREATE TABLE {_quote_identifier(table_name)} AS
-            SELECT * FROM read_csv_auto(?)
-        """,
-            [file_path],
-        )
+        with _csv_source(file_path) as source:
+            con.execute(
+                f"CREATE TABLE {_quote_identifier(table_name)} AS SELECT * FROM read_csv_auto(?)",
+                [source],
+            )
         table_map[alias] = table_name
         row_count = con.execute(
             f"SELECT COUNT(*) FROM {_quote_identifier(table_name)}"
@@ -381,8 +406,9 @@ def _load_csv(
         logger.info(
             f"  Loaded CSV '{base_name}' -> table '{table_name}' ({row_count} rows)"
         )
-    except Exception as e:
-        logger.warning(f"  Failed to load CSV '{base_name}': {e}")
+    except (duckdb.Error, OSError) as e:
+        reason = str(e).strip().split("\n", 1)[0]
+        raise ValueError(f"Failed to load CSV '{file_path}': {reason}") from e
 
 
 def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) -> str:
@@ -752,7 +778,8 @@ def main():
             elif args.action == "summary":
                 action_summary(con, args.table, table_map)
     except ValueError as exc:
-        sys.exit(f"Error: {exc}")
+        logger.error("Error: %s", exc)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

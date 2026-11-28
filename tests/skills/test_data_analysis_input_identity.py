@@ -270,6 +270,38 @@ def test_csv_paths_are_bound_as_values(analysis, tmp_path):
         assert con.execute("SELECT value FROM sales_2026").fetchall() == [(7,)]
 
 
+@pytest.mark.parametrize(
+    "requested, neighbor",
+    [
+        ("orders[1].csv", "orders1.csv"),
+        ("batch[1]/orders.csv", "batch1/orders.csv"),
+        pytest.param(
+            "orders*?.csv",
+            "orders12.csv",
+            marks=pytest.mark.skipif(
+                os.name == "nt", reason="invalid Windows filename"
+            ),
+        ),
+        pytest.param(
+            r"west\orders[1].csv",
+            "west/orders1.csv",
+            marks=pytest.mark.skipif(
+                os.name == "nt", reason="backslash is a separator"
+            ),
+        ),
+    ],
+)
+def test_csv_import_reads_only_the_named_file(analysis, tmp_path, requested, neighbor):
+    selected = tmp_path / requested
+    other = tmp_path / neighbor
+    csv_file(selected.parent, selected.name, 20)
+    csv_file(other.parent, other.name, 900)
+    with duckdb.connect() as con:
+        tables = analysis["load_files"](con, [str(selected)])
+        table = tables[selected.stem]
+        assert con.execute(f'SELECT value FROM "{table}"').fetchall() == [(20,)]
+
+
 def test_inspect_and_summary_handle_quoted_headers(analysis, tmp_path):
     import csv
 

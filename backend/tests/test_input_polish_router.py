@@ -1,13 +1,18 @@
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage
 
 from app.gateway.routers import input_polish
+from deerflow.config.app_config import AppConfig
+from deerflow.config.model_config import ModelConfig
+from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.utils import oneshot_llm
 
 
@@ -90,6 +95,52 @@ def test_polish_input_uses_default_model_when_config_model_is_missing(monkeypatc
     assert result.rewritten_text == "Make this clearer."
     create_chat_model.assert_called_once()
     assert create_chat_model.call_args.kwargs["name"] is None
+
+
+def test_polish_input_preserves_unicode_separators_in_fenced_json():
+    draft = json.dumps({"text": "first\u0085second\u2028third\u2029last"}, ensure_ascii=False)
+    content = f"```json\n{draft}\n```"
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-polish",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "offline-model",
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+            },
+        )
+
+    async def polish():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            config = AppConfig(
+                models=[
+                    ModelConfig(
+                        name="offline-model",
+                        use="langchain_openai:ChatOpenAI",
+                        model="offline-model",
+                        base_url="https://model.invalid/v1",
+                        api_key="test-key",
+                        http_async_client=client,
+                        use_responses_api=False,
+                    )
+                ],
+                sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            )
+            return await input_polish.polish_input.__wrapped__(input_polish.InputPolishRequest(text=draft), request=None, config=config)
+
+    result = asyncio.run(polish())
+
+    assert len(requests) == 1
+    assert requests[0]["model"] == "offline-model"
+    assert draft in requests[0]["messages"][-1]["content"]
+    assert result.rewritten_text == draft
+    assert json.loads(result.rewritten_text) == json.loads(draft)
+    assert result.changed is False
 
 
 def test_polish_input_returns_404_when_disabled(monkeypatch):

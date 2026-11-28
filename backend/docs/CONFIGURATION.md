@@ -272,6 +272,16 @@ models:
     temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
     supports_vision: true
 
+  - name: minimax-m3.1-flash
+    display_name: MiniMax M3.1 Flash
+    use: langchain_openai:ChatOpenAI
+    model: MiniMax-M3.1-Flash
+    api_key: $MINIMAX_API_KEY
+    base_url: https://api.minimax.io/v1
+    max_tokens: 4096
+    temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
+    supports_vision: true  # Thinking is always on (like M2.7); thinking.type=disabled is rejected
+
   - name: minimax-m2.7
     display_name: MiniMax M2.7
     use: langchain_openai:ChatOpenAI
@@ -297,6 +307,14 @@ models:
     model: google/gemini-2.5-flash-preview
     api_key: $OPENAI_API_KEY
     base_url: https://openrouter.ai/api/v1
+
+  - name: nvidia-nemotron-3.5-super-vl
+    display_name: Nemotron 3.5 Super VL 120B (NVIDIA NIM)
+    use: langchain_openai:ChatOpenAI
+    model: nvidia/nemotron-3.5-super-vl-120b-a12b
+    api_key: $NVIDIA_API_KEY
+    base_url: https://integrate.api.nvidia.com/v1
+    supports_vision: true
 ```
 
 If your OpenRouter key lives in a different environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
@@ -354,6 +372,7 @@ are:
 | `qwen-cn` | Alibaba Cloud Bailian / Qwen, China | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Chat Completions / Bearer |
 | `doubao` | Volcengine Beijing, ordinary API | `https://ark.cn-beijing.volces.com/api/v3` | Chat Completions / Bearer |
 | `doubao-coding` | Volcengine Coding Plan, separate key/plan | `https://ark.cn-beijing.volces.com/api/coding/v3` | Chat Completions / Bearer |
+| `byteplus-agent-plan` | BytePlus Agent Plan (Personal & Enterprise), separate key/plan | `https://ark.ap-southeast.bytepluses.com/api/plan/v3` | Chat Completions / Bearer |
 | `moonshot-cn` | Moonshot / Kimi, China API | `https://api.moonshot.cn/v1` | Chat Completions / Bearer |
 | `zhipu-cn` | Zhipu, China ordinary API | `https://open.bigmodel.cn/api/paas/v4` | Chat Completions / Bearer |
 | `zai` | Z.AI, international ordinary API | `https://api.z.ai/api/paas/v4` | Chat Completions / Bearer |
@@ -1610,7 +1629,7 @@ is attempted, and the container is recycled instead of being returned to the
 warm pool. Session-level cleanup does not clear that quarantine because a
 timed-out create may commit after cleanup has already returned.
 
-`prewarm` is disabled by default and applies only to asynchronous AIO runs with
+`prewarm` is disabled by default and applies only to asynchronous AIO and veFaaS runs with
 an unconditional outer execution-lease cleanup: the Gateway/embedded run worker
 and native subagent executor. Direct `create_deerflow_agent(...).ainvoke()` and
 `.astream()` calls retain ordinary lazy acquisition even when this setting is on.
@@ -1779,6 +1798,7 @@ sandbox:
    sandbox_timeout: 14400             # remote lifetime; 0 = explicit cleanup
    bash_command_timeout: 600          # default remote command timeout seconds
    replicas: 3                        # active + warm cap per gateway process
+   overflow_policy: wait              # optional: reject adds a process-local hard cap
    idle_timeout: 600                  # warm seconds before destroy; 0 disables
    environment:
       PYTHONUNBUFFERED: "1"
@@ -1820,7 +1840,12 @@ horizon. File transfer uses OpenSandbox's native filesystem API; bounded
 `find`/`grep` commands implement the directory and content-search surface.
 Downloads are restricted to `/mnt/user-data` and all file paths reject
 traversal. Multi-process discovery and ownership coordination are not yet
-implemented, so `replicas` is a per-Gateway-process soft cap.
+implemented, so `replicas` is a per-Gateway-process soft cap by default. With
+`overflow_policy: reject`, it becomes a process-local hard cap that also counts
+in-flight creates. If all slots are occupied and no warm sandbox can be evicted,
+acquisition raises `SandboxCapacityExceededError` before calling the SDK. This
+can protect a namespace ResourceQuota only when one Gateway process owns the
+provider and `replicas` does not exceed the quota's pod capacity.
 
 **boxd Machine Sandbox** (runs each sandbox as an isolated [boxd](https://boxd.sh?ref=deer-flow) machine):
 
@@ -1882,6 +1907,45 @@ machine is not repeated and returns an error. Machines in standby or
 hibernation wake on the call. Downloads are restricted to `/mnt/user-data` and
 capped while streaming. Like the other remote providers, `replicas` is a
 per-Gateway-process soft cap.
+
+**BytePlus veFaaS Cloud Sandbox** (runs each thread sandbox in a serverless [BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) AIO sandbox; see the [veFaaS documentation](https://docs.byteplus.com/en/docs/vefaas/what-is-vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)):
+
+```yaml
+sandbox:
+  use: deerflow.community.vefaas_sandbox:VeFaaSSandboxProvider
+  # prewarm: true                      # optional: overlap sandbox creation with the first model turn
+  vefaas:
+    region: ap-southeast-1
+    endpoint: https://vefaas.ap-southeast-1.byteplusapi.com
+    function_id: $BYTEPLUS_VEFAAS_SANDBOX_APP_ID
+    sandbox_base_url: $BYTEPLUS_VEFAAS_SANDBOX_BASE_URL
+    access_key_env: BYTEPLUS_ACCESS_KEY_ID
+    secret_key_env: BYTEPLUS_SECRET_ACCESS_KEY
+    cpu_milli: 1000
+    memory_mb: 2048
+    timeout_minutes: 60
+    # pause_on_idle: true              # optional: pause idle sandboxes and auto-resume
+    # snapshot_on_idle: true           # optional: thread-scoped snapshots with retention pruning
+    # snapshot_retention_days: 7
+    # max_snapshots_per_sandbox: 3
+    # precache_images:
+    #   - cr-ap-southeast-1.cr.bytepluses.com/namespace/all-in-one-sandbox:latest
+    # precache_on_startup: true
+    tos_mount:
+      enabled: false
+      bucket: $BYTEPLUS_TOS_BUCKET
+      prefix: deerflow-user-data
+  replicas: 3
+  idle_timeout: 600
+  # ownership:                         # required when more than one gateway shares a veFaaS app
+  #   type: redis
+```
+
+No extra Python SDK is needed — `VeFaaSSandboxProvider` talks to the veFaaS
+OpenAPI (`Version=2024-06-06`, SigV4) over `httpx` and reuses `agent-sandbox`
+for the AIO data plane. See the
+[veFaaS sandbox provider README](../packages/harness/deerflow/community/vefaas_sandbox/README.md)
+for the complete option reference, snapshot retention guidance, and TOS mount details.
 
 Choose between local execution or Docker-based isolation:
 
@@ -1989,11 +2053,34 @@ With `approval: prompt`, a denied public domain becomes a Human Input card with
 **Deny**, **Allow temporarily**, and **Allow for this sandbox** choices. DeerFlow
 does not replay the failed command after approval because it may already have
 performed local side effects; the agent must retry it explicitly. Non-interactive
-runs auto-deny without opening a card or waiting for input. The sidecar rejects
-hostnames that policy does not allow before DNS resolution; allowed hostnames
-that resolve to loopback, private, link-local, multicast, IPv6 ULA/site-local,
-or cloud metadata destinations are rejected and can never be approved. Raw
-TCP/UDP, Git-over-SSH, and other non-HTTP protocols remain unavailable in
+runs auto-deny without opening a card or waiting for input.
+
+The sidecar records denials in a fixed-size tmpfs, so it keeps that history
+bounded: a sandbox can request an unlimited number of unique hosts, and a full
+tmpfs would stop both denial recording and approval handling. Once the limit is
+reached it drops denials that were superseded by another approval card, then
+trims resolved history — ordered by when each decision was applied, so a card
+answered just now is kept — to leave room for pending approvals. A card that is
+currently awaiting a decision is never dropped, so a burst of unanswered cards
+can exceed the limit, but reaching that needs one poll per tool call rather
+than a flood. Persisted request fields are truncated (the method to 16
+characters), so the row limit also bounds the bytes on disk. Recording is best
+effort: if the policy database cannot be read or written, the request is still
+denied with the policy message instead of the connection being closed. A failed
+policy lookup denies without recording, so a transient database error cannot
+create an approval card for a destination that already holds a grant.
+
+The sidecar rejects hostnames that policy does not allow before DNS resolution;
+allowed hostnames that resolve to loopback, private, link-local, multicast,
+IPv6 ULA/site-local, or cloud metadata destinations are rejected and can never
+be approved. This screening also unwraps IPv6 spellings that carry an IPv4
+destination — IPv4-mapped, 6to4, NAT64 (`64:ff9b::/96`), IPv4-translated
+(`::ffff:0:0:0/96`), and the deprecated IPv4-compatible form — and judges the
+embedded IPv4 address, while NAT64 spellings of public IPv4 targets stay
+reachable. The RFC 8215 local-use translation prefix (`64:ff9b:1::/48`) is
+rejected explicitly. Operator-defined NAT64 prefixes outside `64:ff9b::/96`
+are not recognized.
+Raw TCP/UDP, Git-over-SSH, and other non-HTTP protocols remain unavailable in
 restricted modes.
 
 Restricted modes currently require the local Docker backend and Docker Engine
@@ -2284,6 +2371,7 @@ models:
 - `MIMO_API_KEY` - Xiaomi MiMo API key
 - `NOVITA_API_KEY` - Novita API key (OpenAI-compatible endpoint)
 - `OPPER_API_KEY` - Opper API key (OpenAI-compatible endpoint)
+- `NVIDIA_API_KEY` - NVIDIA API key for hosted or self-hosted NIM endpoints
 - `TAVILY_API_KEY` - Tavily search API key
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`

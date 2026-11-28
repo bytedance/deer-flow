@@ -592,6 +592,28 @@ can retry an ambiguously acknowledged send; it does not promise exactly-once
 messages at the provider. Record whether domestic Feishu or international Lark
 was actually exercised.
 
+### Start a coordination task in Feishu
+
+On a deployment with coordination and the notification outbox available, bind
+a Feishu bot in a private chat and send `/task start <objective>`. For example,
+`/task start Write a short release
+summary and save it as a Markdown file`. DeerFlow replies with a Task ID.
+The Coordinator dispatches the work in the background, so you can keep
+chatting with the bot while it runs. Keep the Task ID to look up the task
+through the coordination API.
+
+When the task ends, DeerFlow pushes a status card and, on success, visible
+worker results and saved attachments to the original private chat. It
+delivers the artifacts from the accepted plan, including separate versions
+that share a filename. Each file has its own delivery retry. The bot needs
+Feishu's file upload permission for that step. Empty files and files over
+Feishu's file limit remain available through the coordination artifact API.
+
+This uses the same SQL database and channel connections as the notification
+outbox. The Feishu notification preference applies. Disconnecting or
+replacing the chat binding prevents future delivery from that task to the
+old binding, even if a user reauthorizes its execution in DeerFlow.
+
 ### Group notifications
 
 Tasks may explicitly select one additional connected Feishu, QQ or WeCom group. Personal

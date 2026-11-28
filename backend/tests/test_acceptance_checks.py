@@ -7,11 +7,13 @@ import shlex
 import subprocess
 import sys
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from deerflow.subagents.acceptance_checks import (
     check_acceptance_criteria,
+    check_acceptance_criteria_async,
     render_acceptance_section,
     render_acceptance_segment,
     validate_acceptance_verdict,
@@ -50,6 +52,17 @@ def _prober(files: dict[str, str]):
         return len(files[path].encode("utf-8"))
 
     return probe
+
+
+@pytest.fixture
+def no_sandbox_authz_config(monkeypatch):
+    """Keep file-leaf tests from reading the developer's ``config.yaml``.
+
+    The local gate calls ``safe_app_config()`` for every file family, so a
+    developer's authorization-enabled config must not change these verdicts.
+    The real RBAC test patches the config itself and does not use this fixture.
+    """
+    monkeypatch.setattr("deerflow.authz.sandbox_authz.safe_app_config", lambda: None)
 
 
 def _bash_execution(command: str, *, status: str = "success", output_tail: str = "", shell_persistent: bool | None = False) -> dict:
@@ -185,7 +198,7 @@ class TestFileLeaves:
         assert verdict["leaves"][0]["checked"] is False
 
     @pytest.mark.skipif(os.name == "nt", reason="symlink creation needs privileges on Windows")
-    def test_symlink_escape_is_rejected_on_local_sandbox(self, tmp_path):
+    def test_symlink_escape_is_rejected_on_local_sandbox(self, no_sandbox_authz_config, tmp_path):
         """PR review: the scope check must follow symlinks on the local
         sandbox — a workspace symlink into uploads must not satisfy a
         workspace/outputs-scoped leaf with upload content."""
@@ -215,7 +228,7 @@ class TestFileLeaves:
         assert all(leaf["checked"] is False for leaf in verdict["leaves"])
         assert verdict["unchecked"] == ["file:stolen.md exists", "file_written:stolen.md"]
 
-    def test_genuine_workspace_file_survives_symlink_resolution(self, tmp_path):
+    def test_genuine_workspace_file_survives_symlink_resolution(self, no_sandbox_authz_config, tmp_path):
         workspace = tmp_path / "user-data" / "workspace"
         outputs = tmp_path / "user-data" / "outputs"
         workspace.mkdir(parents=True)
@@ -254,7 +267,7 @@ class TestFileLeaves:
 
         return SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}})
 
-    def test_error_prefixed_content_is_valid_on_local_sandbox(self):
+    def test_error_prefixed_content_is_valid_on_local_sandbox(self, no_sandbox_authz_config):
         """PR review: the local sandbox raises on missing files, so an
         ``Error:``-prefixed string from it is genuine content (a log or
         report heading) — never a provider failure."""
@@ -263,6 +276,29 @@ class TestFileLeaves:
         for criterion in ("file:../outputs/error.log exists", "file:../outputs/error.log non-empty", "file_written:../outputs/error.log"):
             verdict = check_acceptance_criteria([criterion], runtime=runtime, thread_data=THREAD_DATA, content_reader=_reader(files), size_prober=_prober(files))
             assert verdict["leaves"][0]["holds"] is True, criterion
+
+    def test_error_prefixed_content_is_valid_after_lazy_local_init(self, no_sandbox_authz_config):
+        """A task may start without a sandbox id; the size probe then acquires
+        the local sandbox. Reclassify after the probe so a genuine ``Error:``
+        report is not mistaken for a remote provider failure."""
+        runtime = SimpleNamespace(state={"sandbox": {}})
+        files = {"/mnt/user-data/outputs/error.log": "Error: summary of yesterday's incidents"}
+
+        def lazy_local_size_probe(*_args):
+            runtime.state["sandbox"]["sandbox_id"] = "local"
+            return len(files["/mnt/user-data/outputs/error.log"])
+
+        verdict = check_acceptance_criteria(
+            ["file:../outputs/error.log exists"],
+            runtime=runtime,
+            thread_data=THREAD_DATA,
+            content_reader=_reader(files),
+            size_prober=lazy_local_size_probe,
+        )
+
+        leaf = verdict["leaves"][0]
+        assert (leaf["checked"], leaf["holds"]) == (True, True)
+        assert "exists" in leaf["detail"]
 
     def test_binary_deliverable_holds_file_leaves(self):
         """PR review: a valid binary deliverable raises UnicodeDecodeError on
@@ -302,6 +338,399 @@ class TestFileLeaves:
         verdict = check_acceptance_criteria(["file:../outputs/report.md exists"], thread_data=THREAD_DATA, content_reader=_reader(files), size_prober=_prober(files))
 
         assert verdict["leaves"][0]["holds"] is True
+
+
+class TestFileLeafAuthorization:
+    """The local file families share the sandbox:execute admission gate with
+    JSON/CSV: a revoked grant must not reach a metadata probe."""
+
+    @pytest.mark.parametrize("sandbox_id", ["local", "local:user-1:thread-1"])
+    @pytest.mark.parametrize(
+        "criterion",
+        [
+            "file:../outputs/report.md exists",
+            "file:../outputs/report.md non-empty",
+            "file_written:../outputs/report.md",
+            "file:../outputs/report.json json-valid",
+            'file:../outputs/report.csv csv-columns:["id"]',
+        ],
+    )
+    def test_local_file_families_authorize_before_metadata_probe(self, no_sandbox_authz_config, monkeypatch, sandbox_id, criterion):
+        from deerflow.sandbox.exceptions import SandboxError
+
+        authorize = Mock(side_effect=SandboxError("denied"))
+        monkeypatch.setattr("deerflow.authz.sandbox_authz.authorize_sandbox_execution", authorize)
+        size_prober = Mock(return_value=5)
+        content_reader = Mock(return_value="hello")
+        readable_prober = Mock(return_value=True)
+        runtime = SimpleNamespace(
+            state={"sandbox": {"sandbox_id": sandbox_id}},
+            context={"user_id": "user-1", "user_role": "user"},
+        )
+
+        verdict = check_acceptance_criteria(
+            [criterion],
+            runtime=runtime,
+            thread_data=THREAD_DATA,
+            content_reader=content_reader,
+            size_prober=size_prober,
+            readable_prober=readable_prober,
+        )
+
+        leaf = verdict["leaves"][0]
+        assert (leaf["checked"], leaf["holds"]) == (False, False)
+        assert leaf["detail"] == "sandbox access denied; file unverified"
+        assert verdict["unchecked"] == [criterion]
+        authorize.assert_called_once()
+        size_prober.assert_not_called()
+        content_reader.assert_not_called()
+        readable_prober.assert_not_called()
+
+    def test_local_file_family_still_runs_when_authorized(self, no_sandbox_authz_config, monkeypatch):
+        authorize = Mock(return_value=None)
+        monkeypatch.setattr("deerflow.authz.sandbox_authz.authorize_sandbox_execution", authorize)
+        files = {"/mnt/user-data/outputs/report.md": "hello"}
+
+        verdict = check_acceptance_criteria(
+            ["file:../outputs/report.md exists"],
+            runtime=SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}}, context={}),
+            thread_data=THREAD_DATA,
+            content_reader=_reader(files),
+            size_prober=_prober(files),
+        )
+
+        assert verdict["leaves"][0]["holds"] is True
+        authorize.assert_called_once()
+
+    def test_large_file_written_authorizes_before_readable_probe(self, no_sandbox_authz_config, monkeypatch):
+        authorize = Mock(return_value=None)
+        monkeypatch.setattr("deerflow.authz.sandbox_authz.authorize_sandbox_execution", authorize)
+        readable = Mock(return_value=True)
+
+        verdict = check_acceptance_criteria(
+            ["file_written:../outputs/big.bin"],
+            runtime=SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}}, context={}),
+            thread_data=THREAD_DATA,
+            content_reader=Mock(side_effect=AssertionError("content must not be read above the cap")),
+            size_prober=Mock(return_value=60_000),
+            readable_prober=readable,
+        )
+
+        leaf = verdict["leaves"][0]
+        assert (leaf["checked"], leaf["holds"]) == (True, True)
+        assert "read probe ok" in leaf["detail"]
+        authorize.assert_called_once()
+        readable.assert_called_once()
+
+    def test_large_file_written_does_not_open_when_denied(self, no_sandbox_authz_config, monkeypatch):
+        from deerflow.sandbox.exceptions import SandboxError
+
+        authorize = Mock(side_effect=SandboxError("denied"))
+        monkeypatch.setattr("deerflow.authz.sandbox_authz.authorize_sandbox_execution", authorize)
+        readable = Mock(return_value=True)
+
+        verdict = check_acceptance_criteria(
+            ["file_written:../outputs/big.bin"],
+            runtime=SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}}, context={}),
+            thread_data=THREAD_DATA,
+            content_reader=Mock(side_effect=AssertionError("content must not be read")),
+            size_prober=Mock(return_value=60_000),
+            readable_prober=readable,
+        )
+
+        leaf = verdict["leaves"][0]
+        assert (leaf["checked"], leaf["holds"]) == (False, False)
+        assert leaf["detail"] == "sandbox access denied; file unverified"
+        authorize.assert_called_once()
+        readable.assert_not_called()
+
+    @pytest.mark.parametrize("sandbox_id", ["local", "local:user-1:thread-1"])
+    @pytest.mark.parametrize("content", [None, b"x" * 60_000], ids=["missing", "large"])
+    def test_revoked_grant_hides_exists_verdict(self, tmp_path, monkeypatch, sandbox_id, content):
+        """A retained local sandbox id does not retain the grant: revocation
+        returns UNVERIFIED instead of revealing existence or size."""
+        from deerflow.authz.rbac import RbacAuthorizationProvider
+        from deerflow.config.authorization_config import AuthorizationConfig
+        from deerflow.subagents import acceptance_checks as checks
+
+        config = SimpleNamespace(authorization=AuthorizationConfig(enabled=True))
+        provider = RbacAuthorizationProvider(roles={"user": {"sandbox": {"allow": "*"}}})
+        monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+        monkeypatch.setattr("deerflow.authz.sandbox_authz.resolve_authorization_provider", lambda config: provider)
+        runtime = SimpleNamespace(
+            state={"sandbox": {"sandbox_id": sandbox_id}},
+            context={"thread_id": "thread-1", "user_id": "user-1", "user_role": "user"},
+        )
+        if content is not None:
+            (tmp_path / "report.md").write_bytes(content)
+        criterion = "file:report.md exists"
+
+        def check():
+            return check_acceptance_criteria([criterion], runtime=runtime, thread_data={"workspace_path": str(tmp_path)})
+
+        allowed = check()["leaves"][0]
+        assert allowed["checked"] is True
+        assert allowed["holds"] == (content is not None)
+        if content is None:
+            assert allowed["detail"] == "file does not exist"
+        else:
+            assert "60000 bytes" in allowed["detail"]
+
+        provider = RbacAuthorizationProvider(roles={"user": {"sandbox": {"allow": []}}})
+        stat_spy = Mock(wraps=os.stat)
+        resolve_spy = Mock(wraps=checks._resolve_scoped_path)
+        with monkeypatch.context() as denied_patch:
+            denied_patch.setattr(os, "stat", stat_spy)
+            denied_patch.setattr(checks, "_resolve_scoped_path", resolve_spy)
+            revoked = check()["leaves"][0]
+        assert (revoked["checked"], revoked["holds"]) == (False, False)
+        assert revoked["detail"] == "sandbox access denied; file unverified"
+        stat_spy.assert_not_called()
+        resolve_spy.assert_not_called()
+
+        provider = RbacAuthorizationProvider(roles={"user": {"sandbox": {"allow": "*"}}})
+        restored = check()["leaves"][0]
+        assert restored["checked"] is True
+        assert restored["holds"] == (content is not None)
+
+    def test_local_out_of_scope_path_does_not_probe(self, no_sandbox_authz_config, monkeypatch):
+        authorize = Mock(return_value=None)
+        monkeypatch.setattr("deerflow.authz.sandbox_authz.authorize_sandbox_execution", authorize)
+        probe = Mock(side_effect=AssertionError("out-of-scope path must not be probed"))
+
+        verdict = check_acceptance_criteria(
+            ["file:/etc/passwd exists"],
+            runtime=SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}}, context={}),
+            thread_data=THREAD_DATA,
+            size_prober=probe,
+        )
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert "outside the shared thread workspace" in leaf["detail"]
+        authorize.assert_called_once()
+        probe.assert_not_called()
+
+    def test_local_missing_thread_data_does_not_probe(self, no_sandbox_authz_config, monkeypatch):
+        authorize = Mock(return_value=None)
+        monkeypatch.setattr("deerflow.authz.sandbox_authz.authorize_sandbox_execution", authorize)
+        probe = Mock(side_effect=AssertionError("missing workspace must not be probed"))
+
+        verdict = check_acceptance_criteria(
+            ["file:report.md exists"],
+            runtime=SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}}, context={}),
+            thread_data=None,
+            size_prober=probe,
+        )
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert "workspace unavailable" in leaf["detail"]
+        authorize.assert_called_once()
+        probe.assert_not_called()
+
+    def test_local_directory_is_unverified_through_the_leaf(self, no_sandbox_authz_config, monkeypatch, tmp_path):
+        authorize = Mock(return_value=None)
+        monkeypatch.setattr("deerflow.authz.sandbox_authz.authorize_sandbox_execution", authorize)
+        (tmp_path / "subdir").mkdir()
+
+        verdict = check_acceptance_criteria(
+            ["file:subdir exists"],
+            runtime=SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}}, context={}),
+            thread_data={"workspace_path": str(tmp_path)},
+        )
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert "file size could not be established" in leaf["detail"]
+        authorize.assert_called_once()
+
+    def test_invalid_csv_columns_is_a_syntax_error_without_probing(self, no_sandbox_authz_config):
+        probe = Mock(side_effect=AssertionError("invalid criteria must not probe"))
+
+        verdict = check_acceptance_criteria(
+            ["file:report.csv csv-columns:[]"],
+            runtime=SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}}, context={}),
+            thread_data=THREAD_DATA,
+            size_prober=probe,
+        )
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert "csv-columns requires" in leaf["detail"]
+        probe.assert_not_called()
+
+
+class TestAsyncAdmission:
+    """The async entry point decides sandbox:execute on the owning event loop;
+    a loop-affine provider must never be reconstructed in the checklist worker."""
+
+    @staticmethod
+    def _install_loop_affine_provider(monkeypatch, *, allow):
+        import asyncio
+        from types import ModuleType
+
+        from deerflow.authz.provider import AuthzDecision
+        from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
+
+        provider_module = ModuleType("loop_affine_acceptance_test_provider")
+        constructed_on = []
+
+        class LoopAffineProvider:
+            name = "loop-affine"
+
+            def __init__(self):
+                self.loop = asyncio.get_running_loop()
+                constructed_on.append(self.loop)
+
+            def authorize(self, request):
+                return AuthzDecision(allow=allow)
+
+            async def aauthorize(self, request):
+                assert asyncio.get_running_loop() is self.loop
+                return AuthzDecision(allow=allow)
+
+            def filter_resources(self, principal, resource_type, candidates):
+                return list(candidates)
+
+        provider_module.LoopAffineProvider = LoopAffineProvider
+        monkeypatch.setitem(sys.modules, provider_module.__name__, provider_module)
+        config = SimpleNamespace(
+            authorization=AuthorizationConfig(
+                enabled=True,
+                fail_closed=True,
+                default_role="user",
+                provider=AuthorizationProviderConfig(use=f"{provider_module.__name__}:LoopAffineProvider"),
+            )
+        )
+        monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+        return constructed_on
+
+    @pytest.mark.parametrize("allow", [True, False])
+    @pytest.mark.parametrize("content", [None, b"x" * 60_000], ids=["missing", "large"])
+    @pytest.mark.parametrize("initialized", [True, False], ids=["initialized", "lazy"])
+    def test_loop_affine_provider_decides_on_the_loop(self, tmp_path, monkeypatch, allow, content, initialized):
+        """Metadata-only leaves keep their definitive verdicts under a provider
+        that can only be constructed on a running event loop."""
+        import asyncio
+
+        from deerflow.config import paths
+        from deerflow.sandbox.local import LocalSandboxProvider
+
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(paths, "_paths", None)
+        constructed_on = self._install_loop_affine_provider(monkeypatch, allow=allow)
+        provider = LocalSandboxProvider()
+        monkeypatch.setattr("deerflow.sandbox.tools.get_sandbox_provider", lambda: provider)
+        if content is not None:
+            (tmp_path / "report.md").write_bytes(content)
+        runtime = SimpleNamespace(
+            state={"sandbox": {"sandbox_id": "local"}} if initialized else {},
+            context={"thread_id": "thread-1", "user_id": "user-1", "user_role": "user"},
+        )
+
+        async def run():
+            loop = asyncio.get_running_loop()
+            verdict = await check_acceptance_criteria_async(
+                ["file:report.md exists"],
+                runtime=runtime,
+                thread_data={"workspace_path": str(tmp_path)},
+            )
+            assert constructed_on == [loop]
+            return verdict
+
+        verdict = asyncio.run(run())
+        leaf = verdict["leaves"][0]
+        if allow:
+            assert leaf["checked"] is True
+            assert leaf["holds"] == (content is not None)
+            if content is None:
+                assert leaf["detail"] == "file does not exist"
+            else:
+                assert "60000 bytes" in leaf["detail"]
+        else:
+            assert (leaf["checked"], leaf["holds"]) == (False, False)
+            assert leaf["detail"] == "sandbox access denied; file unverified"
+
+    def test_denied_async_admission_does_not_probe(self, monkeypatch):
+        from deerflow.subagents import acceptance_checks as checks
+
+        self._install_loop_affine_provider(monkeypatch, allow=False)
+        probe = Mock(side_effect=AssertionError("denied admission must not probe"))
+        monkeypatch.setattr(checks, "_probe_file_size", probe)
+        monkeypatch.setattr(checks, "_resolve_scoped_path", Mock(side_effect=AssertionError("denied admission must not resolve")))
+        runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}}, context={"user_id": "user-1", "user_role": "user"})
+
+        import asyncio
+
+        verdict = asyncio.run(
+            check_acceptance_criteria_async(
+                ["file:../outputs/report.md exists"],
+                runtime=runtime,
+                thread_data=THREAD_DATA,
+            )
+        )
+        leaf = verdict["leaves"][0]
+        assert (leaf["checked"], leaf["holds"]) == (False, False)
+        assert leaf["detail"] == "sandbox access denied; file unverified"
+        probe.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_acceptance_drains_file_probe(self, tmp_path, monkeypatch):
+        import asyncio
+        import threading
+
+        from deerflow.subagents import acceptance_checks as checks
+
+        self._install_loop_affine_provider(monkeypatch, allow=True)
+        loop = asyncio.get_running_loop()
+        started = asyncio.Event()
+        finish = threading.Event()
+        cleaned_up = asyncio.Event()
+
+        def probe(*_args):
+            loop.call_soon_threadsafe(started.set)
+            assert finish.wait(timeout=5)
+            raise FileNotFoundError
+
+        monkeypatch.setattr(checks, "_probe_file_size", probe)
+        runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}}, context={"user_id": "user-1", "user_role": "user"})
+
+        async def check_then_cleanup():
+            try:
+                await check_acceptance_criteria_async(["file:report.md exists"], runtime=runtime, thread_data={"workspace_path": str(tmp_path)})
+            finally:
+                cleaned_up.set()
+
+        task = asyncio.create_task(check_then_cleanup())
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not cleaned_up.is_set()
+        finally:
+            finish.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert cleaned_up.is_set()
+
+    def test_evidence_only_criteria_skip_admission(self, monkeypatch):
+        authorize = Mock(side_effect=AssertionError("evidence-only criteria need no sandbox admission"))
+        monkeypatch.setattr("deerflow.authz.sandbox_authz.authorize_sandbox_execution_async", authorize)
+        runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}}, context={})
+
+        import asyncio
+
+        verdict = asyncio.run(
+            check_acceptance_criteria_async(
+                ["tests_passed:pytest tests/check.py"],
+                runtime=runtime,
+                thread_data=THREAD_DATA,
+                bash_executions=[_bash_execution("pytest tests/check.py", output_tail="3 passed")],
+            )
+        )
+        assert verdict["leaves"][0]["holds"] is True
+        authorize.assert_not_called()
 
 
 class TestFileLeafSizeProbe:

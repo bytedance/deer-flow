@@ -8,6 +8,9 @@ required.
 
 from __future__ import annotations
 
+FEISHU_TASK_COMMAND = "/task"
+FEISHU_TASK_START_SUBCOMMAND = "start"
+
 KNOWN_CHANNEL_COMMANDS: frozenset[str] = frozenset(
     {
         "/agent",
@@ -89,3 +92,11 @@ def is_known_channel_command(text: str) -> bool:
     if not text.startswith("/"):
         return False
     return text.split(maxsplit=1)[0].lower() in KNOWN_CHANNEL_COMMANDS
+
+
+def is_feishu_task_command(text: str) -> bool:
+    """Return whether text starts with the Feishu ``/task start`` control command."""
+    if not text.startswith("/"):
+        return False
+    parts = text.split(maxsplit=2)
+    return len(parts) >= 2 and parts[0].lower() == FEISHU_TASK_COMMAND and parts[1].lower() == FEISHU_TASK_START_SUBCOMMAND

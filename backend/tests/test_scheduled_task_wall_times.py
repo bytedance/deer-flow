@@ -137,14 +137,14 @@ async def test_end_at_past_the_utc_range_is_rejected(operation, end_at):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", ["enabled", "paused"])
-async def test_unchanged_legacy_gap_schedule_keeps_its_already_accepted_instant(status):
+@pytest.mark.parametrize(("status", "submitted"), [("enabled", "2027-03-14T02:30:00"), ("paused", "20270314T023000")])
+async def test_unchanged_legacy_gap_schedule_keeps_its_already_accepted_instant(status, submitted):
     timezone, wall_time = GAPS[0]
     spec = {"run_at": wall_time}
     accepted = next_run_at("once", spec, timezone, now=NOW)
     existing = _existing(timezone, status=status, schedule_spec=spec, next_run_at=accepted)
     updates = await validate_scheduled_task_update(
-        existing, {"schedule_spec": spec, "timezone": timezone, "title": "Renamed"}, user_id="owner", thread_store=None, scheduler_config=SchedulerConfig(), assistant_resolver=AsyncMock(), used=0, now=NOW
+        existing, {"schedule_spec": {"run_at": submitted}, "timezone": timezone, "title": "Renamed"}, user_id="owner", thread_store=None, scheduler_config=SchedulerConfig(), assistant_resolver=AsyncMock(), used=0, now=NOW
     )
     assert updates["next_run_at"] == accepted
     assert next_run_at("once", spec, timezone, now=accepted) is None

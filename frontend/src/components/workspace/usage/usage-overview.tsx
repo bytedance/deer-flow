@@ -19,7 +19,8 @@ export function UsageOverview({
   const peak = Math.max(1, ...usage.days.map((day) => day.total_tokens));
   const input = usage.days.reduce((sum, day) => sum + day.input_tokens, 0);
   const output = usage.days.reduce((sum, day) => sum + day.output_tokens, 0);
-  const hasRuns = usage.total_runs > 0;
+  // Batch items are usage without runs (e.g. a batch resumed in this window).
+  const hasUsage = usage.total_runs > 0 || (usage.total_batch_items ?? 0) > 0;
   return (
     <div className="space-y-6">
       <div className="grid gap-4 sm:grid-cols-2">
@@ -45,7 +46,7 @@ export function UsageOverview({
           </p>
         </CardHeader>
         <CardContent className="space-y-5">
-          {!hasRuns ? (
+          {!hasUsage ? (
             <p className="text-muted-foreground py-8 text-center text-sm">
               {text.noUsage}
             </p>
@@ -70,7 +71,7 @@ export function UsageOverview({
               ))}
             </div>
           )}
-          {hasRuns && usage.days.length > 0 && (
+          {hasUsage && usage.days.length > 0 && (
             <div
               className="text-muted-foreground flex justify-between text-xs"
               aria-hidden="true"
@@ -84,7 +85,7 @@ export function UsageOverview({
               </span>
             </div>
           )}
-          {hasRuns && (
+          {hasUsage && (
             <details>
               <summary className="cursor-pointer text-sm font-medium">
                 {text.dailyDetails}

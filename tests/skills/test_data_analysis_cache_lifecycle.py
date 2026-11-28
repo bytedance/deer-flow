@@ -3,7 +3,9 @@
 import errno
 import json
 import multiprocessing
+import os
 import runpy
+import subprocess
 import sys
 from pathlib import Path
 
@@ -124,6 +126,67 @@ def test_failed_loader_leaves_no_database_for_retry(tmp_path, input_file):
     with pytest.raises(RuntimeError, match="loader interrupted"):
         scope["main"]()
     assert list(cache.rglob("*.duckdb")) == []
+
+
+@pytest.mark.parametrize(
+    "bad_name, bad_data, diagnostic",
+    [
+        ("second.csv", b"\xff\xfe\x00\x00\xff", "Failed to load CSV"),
+        ("second.csv", None, "File not found"),
+        ("second.txt", b"value\n13\n", "Unsupported file format"),
+    ],
+)
+def test_cli_does_not_publish_partial_input(
+    tmp_path, input_file, bad_name, bad_data, diagnostic
+):
+    second = tmp_path / bad_name
+    if bad_data is not None:
+        second.write_bytes(bad_data)
+    export = tmp_path / "result.csv"
+    env = {**os.environ, **dict.fromkeys(("TMPDIR", "TEMP", "TMP"), str(tmp_path))}
+
+    def query(path, sql):
+        return subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--files",
+                str(input_file),
+                str(path),
+                "--action",
+                "query",
+                "--sql",
+                sql,
+                "--output-file",
+                str(export),
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+
+    failed = query(second, "SELECT SUM(value) AS total FROM report")
+    assert failed.returncode == 1, failed.stdout + failed.stderr
+    assert diagnostic in failed.stderr
+    assert bad_name in failed.stderr
+    assert not export.exists()
+    generations = tmp_path / ".data-analysis-cache" / "generations-v1"
+    assert not list(generations.iterdir())
+
+    second = tmp_path / "second.csv"
+    second.write_text("value\n13\n", encoding="utf-8")
+    sql = "SELECT (SELECT SUM(value) FROM report) + (SELECT SUM(value) FROM second) AS total"
+    rebuilt = query(second, sql)
+    assert rebuilt.returncode == 0, rebuilt.stderr
+    assert export.read_text(encoding="utf-8").splitlines() == ["total", "20"]
+    cache_manifest, cached = manifest(generations)
+    warm = query(second, sql)
+    assert warm.returncode == 0, warm.stderr
+    assert "Cache hit!" in warm.stderr
+    assert manifest(generations) == (cache_manifest, cached)
+    assert export.read_text(encoding="utf-8").splitlines() == ["total", "20"]
 
 
 def publication_worker(cache, source, published, release, results):

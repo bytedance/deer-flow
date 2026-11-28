@@ -108,8 +108,14 @@ async def test_uncertain_dispatch_never_enters_ordinary_retry(execution, monkeyp
     else:
         result.status = service_module.SubagentStatus.TIMED_OUT
         result.error = "execution timed out"
+    result.token_usage_records = [{"total_tokens": 17, "model_name": "provider-model"}]
     await service._execute_item(item, lease_owner="claim-1")
     repository.mark_item_outcome_unknown.assert_awaited_once()
+    usage = repository.mark_item_outcome_unknown.await_args.kwargs["token_usage"]
+    if failure in {"result_commit", "timeout"}:
+        assert usage["total_tokens"] == usage["by_model"]["provider-model"]["total_tokens"] == 17
+    else:
+        assert usage is None
     repository.requeue_item_after_admission_failure.assert_not_awaited()
     # A lost success acknowledgement may already have committed. The repository
     # must reject unknown over a saved result, and the service must never issue

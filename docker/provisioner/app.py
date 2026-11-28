@@ -30,6 +30,7 @@ Architecture (docker-compose-dev):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import ntpath
 import os
@@ -38,6 +39,7 @@ import re
 import secrets
 import time
 from contextlib import asynccontextmanager
+from decimal import Decimal, DecimalException, localcontext
 from pathlib import PurePosixPath, PureWindowsPath
 
 import urllib3
@@ -45,7 +47,8 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
 from kubernetes.client.rest import ApiException
-from pydantic import BaseModel, Field
+from kubernetes.utils.quantity import parse_quantity
+from pydantic import BaseModel, Field, field_validator
 
 # Suppress only the InsecureRequestWarning from urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -77,6 +80,14 @@ LARK_CLI_RUNTIME_VOLUME_NAME = "lark-cli-runtime"
 # broker off (Pattern A / legacy behavior). Broker supersedes Pattern A when both
 # are set.
 LARK_CLI_BROKER_IMAGE = os.environ.get("LARK_CLI_BROKER_IMAGE", "")
+
+# Sandbox Pod environment the Gateway forwards from ``sandbox.environment``.
+# Entries whose names the provisioner already sets from dedicated request fields
+# are dropped so one Pod never carries two sources for the same setting.
+RESERVED_SANDBOX_ENVIRONMENT_KEYS = frozenset({"AIO_BASH_MAX_SESSIONS", "MAX_SHELL_SESSIONS", "DEERFLOW_LARK_BROKER_URL"})
+MAX_SANDBOX_ENVIRONMENT_ENTRIES = 32
+MAX_SANDBOX_ENVIRONMENT_VALUE_CHARS = 1024
+SANDBOX_ENVIRONMENT_KEY_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 # Machine-readable marker attached to lark provisioning-config conflict
 # responses (409/503) telling the Gateway to drop its cached broker
 # capability observation for this endpoint. Keep in sync with
@@ -150,6 +161,46 @@ PROVISIONER_API_KEY = os.environ.get("PROVISIONER_API_KEY", "")
 # Desktop for macOS this is ``host.docker.internal``; on Linux it may be the
 # host's LAN IP. Ignored when SANDBOX_SERVICE_TYPE=ClusterIP.
 NODE_HOST = os.environ.get("NODE_HOST", "host.docker.internal")
+
+
+# The client's parse_quantity also accepts Decimal spellings (NaN, underscores,
+# exponents combined with SI suffixes) that the Kubernetes API rejects.
+_RESOURCE_QUANTITY = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+|[numkMGTPE]|[KMGTPE]i)?")
+
+
+def _read_resource_quantity(name: str, default: str) -> tuple[str, Decimal]:
+    value = os.environ.get(name, default)
+    if not _RESOURCE_QUANTITY.fullmatch(value):
+        raise RuntimeError(f"Invalid {name}={value!r}: expected a Kubernetes resource quantity")
+    try:
+        with localcontext() as context:
+            # Keep comparisons exact even when multiplying by Ei (2**60).
+            context.prec = max(context.prec, len(value) + 19)
+            amount = parse_quantity(value)
+    except (DecimalException, ValueError) as exc:
+        raise RuntimeError(f"Invalid {name}={value!r}: {exc}") from exc
+    if amount < 0:
+        raise RuntimeError(f"Invalid {name}={value!r}: resource quantities must be nonnegative")
+    return value, amount
+
+
+def _load_sandbox_resources() -> k8s_client.V1ResourceRequirements:
+    requests = {}
+    limits = {}
+    for resource, default_request, default_limit in (
+        ("cpu", "100m", "1000m"),
+        ("memory", "256Mi", "1Gi"),
+        ("ephemeral-storage", "500Mi", "500Mi"),
+    ):
+        prefix = "SANDBOX_" + resource.upper().replace("-", "_")
+        requests[resource], request = _read_resource_quantity(f"{prefix}_REQUEST", default_request)
+        limits[resource], limit = _read_resource_quantity(f"{prefix}_LIMIT", default_limit)
+        if request > limit:
+            raise RuntimeError(f"{prefix}_REQUEST={requests[resource]!r} exceeds {prefix}_LIMIT={limits[resource]!r}")
+    return k8s_client.V1ResourceRequirements(requests=requests, limits=limits)
+
+
+SANDBOX_RESOURCES = _load_sandbox_resources()
 
 
 def join_host_path(base: str, *parts: str) -> str:
@@ -518,6 +569,12 @@ async def lifespan(_app: FastAPI):
     _wait_for_kubeconfig()
     core_v1 = _init_k8s_client()
     _ensure_namespace()
+    # Reap leftovers from earlier failed creates even if no create ever runs
+    # again. The sweep is best effort and must not stop the provisioner.
+    try:
+        await asyncio.to_thread(_sweep_orphaned_pods, exclude_sandbox_id="")
+    except Exception:  # noqa: BLE001 - a failed sweep must not fail startup
+        logger.warning("Orphan sweep at startup failed", exc_info=True)
     logger.info("Provisioner is ready (using host Kubernetes)")
     yield
 
@@ -531,7 +588,10 @@ async def verify_api_key(request: Request, call_next):
         # Compare bytes: compare_digest raises TypeError for non-ASCII str,
         # and header values are client-controlled (decoded as latin-1).
         key = request.headers.get("X-API-Key", "").encode("utf-8", "surrogatepass")
-        if not PROVISIONER_API_KEY or not secrets.compare_digest(key, PROVISIONER_API_KEY.encode("utf-8", "surrogatepass")):
+        # A Secret mounted through envFrom keeps its trailing newline; strip
+        # it so the shared secret compares equal to the Gateway's stripped key.
+        configured = PROVISIONER_API_KEY.strip()
+        if not configured or not secrets.compare_digest(key, configured.encode("utf-8", "surrogatepass")):
             logger.warning("provisioner auth rejected: %s %s", request.method, request.url.path)
             return Response(status_code=401, content="Unauthorized")
     return await call_next(request)
@@ -569,6 +629,25 @@ class CreateSandboxRequest(BaseModel):
     # keeps requests from older Gateways and custom provisioner callers working.
     max_shell_sessions: int | None = Field(default=None, gt=0)
     max_bash_sessions: int | None = Field(default=None, gt=0)
+    # Operator ``sandbox.environment`` forwarded by the Gateway. The AIO image
+    # reads these to disable optional services (DISABLE_JUPYTER, ...), which is
+    # how a deployment lowers idle per-sandbox memory (#3213). Keys the
+    # provisioner owns are dropped in ``_build_pod``.
+    environment: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("environment")
+    @classmethod
+    def _validate_environment(cls, value: dict[str, str]) -> dict[str, str]:
+        if len(value) > MAX_SANDBOX_ENVIRONMENT_ENTRIES:
+            raise ValueError(f"environment accepts at most {MAX_SANDBOX_ENVIRONMENT_ENTRIES} entries")
+        for name, entry in value.items():
+            if not SANDBOX_ENVIRONMENT_KEY_PATTERN.fullmatch(name):
+                raise ValueError(f"environment key {name!r} must match [A-Za-z_][A-Za-z0-9_]* and be at most 64 characters")
+            if "\x00" in entry:
+                raise ValueError(f"environment value for {name!r} contains a NUL byte")
+            if len(entry) > MAX_SANDBOX_ENVIRONMENT_VALUE_CHARS:
+                raise ValueError(f"environment value for {name!r} exceeds {MAX_SANDBOX_ENVIRONMENT_VALUE_CHARS} characters")
+        return value
 
 
 class SandboxResponse(BaseModel):
@@ -1031,6 +1110,17 @@ def _build_lark_cli_broker_sidecars(
     ]
 
 
+def _pod_environment_value(value: str) -> str:
+    """Escape a container value so Kubernetes stores it literally.
+
+    Kubelet treats ``$(NAME)`` in a plain ``env.value`` as a reference to an
+    earlier variable and collapses ``$$`` to ``$``. Doubling every dollar sign
+    cancels both rewrites, so the container reads the value the operator wrote
+    instead of one the API server derived from it.
+    """
+    return value.replace("$", "$$")
+
+
 def _build_pod(
     sandbox_id: str,
     thread_id: str,
@@ -1042,6 +1132,7 @@ def _build_pod(
     provision_lark_cli_broker: bool = False,
     max_shell_sessions: int | None = None,
     max_bash_sessions: int | None = None,
+    environment: dict[str, str] | None = None,
 ) -> k8s_client.V1Pod:
     """Construct a Pod manifest for a single sandbox."""
     _validate_lark_provisioning_request(provision_lark_cli_runtime, provision_lark_cli_broker)
@@ -1050,21 +1141,25 @@ def _build_pod(
     )
     sandbox_env: list[k8s_client.V1EnvVar] = []
     if max_bash_sessions is not None:
-        sandbox_env.append(k8s_client.V1EnvVar(name="AIO_BASH_MAX_SESSIONS", value=str(max_bash_sessions)))
+        sandbox_env.append(k8s_client.V1EnvVar(name="AIO_BASH_MAX_SESSIONS", value=_pod_environment_value(str(max_bash_sessions))))
     if max_shell_sessions is not None:
         sandbox_env.append(
             k8s_client.V1EnvVar(
                 name="MAX_SHELL_SESSIONS",
-                value=str(max_shell_sessions),
+                value=_pod_environment_value(str(max_shell_sessions)),
             )
         )
     if _lark_cli_broker_enabled(provision_lark_cli_broker):
         sandbox_env.append(
             k8s_client.V1EnvVar(
                 name="DEERFLOW_LARK_BROKER_URL",
-                value=LARK_BROKER_URL,
+                value=_pod_environment_value(LARK_BROKER_URL),
             )
         )
+    for name, value in sorted((environment or {}).items()):
+        if name in RESERVED_SANDBOX_ENVIRONMENT_KEYS:
+            continue
+        sandbox_env.append(k8s_client.V1EnvVar(name=name, value=_pod_environment_value(value)))
     return k8s_client.V1Pod(
         metadata=k8s_client.V1ObjectMeta(
             name=_pod_name(sandbox_id),
@@ -1110,18 +1205,7 @@ def _build_pod(
                         timeout_seconds=3,
                         failure_threshold=3,
                     ),
-                    resources=k8s_client.V1ResourceRequirements(
-                        requests={
-                            "cpu": "100m",
-                            "memory": "256Mi",
-                            "ephemeral-storage": "500Mi",
-                        },
-                        limits={
-                            "cpu": "1000m",
-                            "memory": "1Gi",
-                            "ephemeral-storage": "500Mi",
-                        },
-                    ),
+                    resources=SANDBOX_RESOURCES,
                     volume_mounts=_build_volume_mounts(
                         thread_id,
                         user_id=user_id,
@@ -1214,6 +1298,200 @@ def _sandbox_access_url(sandbox_id: str, *, tolerate_read_errors: bool = False) 
         raise
 
     return _url_from_service(svc, sandbox_id)
+
+
+def _service_confirmed_absent(sandbox_id: str) -> bool:
+    """Whether the sandbox Service is confirmed missing.
+
+    A Service write that reports an error may still have committed: a peer
+    that discovers the Service can already serve the sandbox Pod through it.
+    Only a 404 confirms absence; any other outcome keeps the Pod.
+    """
+    try:
+        core_v1.read_namespaced_service(_svc_name(sandbox_id), K8S_NAMESPACE)
+    except ApiException as exc:
+        if exc.status != 404:
+            logger.warning("Service %s absence check failed: %s", _svc_name(sandbox_id), exc.reason)
+        return exc.status == 404
+    except urllib3.exceptions.HTTPError as exc:
+        # A transport failure leaves the Service state unknown; keep the Pod
+        # and let this request report the original creation error instead.
+        logger.warning("Transient error confirming Service %s absence: %s", _svc_name(sandbox_id), exc)
+        return False
+    return False
+
+
+def _mark_pod_adopted(sandbox_id: str, *, expected_uid: str) -> k8s_client.V1Pod:
+    """Mark the Pod this create is about to serve so a rollback cannot remove it.
+
+    Every create that serves a Pod it did not create records this mark before
+    returning Running: a create that lost the Pod race, a create whose own Pod
+    was replaced, and an existing sandbox served by the fast path. The
+    strategic merge patch carries the UID the caller attested (before the
+    access-URL wait, the UID it just read) in ``metadata.uid``; that field is
+    immutable, so the API server rejects the patch when the name now addresses
+    a same-name replacement and the mark never lands on it. With a matching
+    UID the patch merges only the adoption key, leaving any other annotations
+    intact. A
+    successful patch bumps the Pod's resourceVersion, so a rollback that
+    already read the Pod fails its conditional delete, and a rollback that
+    reads it afterwards sees the mark and keeps the Pod. Returns the patched
+    Pod so the caller can reject a Pod that started terminating after the
+    response was attested.
+    """
+    target = _pod_name(sandbox_id)
+    if not expected_uid:
+        raise HTTPException(status_code=500, detail=f"Could not adopt Pod {target}: no attested UID")
+    try:
+        return core_v1.patch_namespaced_pod(
+            target,
+            K8S_NAMESPACE,
+            {"metadata": {"uid": expected_uid, "annotations": {"deer-flow/adopted": expected_uid}}},
+        )
+    except ApiException as exc:
+        if exc.status in {409, 422}:
+            raise HTTPException(status_code=409, detail="Existing sandbox was replaced while this request attested it") from exc
+        raise HTTPException(status_code=500, detail=f"Could not adopt Pod {target}: {exc}") from exc
+    except urllib3.exceptions.HTTPError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not adopt Pod {target}: {exc}") from exc
+
+
+def _adopt_attested_pod(sandbox_id: str, response) -> None:
+    """Mark the attested Pod and verify it is still the one the response names.
+
+    A metadata patch can succeed on a Pod that started terminating after the
+    response was built, and the name can address a replacement by the time the
+    mark lands. A create must not report either as ready.
+    """
+    adopted_pod = _mark_pod_adopted(sandbox_id, expected_uid=response.container_id)
+    metadata = getattr(adopted_pod, "metadata", None)
+    if metadata is None:
+        raise HTTPException(status_code=500, detail=f"Could not verify Pod {_pod_name(sandbox_id)} after adopting it")
+    if getattr(metadata, "deletion_timestamp", None):
+        raise HTTPException(status_code=409, detail="Existing sandbox is still terminating")
+    adopted_uid = getattr(metadata, "uid", None)
+    if adopted_uid is not None and response.container_id is not None and adopted_uid != response.container_id:
+        raise HTTPException(status_code=409, detail="Existing sandbox was replaced while this request attested it")
+
+
+def _pre_adopt_racing_pod(sandbox_id: str) -> None:
+    """Best-effort adoption mark before the access-URL wait.
+
+    A create that lost the Pod race creates the Service and then waits for an
+    access URL. During that wait a concurrent creator's rollback can still
+    delete the Pod: the rollback knows only the UID it created and has already
+    seen the Service absent. Marking before the wait bumps the Pod's
+    resourceVersion and records the adoption, so that rollback keeps it. The
+    mark must carry the Pod UID, which the 409 response does not return, so
+    read it once. The final response read still attests the Pod and marks it
+    again; a failure here only leaves that shorter window.
+    """
+    target = _pod_name(sandbox_id)
+    try:
+        pod = core_v1.read_namespaced_pod(target, K8S_NAMESPACE)
+    except (ApiException, urllib3.exceptions.HTTPError) as exc:
+        logger.info("Could not pre-adopt Pod %s: %s", target, exc)
+        return
+    metadata = getattr(pod, "metadata", None)
+    uid = getattr(metadata, "uid", None) if metadata is not None else None
+    if not uid or getattr(metadata, "deletion_timestamp", None):
+        return
+    try:
+        _mark_pod_adopted(sandbox_id, expected_uid=uid)
+    except HTTPException as exc:
+        logger.warning("Could not pre-adopt Pod %s: %s", target, exc.detail)
+
+
+def _delete_pod_unless_adopted(sandbox_id: str, *, expected_uid: str | None = None, pod_name: str | None = None) -> bool:
+    """Delete a Pod unless a create adopted it or it is not the expected Pod.
+
+    The read and the delete share one snapshot. An adoption mark
+    (``deer-flow/adopted``) carrying this Pod's UID, or the legacy ``true``
+    value written by a create that could not attest the UID, means a peer
+    already serves the Pod. A mark carrying another UID belongs to a Pod that
+    has since been replaced and is ignored. The conditional delete is fenced
+    on the UID and resourceVersion just read, so an adoption that lands in
+    between aborts it either way: a sandbox that a concurrent creator has just
+    started serving is never torn down. ``expected_uid`` rejects a same-name
+    replacement, and ``pod_name`` pins the object a sweep listed. An
+    unreadable state keeps the Pod too. Returns whether the delete ran.
+    """
+    target = pod_name or _pod_name(sandbox_id)
+    try:
+        pod = core_v1.read_namespaced_pod(target, K8S_NAMESPACE)
+    except ApiException as exc:
+        if exc.status != 404:
+            logger.warning("Could not read Pod %s before deletion: %s", target, exc.reason)
+        return False
+    except urllib3.exceptions.HTTPError as exc:
+        logger.warning("Could not read Pod %s before deletion: %s", target, exc)
+        return False
+    adopted = (pod.metadata.annotations or {}).get("deer-flow/adopted")
+    if adopted == "true" or (adopted is not None and adopted == pod.metadata.uid):
+        logger.info("Kept Pod %s: a concurrent create adopted it", target)
+        return False
+    if adopted is not None:
+        logger.info("Ignoring stale adoption mark %s on Pod %s", adopted, target)
+    if expected_uid is not None and pod.metadata.uid != expected_uid:
+        logger.info("Kept Pod %s: it was replaced after it was selected", target)
+        return False
+    try:
+        core_v1.delete_namespaced_pod(
+            target,
+            K8S_NAMESPACE,
+            body=k8s_client.V1DeleteOptions(
+                preconditions=k8s_client.V1Preconditions(
+                    uid=pod.metadata.uid,
+                    resource_version=pod.metadata.resource_version,
+                )
+            ),
+        )
+    except (ApiException, urllib3.exceptions.HTTPError) as exc:
+        logger.info("Kept Pod %s: conditional delete did not run (%s)", target, exc)
+        return False
+    return True
+
+
+_ORPHAN_POD_GRACE_SECONDS = 600
+
+
+def _sweep_orphaned_pods(*, exclude_sandbox_id: str) -> None:
+    """Delete sandbox Pods that no Service adopted and that outlived the grace period.
+
+    A create whose Pod write committed while its Service write failed and whose
+    absence check could not run leaves a Pod nothing addresses: list_sandboxes
+    enumerates Services, so neither the Gateway nor a retry would find it again.
+    Sweeping on create and at startup reaps those leftovers; the grace period
+    keeps a freshly created Pod from being considered. Each candidate is
+    re-read and deleted only while its listed UID still matches, so a same-name
+    replacement and a Pod with a live adoption mark are left alone. The Service
+    is read again immediately before the delete: the list can predate a Service
+    created or restored after it was taken.
+    """
+    try:
+        services = core_v1.list_namespaced_service(K8S_NAMESPACE, label_selector="app=deer-flow-sandbox").items or []
+        pods = core_v1.list_namespaced_pod(K8S_NAMESPACE, label_selector="app=deer-flow-sandbox").items or []
+    except (ApiException, urllib3.exceptions.HTTPError) as exc:
+        logger.warning("Could not list sandbox objects for orphan sweep: %s", exc)
+        return
+    serviced = {((service.metadata.labels or {}).get("sandbox-id")) for service in services}
+    now = time.time()
+    for pod in pods:
+        sandbox_id = (pod.metadata.labels or {}).get("sandbox-id")
+        if not sandbox_id or sandbox_id == exclude_sandbox_id or sandbox_id in serviced:
+            continue
+        created_at = getattr(pod.metadata, "creation_timestamp", None)
+        if created_at is None or now - created_at.timestamp() < _ORPHAN_POD_GRACE_SECONDS:
+            continue
+        expected_uid = getattr(pod.metadata, "uid", None)
+        if not expected_uid:
+            logger.warning("Skipped orphan sweep for Pod %s: no UID in the list response", pod.metadata.name)
+            continue
+        if not _service_confirmed_absent(sandbox_id):
+            logger.info("Kept orphaned Pod %s: a Service is present or its state is unknown", pod.metadata.name)
+            continue
+        if _delete_pod_unless_adopted(sandbox_id, expected_uid=expected_uid, pod_name=pod.metadata.name):
+            logger.info("Swept orphaned Pod %s: no Service after %s s", pod.metadata.name, _ORPHAN_POD_GRACE_SECONDS)
 
 
 def _pod_shell_capacity(pod) -> int:
@@ -1364,7 +1642,7 @@ def create_sandbox(req: CreateSandboxRequest):
     existing_url = _sandbox_access_url(sandbox_id, tolerate_read_errors=True)
     if existing_url:
         try:
-            return _sandbox_response(
+            response = _sandbox_response(
                 sandbox_id,
                 existing_url,
                 required_capacity=max_shell_sessions,
@@ -1376,10 +1654,26 @@ def create_sandbox(req: CreateSandboxRequest):
             # Only a confirmed missing Pod may fall through to creation.
             if not isinstance(exc, ApiException) or exc.status != 404:
                 raise HTTPException(status_code=500, detail=f"Could not verify existing sandbox shell capacity: {exc}") from exc
+        else:
+            # Report Running only after the mark lands: a concurrent creator's
+            # rollback checks the mark, or fails its resourceVersion
+            # precondition, instead of deleting a Pod this caller was told is
+            # ready. The capacity check inside _sandbox_response only rejects a
+            # terminating Pod when requirements are sent; a create must never
+            # report Running for one, with or without requirements.
+            if response.status == "Terminating":
+                raise HTTPException(status_code=409, detail="Existing sandbox is still terminating")
+            _adopt_attested_pod(sandbox_id, response)
+            return response
+
+    # ── Sweep leftovers from earlier failed creates ─────────────────
+    _sweep_orphaned_pods(exclude_sandbox_id=sandbox_id)
 
     # ── Create Pod ───────────────────────────────────────────────────
+    pod_created = False
+    created_pod_uid: str | None = None
     try:
-        core_v1.create_namespaced_pod(
+        created_pod = core_v1.create_namespaced_pod(
             K8S_NAMESPACE,
             _build_pod(
                 sandbox_id,
@@ -1391,8 +1685,11 @@ def create_sandbox(req: CreateSandboxRequest):
                 provision_lark_cli_broker=provision_lark_cli_broker,
                 max_shell_sessions=max_shell_sessions,
                 max_bash_sessions=max_bash_sessions,
+                environment=req.environment,
             ),
         )
+        pod_created = True
+        created_pod_uid = getattr(getattr(created_pod, "metadata", None), "uid", None)
         logger.info(f"Created Pod {_pod_name(sandbox_id)}")
     except ApiException as exc:
         if exc.status != 409:  # 409 = AlreadyExists
@@ -1404,12 +1701,20 @@ def create_sandbox(req: CreateSandboxRequest):
         logger.info(f"Created Service {_svc_name(sandbox_id)}")
     except ApiException as exc:
         if exc.status != 409:
-            # Roll back the Pod on failure
-            try:
-                core_v1.delete_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
-            except ApiException:
-                pass
+            # Roll back only the Pod this request created, and only once the
+            # Service is confirmed absent. On a 409 Pod race the Pod belongs
+            # to the concurrent creator, and a Service write that errored may
+            # still have committed; deleting either would tear down a sandbox
+            # another Gateway is waiting on or already using.
+            if pod_created and _service_confirmed_absent(sandbox_id):
+                _delete_pod_unless_adopted(sandbox_id, expected_uid=created_pod_uid)
             raise HTTPException(status_code=500, detail=f"Service creation failed: {exc.reason}")
+
+    if not pod_created:
+        # Pre-adopt before the URL wait so a concurrent creator's rollback
+        # cannot delete the Pod during it; the final response read still
+        # attests and marks the Pod.
+        _pre_adopt_racing_pod(sandbox_id)
 
     # ── Wait until the Service has a usable access URL ───────────────
     sandbox_url: str | None = None
@@ -1425,7 +1730,7 @@ def create_sandbox(req: CreateSandboxRequest):
     # A concurrent creator can win the 409 race with a lower-capacity Pod.
     # Never claim that the requested value was applied without reading it back.
     try:
-        return _sandbox_response(
+        response = _sandbox_response(
             sandbox_id,
             sandbox_url,
             required_capacity=max_shell_sessions,
@@ -1434,6 +1739,14 @@ def create_sandbox(req: CreateSandboxRequest):
         )
     except (ApiException, RuntimeError) as exc:
         raise HTTPException(status_code=500, detail=f"Could not verify created sandbox shell capacity: {exc}") from exc
+
+    if response.status == "Terminating":
+        raise HTTPException(status_code=409, detail="Existing sandbox is still terminating")
+    if not pod_created or response.container_id != created_pod_uid:
+        # A Pod this request did not create (it lost the 409 race, or its own
+        # Pod was replaced) is marked before reporting Running.
+        _adopt_attested_pod(sandbox_id, response)
+    return response
 
 
 @app.delete("/api/sandboxes/{sandbox_id}")

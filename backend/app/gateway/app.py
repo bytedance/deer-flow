@@ -40,6 +40,7 @@ from app.gateway.routers import (
     integrations,
     knowledge,
     mcp,
+    mcp_agent_auth,
     mcp_tasks,
     mcp_user_oauth,
     memory,
@@ -363,6 +364,24 @@ async def _run_startup_trash_sweep(app: FastAPI, startup_config) -> None:
         logger.warning("Trash retention sweep skipped", exc_info=True)
 
 
+async def _run_startup_queued_upload_sweep(app: FastAPI) -> None:
+    try:
+        from app.gateway.run_input_cleanup import cleanup_abandoned_queued_uploads
+        from deerflow.config.paths import get_paths
+
+        store = getattr(app.state, "run_store", None)
+        if store is not None:
+            removed = await cleanup_abandoned_queued_uploads(store, get_paths())
+            if removed:
+                logger.info("Removed %d abandoned queued upload stage(s)", removed)
+    except Exception:
+        logger.warning("Queued upload stage cleanup skipped", exc_info=True)
+
+
+async def _run_startup_storage_sweeps(app: FastAPI, startup_config) -> None:
+    await asyncio.gather(_run_startup_trash_sweep(app, startup_config), _run_startup_queued_upload_sweep(app))
+
+
 async def _shutdown_startup_trash_sweep(app: FastAPI) -> None:
     """Grace-budgeted shutdown for the background startup sweep (§8.3).
 
@@ -497,7 +516,7 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
     silent backlog, so the enqueue side is detached when delivery cannot start.
     """
     scheduled_task_service = getattr(app.state, "scheduled_task_service", None)
-    if scheduled_task_service is None or notification_repo is None:
+    if notification_repo is None:
         return
 
     from app.channels.service import get_channel_service
@@ -505,7 +524,8 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
     channel_service = get_channel_service()
     if channel_service is None:
         logger.warning("channel_connections.enabled but no channel service is running; disabling scheduled-task IM notification enqueue to avoid a write-only outbox")
-        scheduled_task_service.detach_notification_outbox()
+        if scheduled_task_service is not None:
+            scheduled_task_service.detach_notification_outbox()
         return
 
     try:
@@ -562,6 +582,7 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
             return True
 
         prefs_repo = ImNotificationPreferencesRepository(get_session_factory())
+        coordination = getattr(app.state, "coordination_workers", None)
         worker = NotificationDeliveryWorker(
             delivery_repo=notification_repo,
             resolve_channel=channel_service.get_channel,
@@ -577,13 +598,15 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
             resolve_notification_preferences=prefs_repo.get,
             resolve_notification_event_preferences=prefs_repo.get_event_preferences,
             resolve_human_input_pending=resolve_human_input_pending,
+            read_coordination_artifact=coordination.repo.read_artifact if coordination is not None else None,
             poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
             # Language of notices whose owner has no UI language preference.
             default_locale=startup_config.channel_connections.notification_locale,
         )
         await worker.start()
     except Exception:
-        scheduled_task_service.detach_notification_outbox()
+        if scheduled_task_service is not None:
+            scheduled_task_service.detach_notification_outbox()
         raise
     app.state.notification_delivery_worker = worker
 
@@ -672,6 +695,9 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         ensure_browser_runtime_available(startup_config)
         logger.info("Configuration loaded successfully")
         warn_if_auth_disabled_enabled()
+        hitl_approval = getattr(startup_config, "hitl_approval", None)
+        if getattr(hitl_approval, "enabled", False) is not True:
+            logger.warning("hitl_approval is not enabled. Tool calls can execute without runtime human review. Set hitl_approval.enabled to true in config.yaml to enable tool approvals. See docs/guide/skills-and-tools.md.")
     except Exception as e:
         error_msg = f"Failed to load configuration during gateway startup: {e}"
         logger.exception(error_msg)
@@ -761,15 +787,10 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Must run AFTER langgraph_runtime so app.state.store is available for thread migration
         await _ensure_admin_user(app)
 
-        # Phase-2 trash tier (§8.3): one retention sweep at startup, beside
-        # the lazy trigger on the trash listing — no daemon, no scheduler.
-        # Runs after langgraph_runtime so app.state.project_document_repo is
-        # available. The per-user reconciliation walks every row and file, so
-        # it is scheduled as a background task: gateway readiness never waits
-        # on it, a failure is logged by the task itself, and shutdown gives the
-        # in-flight sweep a bounded graceful budget before cancelling it; any
-        # already-started file worker drains before the runtime is torn down.
-        app.state.startup_trash_sweep_task = asyncio.create_task(_run_startup_trash_sweep(app, startup_config))
+        # Run both storage sweeps after their repositories are ready, without
+        # delaying gateway readiness. Shutdown drains in-flight writes before
+        # tearing the runtime down.
+        app.state.startup_trash_sweep_task = asyncio.create_task(_run_startup_storage_sweeps(app, startup_config))
 
         # Best-effort per-document summary generation.
         # Workers start only when projects.summaries_enabled is true; the
@@ -847,9 +868,11 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             # ChannelManager's follow-up-drain watcher (issue #4121 Slice 2)
             # uses to reach the same StreamBridge every other run consumer
             # goes through `get_stream_bridge(request)` for.
+            coordination = getattr(app.state, "coordination_workers", None)
             channel_service = await start_channel_service(
                 startup_config,
                 get_stream_bridge=lambda: getattr(app.state, "stream_bridge", None),
+                dispatch_coordination_task=coordination.dispatch_bound_channel if coordination is not None and scheduled_notification_repo is not None else None,
                 credentials_cipher=credentials_cipher,
                 # channels.leader_lease: auto follows the same multi-process
                 # signal the startup gate used; the lease owner is this
@@ -1371,6 +1394,8 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # MCP API is mounted at /api/mcp
     app.include_router(capabilities.router)
+    # Runtime MCP agent credential grants (admin) at /api/mcp/agent-auth
+    app.include_router(mcp_agent_auth.router)
     app.include_router(mcp.router)
     app.include_router(personal_mcp.router)
     app.include_router(mcp_user_oauth.router)

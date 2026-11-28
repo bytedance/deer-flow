@@ -100,6 +100,7 @@ def main() -> int:
             web_fetch_tool_name=fetch_provider.tool_name if fetch_provider else "web_fetch",
             web_fetch_extra_config=fetch_provider.extra_config if fetch_provider else None,
             sandbox_use=execution.sandbox_use,
+            sandbox_env_vars=llm.sandbox_env_vars or None,
             include_bash_tool=execution.include_bash_tool,
             include_write_tools=execution.include_write_tools,
             channel_connection_providers=channels.enabled_providers,

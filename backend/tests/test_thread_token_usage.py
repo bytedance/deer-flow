@@ -56,6 +56,7 @@ def test_thread_token_usage_returns_stable_shape(monkeypatch: pytest.MonkeyPatch
     assert response.json() == {
         "thread_id": "thread-1",
         **_aggregate_result(),
+        "total_batch_items": 0,
         "context_usage": None,
     }
     run_store.aggregate_tokens_by_thread.assert_awaited_once_with("thread-1", user_id=None)
@@ -180,3 +181,33 @@ async def test_build_context_usage_returns_none_when_checkpoint_read_fails(monke
     )
 
     assert result is None
+
+
+def test_thread_token_usage_adds_batch_items_as_subagent_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    run_store = _make_run_store()
+    monkeypatch.setattr(thread_runs, "build_context_usage", AsyncMock(return_value=None))
+    app = _make_app(run_store)
+    batch_repo = MagicMock()
+    batch_repo.list_item_token_usage = AsyncMock(
+        return_value=[
+            {"item_id": "item-1", "model_name": "model-a", "at": None, "input_tokens": 200, "output_tokens": 60, "total_tokens": 260, "cache_read_tokens": 0},
+            # The same item's retry: one item, two attempts.
+            {"item_id": "item-1", "model_name": "model-a", "at": None, "input_tokens": 100, "output_tokens": 40, "total_tokens": 140, "cache_read_tokens": 0},
+            {"item_id": "item-2", "model_name": None, "at": None, "input_tokens": 8, "output_tokens": 2, "total_tokens": 10, "cache_read_tokens": 0},
+        ]
+    )
+    app.state.subagent_batch_repo = batch_repo
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/token-usage")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total_tokens"] == 150 + 410
+    assert data["total_input_tokens"] == 90 + 308
+    assert data["total_output_tokens"] == 60 + 102
+    assert data["total_runs"] == 2
+    assert data["total_batch_items"] == 2
+    assert data["by_model"] == {"unknown": {"tokens": 150 + 10, "runs": 2}, "model-a": {"tokens": 400, "runs": 0}}
+    assert data["by_caller"] == {"lead_agent": 120, "subagent": 25 + 410, "middleware": 5}
+    batch_repo.list_item_token_usage.assert_awaited_once_with(user_id=None, thread_id="thread-1")
