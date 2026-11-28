@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import posixpath
 import re
+import unicodedata
+import urllib.parse
 from collections.abc import Set as AbstractSet
 from pathlib import PurePosixPath
 from typing import Any
@@ -93,6 +95,42 @@ def build_resource_graph(snapshot: dict[str, Any]) -> tuple[dict[str, Any], list
 # stripped from the very end — e.g. "references/setup.md." -> "references/setup.md"
 # while "references/config.yaml" keeps its extension.
 _TRAILING_SENTENCE_PUNCTUATION = ".?!"
+_PERCENT_ESCAPE_RUN_RE = re.compile(r"(?:%[0-9A-Fa-f]{2})+")
+_STRUCTURAL_LINK_CHARACTERS = frozenset("#?/\\:\"'")
+_URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+
+
+def _link_target_path(raw: str) -> str:
+    """Decode safe UTF-8 escapes without changing the link's structure.
+
+    ``%23``, ``%3F``, ``%3A`` and encoded quotes stay encoded so
+    ``_resolve_reference`` cannot re-read them as a fragment, query, scheme or
+    quote. Separators, controls and non-space whitespace stay encoded for the
+    same reason, and a segment that would decode to ``.`` or ``..`` keeps its
+    escapes, so decoding never adds a dot segment the link did not spell out.
+    """
+    undecoded = raw.split("#", 1)[0].rstrip(_TRAILING_SENTENCE_PUNCTUATION)
+
+    def decode_run(match: re.Match[str]) -> str:
+        escaped = match.group(0)
+        try:
+            decoded = bytes.fromhex(escaped.replace("%", "")).decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return escaped
+        return "".join(urllib.parse.quote(char, safe="") if char in _STRUCTURAL_LINK_CHARACTERS or unicodedata.category(char).startswith("C") or (char.isspace() and char != " ") else char for char in decoded)
+
+    segments = []
+    for segment in undecoded.split("/"):
+        decoded_segment = _PERCENT_ESCAPE_RUN_RE.sub(decode_run, segment)
+        segments.append(segment if decoded_segment in {".", ".."} and decoded_segment != segment else decoded_segment)
+    decoded = "/".join(segments)
+    if decoded[:1].isspace() or decoded[-1:].isspace():
+        return undecoded
+    if _URI_SCHEME_RE.match(decoded) and not _URI_SCHEME_RE.match(undecoded):
+        # An escaped first letter ("%68ttps:x.md") must not turn a relative
+        # path into a URL that `_resolve_reference` skips.
+        return undecoded
+    return decoded
 
 
 def _quoted_title_end(content: str, terminator: int) -> int:
@@ -122,7 +160,8 @@ def _extract_references(content: str) -> set[str]:
     # construct is blanked out of the residual text: the code-span and
     # bare-path passes below are literal-path contexts where '#' may be
     # part of a real filename, and they must never see link-internal text.
-    # Trailing sentence punctuation is still stripped here (#5739).
+    # Trailing sentence punctuation is still stripped here (#5739), then link
+    # targets decode only URL escapes that cannot change link structure.
     #
     # The link scan is opener-driven instead of a regex: `finditer` over
     # `!?\\[[^\\]]*]\\(([^)\\s]+)(?:\\s+"[^"]*")?\\)` re-scans the same target
@@ -181,7 +220,7 @@ def _extract_references(content: str) -> set[str]:
                 # prefix is skipped.
                 position = content.rfind("]", closer, terminator) + 1
                 continue
-        refs.add(content[target:terminator].split("#", 1)[0].rstrip(_TRAILING_SENTENCE_PUNCTUATION))
+        refs.add(_link_target_path(content[target:terminator]))
         spans.append((start, end))
         position = end
     # Blank matched spans by position, not by text: `str.replace` blanks an
@@ -212,7 +251,7 @@ def _resolve_reference(
     files: AbstractSet[str] | None = None,
 ) -> str | None:
     ref = raw_ref.strip().strip("\"'")
-    if not ref or ref.startswith("#") or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", ref):
+    if not ref or ref.startswith("#") or _URI_SCHEME_RE.match(ref):
         return None
     try:
         if ref.startswith("/"):

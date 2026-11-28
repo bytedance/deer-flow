@@ -141,6 +141,37 @@ def test_resource_graph_tracks_referenced_resource(tmp_path):
     assert "references/guide.md" not in facts["resources"]["orphans"]
 
 
+@pytest.mark.parametrize(
+    "target, packaged_path",
+    [
+        pytest.param("references/my%20guide.md", "references/my guide.md", id="space"),
+        pytest.param("references/my%20guide.md#setup", "references/my guide.md", id="space-with-fragment"),
+        pytest.param("references/50%25.md", "references/50%.md", id="percent"),
+        pytest.param("references/caf%C3%A9.md", "references/café.md", id="non-ascii"),
+    ],
+)
+def test_resource_graph_decodes_percent_encoded_markdown_link_targets(tmp_path, target, packaged_path):
+    _write(tmp_path / "SKILL.md", _valid_skill() + f"\nRead [guide]({target}).\n")
+    _write(tmp_path / packaged_path, "# Guide\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert {"source": "SKILL.md", "target": packaged_path} in facts["resources"]["edges"]
+    assert packaged_path not in facts["resources"]["orphans"]
+    assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
+
+
+def test_resource_graph_does_not_decode_percent_encoded_code_span_targets(tmp_path):
+    _write(tmp_path / "SKILL.md", _valid_skill() + "\nRead `references/my%20guide.md`.\n")
+    _write(tmp_path / "references" / "my guide.md", "# Guide\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert {"source": "SKILL.md", "target": "references/my guide.md"} not in facts["resources"]["edges"]
+    assert "references/my guide.md" in facts["resources"]["orphans"]
+    assert any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" and f["evidence"] == "references/my%20guide.md" for f in facts["findings"])
+
+
 def test_resource_graph_strips_trailing_sentence_punctuation_from_prose_refs(tmp_path):
     # A bare path at the end of an English sentence is followed by "." or "!".
     # Those are prose punctuation, not part of the path: they must not turn a
@@ -378,6 +409,26 @@ def test_resource_graph_link_scan_matches_finditer(payload, expected):
     # link is not real — while `[x]([)y](z) [)y](z)` has two genuine,
     # non-overlapping matches that must both be found and blanked.
     assert _extract_references(payload) == expected
+
+
+@pytest.mark.parametrize(
+    "payload, expected",
+    [
+        pytest.param("[x](references/file%2E)", "references/file.", id="safe-dot"),
+        pytest.param("[x](references/100%.md)", "references/100%.md", id="malformed-escape"),
+        pytest.param("[x](references/a%2Fb.md)", "references/a%2Fb.md", id="separator"),
+        pytest.param("[x](references/a%0Ab.md)", "references/a%0Ab.md", id="control"),
+        pytest.param("[x](references/a%FFb.md)", "references/a%FFb.md", id="invalid-utf8"),
+        pytest.param("[x](references/guide.md%20)", "references/guide.md%20", id="trailing-space"),
+        pytest.param("[x](references/caf%C3%A9%2F.md)", "references/café%2F.md", id="mixed-run"),
+        pytest.param("[x](references/%2E%2E/guide.md)", "references/%2E%2E/guide.md", id="encoded-dot-segment"),
+        pytest.param("[x](references/.%2E/guide.md)", "references/.%2E/guide.md", id="half-encoded-dot-segment"),
+        pytest.param("[x](references/v1%2E2/guide.md)", "references/v1.2/guide.md", id="dot-inside-segment"),
+        pytest.param("[x](%68ttps:relative.md)", "%68ttps:relative.md", id="no-new-uri-scheme"),
+    ],
+)
+def test_resource_graph_link_targets_decode_only_safe_escapes(payload, expected):
+    assert _extract_references(payload) == {expected}
 
 
 @pytest.mark.parametrize(
