@@ -165,6 +165,18 @@ def _status(
 
 
 def _same_file(before_file: FileSnapshot, after_file: FileSnapshot) -> bool:
+    # Symlink snapshots never populate sha256, and a retargeted link (or a
+    # regular-file/symlink swap) can keep the same size and mtime, so link
+    # status and target must be compared before the size/mtime fallback
+    # (#8550). A symlink's content is its target: same target = unchanged.
+    # When either side lacks a recorded target (dangling link metadata), fall
+    # back to the metadata comparison so a recreated link is still detected.
+    if before_file.symlink or after_file.symlink:
+        if before_file.symlink != after_file.symlink:
+            return False
+        if before_file.symlink_target is not None or after_file.symlink_target is not None:
+            return before_file.symlink_target == after_file.symlink_target
+        return before_file.size == after_file.size and before_file.mtime_ns == after_file.mtime_ns
     if before_file.sha256 is not None and after_file.sha256 is not None:
         return before_file.sha256 == after_file.sha256
     return before_file.size == after_file.size and before_file.mtime_ns == after_file.mtime_ns
