@@ -25,8 +25,9 @@ reverse direction has to accept both spellings of the same host path — see
 
 from __future__ import annotations
 
+import errno
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 # Only match where a host base ends at a real path-segment boundary, so a mount
 # root does not match inside a sibling that merely shares its prefix
@@ -117,33 +118,18 @@ def build_output_mask_pattern(base: str, *, separator_agnostic: bool = False) ->
     return re.compile(PATH_START_BOUNDARY + escaped + _SEGMENT_BOUNDARY + _PATH_TAIL)
 
 
-def replace_output_path_matches(
-    output: str,
-    base: str,
-    replacement: str | Callable[[str], str],
-    *,
-    separator_agnostic: bool = False,
-) -> str:
-    """Replace ``base`` path matches without compiling a path-specific regex.
+def _next_path_match(output: str, searchable_output: str, searchable_base: str, search_from: int) -> tuple[int, int] | None:
+    """Return the ``(start, end)`` of the next match for one base, or ``None``.
 
-    Dynamic thread roots are high-cardinality. Compiling one regex per root
-    leaves those roots in Python's global ``re`` caches after DeerFlow evicts
-    the owning sandbox. This scanner preserves the same boundary and path-tail
-    contract while keeping no process-level reference to ``base``.
+    A match is a base occurrence that starts a path (not inside a longer
+    word) and ends at a segment boundary, plus the path tail up to the next
+    terminator. Candidates that fail the boundary are skipped, not returned,
+    so the caller never sees a prefix sibling as a match.
     """
-    if not output or not base:
-        return output
-
-    searchable_output = output.replace("\\", "/") if separator_agnostic and "\\" in output else output
-    searchable_base = base.replace("\\", "/") if separator_agnostic and "\\" in base else base
-    chunks: list[str] = []
-    copied_until = 0
-    search_from = 0
-
     while True:
         match_start = searchable_output.find(searchable_base, search_from)
         if match_start < 0:
-            break
+            return None
         if match_start > 0 and _PATH_START_BLOCKERS.fullmatch(searchable_output[match_start - 1]):
             search_from = match_start + 1
             continue
@@ -163,6 +149,54 @@ def replace_output_path_matches(
                 search_from = match_start + 1
                 continue
 
+        return match_start, match_end
+
+
+def replace_output_path_matches(
+    output: str,
+    base: str,
+    replacement: str | Callable[[str], str],
+    *,
+    separator_agnostic: bool = False,
+    max_bytes: int | None = None,
+) -> str:
+    """Replace ``base`` path matches without compiling a path-specific regex.
+
+    Dynamic thread roots are high-cardinality. Compiling one regex per root
+    leaves those roots in Python's global ``re`` caches after DeerFlow evicts
+    the owning sandbox. This scanner preserves the same boundary and path-tail
+    contract while keeping no process-level reference to ``base``.
+
+    ``max_bytes`` bounds the substituted output in bytes: the budget is
+    enforced while the pieces are appended, so a caller that refuses an
+    oversized result never materializes the expanded string first. A
+    replacement that would push the running total past the budget raises
+    ``OSError`` (``EFBIG``) at that match instead of completing the scan.
+    """
+    if not output or not base:
+        return output
+
+    searchable_output = output.replace("\\", "/") if separator_agnostic and "\\" in output else output
+    searchable_base = base.replace("\\", "/") if separator_agnostic and "\\" in base else base
+    chunks: list[str] = []
+    copied_until = 0
+    search_from = 0
+    budgeted_size = 0
+
+    def _append(piece: str) -> None:
+        nonlocal budgeted_size
+        chunks.append(piece)
+        if max_bytes is not None:
+            budgeted_size += len(piece.encode("utf-8"))
+            if budgeted_size > max_bytes:
+                raise OSError(errno.EFBIG, f"Substituted output exceeds maximum size of {max_bytes} bytes")
+
+    while True:
+        found = _next_path_match(output, searchable_output, searchable_base, search_from)
+        if found is None:
+            break
+        match_start, match_end = found
+
         matched_path = output[match_start:match_end]
         if callable(replacement):
             replaced_path = replacement(matched_path)
@@ -170,12 +204,97 @@ def replace_output_path_matches(
             relative = normalize_mask_tail(matched_path[len(base) :])
             replaced_path = f"{replacement}/{relative}" if relative else replacement
 
-        chunks.append(output[copied_until:match_start])
-        chunks.append(replaced_path)
+        _append(output[copied_until:match_start])
+        _append(replaced_path)
         copied_until = match_end
         search_from = match_end
 
     if not chunks:
+        if max_bytes is not None and len(output.encode("utf-8")) > max_bytes:
+            raise OSError(errno.EFBIG, f"Substituted output exceeds maximum size of {max_bytes} bytes")
         return output
-    chunks.append(output[copied_until:])
+    _append(output[copied_until:])
+    return "".join(chunks)
+
+
+def replace_output_path_matches_all(
+    output: str,
+    bases: Sequence[str],
+    replacement: Callable[[str], str],
+    *,
+    separator_agnostic: bool = False,
+    max_bytes: int | None = None,
+) -> str:
+    """Replace path matches for several bases in a single left-to-right scan.
+
+    Same boundary and path-tail contract as ``replace_output_path_matches``,
+    shared through ``_next_path_match`` so the two cannot drift. The scan
+    differs in one way only: the budget applies to the fully substituted
+    output, not to an intermediate pass. When an early base expands a path
+    and a later base contracts others, a per-pass cap rejects an
+    intermediate string the caller never sees; here the ceiling sees the
+    net result (#8260, willem-bd P2). Allocation stays bounded all the same
+    — the output is built piece by piece under one running budget, so a
+    refused payload is never materialized. At the same start the longest
+    base wins, matching the longest-local-first pass order of the sequential
+    form; scanning resumes after each match, so replacement text is never
+    rewritten a second time. Per-base next-match cursors keep the scan
+    linear in the number of references: a base is only rescanned when its
+    cached match was consumed, so mounts absent from the output are scanned
+    once instead of once per reference (Codex P2 on #8260).
+    """
+    if not output or not bases:
+        return output
+
+    searchable_output = output.replace("\\", "/") if separator_agnostic and "\\" in output else output
+    searchable_bases = [base.replace("\\", "/") if separator_agnostic and "\\" in base else base for base in bases]
+    chunks: list[str] = []
+    copied_until = 0
+    search_from = 0
+    budgeted_size = 0
+    # A cached match stays the earliest match at-or-after any later
+    # search_from, and None is terminal, so only a consumed match is
+    # recomputed; a base whose match still lies ahead is never rescanned.
+    next_matches: list[tuple[int, int] | None] = [None] * len(searchable_bases)
+    computed: list[bool] = [False] * len(searchable_bases)
+
+    def _append(piece: str) -> None:
+        nonlocal budgeted_size
+        chunks.append(piece)
+        if max_bytes is not None:
+            budgeted_size += len(piece.encode("utf-8"))
+            if budgeted_size > max_bytes:
+                raise OSError(errno.EFBIG, f"Substituted output exceeds maximum size of {max_bytes} bytes")
+
+    while True:
+        best_start = -1
+        best_end = -1
+        best_base_len = -1
+        for i, searchable_base in enumerate(searchable_bases):
+            cached = next_matches[i]
+            if not computed[i] or (cached is not None and cached[0] < search_from):
+                cached = _next_path_match(output, searchable_output, searchable_base, search_from)
+                next_matches[i] = cached
+                computed[i] = True
+            if cached is None:
+                continue
+            start, end = cached
+            if best_start < 0 or start < best_start or (start == best_start and len(searchable_base) > best_base_len):
+                best_start, best_end, best_base_len = start, end, len(searchable_base)
+        if best_start < 0:
+            break
+
+        matched_path = output[best_start:best_end]
+        replaced_path = replacement(matched_path)
+
+        _append(output[copied_until:best_start])
+        _append(replaced_path)
+        copied_until = best_end
+        search_from = best_end
+
+    if not chunks:
+        if max_bytes is not None and len(output.encode("utf-8")) > max_bytes:
+            raise OSError(errno.EFBIG, f"Substituted output exceeds maximum size of {max_bytes} bytes")
+        return output
+    _append(output[copied_until:])
     return "".join(chunks)

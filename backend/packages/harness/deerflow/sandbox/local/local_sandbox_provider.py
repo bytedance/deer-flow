@@ -528,6 +528,9 @@ class LocalSandboxProvider(SandboxProvider):
                 )
                 if cached is not None:
                     replacement._agent_written_paths.update(cached._agent_written_paths)
+                    for path, digest in cached._stored_content_digests.items():
+                        replacement._stored_content_digests[path] = digest.copy()
+                    replacement._stored_content_translated.update(cached._stored_content_translated)
                 cached = replacement
                 self._thread_sandboxes[key] = cached
                 self._evict_until_within_cap_locked()

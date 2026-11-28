@@ -1,5 +1,6 @@
 import ctypes
 import errno
+import hashlib
 import locale
 import logging
 import ntpath
@@ -23,7 +24,7 @@ from deerflow.sandbox.command_scope import COMMAND_OWNER_ENV, current_command_sc
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT, download_limit
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
-from deerflow.sandbox.path_patterns import PATH_START_BOUNDARY, replace_output_path_matches
+from deerflow.sandbox.path_patterns import PATH_START_BOUNDARY, replace_output_path_matches, replace_output_path_matches_all
 from deerflow.sandbox.sandbox import CommandOutput, Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches, is_user_data_path, path_matches
 from deerflow.utils.atomic_write import publish_bytes_atomically
@@ -511,6 +512,16 @@ class LocalSandbox(Sandbox):
         # Track files written through write_file so read_file only
         # reverse-resolves paths in agent-authored content.
         self._agent_written_paths: set[str] = set()
+        # Digest of the exact bytes write_file stored per path, and whether
+        # those bytes include a container-path translation (Codex P2 on
+        # #8260). A tracked path can later be overwritten with binary data,
+        # so download_file must not decide text-vs-binary from UTF-8
+        # validity: it reverse-resolves only bytes still identical to a
+        # stored write that translated paths. Hash objects (not hexdigests)
+        # are kept so an appending write can extend the digest without
+        # re-reading the file.
+        self._stored_content_digests: dict[str, hashlib._Hash] = {}
+        self._stored_content_translated: set[str] = set()
 
     # ``path_mappings`` is set once in ``__init__`` and never mutated, so the
     # sorted views and resolved roots below are stable for the sandbox's
@@ -724,12 +735,21 @@ class LocalSandbox(Sandbox):
                 return f"{mapping.container_path}/{relative}" if relative else mapping.container_path
         return None
 
-    def _reverse_resolve_paths_in_output(self, output: str) -> str:
+    def _reverse_resolve_paths_in_output(self, output: str, *, max_bytes: int | None = None) -> str:
         """
         Reverse resolve local paths back to container paths in output string.
 
         Args:
             output: Output string that may contain local paths
+            max_bytes: Bound on the substituted output in bytes. When set,
+                the budget is enforced while substituting (see
+                ``replace_output_path_matches_all``), so a caller that refuses
+                an oversized result never materializes the expanded string —
+                and the ceiling applies to the fully restored output, not to
+                an intermediate pass: an early mapping that expands a path
+                must not trip it when a later mapping contracts the result
+                back under the limit (#8260, willem-bd P2). Without a budget
+                the mappings still apply one pass at a time, as before.
 
         Returns:
             Output with local paths resolved to container paths
@@ -743,6 +763,14 @@ class LocalSandbox(Sandbox):
         # ``_resolve_paths_in_command``), so matching must accept both
         # separators or the model sees raw host paths that no container path
         # maps back to.
+        if max_bytes is not None:
+            return replace_output_path_matches_all(
+                output,
+                [self._resolved_local_paths[mapping] for mapping in self._mappings_by_local_specificity],
+                self._reverse_resolve_path,
+                separator_agnostic=True,
+                max_bytes=max_bytes,
+            )
         result = output
         for mapping in self._mappings_by_local_specificity:
             result = replace_output_path_matches(
@@ -1371,6 +1399,31 @@ class LocalSandbox(Sandbox):
                 data = f.read(max_download_size + 1)
             if len(data) > max_download_size:
                 raise OSError(errno.EFBIG, f"File exceeds maximum download size of {max_download_size} bytes", path)
+            # Mirror read_file: reverse-resolve host paths back to virtual paths
+            # for agent-written text files, so the downloaded bytes match what
+            # the agent verified via read_file and no host path leaks (#8259).
+            # Reverse-resolve only bytes still identical to a stored write
+            # that translated paths. A tracked path later overwritten with
+            # binary data must download byte-identical: a successful UTF-8
+            # decode does not prove the bytes are text, so the digest — not
+            # the decode — is the text/binary test (#8260, Codex P2). A
+            # digest match also guarantees the decode below cannot fail:
+            # the recorded bytes came from str.encode("utf-8").
+            digest = self._stored_content_digests.get(resolved_path)
+            if resolved_path in self._stored_content_translated and digest is not None and hashlib.sha256(data).hexdigest() == digest.hexdigest():
+                text = data.decode("utf-8")
+                # The budget is enforced while substituting, not after: a
+                # much longer virtual root expands the payload, and building
+                # the whole expanded string first would materialize the very
+                # bytes the ceiling exists to refuse (#8260, Codex P2).
+                restored = self._reverse_resolve_paths_in_output(text, max_bytes=max_download_size).encode("utf-8")
+                # Reverse resolution can expand the payload — a short host
+                # path can stand in for a longer virtual one — so the size
+                # ceiling applies to the bytes actually returned, not only
+                # to the bytes read from disk.
+                if len(restored) > max_download_size:
+                    raise OSError(errno.EFBIG, f"File exceeds maximum download size of {max_download_size} bytes", path)
+                return restored
             return data
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
@@ -1400,9 +1453,43 @@ class LocalSandbox(Sandbox):
             # Only agent-written files get reverse-resolved; user uploads and
             # external tool output are left untouched.
             self._agent_written_paths.add(resolved_path)
+            # Record what this write stored, so download_file can tell
+            # translated text from later overwrites.
+            self._track_stored_content(resolved_path, resolved_content, translated=translate_paths and resolved_content != content, append=append)
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None
+
+    def _track_stored_content(self, resolved_path: str, resolved_content: str, *, translated: bool, append: bool) -> None:
+        """Record the digest of bytes a write stored, and whether they
+        include a path translation (#8260).
+
+        ``download_file`` reverse-resolves only bytes still identical to a
+        stored write that translated paths. A non-append write replaces the
+        whole file, so its digest and flag replace any earlier record — a
+        rewrite that translates nothing drops the translation record. An
+        appending write extends the recorded digest and ORs the flag, so a
+        script built up over several writes still reverse-resolves. When
+        the pre-existing bytes came from elsewhere (bash, an upload), the
+        full stored content cannot be proven to be a translating write, so
+        no record is kept.
+        """
+        stored = resolved_content.encode("utf-8")
+        if append:
+            previous = self._stored_content_digests.get(resolved_path)
+            if previous is None:
+                return
+            digest = previous.copy()
+            digest.update(stored)
+            self._stored_content_digests[resolved_path] = digest
+            if translated:
+                self._stored_content_translated.add(resolved_path)
+        else:
+            self._stored_content_digests[resolved_path] = hashlib.sha256(stored)
+            if translated:
+                self._stored_content_translated.add(resolved_path)
+            else:
+                self._stored_content_translated.discard(resolved_path)
 
     def _virtual_search_mounts(self, path: str) -> list[tuple[str, Path]] | None:
         """Search only mounted children of an unmapped virtual parent.
