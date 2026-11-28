@@ -1,4 +1,5 @@
 {{- if .Values.redis.enabled -}}
+{{- $name := include "deer-flow.redisFullname" . -}}
 {{- $password := .Values.redis.auth.password -}}
 {{- /* A user-managed Secret wins over `redis.auth.password` (see values.yaml),
        and whether it carries `redis-password` is only knowable at runtime. */ -}}
@@ -6,13 +7,13 @@
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ include "deer-flow.redisFullname" . }}
+  name: {{ $name }}
   namespace: {{ include "deer-flow.namespace" . }}
   labels:
     {{- include "deer-flow.labels" . | nindent 4 }}
     app.kubernetes.io/component: redis
 spec:
-  serviceName: {{ include "deer-flow.redisFullname" . }}
+  serviceName: {{ $name }}
   replicas: 1
   selector:
     matchLabels:
@@ -106,8 +107,7 @@ spec:
     - metadata:
         name: data
         labels:
-          {{- include "deer-flow.labels" . | nindent 10 }}
-          app.kubernetes.io/component: redis
+          {{- include "deer-flow.dataClaimLabels" (dict "root" . "name" $name "component" "redis") | nindent 10 }}
       spec:
         accessModes:
           - {{ .Values.redis.primary.persistence.accessMode | quote }}

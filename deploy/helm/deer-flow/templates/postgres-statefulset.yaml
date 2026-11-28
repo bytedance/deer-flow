@@ -1,4 +1,5 @@
 {{- if .Values.postgresql.enabled -}}
+{{- $name := include "deer-flow.postgresFullname" . -}}
 {{- $repository := .Values.postgresql.image.repository -}}
 {{- $image := printf "%s:%v" $repository .Values.postgresql.image.tag -}}
 {{- $tag := first (splitList "@" (toString .Values.postgresql.image.tag)) -}}
@@ -8,13 +9,13 @@
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ include "deer-flow.postgresFullname" . }}
+  name: {{ $name }}
   namespace: {{ include "deer-flow.namespace" . }}
   labels:
     {{- include "deer-flow.labels" . | nindent 4 }}
     app.kubernetes.io/component: postgres
 spec:
-  serviceName: {{ include "deer-flow.postgresFullname" . }}
+  serviceName: {{ $name }}
   replicas: 1
   selector:
     matchLabels:
@@ -117,8 +118,7 @@ spec:
     - metadata:
         name: data
         labels:
-          {{- include "deer-flow.labels" . | nindent 10 }}
-          app.kubernetes.io/component: postgres
+          {{- include "deer-flow.dataClaimLabels" (dict "root" . "name" $name "component" "postgres") | nindent 10 }}
       spec:
         accessModes:
           - {{ .Values.postgresql.primary.persistence.accessMode | quote }}

@@ -20,6 +20,12 @@ For a copy of the same image under another repository path or tag (for example, 
 
 With chart-managed storage, a new database starts in `pgdata/`, including on a volume with a storage-managed `.snapshot/` directory. An existing database at the volume root stays there. Run `readlink -f "$PGDATA"` in the database Pod to find the physical directory. Use that directory when switching images or taking a file-level backup after a clean shutdown.
 
+Before uninstalling a Kubernetes release, check the home PVC retention policy
+if persistence is enabled. To restore the workspace on reinstall, export the
+installed release's user-supplied values and preserve the database credentials
+and the app's credential encryption key. See the
+[Helm uninstall instructions](../../deploy/helm/deer-flow/README.md#uninstall).
+
 ## Option 1: Docker (Recommended)
 
 Requires Docker Desktop / Docker Engine and **Docker Compose v2.24+**
