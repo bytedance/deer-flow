@@ -98,9 +98,14 @@ async def _validate_mcp_plugins(selection: list[str] | None, request: Request, a
     # Managed definitions are deployment-wide. Personal installations stay
     # in the caller's own catalog, even when the caller is an administrator.
     installations = await list_installations("mcp", request, app_config)
-    unknown = sorted(set(selection) - {item.id for item in installations.items if item.selectable})
+    selectable = {item.id: item for item in installations.items if item.selectable}
+    requested = set(selection)
+    unknown = sorted(requested - selectable.keys())
     if unknown:
         raise HTTPException(status_code=422, detail=f"Unknown or ambiguous MCP installation IDs: {', '.join(unknown)}")
+    unsupported = [f"{installation_id} ({reason})" for installation_id in sorted(requested) if (reason := selectable[installation_id].subagent_unsupported_reason) is not None]
+    if unsupported:
+        raise HTTPException(status_code=422, detail=f"MCP installations unavailable to subagents: {', '.join(unsupported)}")
 
 
 def _validate_path_name(name: str, *, for_creation: bool = False) -> str:

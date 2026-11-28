@@ -424,7 +424,9 @@ Middleware tool declarations follow LangChain's `Sequence` contract, including l
 In a custom or managed subagent definition, omit `mcp_plugins` or set it to
 `null` to inherit the lead agent's selection. An empty list selects no MCP
 tools. A nonempty list selects those installation IDs independently of the lead
-agent. Use the installation IDs from Capability Center.
+agent. Use the installation IDs from Capability Center. Browser OAuth tools
+are available only to the lead agent. Omit those installation IDs from YAML
+subagent bindings and overrides. Managed subagent writes reject them.
 
 Under `subagents.agents.<name>` in `config.yaml`, a list takes precedence over
 the built-in, custom, or managed definition, including an empty list. Omitting

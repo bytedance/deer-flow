@@ -191,8 +191,9 @@ the field keeps its saved value. Use `null` to inherit the lead selection,
 `[]` to select no MCP installations, or a list of deployment MCP installation
 IDs from `GET /api/capabilities/installations/mcp`. Disabled installations can
 be saved and contribute tools only while enabled. Unknown, personal, or
-ambiguous installation IDs return HTTP 422 when submitted. Unrelated updates
-retain a saved reference if its installation is later removed.
+ambiguous installation IDs return HTTP 422 when submitted. Browser OAuth
+installations are lead-only and also return HTTP 422 when selected. Unrelated
+updates retain existing references, including removed installations.
 `GET /api/subagents` reports each definition's selection as `mcp_plugins` and
 any configured list override in `config_overrides.mcp_plugins`.
 

@@ -125,6 +125,7 @@ async def test_batch_task_is_explicit_idempotent_submission(
     request = submitter.submit.await_args.args[0]
     assert request.submission_key == "run-1:call-1"
     assert request.execution_spec["mcp_plugins"] == expected_plugins
+    assert "mcp_plugins" not in request.execution_spec["subagent_config"]
     assert "ask_clarification" in request.execution_spec["subagent_config"]["disallowed_tools"]
     assert request.user_id == "user-1"
     assert [item["key"] for item in request.items] == ["record-1", "record-2"]

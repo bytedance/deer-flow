@@ -262,8 +262,12 @@ async def batch_task(
             continuation_context["context"]["model_name"] = metadata["model_name"]
     run_id = context.get("run_id")
     submission_key = f"{run_id or thread_id}:{tool_call_id}"
+    config_snapshot = asdict(config)
+    # Older workers unpack this mapping directly into SubagentConfig.
+    config_snapshot.pop("mcp_plugins")
+    config_snapshot["prompt_overlay"] = config.prompt_overlay.model_dump()
     execution_spec = {
-        "subagent_config": {**asdict(config), "prompt_overlay": config.prompt_overlay.model_dump()},
+        "subagent_config": config_snapshot,
         "parent_model": metadata.get("model_name"),
         "tool_groups": metadata.get("tool_groups"),
         # Freeze the effective selection so a retry does not re-read the registry.
