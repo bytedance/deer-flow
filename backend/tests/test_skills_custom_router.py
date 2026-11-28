@@ -357,10 +357,12 @@ def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_
     skills_root = tmp_path / "skills"
     skills_root.mkdir()
     refresh_calls = []
+    reviewed = []
 
     async def _scan(*args, **kwargs):
         from deerflow.skills.security_scanner import ScanResult
 
+        reviewed.append(kwargs["location"])
         return ScanResult(decision="allow", reason="ok")
 
     async def _refresh(user_id: str):
@@ -395,7 +397,17 @@ def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_
     app.include_router(skills_router.router)
 
     thread_id = "thread-uploaded-skill"
-    archive_bytes = _make_skill_archive_bytes("uploaded-skill")
+    package_files = {
+        "SKILL.md": _skill_content("uploaded-skill").replace("# uploaded-skill", "# 数据分析").encode("utf-8"),
+        "scripts/run.py": 'print("分析完成")\n'.encode(),
+        "references/guide.md": b"# Guide\n",
+        "assets/nested/input.csv": "name,value\n示例,42\n".encode(),
+    }
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for relative_path, content in package_files.items():
+            archive.writestr(f"uploaded-skill/{relative_path}", content)
+    archive_bytes = buffer.getvalue()
 
     with TestClient(app) as client:
         upload_response = client.post(
@@ -407,7 +419,9 @@ def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_
         uploaded_path = Path(uploaded_file["path"])
         assert uploaded_path.is_file()
 
-        install_response = client.post("/api/skills/install", json={"thread_id": thread_id, "path": uploaded_file["virtual_path"]})
+        install_body = {"thread_id": thread_id, "path": uploaded_file["virtual_path"]}
+        install_response = client.post("/api/skills/install", json=install_body)
+        duplicate_response = client.post("/api/skills/install", json=install_body)
 
     assert install_response.status_code == 200
     assert install_response.json()["skill_name"] == "uploaded-skill"
@@ -417,6 +431,11 @@ def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_
     assert stat.S_IMODE(nested_dir.stat().st_mode) & 0o055 == 0o055
     assert stat.S_IMODE((installed_dir / "SKILL.md").stat().st_mode) & 0o044 == 0o044
     assert stat.S_IMODE((nested_dir / "guide.md").stat().st_mode) & 0o044 == 0o044
+    assert duplicate_response.status_code == 409
+    assert uploaded_path.read_bytes() == archive_bytes
+    for relative_path, content in package_files.items():
+        assert (installed_dir / relative_path).read_bytes() == content
+    assert "uploaded-skill/scripts/run.py" in reviewed
     assert refresh_calls == [("refresh", "default")]
 
 

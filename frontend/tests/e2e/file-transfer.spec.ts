@@ -223,3 +223,160 @@ test("uploads retain successful files, cancel one file and retry only the failed
   );
   expect(attempts.filter((name) => name === "success.txt")).toHaveLength(1);
 });
+
+test("installs an uploaded Skill from its chat card with the original path", async ({
+  page,
+}) => {
+  const filename = "分析.skill";
+  const virtualPath = `/mnt/user-data/uploads/${filename}`;
+  mockLangGraphAPI(page, {
+    threads: [
+      {
+        thread_id: threadId,
+        title: "Install uploaded Skill",
+        messages: [
+          {
+            type: "human",
+            id: "upload",
+            content: "Install this Skill package",
+            additional_kwargs: {
+              files: [
+                { filename, size: 512, path: virtualPath, status: "uploaded" },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.addInitScript(() => localStorage.setItem("theme", "light"));
+  let attempts = 0;
+  let installed = false;
+  let release!: () => void;
+  await page.route("**/api/skills", (route) =>
+    route.fulfill({
+      json: {
+        skills: installed
+          ? [
+              {
+                name: "analysis",
+                description: "Uploaded analysis skill",
+                category: "custom",
+                license: "MIT",
+                enabled: true,
+                editable: true,
+              },
+            ]
+          : [],
+      },
+    }),
+  );
+  await page.route("**/api/skills/install", async (route) => {
+    attempts++;
+    expect(route.request().postDataJSON()).toEqual({
+      thread_id: threadId,
+      path: virtualPath,
+    });
+    if (attempts === 1) {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await route.fulfill({
+        status: 400,
+        json: { detail: "Archive rejected by security review" },
+      });
+    } else {
+      installed = true;
+      await route.fulfill({
+        json: {
+          success: true,
+          skill_name: "analysis",
+          message: "Installed analysis",
+        },
+      });
+    }
+  });
+  await page.goto(`/workspace/chats/${threadId}`);
+  const button = page.getByRole("button", {
+    name: `Install ${filename}`,
+    exact: true,
+  });
+  await expect(button).toBeVisible();
+  expect(attempts).toBe(0);
+  await mkdir(qa, { recursive: true });
+  await page.screenshot({
+    path: path.join(qa, "uploaded-skill-light.png"),
+    animations: "disabled",
+  });
+  await button.click();
+  try {
+    await expect(button).toBeDisabled();
+    await expect.poll(() => attempts).toBe(1);
+    await page.evaluate(() => document.documentElement.classList.add("dark"));
+    await page.screenshot({
+      path: path.join(qa, "uploaded-skill-pending-dark.png"),
+      animations: "disabled",
+    });
+  } finally {
+    release?.();
+  }
+  await expect(
+    page.getByText("Archive rejected by security review", { exact: true }),
+  ).toBeVisible();
+  await expect(button).toBeEnabled();
+  await button.click();
+  await expect(
+    page.getByText("Installed analysis", { exact: true }),
+  ).toBeVisible();
+  expect(attempts).toBe(2);
+  const composer = page.getByRole("textbox", { name: /how can i assist you/i });
+  await composer.fill("@analysis");
+  await expect(
+    page.getByRole("option", { name: "analysis Uploaded analysis skill" }),
+  ).toBeVisible();
+});
+
+for (const tag of ["current_uploads", "uploaded_files"]) {
+  test(`keeps a ${tag} text attachment preview-only`, async ({ page }) => {
+    const filename = "compat.skill";
+    const virtualPath = `/mnt/user-data/uploads/${filename}`;
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: threadId,
+          title: "Compatibility attachment",
+          messages: [
+            {
+              type: "human",
+              id: "compat",
+              content: `<${tag}>\n- ${filename} (512 B)\n  Path: ${virtualPath}\n</${tag}>`,
+            },
+          ],
+        },
+      ],
+    });
+    let installs = 0;
+    await page.route("**/api/skills/install", async (route) => {
+      installs++;
+      await route.fulfill({
+        status: 403,
+        json: { detail: "Unexpected installation" },
+      });
+    });
+    await page.route(`**/api/threads/${threadId}/artifacts/**`, (route) =>
+      route.fulfill({ contentType: "text/plain", body: "Preview fixture" }),
+    );
+    await page.goto(`/workspace/chats/${threadId}`);
+    await expect(
+      page.getByRole("button", { name: `Install ${filename}`, exact: true }),
+    ).toHaveCount(0);
+    await page
+      .getByRole("button", { name: `${filename} SKILL · 0.5 KB`, exact: true })
+      .click();
+    await expect(
+      page.getByText("Preview fixture", { exact: true }),
+    ).toBeVisible();
+    expect(installs).toBe(0);
+  });
+}
