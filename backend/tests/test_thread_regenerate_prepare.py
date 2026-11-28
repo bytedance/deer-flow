@@ -211,11 +211,16 @@ def _event_store_for_ai(
 class FakeRunManager:
     def __init__(self, records):
         self.records = records
+        for record in records:
+            if not hasattr(record, "thread_id"):
+                record.thread_id = "thread-1"
+            if not hasattr(record, "user_id"):
+                record.user_id = "user-1"
 
-    async def list_by_thread(self, thread_id, *, user_id=None, limit=100):
+    async def list_by_thread(self, thread_id, *, user_id=None, limit=100, raise_on_store_error=False):
         return self.records[:limit]
 
-    async def get(self, run_id, *, user_id=None):
+    async def get(self, run_id, *, user_id=None, raise_on_store_error=False):
         return next((record for record in self.records if record.run_id == run_id), None)
 
 
@@ -1732,6 +1737,108 @@ def test_prepare_regenerate_payload_uses_server_stamped_human_run_id_without_par
     response = asyncio.run(_prepare_regenerate_payload("thread-1", "ai-1", _request(checkpointer, event_store)))
 
     assert response.target_run_id == "parent-run"
+
+
+@pytest.mark.parametrize("content", ["Partial answer", [{"type": "text", "text": "Partial answer"}]])
+def test_prepare_recognizes_length_notice_added_after_the_journal_summary(content):
+    from app.gateway.routers.thread_runs import _find_target_run_id
+    from deerflow.agents.middlewares.model_length_finish_reason_middleware import ModelLengthFinishReasonMiddleware
+
+    raw = AIMessage(id="ai", content=content, tool_calls=[{"name": "search", "args": {}, "id": "call"}], response_metadata={"finish_reason": "length"})
+    answer = ModelLengthFinishReasonMiddleware().after_model({"messages": [raw]}, SimpleNamespace(context={}))["messages"][0]
+    assert answer.content != raw.content
+    run = SimpleNamespace(run_id="source", status=RunStatus.success, last_ai_message="Partial answer")
+    request = _request(None, FakeEventStore([]), run_manager=FakeRunManager([run]))
+    assert asyncio.run(_find_target_run_id("thread", "ai", answer, None, request)) == "source"
+
+
+@pytest.mark.parametrize("failure", ["duplicate", "journal-outage", "run-list-outage"])
+def test_prepare_requires_one_verified_run_when_looking_up_legacy_answers(monkeypatch, failure):
+    from unittest.mock import AsyncMock
+
+    from app.gateway.routers.thread_runs import _find_target_run_id
+
+    records = [SimpleNamespace(run_id=key, status=RunStatus.success, last_ai_message="Repeated answer") for key in ("first", "second")]
+    manager = FakeRunManager(records)
+    events = FakeEventStore([])
+    if failure == "journal-outage":
+        monkeypatch.setattr(events, "list_messages", AsyncMock(side_effect=OSError("temporary storage failure")))
+    if failure == "run-list-outage":
+        monkeypatch.setattr(manager, "list_by_thread", AsyncMock(side_effect=OSError("temporary storage failure")))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(_find_target_run_id("thread", "ai", AIMessage(id="ai", content="Repeated answer"), None, _request(None, events, run_manager=manager)))
+    assert exc.value.status_code == (409 if failure == "duplicate" else 503)
+
+
+@pytest.mark.asyncio
+async def test_replay_eligibility_on_owned_internal_thread_uses_the_raw_caller():
+    from unittest.mock import AsyncMock
+
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, get_internal_user
+    from app.gateway.routers.thread_runs import _require_successful_source_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    manager = RunManager(store=MemoryRunStore())
+    request = _request(None, FakeEventStore([]), run_manager=manager)
+    owner = "raw-owner@example.com"
+    request.state.user = get_internal_user(owner_user_id=owner)
+    request.headers = {INTERNAL_OWNER_USER_ID_HEADER_NAME: owner}
+    request.app.state.thread_store = SimpleNamespace(get=AsyncMock(return_value={"user_id": owner}))
+    foreign = await manager.create("thread", user_id="other")
+    await manager.set_status(foreign.run_id, RunStatus.success)
+    with pytest.raises(HTTPException) as exc:
+        await _require_successful_source_run("thread", foreign.run_id, request)
+    assert exc.value.status_code == 409
+    own = await manager.create("thread", user_id=owner)
+    await manager.set_status(own.run_id, RunStatus.success)
+    assert (await _require_successful_source_run("thread", own.run_id, request)).run_id == own.run_id
+
+
+@pytest.mark.asyncio
+async def test_steering_guard_honors_an_owner_filtered_store_projection():
+    from unittest.mock import AsyncMock
+
+    from app.gateway.routers.thread_runs import _reject_multi_input_replay
+
+    manager = FakeRunManager([])
+    fetch = AsyncMock(return_value={"run_inputs": {"items": [{"mode": "steer", "status": "applied"}]}})
+    manager.input_store = SimpleNamespace(supports_run_inputs=True, get=fetch)
+    with pytest.raises(HTTPException) as exc:
+        await _reject_multi_input_replay("run", _request(None, FakeEventStore([]), run_manager=manager), user_id="owner")
+    assert exc.value.status_code == 409 and "adjusted" in exc.value.detail
+    fetch.assert_awaited_once_with("run", user_id="owner")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["edit", "interrupted"])
+@pytest.mark.parametrize("failure", ["cached-other-owner", "store-unavailable"])
+async def test_prepare_reads_only_attributable_runs_and_distinguishes_an_outage(monkeypatch, operation, failure):
+    from unittest.mock import AsyncMock
+
+    from app.gateway.routers.thread_runs import _find_interrupted_target_run_id, _require_successful_source_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    request = _request(None, FakeEventStore([]), run_manager=manager)
+    source = await manager.create("thread-1", user_id="other-owner")
+    await manager.set_status(source.run_id, RunStatus.success if operation == "edit" else RunStatus.interrupted)
+    run_id = source.run_id
+    if failure == "store-unavailable":
+        run_id = "cold-run"
+        monkeypatch.setattr(store, "get", AsyncMock(side_effect=OSError("temporary storage failure")))
+    if operation == "edit":
+        with pytest.raises(HTTPException) as exc:
+            await _require_successful_source_run("thread-1", run_id, request)
+        assert exc.value.status_code == (409 if failure == "cached-other-owner" else 503)
+    elif failure == "cached-other-owner":
+        assert await _find_interrupted_target_run_id("thread-1", {"additional_kwargs": {"run_id": run_id}}, request) is None
+    else:
+        with pytest.raises(HTTPException) as exc:
+            await _find_interrupted_target_run_id("thread-1", {"additional_kwargs": {"run_id": run_id}}, request)
+        assert exc.value.status_code == 503
 
 
 def test_prepare_regenerate_payload_rejects_unverified_run_fallback_when_events_are_missing():

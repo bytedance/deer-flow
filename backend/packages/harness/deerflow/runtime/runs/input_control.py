@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from deerflow.agents.chat_mode import CHAT_MODE_KEY
 from deerflow.utils.messages import SUBAGENT_RESULT_MESSAGE_NAME
 
 from .inputs import RunInputs
@@ -79,8 +80,9 @@ def _dispatch_message_id(request) -> str | None:
 
 
 class RunInputControl:
-    def __init__(self, inputs: RunInputs, *, agent_runs, thread_id: str, checkpointer, on_result=None, on_replan=None):
+    def __init__(self, inputs: RunInputs, *, agent_runs, thread_id: str, checkpointer, on_result=None, on_replan=None, chat_mode: bool = False):
         self.inputs, self.agent_runs, self.thread_id, self.checkpointer = inputs, agent_runs, thread_id, checkpointer
+        self._chat_mode = chat_mode
         self.delivered: set[str] = set()
         self.acknowledged: set[str] = set()
         self.delegations: list[dict] = []
@@ -138,15 +140,21 @@ class RunInputControl:
                     gate.release()
         for entry in entries:
             self.delivered.add(entry["id"])
-            direct = entry.get("source", "user") == "user"
+            source = entry.get("source", "user")
+            direct = source == "user"
+            metadata = {"run_input_id": entry["id"], "run_input_source": source, "run_id": self.inputs.run_id}
+            if self._chat_mode:
+                metadata[CHAT_MODE_KEY] = "chat"
             if direct:
                 self.current_input = entry["id"]
+            else:
+                metadata.update(hide_from_ui=True, untrusted_input=True)
             messages.append(
                 HumanMessage(
                     content=entry["text"],
                     id=entry["message_id"],
                     name=None if direct else "extension-input",
-                    additional_kwargs={"run_input_id": entry["id"], "run_input_source": entry.get("source", "user"), "run_id": self.inputs.run_id, **({"hide_from_ui": True, "untrusted_input": True} if not direct else {})},
+                    additional_kwargs=metadata,
                 )
             )
         if not messages:

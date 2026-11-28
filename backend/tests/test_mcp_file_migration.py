@@ -1007,6 +1007,23 @@ class TestResultHasTextContent:
 
 
 class TestConvertCallToolResultRewrites:
+    def test_chat_keeps_text_and_embedded_text_without_probing_paths_or_attaching_media(self):
+        from mcp.types import AudioContent, EmbeddedResource, TextResourceContents
+
+        result = CallToolResult(
+            content=[
+                TextContent(type="text", text="Read report.txt"),
+                AudioContent(type="audio", mimeType="audio/wav", data="c2FtcGxl"),
+                EmbeddedResource(type="resource", resource=TextResourceContents(uri="mem://report", text="Result")),
+                ResourceLink(type="resource_link", name="report", uri="file:///somewhere/report.txt"),
+            ],
+            structuredContent={"attachment": "file:///somewhere/report.txt"},
+        )
+        with patch.object(mcp_tools, "_rewrite_local_paths_in_text", side_effect=AssertionError("unexpected filesystem probe")):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1", chat_mode=True)
+        assert [block["text"] for block in content] == ["Read report.txt", "Result"]
+        assert artifact is None
+
     def test_local_image_resource_link_becomes_text_placeholder(self, paths: Paths):
         src = _workspace_file(paths, "page.png", content=b"png")
         result = CallToolResult(

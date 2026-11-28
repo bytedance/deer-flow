@@ -25,6 +25,54 @@ _stub_app_config = _base_config
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("claimed", [False, True], ids=["still-shared", "claimed-by-another-owner"])
+async def test_chat_mode_selection_preserves_legacy_shared_thread_ownership(thread_store, monkeypatch, _stub_app_config, claimed):
+    from unittest.mock import AsyncMock
+
+    from fastapi import HTTPException
+
+    from app.gateway.run_models import RunCreateRequest
+
+    thread_id = "shared-chat"
+    await thread_store.create(thread_id, user_id=None, metadata={"legacy": True})
+    app = app_for(thread_store, InMemorySaver())
+    app.state.run_manager = RunManager(store=MemoryRunStore())
+    app.state.stream_bridge = SimpleNamespace()
+    app.state.store = InMemoryStore()
+    app.state.run_event_store = MemoryRunEventStore()
+    request = SimpleNamespace(headers={}, state=SimpleNamespace(user=USER), app=app)
+    run_agent = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", run_agent)
+    merge = thread_store.update_metadata
+    transfers = []
+
+    async def merge_after_claim(*args, **kwargs):
+        if claimed:
+            transfers.append(await thread_store.claim_unowned(thread_id, "new-owner"))
+        return await merge(*args, **kwargs)
+
+    monkeypatch.setattr(thread_store, "update_metadata", merge_after_claim)
+    token = set_current_user(USER)
+    try:
+        body = RunCreateRequest(input={"messages": [{"role": "user", "content": "Hello"}]}, context={"mode": "chat"})
+        if claimed:
+            with pytest.raises(HTTPException) as denied:
+                await services.start_run(body, thread_id, request)
+            assert denied.value.status_code == 404
+            run_agent.assert_not_awaited()
+        else:
+            record = await services.start_run(body, thread_id, request)
+            await record.task
+            assert run_agent.await_count == 1
+    finally:
+        reset_current_user(token)
+    row = await thread_store.get(thread_id, user_id=None)
+    assert transfers == ([True] if claimed else [])
+    assert row["user_id"] == ("new-owner" if claimed else None)
+    assert row["metadata"] == ({"legacy": True} if claimed else {"legacy": True, "mode": "chat"})
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("first_reader", ["run", "http"])
 async def test_detached_run_metadata_and_http_create_share_admission(thread_store, monkeypatch, first_reader):
     thread_id = "cross-entry-create"

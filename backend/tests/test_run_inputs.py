@@ -503,6 +503,44 @@ async def test_http_input_admission_and_status_are_owner_scoped(input_store, mon
 
 
 @pytest.mark.asyncio
+async def test_queued_input_on_chat_run_keeps_its_mode_and_rejects_attachment_context(input_store, monkeypatch):
+    from uuid import UUID
+
+    from _router_auth_helpers import make_authed_test_app
+    from httpx import ASGITransport, AsyncClient
+
+    from app.gateway.auth.models import User
+    from app.gateway.routers.thread_runs import router
+    from deerflow.runtime.runs.manager import RunManager
+
+    await input_store.merge_owned_metadata("run", {"mode": "chat"}, owner_worker_id="worker")
+    inputs = RunInputs(input_store, "run", USER_ID, "worker")
+    await inputs.reopen()
+    user = User(id=UUID(USER_ID), email="chat@example.com", password_hash="unused")
+    app = make_authed_test_app(user_factory=lambda: user)
+
+    @app.middleware("http")
+    async def session_source(request, call_next):
+        request.state.auth_source = "session"
+        return await call_next(request)
+
+    app.include_router(router)
+    app.state.run_manager = RunManager(store=input_store)
+    monkeypatch.setattr("app.gateway.run_inputs.get_agent_runs", lambda _: object())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        url = "/api/threads/thread/runs/run/inputs"
+        body = {"request_id": "follow-up", "text": "Continue", "mode": "queue"}
+        rejected = await client.post(url, json={**body, "context": {"attachments": ["image.png"]}})
+        assert rejected.status_code == 422
+        invalid_mode = await client.post(url, json={**body, "context": {"mode": "Chat"}})
+        assert invalid_mode.status_code == 422
+        accepted = await client.post(url, json={**body, "context": {"mode": "ultra"}})
+        assert accepted.status_code == 200
+    items = (await inputs.read())["items"]
+    assert len(items) == 1 and items[0]["context"]["mode"] == "chat"
+
+
+@pytest.mark.asyncio
 async def test_list_thread_inputs_keeps_retryable_inputs_ahead_of_terminal_receipts(monkeypatch):
     """Regression for #7972: 32 recent receipts must not hide an older retryable input."""
     from app.gateway import run_inputs as gateway_run_inputs

@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, ValidationInfo, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
+from app.gateway.thread_mode import RunModeOptions, validate_mode_options
 from deerflow.runtime.stream_modes import RunStreamMode, UnsupportedStreamModeError, normalize_stream_modes
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -36,7 +37,9 @@ class RunCreateRequest(BaseModel):
     command: dict[str, Any] | None = Field(default=None, description="LangGraph Command")
     metadata: dict[str, Any] | None = Field(default=None, description="Run metadata")
     config: dict[str, Any] | None = Field(default=None, description="RunnableConfig overrides")
-    context: dict[str, Any] | None = Field(default=None, description="DeerFlow context overrides (model_name, thinking_enabled, etc.). May include client capabilities under context.client.")
+    context: RunModeOptions | None = Field(
+        default=None, description="Per-run DeerFlow options including mode, model_name, and thinking_enabled. Set mode to chat for text-only conversation without a sandbox. Client capabilities go under context.client."
+    )
     conversation_references: list[ConversationReference] = Field(
         default_factory=list,
         max_length=MAX_CONVERSATION_REFERENCES,
@@ -108,12 +111,16 @@ class RunCreateRequest(BaseModel):
         if value is None:
             return value
         for section in ("configurable", "context"):
-            if value.get(section) is not None and not isinstance(value[section], dict):
+            options = value.get(section)
+            if options is None:
+                continue
+            if not isinstance(options, dict):
                 raise PydanticCustomError(
                     "invalid_run_config_section",
                     "config.{section} must be an object or null",
                     {"section": section},
                 )
+            validate_mode_options(options)
         return value
 
     @model_validator(mode="after")

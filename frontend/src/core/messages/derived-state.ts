@@ -54,6 +54,7 @@ function canReuseMessageGroup(
     !previous ||
     previous.id !== next.id ||
     previous.type !== next.type ||
+    previous.textOnly !== next.textOnly ||
     previous.messages.length !== next.messages.length
   ) {
     return false;

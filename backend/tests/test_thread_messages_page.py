@@ -74,6 +74,64 @@ def test_thread_page_orders_across_runs_and_paginates_without_gaps():
     assert older.json()["next_before_seq"] is None
 
 
+def test_chat_history_projects_model_and_tool_callbacks_on_each_page():
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.tools import tool
+
+    from deerflow.runtime.runs.manager import RunManager
+    from deerflow.runtime.runs.schemas import RunStatus
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+
+    store = MemoryRunEventStore()
+    manager = RunManager()
+    image = {"type": "image", "base64": "cGljdHVyZQ==", "mime_type": "image/png"}
+    answer = AIMessage(content=[{"type": "text", "text": "Answer"}, image])
+    model = FakeMessagesListChatModel(responses=[answer])
+
+    @tool(response_format="content_and_artifact")
+    def lookup():
+        """Look up a record with a preview image."""
+        return [{"type": "text", "text": "Record"}, image], {"resource_links": [{"uri": "file:///report.png"}]}
+
+    class Agent:
+        async def astream(self, graph_input, config, **kwargs):
+            await model.ainvoke(graph_input["messages"], config)
+            result = await lookup.ainvoke({"type": "tool_call", "name": lookup.name, "id": "lookup", "args": {}}, config)
+            yield {"messages": [result]}
+
+    async def run_turn(mode):
+        record = await manager.create("thread-1")
+        user = HumanMessage(content="Look it up", additional_kwargs={"run_id": record.run_id})
+        await run_agent(
+            AsyncMock(),
+            manager,
+            record,
+            ctx=RunContext(checkpointer=None, event_store=store),
+            agent_factory=lambda **_: Agent(),
+            graph_input={"messages": [user]},
+            config={"context": {"mode": mode}},
+        )
+        assert record.status == RunStatus.success, record.error
+
+    async def run_turns():
+        await run_turn("flash")
+        await run_turn("chat")
+
+    asyncio.run(run_turns())
+    with TestClient(_make_app(store)) as client:
+        rows = client.get("/api/threads/thread-1/messages/page").json()["data"]
+        last_page = client.get("/api/threads/thread-1/messages/page?limit=2").json()["data"]
+    previous_user, previous_ai, previous_tool, user, ai, tool_result = [row["content"] for row in rows]
+    assert image in previous_ai["content"] and image in previous_tool["content"]
+    assert previous_tool["artifact"]["resource_links"]
+    assert all("deerflow_mode" not in message["additional_kwargs"] for message in (previous_user, previous_ai, previous_tool))
+    assert ai["content"] == [{"type": "text", "text": "Answer"}]
+    assert tool_result["content"] == [{"type": "text", "text": "Record"}]
+    assert tool_result["artifact"] is None
+    assert user["additional_kwargs"]["deerflow_mode"] == "chat"
+    assert [row["content"]["additional_kwargs"]["deerflow_mode"] for row in last_page] == ["chat", "chat"]
+
+
 @pytest.mark.parametrize("caller", ["middleware:title", "subagent:general-purpose"])
 def test_thread_page_scans_past_internal_ai_chunks_to_fill_visible_page(monkeypatch, caller):
     monkeypatch.setattr(thread_runs, "THREAD_MESSAGE_PAGE_SCAN_BATCH", 3)

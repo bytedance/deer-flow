@@ -37,6 +37,17 @@ function setup(
 }
 
 describe("account preference synchronization", () => {
+  it("retains ordinary preferences when an old account contains Chat", async () => {
+    const { parsePreferences } =
+      await import("@/core/settings/preferences-sync");
+    const state = setup(
+      async () => parsePreferences({ mode: "chat", model_name: "model-a" }),
+      async () => undefined,
+    );
+    await state.sync.flush();
+    expect(state.visible()).toEqual({ model_name: "model-a" });
+  });
+
   it("retries a failed bootstrap and preserves edits made while loading", async () => {
     let attempts = 0;
     const writes: Preferences[] = [];

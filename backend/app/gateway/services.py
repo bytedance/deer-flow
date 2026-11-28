@@ -14,10 +14,11 @@ import json
 import logging
 import math
 import re
+import sqlite3
 import threading
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -27,11 +28,15 @@ from fastapi import HTTPException, Request
 from langchain_core.messages import BaseMessage, ChatMessage, HumanMessage, SystemMessage
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
+from sqlalchemy.exc import DisconnectionError, InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION, get_auth_disabled_user, is_auth_disabled
 from app.gateway.authz import require_cancel_permission_if, resolve_route_permissions
-from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_run_store, get_stream_bridge
+from app.gateway.checkpoint_lineage import CheckpointLineageError, CheckpointLineageTimeoutError, checkpoint_exists, find_checkpoint_introducing_message, replay_lineage_lookup_deadline, replay_lineage_timeout_http_error
+from app.gateway.checkpoint_mode_errors import CHECKPOINT_MODE_ERRORS, checkpoint_mode_http_error
+from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
 from app.gateway.internal_auth import (
     INTERNAL_OWNER_USER_ID_HEADER_NAME,
@@ -42,15 +47,18 @@ from app.gateway.internal_auth import (
 from app.gateway.knowledge_scope_admission import admit_message_knowledge_scope
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.run_origin import resolve_request_origin
+from app.gateway.thread_mode import selected_mode, state_has_attachments, thread_mode
 from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
-from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.chat_mode import CHAT_MODE_KEY, has_attachment_fields
+from deerflow.agents.human_input import extract_unanswered_human_input_request, read_human_input_response
 from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.language import ui_locale
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
 from deerflow.agents.middlewares.loop_detection_middleware import LOOP_CAP_STATE_KEY
 from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
+from deerflow.agents.middlewares.model_length_finish_reason_middleware import MODEL_LENGTH_CAPPED_NOTICE, MODEL_LENGTH_TERMINATION_MARKER
 from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, SKILL_USAGES_KEY
 from deerflow.agents.middlewares.tool_output_budget_middleware import TOOL_OUTPUT_BLOB_KEY
 from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECEIPT_LEDGER_KEY
@@ -96,10 +104,12 @@ from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.client_context import sanitize_client_context
 from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY, MCP_BROWSER_USER_CONTEXT_KEY, PROJECT_CONTEXT_KEY
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
+from deerflow.runtime.events.store.base import IncompleteMessageRunLookupError, RunEventStore
 from deerflow.runtime.goal import goal_thread_lock
-from deerflow.runtime.journal import build_checkpoint_history_seed_events
+from deerflow.runtime.journal import RUN_ANSWER_SUMMARY_LIMIT, build_checkpoint_history_seed_events
 from deerflow.runtime.keyed_lock import KeyedLockTable
 from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, make_origin
+from deerflow.runtime.runs.manager import IncompleteRunPageError
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.runs.schemas import EVIDENCE_ORIGINS
 from deerflow.runtime.secret_context import (
@@ -117,7 +127,8 @@ from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_con
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.goal_objective import normalize_goal_objective
-from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_KEY, ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
+from deerflow.utils.llm_text import strip_leading_think_blocks
+from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, IMPORTED_HISTORY_KEY, ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY, message_to_text
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -178,12 +189,17 @@ _THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
 # (contracts/scheduled_goal_notes_contract.json "scheduled_origin_key").
 SCHEDULED_ORIGIN_KEY = "deerflow_scheduled_origin"
 
+_TURN_MODE_OPTIONS = "deerflow_mode_options"
+_MODE_OPTIONS = ("mode", "mode_default_fields", "thinking_enabled", "reasoning_effort", "is_plan_mode", "subagent_enabled")
+
 _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
     frozenset(
         {
             # Only the scheduler's internal launch may mark a message as a
             # scheduled run prompt.
             SCHEDULED_ORIGIN_KEY,
+            CHAT_MODE_KEY,
+            _TURN_MODE_OPTIONS,
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
@@ -272,7 +288,7 @@ async def _ensure_thread_metadata(
     *,
     owner_user_id: str | None,
     require_existing_thread: bool = False,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """Ensure an admitted run's thread exists without delaying task attachment."""
     async with goal_thread_lock(record.thread_id):
         return await _ensure_thread_metadata_locked(run_ctx, record, owner_user_id=owner_user_id, require_existing_thread=require_existing_thread)
@@ -284,19 +300,33 @@ async def _ensure_thread_metadata_locked(
     *,
     owner_user_id: str | None,
     require_existing_thread: bool,
-) -> dict[str, Any]:
+    sync_file_mode: bool = False,
+) -> dict[str, Any] | None:
     """Share create admission with HTTP while retaining detached task ownership."""
     thread_store = run_ctx.thread_store
     existing = await thread_store.get(record.thread_id)
-    if existing is None and owner_user_id:
+    if existing is None and (owner_user_id or sync_file_mode):
         unscoped = await thread_store.get(record.thread_id, user_id=None)
-        if unscoped is not None:
+        if unscoped is not None and owner_user_id:
             if unscoped.get("user_id") != owner_user_id:
                 await thread_store.update_owner(record.thread_id, owner_user_id, user_id=None)
             existing = await thread_store.get(record.thread_id)
+        elif unscoped is not None and unscoped.get("user_id") is None:
+            # Shared pre-auth rows pass ordinary thread ownership checks.
+            # A mode selection must neither recreate nor claim such a thread.
+            existing = unscoped
+        elif unscoped is not None:
+            raise HTTPException(404, "Thread not found")
+    if existing is None and require_existing_thread:
+        raise LookupError(f"Thread {record.thread_id} was deleted during run admission")
+    fresh_mode = selected_mode(record.metadata)
+    if sync_file_mode and fresh_mode != "chat":
+        # Ordinary selections are per run. Only leaving Chat or repairing a
+        # legacy unsupported selection changes an existing thread preference.
+        metadata = (existing or {}).get("metadata") or {}
+        if metadata.get("mode") is None or selected_mode(metadata) not in (None, "chat"):
+            return existing
     if existing is None:
-        if require_existing_thread:
-            raise LookupError(f"Thread {record.thread_id} was deleted during run admission")
         from deerflow.persistence.thread_meta import THREAD_PROJECT_METADATA_KEY
 
         run_metadata = record.metadata or {}
@@ -307,8 +337,10 @@ async def _ensure_thread_metadata_locked(
             # membership key: run admission never modifies project membership —
             # the column is written only by POST /api/threads and
             # /threads/{id}/move — so the key must not persist either.
-            if key not in (DEERFLOW_TRACE_METADATA_KEY, THREAD_PROJECT_METADATA_KEY)
+            if key not in (DEERFLOW_TRACE_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, "mode")
         }
+        if selected_mode(run_metadata) == "chat":
+            metadata["mode"] = "chat"
         # A run that names its thread in the input (a scheduled run) creates it
         # named: the worker copies the title to the thread list only when the
         # run ends, and a server-created thread is listed as soon as it exists.
@@ -320,6 +352,11 @@ async def _ensure_thread_metadata_locked(
             display_name=title if isinstance(title, str) and title.strip() else None,
             metadata=metadata,
         )
+    elif sync_file_mode and (existing.get("metadata") or {}).get("mode") != fresh_mode:
+        shared = existing.get("user_id") is None
+        await thread_store.update_metadata(record.thread_id, {"mode": fresh_mode}, touch=False, **({"allow_unowned": True} if shared else {}))
+        if shared and await thread_mode(thread_store, record.thread_id, user_id=record.user_id) != fresh_mode:
+            raise HTTPException(409, "Thread mode changed during run admission")
     return existing
 
 
@@ -2218,6 +2255,22 @@ async def apply_checkpoint_to_run_config(
         configurable["checkpoint_map"] = checkpoint_map
 
 
+def _normalize_clarification_checkpoint(configurable: dict[str, Any]) -> str | None:
+    """Use the same root checkpoint for card lookup, graph execution, and delta state reads."""
+    checkpoint_map = configurable.get("checkpoint_map", {})
+    if not isinstance(checkpoint_map, Mapping):
+        raise HTTPException(400, "checkpoint_map must be an object")
+    checkpoint_id = configurable.get("checkpoint_id")
+    if "" in checkpoint_map or configurable.get("checkpoint_ns"):
+        # The outer graph takes the map's root entry; a child coordinate alone
+        # leaves it unpinned. Delta state reads also consult checkpoint_id.
+        checkpoint_id = checkpoint_map.get("")
+        configurable.update(checkpoint_ns="", checkpoint_id=checkpoint_id or None)
+    if checkpoint_id is not None and not isinstance(checkpoint_id, str):
+        raise HTTPException(400, "The root checkpoint ID must be a string")
+    return checkpoint_id or None
+
+
 async def ensure_checkpoint_history_seeded(
     request: Request,
     *,
@@ -2310,15 +2363,219 @@ def _is_scope_source_human_message(message: Any) -> bool:
     return not _skips_input_guardrail(dict(_message_additional_kwargs(message)), message.get("name"))
 
 
-async def _recover_run_knowledge_scope(
+async def _matches_interrupted_answer(run_mgr: RunManager, events: RunEventStore, thread_id: str, run_id: str, message_id: str, *, user_id: str) -> bool:
+    """Bind an uncheckpointed answer to its journal or one unambiguous interrupted run."""
+    page_size = 200
+    records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=page_size, raise_on_store_error=True)
+    record = await run_mgr.get(run_id, user_id=user_id, raise_on_store_error=True)
+    if record is None:
+        record = next((candidate for candidate in records if candidate.run_id == run_id), None)
+    if record is None or record.thread_id != thread_id or record.user_id != user_id or record.status != RunStatus.interrupted:
+        return False
+    try:
+        origins = await events.find_latest_ai_message_run_ids(thread_id, {message_id}, user_id=user_id)
+    except IncompleteMessageRunLookupError:
+        return False
+    if message_id in origins:
+        return origins[message_id] == run_id
+    # Partial streams may have no AI event. Verify the unique interrupted
+    # candidate across all pages, stopping as soon as a second one is found.
+    found = False
+    cursor = None
+    while True:
+        for other in records:
+            if other.status == RunStatus.interrupted:
+                if other.run_id != run_id:
+                    return False
+                found = True
+        if len(records) < page_size:
+            return found
+        last = records[-1]
+        next_cursor = (last.created_at, last.run_id)
+        if cursor == next_cursor:
+            return False
+        cursor = next_cursor
+        records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=page_size, before_created_at=last.created_at, before_run_id=last.run_id, raise_on_store_error=True)
+
+
+def _mode_options(section: object) -> dict[str, Any]:
+    if not isinstance(section, Mapping):
+        return {}
+    options = {key: section[key] for key in _MODE_OPTIONS if key in section}
+    if selected_mode(options) is None:
+        options.pop("mode", None)
+    return options
+
+
+def replay_runs_matching_answer(records: list[RunRecord], message: Any) -> list[RunRecord]:
+    """Match stored raw or visible answer summaries in the order supplied by the run store."""
+    text = message_to_text(message)
+    if not text:
+        return []
+    raw_texts = [text]
+    # The journal observes the generation before the length middleware appends its notice.
+    termination = _message_additional_kwargs(message).get(MODEL_LENGTH_TERMINATION_MARKER)
+    if isinstance(termination, Mapping) and termination.get("suppressed_tool_call_count") and text.endswith(MODEL_LENGTH_CAPPED_NOTICE):
+        raw_texts.append(text.removesuffix(MODEL_LENGTH_CAPPED_NOTICE).rstrip())
+    summaries = {answer[:RUN_ANSWER_SUMMARY_LIMIT].strip() for raw in raw_texts for answer in (raw.strip(), strip_leading_think_blocks(raw))}
+    matches = []
+    for record in records:
+        if record.status != RunStatus.success:
+            continue
+        summary = (record.last_ai_message or "").strip()
+        if summary and summary in summaries:
+            matches.append(record)
+    return matches
+
+
+@contextmanager
+def replay_source_read_errors(thread_id: str) -> Iterator[None]:
+    """Translate checkpoint policy and storage failures at both replay entry points."""
+    try:
+        yield
+    except CheckpointLineageTimeoutError as exc:
+        raise replay_lineage_timeout_http_error(thread_id, exc, detail="Timed out recovering the source turn's execution options") from exc
+    except CHECKPOINT_MODE_ERRORS as exc:
+        raise checkpoint_mode_http_error(exc, thread_id) from exc
+    except (IncompleteRunPageError, OSError, sqlite3.OperationalError, DisconnectionError, InterfaceError, OperationalError, SQLAlchemyTimeoutError) as exc:
+        logger.warning("Could not read source mode for replay", exc_info=True)
+        raise HTTPException(503, "Source run mode is temporarily unavailable") from exc
+
+
+def is_history_seed_run(thread_id: str, run_id: str) -> bool:
+    """History seeds group messages under numbered IDs without creating a run."""
+    group, _, turn = run_id.rpartition("-")
+    return turn.isdecimal() and group in (f"checkpoint-seed-{thread_id}", f"branch-seed-{thread_id}")
+
+
+def replay_owner_user_id(request: Request) -> str | None:
+    """Use the same caller identity that admission stamped on the original run."""
+    user = getattr(getattr(request, "state", None), "user", None) or get_current_user()
+    return get_trusted_internal_owner_user_id(request) or (str(user.id) if user is not None else None)
+
+
+async def find_legacy_replay_run(request: Request, thread_id: str, message_id: str, source: Mapping[str, Any], target_run_id: str | None, answer: Any) -> RunRecord | None:
+    """Find a run attributable to this answer and caller, including before turn markers existed."""
+    owner = replay_owner_user_id(request)
+    if owner is None:
+        return None
+    manager = get_run_manager(request)
+    source_id = source.get("run_id")
+    journal_id = None
+    if not source_id or (target_run_id and target_run_id != source_id):
+        # A regenerated answer can belong to a different run from its copied prompt.
+        # The prepare response is a hint; verify a different ID against the journal.
+        try:
+            origins = await get_run_event_store(request).find_latest_ai_message_run_ids(thread_id, {message_id}, user_id=owner)
+        except IncompleteMessageRunLookupError:
+            # The source stamp or the same answer match used by prepare can
+            # still identify the run when a legacy journal cannot page back.
+            origins = {}
+        journal_id = origins.get(message_id)
+    run_ids = [value for value in (journal_id, source_id) if isinstance(value, str) and value and not is_history_seed_run(thread_id, value)]
+    for run_id in dict.fromkeys(run_ids):
+        record = await manager.get(run_id, user_id=owner, raise_on_store_error=True)
+        # A cache hit alone does not prove the run belongs to this turn and caller.
+        if record is not None and record.thread_id == thread_id and record.user_id == owner:
+            return record
+    if run_ids or answer is None:
+        # A pruned run must never borrow another run's identical answer.
+        return None
+    records = await manager.list_by_thread(thread_id, user_id=owner, limit=10, raise_on_store_error=True)
+    matches = replay_runs_matching_answer([row for row in records if row.thread_id == thread_id and row.user_id == owner], answer)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _stored_mode_options(record: RunRecord | None) -> dict[str, Any] | None:
+    if record is None:
+        return None
+    config = (record.kwargs or {}).get("config") or {}
+    # Match build_run_config: when both raw sections were sent, only context was admitted.
+    options = _mode_options(config.get("context", config.get("configurable")))
+    if mode := selected_mode(record.metadata):
+        options["mode"] = mode
+    # Pre-marker runs did not persist top-level body.context. An empty raw
+    # config supplies no evidence about whether the user chose an ordinary mode.
+    return options or None
+
+
+def _stored_turn_metadata(record: RunRecord) -> Mapping[str, Any]:
+    stored_input = (record.kwargs or {}).get("input")
+    messages = stored_input.get("messages") if isinstance(stored_input, Mapping) else None
+    if not isinstance(messages, list):
+        return {}
+    return next((_message_additional_kwargs(msg) for msg in reversed(messages) if _is_scope_source_human_message(msg)), {})
+
+
+async def _resume_mode_options(request: Request, thread_id: str, source: Mapping[str, Any] | None, *, pinned: bool) -> dict[str, Any] | None:
+    """Recover the options that assembled the paused tools, even if the checkpoint head moved."""
+    checkpoint_options = _mode_options(source.get(_TURN_MODE_OPTIONS)) if source is not None else None
+    if source is not None and source.get(CHAT_MODE_KEY) == "chat":
+        checkpoint_options = {**(checkpoint_options or {}), "mode": "chat"}
+    if pinned and source is not None and (_TURN_MODE_OPTIONS in source or source.get(CHAT_MODE_KEY) == "chat"):
+        return checkpoint_options
+    source_run_id = (source or {}).get("run_id")
+    paused = None
+    owner = replay_owner_user_id(request)
+    if owner is not None:
+        with replay_source_read_errors(thread_id):
+            if not pinned:
+                # Match the waiting run that mark_approval_answered will select.
+                records = await get_run_manager(request).list_by_thread(thread_id, user_id=owner, limit=5, raise_on_store_error=True)
+                paused = next((record for record in records if record.status == RunStatus.waiting_for_input), None)
+            elif isinstance(source_run_id, str) and source_run_id:
+                record = await get_run_manager(request).get(source_run_id, user_id=owner, raise_on_store_error=True)
+                if record is not None and record.thread_id == thread_id and record.user_id == owner:
+                    paused = record
+    if paused is None:
+        return checkpoint_options
+    if _TURN_MODE_OPTIONS in (paused.kwargs or {}):
+        # A continuation can pause again without recording a new human message.
+        return _mode_options(paused.kwargs[_TURN_MODE_OPTIONS])
+    turn = _stored_turn_metadata(paused)
+    options = _stored_mode_options(paused) or {}
+    checkpoint_trace = (source or {}).get(DEERFLOW_TRACE_METADATA_KEY)
+    paused_trace = (paused.metadata or {}).get(DEERFLOW_TRACE_METADATA_KEY)
+    if _TURN_MODE_OPTIONS in turn:
+        options = _mode_options(turn[_TURN_MODE_OPTIONS])
+    elif checkpoint_trace and checkpoint_trace == paused_trace:
+        # An execution checkpoint contains the options the worker actually used.
+        options.update(checkpoint_options or {})
+    elif source_run_id == paused.run_id or (not source_run_id and not checkpoint_trace and not paused_trace and options.keys() <= {"mode"} and (not options or selected_mode(checkpoint_options) == selected_mode(options))):
+        # Older rows may have neither a trace nor a source run ID.
+        options = {**(checkpoint_options or {}), **options}
+    if turn.get(CHAT_MODE_KEY) == "chat":
+        options["mode"] = "chat"
+    if mode := selected_mode(paused.metadata):
+        options["mode"] = mode
+    return options
+
+
+async def _message_checkpoint_options(accessor: Any, snapshot: Any, message_id: str, *, max_depth: int | None = 32) -> dict[str, Any] | None:
+    """Read execution options from the checkpoint that introduced this message on this branch."""
+    try:
+        origin = await find_checkpoint_introducing_message(accessor, snapshot, message_id, max_depth=max_depth)
+    except CheckpointLineageError:
+        return None
+    metadata = getattr(origin, "metadata", None) or {}
+    if metadata.get("source") in {"input", "loop"}:
+        return _mode_options(metadata) or None
+    return None
+
+
+async def _recover_source_message_metadata(
     request: Request,
     *,
     thread_id: str,
     target_message_id: str | None,
+    target_run_id: str | None = None,
+    clarification_id: str | None = None,
     checkpoint_id: str | None = None,
     checkpoint_ns: str = "",
-) -> object | None:
-    """Recover the source turn's scope from the selected checkpoint or head."""
+    resuming: bool = False,
+    pinned_clarification: bool = False,
+) -> Mapping[str, Any] | None:
+    """An ordinary source may have empty metadata. None means its message is missing."""
     checkpoint_kwargs: dict[str, Any] = {}
     if checkpoint_id is not None:
         checkpoint_kwargs["checkpoint_id"] = checkpoint_id
@@ -2332,45 +2589,100 @@ async def _recover_run_knowledge_scope(
     try:
         snapshot = await accessor.aget(config)
     except Exception as exc:
-        logger.exception("Failed to recover knowledge scope for thread %s", sanitize_log_param(thread_id))
-        raise HTTPException(status_code=500, detail="Failed to recover knowledge scope") from exc
+        logger.exception("Failed to recover source turn for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to recover source turn") from exc
+    if pinned_clarification and not checkpoint_exists(snapshot):
+        raise HTTPException(404, f"Checkpoint {checkpoint_id} not found")
     values = getattr(snapshot, "values", None)
     messages = values.get("messages") if isinstance(values, Mapping) else None
     if not isinstance(messages, list):
         messages = []
 
     source: Any | None = None
+    answer: Any | None = None
     if target_message_id:
         target_index = next(
             (index for index, message in enumerate(messages) if _message_identifier(message) == target_message_id),
             None,
         )
         if target_index is not None:
+            answer = messages[target_index]
             source = next(
                 (message for message in reversed(messages[:target_index]) if _is_scope_source_human_message(message)),
                 None,
             )
-        else:
-            # Interrupted assistant output may never reach a checkpoint. Its
-            # source is still the terminal HumanMessage of the latest state.
+        elif target_run_id:
+            # A prepared, interrupted response can lack a checkpointed AI
+            # message. Its server-stamped human turn must match the source run.
             source = next(
                 (message for message in reversed(messages) if _is_scope_source_human_message(message)),
                 None,
             )
+            owner = replay_owner_user_id(request)
+            with replay_source_read_errors(thread_id):
+                if (
+                    owner is None
+                    or _message_additional_kwargs(source).get("run_id") != target_run_id
+                    or not await _matches_interrupted_answer(get_run_manager(request), get_run_event_store(request), thread_id, target_run_id, target_message_id, user_id=owner)
+                ):
+                    source = None
         if source is None:
             raise HTTPException(
                 status_code=409,
-                detail="Could not recover the source HumanMessage knowledge_scope",
+                detail="Could not recover the source user message",
             )
     else:
+        if clarification_id:
+            # A retry or an answer from another tab can name an earlier card.
+            for index in range(len(messages) - 1, -1, -1):
+                card = extract_unanswered_human_input_request((messages[index],))
+                if card and card["request_id"] == clarification_id:
+                    answer = messages[index]
+                    messages = messages[:index]
+                    break
+            if pinned_clarification and answer is None:
+                raise HTTPException(409, "Select a checkpoint from a history that contains this clarification card")
         source = next(
             (message for message in reversed(messages) if _is_scope_source_human_message(message)),
             None,
         )
-    if source is None:
-        return None
-    additional_kwargs = _message_additional_kwargs(source)
-    return additional_kwargs.get(KNOWLEDGE_SCOPE_KEY)
+    metadata = _message_additional_kwargs(source) if source is not None else {}
+    if resuming:
+        checkpoint_metadata = getattr(snapshot, "metadata", None) or {}
+        execution = checkpoint_metadata if checkpoint_metadata.get("source") in {"input", "loop"} else {}
+        options = _mode_options(execution)
+        if source is not None or options:
+            metadata = {**metadata, DEERFLOW_TRACE_METADATA_KEY: execution.get(DEERFLOW_TRACE_METADATA_KEY)}
+            if options:
+                metadata.setdefault(_TURN_MODE_OPTIONS, options)
+            return metadata
+    if clarification_id and not target_message_id:
+        if answer is None and source is not None:
+            # Retain existing scope and Chat restrictions for a missing card.
+            # An unrelated turn cannot supply its execution options.
+            return {key: value for key, value in metadata.items() if key != _TURN_MODE_OPTIONS}
+        if _TURN_MODE_OPTIONS not in metadata and not metadata.get(CHAT_MODE_KEY) and (card_message_id := _message_identifier(answer)):
+            with replay_source_read_errors(thread_id):
+                async with replay_lineage_lookup_deadline():
+                    options = await _message_checkpoint_options(accessor, snapshot, card_message_id, max_depth=None)
+            if options is not None:
+                return {**metadata, _TURN_MODE_OPTIONS: options}
+    if source is not None:
+        if target_message_id and _TURN_MODE_OPTIONS not in metadata:
+            with replay_source_read_errors(thread_id):
+                record = await find_legacy_replay_run(request, thread_id, target_message_id, metadata, target_run_id, answer)
+                options = _stored_mode_options(record)
+                if selected_mode(options) is None and answer is not None and not metadata.get(CHAT_MODE_KEY):
+                    # A later turn can have changed the head's mode. Only the
+                    # checkpoint which introduced this exact answer can supply it.
+                    if mode := selected_mode(await _message_checkpoint_options(accessor, snapshot, target_message_id)):
+                        options = {**(options or {}), "mode": mode}
+            if options is not None:
+                return {**metadata, _TURN_MODE_OPTIONS: options}
+        return metadata
+    if selected_mode(getattr(snapshot, "metadata", None)) == "chat":
+        return {CHAT_MODE_KEY: "chat"}
+    return None
 
 
 def _current_human_message(graph_input: object) -> HumanMessage | None:
@@ -2583,16 +2895,18 @@ async def start_run(
     # bypassing the check -- a leaked internal token must not grant cross-user
     # thread access.
     user = getattr(request.state, "user", None)
+    path_owner_checked = user is not None and getattr(request.state, "owner_checked_run_thread", None) == (thread_id, str(user.id))
+    existing_at_admission = require_existing_thread or path_owner_checked
 
     async def thread_access_allowed() -> bool:
         if user is None:
-            if not require_existing_thread:
+            if not existing_at_admission:
                 return True
             return await run_ctx.thread_store.get(thread_id) is not None
         allowed = await run_ctx.thread_store.check_access(
             thread_id,
             str(user.id),
-            require_existing=require_existing_thread,
+            require_existing=existing_at_admission,
         )
         if not allowed and owner_user_id and getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
             # Channel workers may also act for the connection owner named in
@@ -2601,11 +2915,11 @@ async def start_run(
             allowed = await run_ctx.thread_store.check_access(
                 thread_id,
                 owner_user_id,
-                require_existing=require_existing_thread,
+                require_existing=existing_at_admission,
             )
         return allowed
 
-    if not await thread_access_allowed():
+    if not path_owner_checked and not await thread_access_allowed():
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
     from app.gateway.coordination_workers import direct_worker_run, managed_task
@@ -2645,6 +2959,7 @@ async def start_run(
             if idempotency_key is not None
             else None
         )
+        retry_failed_resume = False
         if command and command.get("resume") is not None:
             graph_input = Command(resume=command["resume"])
             stored_idempotency_request = (admitted_run.idempotency_request or _legacy_stored_idempotency_request(admitted_run.kwargs or {})) if admitted_run is not None else None
@@ -2731,37 +3046,117 @@ async def start_run(
 
         replay_kind = run_metadata.get("replay_kind")
         target_message_id = run_metadata.get("regenerate_from_message_id")
+        has_replay_target = isinstance(target_message_id, str) and bool(target_message_id)
         scope_graph_input = graph_input if isinstance(graph_input, dict) else {"messages": []}
         current_human_message = _current_human_message(graph_input)
         current_message_has_scope = current_human_message is not None and KNOWLEDGE_SCOPE_KEY in current_human_message.additional_kwargs
-        replay_requires_scope_recovery = graph_input is None or isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
+        resuming = isinstance(graph_input, Command)
+        replay_requires_scope_recovery = graph_input is None or resuming or (has_replay_target and (replay_kind != "edit" or not current_message_has_scope))
         is_human_input_response = current_human_message is not None and "human_input_response" in current_human_message.additional_kwargs
+        clarification_response = read_human_input_response(_message_additional_kwargs(current_human_message)) if is_human_input_response else None
         # Clarification and edit-replay messages may intentionally replace the
         # source scope. If either client omits its current selector snapshot,
         # inherit the source turn's authoritative scope instead of widening the
         # run to every operator-approved dataset. Other replay paths always use
         # server recovery regardless of client input.
         is_scope_recovery = replay_requires_scope_recovery or (is_human_input_response and not current_message_has_scope)
-        recovery_checkpoint: dict[str, Any] = {}
-        if graph_input is None:
-            configurable = config.get("configurable") or {}
-            recovery_checkpoint = {key: configurable[key] for key in ("checkpoint_id", "checkpoint_ns") if configurable.get(key)}
-        recovery_scope = (
-            await _recover_run_knowledge_scope(
+        recovery_args: dict[str, Any] = {}
+        configurable = config.get("configurable") or {}
+        if graph_input is None or resuming:
+            recovery_args.update({key: configurable[key] for key in ("checkpoint_id", "checkpoint_ns") if configurable.get(key)})
+        elif is_human_input_response and not has_replay_target:
+            # A prepared replay's checkpoint can predate its target. A normal
+            # card reply instead resolves against the history the worker sees.
+            if checkpoint_id := _normalize_clarification_checkpoint(configurable):
+                recovery_args.update(checkpoint_id=checkpoint_id, pinned_clarification=True)
+        if resuming:
+            recovery_args["resuming"] = True
+        is_replay = is_scope_recovery or is_human_input_response or has_replay_target
+        source_metadata: Mapping[str, Any] | None = {}
+        if is_replay and admitted_run is not None and target_message_id:
+            # A keyed retry can outlive its source checkpoint. The original
+            # admission already persisted the canonical turn and its scope.
+            source_metadata = _stored_turn_metadata(admitted_run)
+        elif is_replay:
+            if clarification_response is not None:
+                recovery_args["clarification_id"] = clarification_response["request_id"]
+            target_run_id = run_metadata.get("regenerate_from_run_id")
+            if isinstance(target_run_id, str) and target_run_id:
+                recovery_args["target_run_id"] = target_run_id
+            source_metadata = await _recover_source_message_metadata(
                 request,
                 thread_id=thread_id,
                 target_message_id=(target_message_id if isinstance(target_message_id, str) else None),
-                **recovery_checkpoint,
+                **recovery_args,
             )
-            if is_scope_recovery
-            else None
-        )
+        recovery_scope = (source_metadata or {}).get(KNOWLEDGE_SCOPE_KEY) if is_scope_recovery else None
+
+        requested_mode = selected_mode(body_context) or selected_mode(config.get("context")) or selected_mode(config.get("configurable"))
+        continuing_mode = is_replay or getattr(request.state, "run_input_dispatch", False) is True
+        mode = requested_mode
+        source_options = (source_metadata or {}).get(_TURN_MODE_OPTIONS)
+        source_chat = (source_metadata or {}).get(CHAT_MODE_KEY) == "chat"
+        if resuming:
+            if admitted_run is None or retry_failed_resume:
+                source_options = await _resume_mode_options(request, thread_id, source_metadata, pinned=bool(recovery_args.get("checkpoint_id")))
+            else:
+                source_options = _stored_mode_options(admitted_run)
+            source_chat = selected_mode(source_options) == "chat"
+            restore_options = source_options is not None
+        elif has_replay_target:
+            restore_options = source_options is not None or source_chat or requested_mode == "chat"
+        else:
+            restore_options = clarification_response is not None and (source_options is not None or source_chat)
+        if restore_options:
+            # The composer selection and its derived flags apply to the next new turn.
+            options = _mode_options(source_options)
+            for section in (config.setdefault("context", {}), config["configurable"]):
+                for key in _MODE_OPTIONS:
+                    section.pop(key, None)
+                section.update(options)
+            mode = selected_mode(options)
+        if source_chat:
+            mode = "chat"
+        if admitted_run is not None and not (resuming and retry_failed_resume):
+            mode = selected_mode(admitted_run.metadata)
+        elif source_options is None and mode != "chat" and (source_metadata is None or clarification_response is not None):
+            if await thread_mode(run_ctx.thread_store, thread_id, user_id=str(user.id) if user is not None else run_user_id, internal_owner_id=owner_user_id) == "chat":
+                raise HTTPException(409, "Could not recover the source turn for this Chat continuation")
+        # The run metadata is echoed and used for retries.
+        # Only the admitted mode belongs here, never arbitrary body.metadata.
+        run_metadata.pop("mode", None)
+        config["metadata"].pop("mode", None)
+        if mode is not None:
+            run_metadata["mode"] = mode
+            config["metadata"]["mode"] = mode
+            config.setdefault("context", {})["mode"] = mode
+            config["configurable"]["mode"] = mode
+        if mode == "chat":
+            raw_config = body_config or {}
+            if (
+                queued_attachments is not None
+                or state_has_attachments(normalized_input)
+                or any(has_attachment_fields(section) for section in (body_context, raw_config.get("context"), raw_config.get("configurable")))
+                or getattr(request.state, "extension_artifact_imports", None)
+            ):
+                raise HTTPException(422, "Chat mode accepts text only. Send attachments in a new turn using a different mode.")
+            if current_human_message is not None:
+                current_human_message.additional_kwargs[CHAT_MODE_KEY] = "chat"
+        elif current_human_message is not None:
+            # The turn marker is issued here, including for trusted IM input.
+            current_human_message.additional_kwargs.pop(CHAT_MODE_KEY, None)
         # Match lead-agent assembly: runtime context overrides configurable.
         # Older API/channel callers may name an agent through context while
         # retaining lead_agent as their routing assistant ID.
         scope_runtime_config = dict(config.get("configurable") or {})
         if isinstance(config.get("context"), dict):
             scope_runtime_config.update(config["context"])
+        if mode == "chat" and scope_runtime_config.get("is_bootstrap"):
+            raise HTTPException(422, "Creating an agent requires workspace access. Switch out of Chat mode to initialize the agent.")
+        if current_human_message is not None and is_genuine_user_message(current_human_message):
+            # An empty marker on a real user turn preserves the agent defaults
+            # across branches and retries even after its run is gone.
+            current_human_message.additional_kwargs[_TURN_MODE_OPTIONS] = _mode_options(scope_runtime_config)
         scope_assistant_id = scope_runtime_config.get("agent_name") or _DEFAULT_ASSISTANT_ID
         # Bootstrap assembly intentionally does not load an agent config: the
         # new agent may not exist yet and setup_agent creates its definition.
@@ -3140,8 +3535,18 @@ async def start_run(
                 # delete route holds a durable thread-operation reservation,
                 # so after this point either the run or the delete wins; they
                 # cannot both succeed across Gateway workers.
-                if require_existing_thread and not await thread_access_allowed():
+                read_saved_mode = not continuing_mode and requested_mode is None and admitted_run is None
+                # For a fresh default run, one row supplies both ownership and
+                # the previous file policy. Unauthenticated internal calls keep
+                # their existing context-scoped access check.
+                if existing_at_admission and (not read_saved_mode or user is None) and not await thread_access_allowed():
                     raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+                sync_file_mode = not continuing_mode and requested_mode is not None
+                if read_saved_mode:
+                    # A fresh request without a mode uses the agent's original
+                    # defaults. Reopen file operations if the last turn used Chat.
+                    saved_mode = await thread_mode(run_ctx.thread_store, thread_id, user_id=str(user.id) if user is not None else run_user_id, internal_owner_id=owner_user_id, require_existing=existing_at_admission)
+                    sync_file_mode = saved_mode == "chat"
                 admission_run_id = str(uuid.uuid4())
                 start_producer_lease = _declared_bridge_method(
                     bridge,
@@ -3184,6 +3589,10 @@ async def start_run(
                             # The live config built above keeps them for the actual run.
                             kwargs={
                                 "input": run_record_input,
+                                **({_TURN_MODE_OPTIONS: _mode_options(scope_runtime_config)} if resuming else {}),
+                                # A replay can narrow a requested normal mode to Chat.
+                                # Remember that choice for an identical keyed retry.
+                                **({"requested_mode": requested_mode} if idempotency_key and requested_mode and requested_mode != mode else {}),
                                 **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
                                 **({"queued_input_request_hash": knowledge_default_request_hash, "queued_input_checks_publication": True} if queued_attachments is not None else {}),
                                 "config": redact_config_secrets(body.config),
@@ -3235,7 +3644,9 @@ async def start_run(
                         # thread. Reconcile retries against the original request.
                         matches_queued_input = queued_attachments is not None and knowledge_default_request_hash is not None and stored.get("queued_input_request_hash") == knowledge_default_request_hash
                         matches_input = matches_queued_input or matches_default_request or matches_legacy_default_request or stored_input == body.input or stored_input == request_input or stored_input == run_record_input
-                    if not matches_idempotency_request or not matches_input or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
+                    previous_mode = selected_mode(record.metadata)
+                    changes_chat_mode = requested_mode is not None and requested_mode not in (previous_mode, stored.get("requested_mode")) and "chat" in (requested_mode, previous_mode)
+                    if changes_chat_mode or not matches_idempotency_request or not matches_input or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
                         raise HTTPException(
                             status_code=409,
                             detail="Idempotency-Key already used with a different request",
@@ -3279,6 +3690,10 @@ async def start_run(
                             )
                             if current_request_ids != validated_approval_request_ids:
                                 raise HTTPException(status_code=409, detail={"code": "no_pending_approval", "message": "No resumable pause exists for this thread"})
+                    if sync_file_mode:
+                        # Publish Chat policy transitions before file routes
+                        # can observe the response, including on a new thread.
+                        await await_drained(_ensure_thread_metadata_locked(run_ctx, record, owner_user_id=owner_user_id, require_existing_thread=require_existing_thread, sync_file_mode=True))
                     # The stream lease was established before durable admission.
                     # Once resume persistence succeeds, keep task attachment
                     # await-free so cancellation cannot strand a pending row.

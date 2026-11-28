@@ -31,7 +31,7 @@ from deerflow.mcp.session_pool import (
 from deerflow.mcp.tasks.ordinary import McpTaskConnectionUnavailableError
 from deerflow.mcp.tasks.runtime import get_mcp_task_oauth_token_manager
 from deerflow.mcp.user_config import PersonalMcpConfigSnapshot, load_user_mcp_config_if_changed
-from deerflow.mcp_scope import mcp_session_scope_key
+from deerflow.mcp_scope import McpSessionScope, mcp_session_scope_key
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 logger = logging.getLogger(__name__)
@@ -121,6 +121,7 @@ class McpTaskToolCaller:
         request_scoped_headers: bool = False,
         connection_scope: Literal["deployment", "personal"] = "deployment",
         agent_auth: dict[str, Any] | None = None,
+        chat_mode: bool = False,
     ) -> Any:
         """Call a raw MCP tool.
 
@@ -150,6 +151,7 @@ class McpTaskToolCaller:
                     thread_incarnation=thread_incarnation,
                     request_scoped_headers=request_scoped_headers,
                     connection_scope=connection_scope,
+                    chat_mode=chat_mode,
                 )
         except McpAgentAuthorizationError as exc:
             raise McpTaskConnectionUnavailableError(str(exc)) from None
@@ -184,6 +186,7 @@ class McpTaskToolCaller:
         thread_incarnation: str | None,
         request_scoped_headers: bool,
         connection_scope: MCPPoolDomain,
+        chat_mode: bool,
     ) -> Any:
         is_background_call = not request_scoped_headers
         interceptors = self._interceptors if is_background_call else self._submit_interceptors
@@ -196,6 +199,7 @@ class McpTaskToolCaller:
             user_id=user_id,
             thread_id=thread_id,
             thread_incarnation=thread_incarnation,
+            chat_stdio=chat_mode and transport == "stdio",
         )
 
         if transport == "stdio":
@@ -211,12 +215,13 @@ class McpTaskToolCaller:
                     normalized_connection_fingerprint(connection),
                     domain=connection_scope,
                 )
-            connection = await asyncio.to_thread(
-                _prepare_stdio_connection,
-                connection,
-                user_id=user_id,
-                thread_id=thread_id,
-            )
+            if not chat_mode:
+                connection = await asyncio.to_thread(
+                    _prepare_stdio_connection,
+                    connection,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                )
             session_init_timeout = server_config.session_init_timeout
             if binding is not None:
                 session_request = pool.get_session(
@@ -290,7 +295,7 @@ class McpTaskToolCaller:
         *,
         session: Any | None,
         pool: MCPSessionPool | None,
-        scope_key: str,
+        scope_key: McpSessionScope,
         connection: dict[str, Any],
         server_name: str,
         tool_name: str,

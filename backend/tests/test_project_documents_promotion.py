@@ -420,6 +420,22 @@ class TestFromThread:
 
 
 class TestAttach:
+    def test_chat_destination_rejected_before_staging(self, tmp_path):
+        app = _build_app(tmp_path)
+        with TestClient(app) as client:
+            pid = _create_project(client)["id"]
+            doc = _upload(client, pid, "report.txt", b"attach me").json()["document"]
+            _seed_thread(app, "text-only", metadata={"mode": "chat"})
+            with (
+                patch.object(project_documents, "stage_document_copy_for_attach", wraps=project_documents.stage_document_copy_for_attach) as stage,
+                patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()) as provider,
+            ):
+                response = _attach(client, pid, doc["id"], "text-only")
+            assert response.status_code == 422
+            stage.assert_not_awaited()
+            provider.assert_not_called()
+            assert not _thread_uploads("text-only").exists()
+
     @pytest.mark.parametrize("filename", [".upload-notes.part", ".upload-notes.part.", ".UPLOAD-NOTES.PART", ".Upload-NoTeS.Part ."])
     def test_legacy_reserved_name_reports_client_error_and_preserves_shelf(self, tmp_path, filename):
         app = _build_app(tmp_path)

@@ -14,6 +14,8 @@ from starlette.datastructures import UploadFile
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_agent_runs, get_config, get_current_user, get_run_manager
+from app.gateway.thread_mode import RunModeOptions, selected_mode, stored_custom_agent
+from deerflow.agents.chat_mode import has_attachment_fields
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime.runs.inputs import InputCancelled, InputConflict, RunInputs
 from deerflow.runtime.runs.schemas import RunStatus
@@ -35,7 +37,7 @@ class RunInputRequest(BaseModel):
     request_id: str = Field(min_length=1, max_length=96)
     text: str = Field(min_length=1, max_length=16 * 1024)
     mode: Literal["queue", "steer"]
-    context: dict = Field(default_factory=dict)
+    context: RunModeOptions = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def bounded_context(self):
@@ -91,6 +93,11 @@ def _store(request):
     return store
 
 
+def _validate_input_mode(source_mode: str | None, context: dict, *, has_files: bool) -> None:
+    if (source_mode == "chat" or selected_mode(context) == "chat") and (has_files or has_attachment_fields(context)):
+        raise HTTPException(422, "Chat mode accepts text only. Switch modes to send attachments.")
+
+
 async def submit_run_input(
     thread_id: str,
     run_id: str,
@@ -131,6 +138,9 @@ async def submit_run_input(
         raise HTTPException(409, "This Run has not enabled interactive inputs")
     from app.gateway.run_input_files import discard_input_files, stage_input_files
 
+    source_mode = selected_mode(row.get("metadata"))
+    _validate_input_mode(source_mode, body.context, has_files=bool(files))
+
     stage = None
     if files:
         if body.mode != "queue" or upload_config is None:
@@ -144,6 +154,10 @@ async def submit_run_input(
         from deerflow.runtime.run_origin import admit_origin
 
         context = {key: value for key, value in body.context.items() if key in _CONTEXT_CONFIGURABLE_KEYS and key not in ("agent_name", "is_bootstrap")}
+        if source_mode == "chat":
+            # A queued input is dispatched after this run and can be retried
+            # much later. Carry its original mode across subsequent UI changes.
+            context["mode"] = "chat"
         if isinstance(body.context.get("locale"), str):
             context["locale"] = body.context["locale"]
         source = "extension" if admit_origin(getattr(request.state, "run_origin", None)) is not None else "user"
@@ -297,16 +311,31 @@ async def dispatch_one_input(thread_id, run_id, input_id, request, *, retry=Fals
     if source is None or source["thread_id"] != thread_id:
         raise HTTPException(404, "Run not found")
     inputs = RunInputs(store, run_id, user_id)
-    if retry:
-        original = next((entry for entry in (source.get("run_inputs") or {}).get("items", []) if entry["id"] == input_id), None)
-        if original is not None:
-            await _recover_unpublished_input(inputs, thread_id, original)
+    source_mode = selected_mode(source.get("metadata"))
+    original = next((entry for entry in (source.get("run_inputs") or {}).get("items", []) if entry["id"] == input_id), None)
+    if original is not None:
+        if retry:
+            original = await _recover_unpublished_input(inputs, thread_id, original)
+        # Reject older staged files before claiming them so the owner can still cancel.
+        if original.get("attachment_stage") and original["status"] in ("pending", "not_applied"):
+            _validate_input_mode(source_mode, original.get("context") or {}, has_files=True)
     entry = await inputs.claim(input_id, retry=retry)
     if entry.get("run_id"):
         run = await get_run(thread_id, entry["run_id"], request)
         return AgentRun(thread_id, run.run_id, run.status, run.assistant_id, run.stop_reason)
     message_id = str(uuid5(NAMESPACE_URL, f"deerflow-dispatch:{inputs.run_id}:{input_id}"))
-    context = entry.get("context", {})
+    context = dict(entry.get("context") or {})
+    assistant_id = await resolve_thread_assistant_id(request, thread_id, fail_closed=True)
+    if source_mode == "chat":
+        context["mode"] = "chat"
+        if assistant_id is None:
+            # Older unbound threads can select a custom agent through context.
+            # Its canonical admission-time identity is scoped to this source run.
+            assistant_id = stored_custom_agent(source.get("evidence_agent_id"))
+    elif selected_mode(context) is None:
+        # Before mode validation a queued input could store an unrecognized
+        # override. Omit it so normal run admission applies the agent defaults.
+        context.pop("mode", None)
     source_config = (source.get("kwargs") or {}).get("config") or {}
     limit = source_config.get("recursion_limit")
     config = {"recursion_limit": limit} if type(limit) is int else None
@@ -328,7 +357,10 @@ async def dispatch_one_input(thread_id, run_id, input_id, request, *, retry=Fals
         # This fact comes from the stored, authenticated input, not from text
         # or an arbitrary extension-supplied metadata flag.
         request.state.run_origin = None
-    body = RunCreateRequest(assistant_id=await resolve_thread_assistant_id(request, thread_id, fail_closed=True), input={"messages": [message]}, context=context, config=config, on_disconnect="continue")
+    body = RunCreateRequest(assistant_id=assistant_id, input={"messages": [message]}, context=context, config=config, on_disconnect="continue")
+    # This delayed input resumes a selection already accepted by the server.
+    # It must not silently replace a later mode selected on the thread.
+    request.state.run_input_dispatch = True
     # A new key is safe only when the earlier run failed before entering the graph.
     key = f"run-input-retry:{run_id}:{attempt}:{input_id}" if attempt else f"run-input:{run_id}:{input_id}"
     run = await create_run(thread_id, body, request, idempotency_key=key)

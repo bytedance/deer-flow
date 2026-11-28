@@ -1039,7 +1039,7 @@ async def test_start_run_idempotency_distinguishes_static_resume_from_new_input(
     with (
         patch("app.gateway.services.resolve_agent_factory", return_value=object()),
         patch("app.gateway.services.run_agent", side_effect=AssertionError("worker must not attach")),
-        patch("app.gateway.services._recover_run_knowledge_scope", new=AsyncMock(return_value=None)),
+        patch("app.gateway.services._recover_source_message_metadata", new=AsyncMock(return_value={})),
     ):
         reused = await start_run(body, "thread-1", _make_start_run_request(manager), idempotency_key="static-resume-key")
         with pytest.raises(HTTPException) as excinfo:
@@ -1399,6 +1399,7 @@ async def test_resume_attach_failure_restores_pause_and_allows_all_reject_retry(
     store = MemoryRunStore()
     manager = RunManager(store=store, worker_id="worker-a")
     original_metadata = {
+        "mode": "flash",
         "hitl_approval": {
             "kind": "hitl_approval",
             "request_id": "approval-1",
@@ -1411,7 +1412,7 @@ async def test_resume_attach_failure_restores_pause_and_allows_all_reject_retry(
         "thread-1",
         user_id=None,
         metadata=original_metadata,
-        kwargs={"input": None, "config": None},
+        kwargs={"input": None, "config": {"configurable": {"thinking_enabled": False}}},
     )
     await manager.set_status(paused.run_id, RunStatus.waiting_for_input)
     request = _make_start_run_request(manager)
@@ -1437,9 +1438,11 @@ async def test_resume_attach_failure_restores_pause_and_allows_all_reject_retry(
 
     async def fake_run_agent(bridge, run_manager, record, **kwargs):
         executions.append(record.run_id)
+        assert kwargs["config"]["context"]["thinking_enabled"] is False
+        assert record.metadata["mode"] == "flash"
         await run_manager.set_status(record.run_id, RunStatus.success)
 
-    all_reject = RunCreateRequest(command={"resume": {"responses": [{"option_id": "reject", "tool_call_id": "call-1", "request_id": "approval-1"}]}})
+    all_reject = RunCreateRequest(command={"resume": {"responses": [{"option_id": "reject", "tool_call_id": "call-1", "request_id": "approval-1"}]}}, context={"mode": "chat"})
     with (
         patch("app.gateway.services.resolve_agent_factory", return_value=object()),
         patch("app.gateway.hitl_approval.validate_resume_request", new=AsyncMock(return_value={"call-1": "approval-1"})),
@@ -1475,7 +1478,7 @@ async def test_resume_attach_failure_restores_pause_and_allows_all_reject_retry(
     assert retried.run_id != failed.run_id
     assert await store.get(failed.run_id) is None
     assert paused.status == RunStatus.success
-    assert paused.metadata == {"retained": True}
+    assert paused.metadata == {"retained": True, "mode": "flash"}
     assert (await store.get(paused.run_id))["status"] == "success"
 
 

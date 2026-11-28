@@ -59,8 +59,13 @@ Use an absolute path for consistent behavior across launch locations; a
 whole-string environment reference such as `"$MCP_SERVER_CWD"` is also supported.
 The configured directory applies to discovery and subsequent tool calls.
 When `cwd` is omitted, `null`, or an empty string (including an unset environment
-reference), discovery inherits the Gateway's working directory and pooled calls
-use the thread workspace. HTTP/SSE servers ignore it.
+reference), discovery inherits the Gateway's working directory. Pooled calls use
+the thread workspace by default. Chat uses a separate stdio session per
+user, thread and incarnation, with a private temporary directory for the
+subprocess. Returning to Chat reuses that session while it is live.
+The pool removes the directory when it closes the session. Explicit `cwd`
+and temporary-directory environment settings still apply. Chat delivers text
+from tool results and skips workspace file capture. HTTP/SSE servers ignore `cwd`.
 Files created outside the thread's user-data tree are not exposed through the
 sandbox/artifact API.
 

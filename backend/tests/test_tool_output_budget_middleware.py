@@ -21,6 +21,7 @@ import re
 import sys
 import tempfile
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from langchain.agents.middleware.types import ModelRequest
@@ -2964,3 +2965,30 @@ class TestSupersededWriteElision:
 
         assert self._content(forwarded, 0).startswith("[content elided: 5000 chars")
         assert forwarded.messages[0].tool_calls[1] == turn.tool_calls[1]
+
+
+@pytest.mark.parametrize("async_call", [False, True])
+def test_chat_keeps_large_search_results_inline_on_an_existing_thread(tmp_path, monkeypatch, async_call):
+    import asyncio
+
+    config = ToolOutputConfig(externalize_min_chars=1000, fallback_max_chars=2048)
+    middleware = ToolOutputBudgetMiddleware(config=config)
+    request = _make_request(tool_name="web_search", outputs_path=str(tmp_path))
+    request.runtime.context["mode"] = "chat"
+    request.runtime.state["sandbox"] = {"sandbox_id": "previous-run"}
+    provider = MagicMock()
+    monkeypatch.setattr("deerflow.agents.middlewares.tool_output_budget_middleware.get_sandbox_provider", lambda: provider)
+    message = ToolMessage(content="search result " * 2000, tool_call_id="tc-1", name="web_search")
+    if async_call:
+
+        async def handler(_):
+            return message
+
+        result = asyncio.run(middleware.awrap_tool_call(request, handler))
+    else:
+        result = middleware.wrap_tool_call(request, lambda _: message)
+    assert "search result" in result.content
+    assert len(result.content) < len(message.content)
+    assert "/mnt/user-data/outputs" not in result.content
+    assert not list(tmp_path.iterdir())
+    provider.get.assert_not_called()

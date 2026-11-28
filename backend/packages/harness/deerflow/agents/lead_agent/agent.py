@@ -49,7 +49,7 @@ from deerflow.agents.middlewares.terminal_response_middleware import TerminalRes
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import CompletedSubagentUsageMiddleware, TokenUsageMiddleware
-from deerflow.agents.middlewares.tool_declarations import layer_one_outcome, narrow_declared_tools, verify_declared_tool_view
+from deerflow.agents.middlewares.tool_declarations import apply_declared_tool_view, layer_one_outcome, narrow_declared_tools, verify_declared_tool_view
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.task_continuity.tools import append_task_continuity_tools
@@ -216,11 +216,13 @@ def _append_project_document_tools_if_pinned(tools: list, cfg: dict) -> None:
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
-    """Merge legacy configurable options with LangGraph runtime context."""
+    """Resolve the options shared by the prompt, tools and middleware."""
     cfg = dict(config.get("configurable", {}) or {})
     context = config.get("context", {}) or {}
     if isinstance(context, dict):
         cfg.update(context)
+    if cfg.get("mode") == "chat":
+        cfg.update(is_plan_mode=False, subagent_enabled=False, is_bootstrap=False)
     return cfg
 
 
@@ -546,10 +548,14 @@ def build_middlewares(
     from deerflow.extensions import get_agent_build_extensions
 
     resolved_extensions = extensions if extensions is not None else get_agent_build_extensions()
+    cfg = _get_runtime_config(config)
+    chat_mode = cfg.get("mode") == "chat"
     runtime_middleware_kwargs = {
         "app_config": resolved_app_config,
         "lazy_init": True,
     }
+    if chat_mode:
+        runtime_middleware_kwargs["chat_mode"] = True
     if available_skills is not None:
         runtime_middleware_kwargs["available_skills"] = available_skills
     if not owns_agent_skill_projection:
@@ -581,25 +587,28 @@ def build_middlewares(
             agent_name=agent_name,
             app_config=resolved_app_config,
             memory_enabled=memory_enabled,
+            chat_mode=chat_mode,
         )
     )
 
     # Deterministically load a full SKILL.md when the user starts the turn with
     # /skill-name. This keeps the base system prompt metadata-only while giving
     # explicit user activation priority over model-side relevance guessing.
-    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    slash_source_owner_token = None
+    if not chat_mode:
+        from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
 
-    slash_source_owner_token = secrets.token_urlsafe(24)
-    middlewares.append(
-        SkillActivationMiddleware(
-            available_skills=available_skills,
-            app_config=resolved_app_config,
-            user_id=user_id,
-            slash_source_owner_token=slash_source_owner_token,
-            skill_authorization=skill_authorization,
-            skill_storage=skill_storage,
+        slash_source_owner_token = secrets.token_urlsafe(24)
+        middlewares.append(
+            SkillActivationMiddleware(
+                available_skills=available_skills,
+                app_config=resolved_app_config,
+                user_id=user_id,
+                slash_source_owner_token=slash_source_owner_token,
+                skill_authorization=skill_authorization,
+                skill_storage=skill_storage,
+            )
         )
-    )
 
     # Observe the final tool_search Command after every inner result
     # transformer has run. Tool wrappers are first-in-list outermost, so this
@@ -616,6 +625,7 @@ def build_middlewares(
 
     middlewares.append(
         DurableContextMiddleware(
+            chat_mode=chat_mode,
             skills_container_path=resolved_app_config.skills.container_path,
             skill_file_read_tool_names=resolved_app_config.summarization.skill_file_read_tool_names,
             inject_tool_artifacts=resolved_app_config.tool_artifacts.enabled and resolved_app_config.tool_artifacts.inject_model_context,
@@ -640,9 +650,7 @@ def build_middlewares(
         middlewares.append(summarization_middleware)
 
     # Add TodoList middleware if plan mode is enabled
-    cfg = _get_runtime_config(config)
-    is_plan_mode = cfg.get("is_plan_mode", False)
-    todo_list_middleware = _create_todo_list_middleware(is_plan_mode)
+    todo_list_middleware = _create_todo_list_middleware(cfg.get("is_plan_mode", False))
     if todo_list_middleware is not None:
         middlewares.append(todo_list_middleware)
 
@@ -686,7 +694,7 @@ def build_middlewares(
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
     model_config = resolved_app_config.get_model_config(model_name) if model_name else None
-    if model_config is not None and model_config.supports_vision:
+    if not chat_mode and model_config is not None and model_config.supports_vision:
         middlewares.append(ViewImageMiddleware())
 
     # Auto-promote deferred MCP schemas from PR1 routing metadata before the
@@ -720,9 +728,8 @@ def build_middlewares(
         middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
 
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
-    subagent_enabled = cfg.get("subagent_enabled", False)
     effective_max_subagents_per_run: int | None = None
-    if subagent_enabled:
+    if cfg.get("subagent_enabled"):
         max_concurrent_subagents = effective_subagent_concurrency(
             cfg.get("max_concurrent_subagents"),
             resolved_app_config,
@@ -742,7 +749,7 @@ def build_middlewares(
     # https://docs.langchain.com/oss/python/langchain/middleware/custom#execution-order
     # Backfill only completed child usage before budget enforcement. Keep
     # current-step attribution after the guards that can change tool calls.
-    if token_budget_config.enabled and resolved_app_config.token_usage.enabled:
+    if not chat_mode and token_budget_config.enabled and resolved_app_config.token_usage.enabled:
         middlewares.append(CompletedSubagentUsageMiddleware())
 
     # Downgrade persisted URL-sourced file/image blocks (pre-fix MCP
@@ -804,17 +811,13 @@ def build_middlewares(
 
     from deerflow.extensions.stack import compose_with_extensions
 
-    if not resolved_extensions.has_middleware_contributors:
-        return compose_with_extensions(middlewares, AgentScope.LEAD, None, resolved_extensions)
+    build_context = None
+    if resolved_extensions.has_middleware_contributors:
+        from deerflow_extension_api import AgentBuildContext
 
-    from deerflow_extension_api import AgentBuildContext
+        from deerflow.extensions.policy import project_host_policy
 
-    from deerflow.extensions.policy import project_host_policy
-
-    return compose_with_extensions(
-        middlewares,
-        AgentScope.LEAD,
-        AgentBuildContext(
+        build_context = AgentBuildContext(
             scope=AgentScope.LEAD,
             agent_name=agent_name,
             model_name=model_name,
@@ -823,9 +826,16 @@ def build_middlewares(
                 token_budget_config=token_budget_config,
                 max_subagents_per_run=effective_max_subagents_per_run,
             ),
-        ),
-        resolved_extensions,
-    )
+        )
+    middlewares = compose_with_extensions(middlewares, AgentScope.LEAD, build_context, resolved_extensions)
+    if chat_mode:
+        from deerflow.agents.middlewares.chat_mode_middleware import ChatModeMiddleware
+
+        # All Chat tools were assembled explicitly. Configured and contributed
+        # middleware declarations would otherwise be appended by LangChain.
+        middlewares = apply_declared_tool_view(middlewares, authorized_names=frozenset())
+        middlewares.insert(0, ChatModeMiddleware())
+    return middlewares
 
 
 def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
@@ -855,7 +865,7 @@ def _insert_hitl_approval_middleware(middlewares: list, final_tools: list, app_c
     # Resolve artifact handles first, then approve the concrete operation.
     # Authorization remains inside this wrapper so edited arguments are checked
     # by the same mandatory guardrails before reaching the bound tool.
-    index = next((i + 1 for i, middleware in enumerate(middlewares) if type(middleware).__name__ == "ArtifactResolutionMiddleware"), 0)
+    index = next((i + 1 for i, middleware in enumerate(middlewares) if type(middleware).__name__ in {"ArtifactResolutionMiddleware", "ChatModeMiddleware"}), 0)
     middlewares.insert(index, ToolApprovalMiddleware(hitl_config, app_config=app_config, supports_resume=supports_resume, model_name=model_name))
 
 
@@ -1023,6 +1033,7 @@ def _assemble_lead_agent(
     from deerflow.tools.conversation import CONVERSATION_READER_CONTEXT_KEY
 
     cfg = _get_runtime_config(config)
+    chat_mode = cfg.get("mode") == "chat"
     batch_continuation_available = cfg.get(AGENT_RUNS_CONTEXT_KEY) is not None
     resolved_app_config = app_config
     mode = (config.get("configurable", {}) or {}).get(
@@ -1041,7 +1052,6 @@ def _assemble_lead_agent(
 
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
-    requested_subagent_enabled = cfg.get("subagent_enabled", False)
     subagent_execution_capacity = configured_subagent_max_running()
     max_concurrent_subagents = effective_subagent_concurrency(
         cfg.get("max_concurrent_subagents"),
@@ -1073,11 +1083,11 @@ def _assemble_lead_agent(
     allowed_subagents = getattr(agent_config, "allowed_subagents", None) if agent_config is not None else None
     # The request switch may disable delegation, but it can never widen the
     # server-side custom-agent policy. An explicit empty list is a hard deny.
-    subagent_enabled = bool(requested_subagent_enabled and allowed_subagents != [])
+    subagent_enabled = bool(cfg.get("subagent_enabled") and allowed_subagents != [])
     config.setdefault("configurable", {})["subagent_enabled"] = subagent_enabled
     if isinstance(config.get("context"), dict):
         config["context"]["subagent_enabled"] = subagent_enabled
-    available_skills = _available_skill_names(agent_config, is_bootstrap)
+    available_skills = set() if chat_mode else _available_skill_names(agent_config, is_bootstrap)
 
     # Phase 3: enforce skill authorization (Layer 1). Filter the skill
     # allowlist by the provider's "skill" policy so denied skills never
@@ -1221,18 +1231,20 @@ def _assemble_lead_agent(
             existing = list(existing)
         config["callbacks"] = [*existing, *tracing_callbacks]
 
-    enabled_skills = _load_enabled_available_skills(
-        available_skills,
-        app_config=resolved_app_config,
-        user_id=resolved_user_id,
-        skill_storage=skill_storage,
-    )
+    enabled_skills = []
+    if not chat_mode:
+        enabled_skills = _load_enabled_available_skills(
+            available_skills,
+            app_config=resolved_app_config,
+            user_id=resolved_user_id,
+            skill_storage=skill_storage,
+        )
 
     # Build skill search setup (deferred skill discovery).
     # Controlled by skills.deferred_discovery — independent from tool_search.enabled.
     from deerflow.skills.describe import build_skill_search_setup
 
-    skill_search_enabled = resolved_app_config.skills.deferred_discovery
+    skill_search_enabled = not chat_mode and resolved_app_config.skills.deferred_discovery
     container_base_path = resolved_app_config.skills.container_path
 
     if is_bootstrap:
@@ -1286,6 +1298,7 @@ def _assemble_lead_agent(
             memory_enabled=memory_enabled,
             owns_agent_skill_projection=False,
             app_config=resolved_app_config,
+            skill_storage=skill_storage,
             deferred_setup=setup,
             mcp_routing_middleware=mcp_routing_middleware,
             user_id=resolved_user_id,
@@ -1397,7 +1410,7 @@ def _assemble_lead_agent(
     # leave it unset, so ``update_agent`` remains available there.
     channel_name = cfg.get("channel_name")
     is_webhook_channel = channel_name in _WEBHOOK_CHANNELS
-    extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
+    extra_tools = [update_agent] if agent_name and not is_webhook_channel and not chat_mode else []
     # Resolve the model once so tool guidance uses the same effective settings.
     chat_model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, model_overrides=agent_model_overrides)
     raw_tools = get_available_tools(
@@ -1405,13 +1418,14 @@ def _assemble_lead_agent(
         groups=agent_config.tool_groups if agent_config else None,
         mcp_plugins=getattr(agent_config, "mcp_plugins", None),
         subagent_enabled=subagent_enabled,
+        **({"chat_mode": True} if chat_mode else {}),
         include_conversation_reader=callable(cfg.get(CONVERSATION_READER_CONTEXT_KEY)) and not bool(cfg.get("is_subagent")),
         **({"mcp_browser_user": runtime_context[MCP_BROWSER_USER_CONTEXT_KEY]} if isinstance(runtime_context, Mapping) and runtime_context.get(MCP_BROWSER_USER_CONTEXT_KEY) and not cfg.get("is_subagent") else {}),
         **({"scheduler_capability": scheduler_capability} if scheduler_capability is not None else {}),
         app_config=resolved_app_config,
         chat_model=chat_model,
     )
-    selected_child_model = cfg.get("subagent_model_name")
+    selected_child_model = None if chat_mode else cfg.get("subagent_model_name")
     if selected_child_model is not None:
         from deerflow.models.selection import authorize_selected_model, bind_selected_task_model
 
@@ -1426,8 +1440,9 @@ def _assemble_lead_agent(
         authorization_candidates.append(skill_setup.describe_skill_tool)
     if memory_enabled and should_use_memory_tools(resolved_app_config.memory):
         _append_memory_tools_without_name_conflicts(authorization_candidates)
-    _append_project_document_tools_if_pinned(authorization_candidates, cfg)
-    append_task_continuity_tools(authorization_candidates, resolved_app_config)
+    if not chat_mode:
+        _append_project_document_tools_if_pinned(authorization_candidates, cfg)
+        append_task_continuity_tools(authorization_candidates, resolved_app_config)
     configured_tool_ids = {id(tool) for tool in configured_tools}
     authorized_tools, _authz_provider = apply_tool_authorization(
         authorization_candidates,
@@ -1469,6 +1484,7 @@ def _assemble_lead_agent(
     )
     _insert_hitl_approval_middleware(middlewares, final_tools, resolved_app_config, supports_resume=not (config.get("context") or {}).get("_hitl_disabled_resume_escape", False), model_name=model_name)
     system_prompt = apply_prompt_template(
+        **({"chat_mode": True} if chat_mode else {}),
         subagent_enabled=subagent_enabled,
         max_concurrent_subagents=max_concurrent_subagents,
         max_total_subagents=max_total_subagents,
@@ -1488,7 +1504,7 @@ def _assemble_lead_agent(
         bash_available=has_bash_tool(authorized_tools),
     )
     bound_middlewares = normalize_middleware_state_schemas(middlewares, mode)
-    verify_declared_tool_view(bound_middlewares, authorized_names=declared_authorized)
+    verify_declared_tool_view(bound_middlewares, authorized_names=frozenset() if chat_mode else declared_authorized)
     graph = create_agent(
         model=chat_model,
         tools=final_tools,

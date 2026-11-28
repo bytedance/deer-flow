@@ -277,12 +277,12 @@ def _run_tool_result_call_ids(client, tid, run_id):
     return [row["content"]["tool_call_id"] for row in rows if row.get("event_type") == "llm.tool.result"]
 
 
-def test_approval_pause_then_approve_executes(isolated_app):
+def test_approval_pause_then_approve_executes_after_switching_to_chat(isolated_app):
     _enable_approval()
     with patch(_MODEL_PATCH, new=_fake_model), TestClient(isolated_app) as client:
         csrf = _register_user(client)
         tid = _create_thread(client, csrf)
-        rid = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "write"}]})).json()["run_id"]
+        rid = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "write"}]}, context={"mode": "flash"})).json()["run_id"]
         state = _wait_for_approval(client, tid)
         deadline = time.monotonic() + 20.0
         run = {}
@@ -298,13 +298,18 @@ def test_approval_pause_then_approve_executes(isolated_app):
         assert conflict.status_code == 409
         assert conflict.json()["detail"]["code"] == "approval_pending"
 
-        approved = _resume(client, csrf, tid, "approve")
+        switched = client.patch(f"/api/threads/{tid}", json={"metadata": {"mode": "chat"}}, headers={"X-CSRF-Token": csrf})
+        assert switched.status_code == 200, switched.text
+        decision = {"request_id": payloads[0]["value"]["request_id"], "tool_call_id": "call_hitl_1", "option_id": "approve"}
+        approved = _run(client, csrf, tid, {"command": {"resume": {"responses": [decision]}}, "context": {"mode": "chat"}})
         assert approved.status_code == 200, approved.text
-        _ = _wait_run_terminal(client, tid, approved.json()["run_id"])
+        resumed = _wait_run_terminal(client, tid, approved.json()["run_id"])
+        assert (resumed["metadata"]["mode"], resumed["status"]) == ("flash", "success")
         state = client.get(f"/api/threads/{tid}").json()
         contents = [m.get("content") for m in state["values"]["messages"] if m.get("type") == "tool"]
         assert "OK" in contents
         assert state["status"] == "idle"
+        assert state["metadata"]["mode"] == "chat"
 
         duplicate = _resume(client, csrf, tid, "approve", request_id=payloads[0]["value"]["request_id"])
         assert duplicate.status_code == 409
@@ -329,6 +334,36 @@ def test_checkpointed_approval_survives_gateway_restart(isolated_app):
             state = restarted.get(f"/api/threads/{tid}").json()
             written = [message for message in state["values"]["messages"] if message.get("type") == "tool" and message.get("content") == "OK"]
             assert len(written) == 1
+
+
+def test_consecutive_approvals_preserve_the_original_model_options(isolated_app, monkeypatch):
+    from app.gateway import services
+
+    _enable_approval()
+    worker_options = []
+    run_agent = services.run_agent
+
+    async def observe_run(*args, **kwargs):
+        worker_options.append(kwargs["config"]["context"].get("thinking_enabled"))
+        return await run_agent(*args, **kwargs)
+
+    monkeypatch.setattr(services, "run_agent", observe_run)
+    with patch(_MODEL_PATCH, new=_fake_two_step_model), TestClient(isolated_app) as client:
+        csrf = _register_user(client)
+        tid = _create_thread(client, csrf)
+        original = {"mode": "flash", "thinking_enabled": False}
+        started = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "write twice"}]}, context=original))
+        assert started.status_code == 200
+        for index in (1, 2):
+            tool_call_id = f"call_hitl_{index}"
+            request_id = _approval_request_id(client, tid, tool_call_id)
+            decision = {"tool_call_id": tool_call_id, "request_id": request_id, "option_id": "approve"}
+            resumed = _run(client, csrf, tid, {"command": {"resume": {"responses": [decision]}}, "config": {"context": {"mode": "chat", "thinking_enabled": True}}})
+            assert resumed.status_code == 200, resumed.text
+            run = _wait_run_terminal(client, tid, resumed.json()["run_id"])
+            assert run["metadata"]["mode"] == "flash"
+            assert run["status"] == ("waiting_for_input" if index == 1 else "success")
+        assert worker_options == [False, False, False]
 
 
 def test_fresh_run_rechecks_pending_approval_at_durable_admission(isolated_app):

@@ -347,6 +347,7 @@ class ThreadMetaRepository(ThreadMetaStore):
         *,
         touch: bool = True,
         user_id: str | None | _AutoSentinel = AUTO,
+        allow_unowned: bool = False,
     ) -> None:
         """Merge ``metadata`` into ``metadata_json``.
 
@@ -373,7 +374,7 @@ class ThreadMetaRepository(ThreadMetaStore):
                 row = result.scalar_one_or_none()
             if row is None:
                 return
-            if resolved_user_id is not None and row.user_id != resolved_user_id:
+            if resolved_user_id is not None and row.user_id != resolved_user_id and not (allow_unowned and row.user_id is None):
                 return
             merged = dict(row.metadata_json or {})
             merged.update(metadata)

@@ -375,7 +375,7 @@ async def promote_thread_file_to_shelf(
 
 @router.post("/{document_id}/attach-to-thread/{thread_id}", response_model=AttachDocumentResponse)
 @require_permission("projects", "write")
-@require_permission("threads", "write", owner_check=True, require_existing=True)
+@require_permission("threads", "write", owner_check=True, require_existing=True, thread_files=True)
 async def attach_project_document_to_thread(
     project_id: str,
     document_id: str,

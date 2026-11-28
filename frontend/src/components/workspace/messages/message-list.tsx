@@ -125,6 +125,7 @@ import { MarkdownContent } from "./markdown-content";
 import {
   createMarkdownLinkComponent,
   MessageArtifactPathsContext,
+  TextOnlyMessageContext,
 } from "./markdown-link";
 import { MessageGroup, getMessageGroupReasoningMessage } from "./message-group";
 import { MessageListItem } from "./message-list-item";
@@ -1335,7 +1336,9 @@ export function MessageList({
             durationSeconds={display.durationSeconds}
           />
         ))}
-        {content}
+        <TextOnlyMessageContext.Provider value={group.textOnly === true}>
+          {content}
+        </TextOnlyMessageContext.Provider>
       </div>
     );
   };
@@ -1737,7 +1740,11 @@ export function MessageList({
                           ])}
                           showTokenDebugSummaries={showTokenDebugSummaries}
                           threadId={threadId}
-                          toolArtifacts={thread.values?.tool_artifacts}
+                          toolArtifacts={
+                            group.textOnly
+                              ? undefined
+                              : thread.values?.tool_artifacts
+                          }
                         />
                       </MessageArtifactPathsContext.Provider>,
                     );
@@ -1806,7 +1813,11 @@ export function MessageList({
                         group.messages,
                       )}
                       showTokenDebugSummaries={showTokenDebugSummaries}
-                      toolArtifacts={thread.values?.tool_artifacts}
+                      toolArtifacts={
+                        group.textOnly
+                          ? undefined
+                          : thread.values?.tool_artifacts
+                      }
                       awaitingApproval={
                         approvalRequests.length > 0 &&
                         groupIndex === lastGroupIndex

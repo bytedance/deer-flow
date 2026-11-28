@@ -21,6 +21,31 @@ const MOCK_AGENTS = [
 ];
 
 test.describe("Agent chat", () => {
+  test("binds a new Chat thread to its custom agent at creation", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, { agents: MOCK_AGENTS });
+    await page.goto("/workspace/agents/test-agent/chats/new");
+    const composer = page
+      .locator("form")
+      .filter({ has: page.getByRole("textbox") });
+    await composer
+      .getByRole("button", { name: /^(Flash|Reasoning|Pro|Ultra)$/ })
+      .click();
+    await page.getByRole("menuitem").filter({ hasText: /^Chat/ }).click();
+    await composer.getByRole("textbox").fill("Hello");
+    const create = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        new URL(request.url()).pathname === "/api/threads",
+    );
+    await composer.getByRole("textbox").press("Enter");
+    expect((await create).postDataJSON()).toMatchObject({
+      assistant_id: "test-agent",
+      metadata: { mode: "chat" },
+    });
+  });
+
   test("display name length counts emoji as code points", async ({ page }) => {
     mockLangGraphAPI(page, { agents: [MOCK_AGENTS[0]!] });
     let savedName: string | undefined;

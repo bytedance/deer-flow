@@ -805,7 +805,7 @@ async def _get_viewed_image_blob_response(
     summary="Update Artifact File",
     description="Replace an existing UTF-8 text artifact after verifying that its content has not changed.",
 )
-@require_permission("threads", "write", owner_check=True, require_existing=True)
+@require_permission("threads", "write", owner_check=True, require_existing=True, thread_files=True)
 async def update_artifact(
     thread_id: ThreadId,
     path: str,

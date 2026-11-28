@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any, TypeGuard
 
 THREAD_INCARNATION_CONTEXT_KEY = "thread_incarnation"
@@ -20,19 +21,36 @@ def is_valid_thread_incarnation(value: object) -> TypeGuard[str | None]:
     return value is None or (isinstance(value, str) and bool(value))
 
 
+@dataclass(frozen=True, slots=True)
+class ChatStdioScope:
+    """A separate process and temporary directory for text-only calls."""
+
+    user_id: str
+    thread_id: str
+    thread_incarnation: str | None
+
+
+McpSessionScope = str | ChatStdioScope
+
+
 def mcp_session_scope_key(
     *,
     user_id: str,
     thread_id: str,
     thread_incarnation: str | None = None,
-) -> str:
+    chat_stdio: bool = False,
+) -> McpSessionScope:
     """Return the canonical user/thread/incarnation session key.
 
     A legacy NULL incarnation retains the pre-activation scope so rolling
-    upgrades do not split an existing legacy session.
+    upgrades do not split an existing legacy session. Chat stdio processes use
+    a distinct key type even for legacy threads so they cannot reuse a process
+    running in the thread workspace.
     """
     if not is_valid_thread_incarnation(thread_incarnation):
         raise RuntimeError("MCP session scope requires a non-empty thread incarnation")
+    if chat_stdio:
+        return ChatStdioScope(user_id, thread_id, thread_incarnation)
     scope = f"{user_id}:{thread_id}"
     if thread_incarnation is None:
         return scope
@@ -45,12 +63,11 @@ def mcp_session_scope_key(
     )
 
 
-def mcp_scope_belongs_to_thread(scope_key: str, *, user_id: str, thread_id: str) -> bool:
+def mcp_scope_belongs_to_thread(scope_key: McpSessionScope, *, user_id: str, thread_id: str) -> bool:
     """Return whether *scope_key* was minted for this user/thread identity.
 
-    Matches both encodings :func:`mcp_session_scope_key` can produce: the legacy
-    ``user:thread`` scope (NULL incarnation) and the versioned
-    ``v2:[user, thread, incarnation]`` scope. The incarnation is deliberately
+    Matches the Chat stdio scope, legacy ``user:thread`` scope (NULL incarnation)
+    and versioned ``v2:[user, thread, incarnation]`` scope. The incarnation is deliberately
     *not* compared — a caller tearing down a whole thread has to invalidate every
     generation of it, and the current generation cannot be read reliably at
     teardown time (see ``MCPSessionPool.close_thread_scope``).
@@ -60,6 +77,8 @@ def mcp_scope_belongs_to_thread(scope_key: str, *, user_id: str, thread_id: str)
     ever over-close (tear down an extra session), never leak one, and the
     versioned encoding — which every incarnation-aware caller uses — is exact.
     """
+    if isinstance(scope_key, ChatStdioScope):
+        return scope_key.user_id == user_id and scope_key.thread_id == thread_id
     if scope_key == f"{user_id}:{thread_id}":
         return True
     if not scope_key.startswith(_V2_SCOPE_PREFIX):

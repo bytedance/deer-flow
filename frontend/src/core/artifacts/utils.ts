@@ -3,6 +3,7 @@ import type { AIMessage, Message, ToolMessage } from "@langchain/langgraph-sdk";
 import { getBackendBaseURL } from "../config";
 import { indexToolResults } from "../messages/tool-result";
 import {
+  chatTurnMessages,
   extractPresentFilesFromMessage,
   hasPresentFiles,
 } from "../messages/utils";
@@ -201,10 +202,12 @@ export function collectThreadArtifactPaths(
   messages: readonly Message[],
 ): readonly string[] {
   let toolResults: ReturnType<typeof indexToolResults<Message>> | undefined;
+  const chatMessages = chatTurnMessages(messages);
   const resultsAt = (index: number) =>
     (toolResults ??= indexToolResults(messages)).get(index);
   const presented = messages
     .flatMap((message, index) => {
+      if (chatMessages.has(message)) return [];
       const paths = hasPresentFiles(message)
         ? extractPresentFilesFromMessage(message, resultsAt(index) ?? [])
         : [];

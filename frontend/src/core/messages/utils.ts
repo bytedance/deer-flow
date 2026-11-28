@@ -20,6 +20,7 @@ interface GenericMessageGroup<T = string> {
   type: T;
   id: string | undefined;
   messages: Message[];
+  textOnly?: boolean;
 }
 
 interface HumanMessageGroup extends GenericMessageGroup<"human"> {
@@ -124,6 +125,32 @@ const HIDDEN_CONTROL_MESSAGE_NAMES = new Set([
   "todo_completion_reminder",
 ]);
 
+/** Use the turn's mode, including when a history page starts midway through a run. */
+export function chatTurnMessages(messages: readonly Message[]): Set<Message> {
+  const result = new Set<Message>();
+  let chat = false;
+  for (const message of messages) {
+    const mode = message.additional_kwargs?.deerflow_mode;
+    // LangChain concatenates string-valued additional_kwargs when it joins
+    // chunks. Older streams stamped every chunk, including mid-page answers.
+    const markedChat = typeof mode === "string" && /^(?:chat)+$/.test(mode);
+    if (message.type === "human" && !isHiddenFromUIMessage(message)) {
+      chat = markedChat;
+    } else if (
+      markedChat &&
+      (message.type === "ai" || message.type === "tool")
+    ) {
+      chat = true;
+    }
+    if (chat) result.add(message);
+  }
+  return result;
+}
+
+export function isFilePresentationTool(name?: string) {
+  return name === "present_files" || name === "present_shared_artifact";
+}
+
 export function getMessageGroups(
   messages: Message[],
   { isCurrentTurnLoading = false }: { isCurrentTurnLoading?: boolean } = {},
@@ -133,6 +160,7 @@ export function getMessageGroups(
   }
 
   const groups: MessageGroup[] = [];
+  const chatMessages = chatTurnMessages(messages);
   const currentTurnStartIndex = isCurrentTurnLoading
     ? findCurrentTurnStartIndex(messages)
     : -1;
@@ -159,9 +187,14 @@ export function getMessageGroups(
   }
 
   for (const [messageIndex, message] of messages.entries()) {
-    if (isHiddenFromUIMessage(message)) {
+    if (isHiddenFromUIMessage(message)) continue;
+    const textOnly = chatMessages.has(message);
+    if (
+      textOnly &&
+      message.type === "tool" &&
+      isFilePresentationTool(message.name)
+    )
       continue;
-    }
 
     if (message.type === "human") {
       const scheduledOrigin = scheduledOriginOf(message);
@@ -276,22 +309,25 @@ export function getMessageGroups(
       // visible with the text that introduced it.
       // Non-empty content arrays can contain only Anthropic thinking blocks.
       // Require content the answer renderer can actually display.
+      // Providers can stream invented file calls alongside a real web/MCP
+      // call. Preserve the original message for citation and usage lookups.
+      const hasVisibleToolCalls = textOnly
+        ? message.tool_calls?.some((call) => !isFilePresentationTool(call.name))
+        : hasToolCalls(message);
       const hasAnswerContent = extractContentFromMessage(message).length > 0;
       const isUnresolvedAssistantText =
         currentTurnStartIndex >= 0 &&
         messageIndex > currentTurnStartIndex &&
         hasAnswerContent &&
-        !hasToolCalls(message) &&
+        !hasVisibleToolCalls &&
         // A provider that has already supplied reasoning with answer text is
         // completing an answer, not merely streaming a pre-tool narration.
         // Keep it out of the processing disclosure while the turn is active.
         !hasReasoning(message);
       const becomesAssistantBubble =
-        hasAnswerContent &&
-        !hasToolCalls(message) &&
-        !isUnresolvedAssistantText;
+        hasAnswerContent && !hasVisibleToolCalls && !isUnresolvedAssistantText;
 
-      if (hasPresentFiles(message)) {
+      if (!textOnly && hasPresentFiles(message)) {
         groups.push({
           id: message.id,
           type: "assistant:present-files",
@@ -306,7 +342,7 @@ export function getMessageGroups(
       } else if (
         !becomesAssistantBubble &&
         (hasReasoning(message) ||
-          hasToolCalls(message) ||
+          hasVisibleToolCalls ||
           isUnresolvedAssistantText)
       ) {
         const lastGroup = groups[groups.length - 1];
@@ -328,6 +364,12 @@ export function getMessageGroups(
     }
   }
 
+  if (chatMessages.size) {
+    for (const group of groups) {
+      if (group.messages.some((message) => chatMessages.has(message)))
+        group.textOnly = true;
+    }
+  }
   return groups;
 }
 

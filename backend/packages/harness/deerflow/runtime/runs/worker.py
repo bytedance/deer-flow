@@ -41,6 +41,7 @@ from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.errors import GraphRecursionError
 from langgraph.types import Command, Overwrite, StateSnapshot
 
+from deerflow.agents.chat_mode import chat_stream_chunk
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.agents.interaction_policy import RunInteractionPolicy, resolve_run_interaction_policy
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
@@ -1169,6 +1170,10 @@ async def run_agent(
 ) -> None:
     """Execute an agent in the background, publishing events to *bridge*."""
 
+    caller_context = config.get("context")
+    configured_mode = (config.get("configurable") or {}).get("mode")
+    chat_mode = (caller_context.get("mode", configured_mode) if isinstance(caller_context, Mapping) else configured_mode) == "chat"
+
     # Unpack infrastructure dependencies from RunContext.
     checkpointer = ctx.checkpointer
     store = ctx.store
@@ -1361,6 +1366,7 @@ async def run_agent(
                 thread_id=thread_id,
                 event_store=event_store,
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
+                chat_mode=chat_mode,
                 user_id=record.user_id,
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
@@ -1481,7 +1487,7 @@ async def run_agent(
 
         persist_completion = True
 
-        if event_store is not None:
+        if event_store is not None and not chat_mode:
             workspace_changes_user_id = get_effective_user_id()
             # Resolved once per run so the pre-run snapshot, the post-run
             # delivery scan, and the workspace-changes scan all agree on the
@@ -1545,6 +1551,8 @@ async def run_agent(
         # A disabled all-reject escape still needs the HITL hook to consume the
         # pending interrupt. The assembly marker makes that hook deny rather
         # than pause again; all other runs cannot inject this internal mode.
+        if chat_mode:
+            runtime_ctx["mode"] = "chat"
         runtime_ctx.pop("_hitl_disabled_resume_escape", None)
         if hitl_resume_escape:
             runtime_ctx["_hitl_disabled_resume_escape"] = True
@@ -1597,6 +1605,7 @@ async def run_agent(
                 checkpointer=checkpointer,
                 on_result=record_deferred_result,
                 on_replan=record_steered_response,
+                chat_mode=chat_mode,
             )
             runtime_ctx[INPUT_CONTEXT_KEY] = input_control
         if ctx.approval_store is not None and hitl_config is not None and hitl_config.enabled and isinstance(thread_incarnation, str) and record.user_id:
@@ -1809,6 +1818,7 @@ async def run_agent(
 
         # Built once per run, not per _stream_once call: goal continuations
         # re-enter the stream and would otherwise discard the resolved seqs.
+        marked_chat_messages: set[str] = set()
         seq_stamper = _build_seq_stamper(event_store, thread_id, journal) if "values" in requested_modes else None
 
         def observe_stream_pause(mode: str, chunk: Any, namespace: tuple[str, ...]) -> None:
@@ -1912,6 +1922,8 @@ async def run_agent(
                                     broke_on_abort = True
                                     logger.info("Run %s abort requested — stopping", run_id)
                                     break
+                                if chat_mode and single_mode == "messages":
+                                    chunk = chat_stream_chunk(chunk, marked_chat_messages)
                                 if single_mode != "custom":
                                     # Custom frames carry task_* events whose payload can hold a delegated
                                     # subagent's messages; see the multi-mode branch below.
@@ -1967,6 +1979,8 @@ async def run_agent(
                             if mode is None:
                                 continue
 
+                            if chat_mode and mode == "messages":
+                                chunk = chat_stream_chunk(chunk, marked_chat_messages)
                             if not namespace and mode != "custom":
                                 # Only root-graph frames may decide the parent run's error
                                 # fallback: a delegated subagent's marked fallback is the

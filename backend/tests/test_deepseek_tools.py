@@ -90,7 +90,8 @@ def test_provider_entry_preserves_the_web_search_interface(provider):
     assert set(provider.tool.args) == {"query", "max_results"}
 
 
-def test_configured_provider_is_assembled_and_invoked_by_the_host(provider):
+@pytest.mark.parametrize("chat_mode", [False, True])
+def test_configured_provider_is_assembled_and_invoked_by_the_host(provider, chat_mode):
     config = AppConfig.model_validate(
         {
             "tools": [{"name": "web_search", "group": "web", "use": "deerflow.community.deepseek.tools:web_search_tool"}],
@@ -99,6 +100,7 @@ def test_configured_provider_is_assembled_and_invoked_by_the_host(provider):
     )
     tools = get_available_tools(
         app_config=config,
+        chat_mode=chat_mode,
         groups=["web"],
         include_mcp=False,
         subagent_enabled=False,

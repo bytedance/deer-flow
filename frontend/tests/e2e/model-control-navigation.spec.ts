@@ -74,6 +74,9 @@ for (const destination of ["agent-thread", "normal-chat"] as const) {
       createdId,
     );
     try {
+      expect(createRequest.postDataJSON()).toMatchObject({
+        assistant_id: "reviewer",
+      });
       await page
         .getByRole("link", {
           name:

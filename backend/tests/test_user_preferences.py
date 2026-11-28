@@ -76,9 +76,9 @@ async def api(preference_repo, monkeypatch):
 async def test_preferences_api_partial_patch_reset_and_owner_isolation(api):
     client, identity = api
     path = "/api/v1/auth/preferences"
-    assert (await client.patch(path, json={"notification_enabled": False, "mode": "pro"})).status_code == 204
+    assert (await client.patch(path, json={"notification_enabled": False, "mode": "flash"})).status_code == 204
     assert (await client.patch(path, json={"model_name": "model-a"})).status_code == 204
-    assert (await client.get(path)).json() == {"notification_enabled": False, "model_name": "model-a", "mode": "pro", "reasoning_effort": None, "locale": None}
+    assert (await client.get(path)).json() == {"notification_enabled": False, "model_name": "model-a", "mode": "flash", "reasoning_effort": None, "locale": None}
     assert (await client.patch(path, json={"mode": None})).status_code == 204
     identity.id = "bob"
     # A stale tab with Alice's expected identity must not write using Bob's cookie.
@@ -98,6 +98,7 @@ async def test_preferences_api_partial_patch_reset_and_owner_isolation(api):
     [
         {"notification_enabled": "false"},
         {"mode": "invalid"},
+        {"mode": "chat"},
         {"locale": "fr-FR"},
         {"locale": "zh"},
         {"locale": 1},
@@ -145,10 +146,16 @@ async def test_preferences_api_stores_the_ui_locale(api, preference_repo, locale
 
 
 @pytest.mark.anyio
-async def test_preferences_read_discards_only_malformed_fields(api, preference_repo):
+@pytest.mark.parametrize("stored_mode", ["invalid", "chat"])
+async def test_preferences_read_discards_only_malformed_fields(api, preference_repo, stored_mode):
     client, _ = api
-    await preference_repo.patch("alice", {"notification_enabled": False, "mode": "invalid", "locale": "fr-FR", "unknown": "ignored"})
-    assert (await client.get("/api/v1/auth/preferences")).json() == {"notification_enabled": False, "model_name": None, "mode": None, "reasoning_effort": None, "locale": None}
+    path = "/api/v1/auth/preferences"
+    await preference_repo.patch("alice", {"notification_enabled": False, "mode": stored_mode, "locale": "fr-FR", "unknown": "ignored"})
+    assert (await client.get(path)).json() == {"notification_enabled": False, "model_name": None, "mode": None, "reasoning_effort": None, "locale": None}
+    assert (await client.patch(path, json={"model_name": "new-model"})).status_code == 204
+    assert (await client.get(path)).json()["model_name"] == "new-model"
+    assert (await client.patch(path, json={"mode": "flash"})).status_code == 204
+    assert (await client.get(path)).json()["mode"] == "flash"
 
 
 def test_preferences_migration_preserves_existing_users_and_downgrades(tmp_path):

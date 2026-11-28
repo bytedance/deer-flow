@@ -32,6 +32,8 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         thread_id: str,
         user_id: str | None | _AutoSentinel,
         method_name: str,
+        *,
+        allow_unowned: bool = False,
     ) -> dict | None:
         """Fetch a record and verify ownership. Returns a mutable copy, or None."""
         resolved = resolve_user_id(user_id, method_name=method_name)
@@ -39,7 +41,7 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         if item is None:
             return None
         record = dict(item.value)
-        if resolved is not None and record.get("user_id") != resolved:
+        if resolved is not None and record.get("user_id") != resolved and not (allow_unowned and record.get("user_id") is None):
             return None
         return record
 
@@ -195,9 +197,9 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             record["updated_at"] = now_iso()
             await self._store.aput(THREADS_NS, thread_id, record)
 
-    async def update_metadata(self, thread_id: str, metadata: dict, *, touch: bool = True, user_id: str | None | _AutoSentinel = AUTO) -> None:
+    async def update_metadata(self, thread_id: str, metadata: dict, *, touch: bool = True, user_id: str | None | _AutoSentinel = AUTO, allow_unowned: bool = False) -> None:
         async with self._thread_locks.hold(thread_id):
-            record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.update_metadata")
+            record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.update_metadata", allow_unowned=allow_unowned)
             if record is None:
                 return
             merged = dict(record.get("metadata") or {})

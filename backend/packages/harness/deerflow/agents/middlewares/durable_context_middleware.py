@@ -371,19 +371,22 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         pii_redaction_config: PiiRedactionConfig | None = None,
         skill_authorization=None,
         entry_decisions_owner_token: str | None = None,
+        chat_mode: bool = False,
     ) -> None:
         super().__init__()
-        self._task_continuity_enabled = task_continuity_enabled
+        self._chat_mode = chat_mode
+        self._task_continuity_enabled = task_continuity_enabled and not chat_mode
         self._pii_redaction_config = pii_redaction_config
         self._skills_root = _normalize_skills_root(skills_container_path)
         self._skill_read_tool_names = frozenset(DEFAULT_SKILL_FILE_READ_TOOL_NAMES if skill_file_read_tool_names is None else skill_file_read_tool_names)
-        self._inject_tool_artifacts = inject_tool_artifacts
+        self._inject_tool_artifacts = inject_tool_artifacts and not chat_mode
         self._skill_authorization = skill_authorization
         self._entry_decisions_owner_token = entry_decisions_owner_token
 
     def release_policy_parameters(self) -> dict[str, object]:
         """Describe the normalized inputs that govern capture and injection."""
         return {
+            **({"conversation_summary_only": True} if self._chat_mode else {}),
             "skills_container_path": self._skills_root,
             "skill_file_read_tool_names": sorted(self._skill_read_tool_names),
             "task_continuity_enabled": self._task_continuity_enabled,
@@ -432,6 +435,8 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         return self._capture_delegations(state, runtime)
 
     def _capture_delegations(self, state: AgentState, runtime: Runtime | None) -> dict | None:
+        if self._chat_mode:
+            return None
         run_id = _runtime_run_id(runtime)
         pre_existing_message_ids = _runtime_pre_existing_message_ids(runtime)
         opening_index = _run_opening_human_index(state["messages"], run_id, pre_existing_message_ids) if run_id is not None else None
@@ -450,6 +455,8 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         return None
 
     def _capture(self, state: AgentState, runtime: Runtime | None) -> dict | None:
+        if self._chat_mode:
+            return None
         messages = state["messages"]
         updates: dict = {}
         delegation_update = self._capture_delegations(state, runtime)
@@ -462,6 +469,11 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
 
     def _inject(self, request: ModelRequest) -> ModelRequest:
         state = request.state or {}
+        if self._chat_mode:
+            # Compacted conversation history remains relevant across modes.
+            # Earlier task plans, loaded skills and file handles stay in state
+            # for the next work run without becoming instructions for this one.
+            state = {"summary_text": state.get("summary_text")}
         goal_objective = redact_text(_active_goal_objective(state.get("goal")), self._pii_redaction_config)
         artifacts = []
         if self._inject_tool_artifacts:

@@ -471,8 +471,15 @@ def _build_fallback(
 # ---------------------------------------------------------------------------
 
 
+def _is_chat_request(request: ToolCallRequest | ModelRequest) -> bool:
+    context = getattr(getattr(request, "runtime", None), "context", None)
+    return isinstance(context, Mapping) and context.get("mode") == "chat"
+
+
 def _resolve_outputs_path(request: ToolCallRequest) -> str | None:
     """Best-effort extraction of the thread outputs path."""
+    if _is_chat_request(request):
+        return None
     runtime = getattr(request, "runtime", None)
     if runtime is None:
         return None
@@ -510,6 +517,8 @@ def _resolve_sandbox(request: ToolCallRequest) -> Sandbox | None:
     that do not use a sandbox (``web_search``, MCP, ...) will return ``None``
     here, which is fine -- the caller falls back to inline truncation.
     """
+    if _is_chat_request(request):
+        return None
     runtime = getattr(request, "runtime", None)
     state = getattr(runtime, "state", None)
     if not isinstance(state, dict):
@@ -914,6 +923,8 @@ def _patch_model_messages(messages: list[Any], config: ToolOutputConfig) -> list
 
 
 def _model_outputs_path(request: ModelRequest) -> str | None:
+    if _is_chat_request(request):
+        return None
     state = getattr(request, "state", None)
     if not isinstance(state, Mapping):
         return None

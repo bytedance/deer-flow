@@ -499,6 +499,7 @@ def _convert_call_tool_result(
     user_id: str | None = None,
     source_base_dir: Path | None = None,
     changed_files: Iterable[Path] | None = None,
+    chat_mode: bool = False,
 ) -> Any:
     """Convert an MCP CallToolResult to the LangChain ``content_and_artifact`` format.
 
@@ -558,7 +559,7 @@ def _convert_call_tool_result(
         # Servers like Playwright report saved files only as plain text, with no
         # ResourceLink to hook into. Scan the text for local paths and translate
         # them so the produced files are readable through the sandbox/artifact API.
-        if thread_id is None or user_id is None:
+        if chat_mode or thread_id is None or user_id is None:
             return text
         return _rewrite_local_paths_in_text(
             text,
@@ -587,6 +588,8 @@ def _convert_call_tool_result(
     # server's diagnostics, so name the shape in the fallback message instead.
     empty_binary_shapes: list[str] = []
     for item in call_tool_result.content:
+        if chat_mode and not (isinstance(item, TextContent) or (isinstance(item, EmbeddedResource) and isinstance(item.resource, TextResourceContents))):
+            continue
         if isinstance(item, TextContent):
             lc_content.append(create_text_block(text=_resolve_text(item.text)))
         elif isinstance(item, ImageContent):
@@ -679,6 +682,13 @@ def _convert_call_tool_result(
             message += f" ({described}); the payload is not shown"
         raise ToolException(message + ".")
 
+    if chat_mode:
+        if not lc_content and call_tool_result.structuredContent is not None:
+            lc_content.append(create_text_block(text=json.dumps(call_tool_result.structuredContent, ensure_ascii=False)))
+        elif call_tool_result.content and not lc_content:
+            lc_content.append(create_text_block(text="Attachment omitted in Chat mode."))
+        return lc_content, None
+
     artifact = None
     if call_tool_result.structuredContent is not None:
         structured_content = call_tool_result.structuredContent
@@ -761,21 +771,24 @@ def _make_session_pool_tool(
         # per-(user_id, thread_id), so a thread_id alone could otherwise let two
         # users with a colliding thread_id share one stateful MCP session.
         thread_incarnation = runtime_thread_incarnation(deerflow_runtime)
+        context = deerflow_runtime.context if deerflow_runtime is not None else {}
+        chat_mode = context.get("mode") == "chat"
+        is_stdio = connection.get("transport", "stdio") == "stdio"
         scope_key = mcp_session_scope_key(
             user_id=user_id,
             thread_id=thread_id,
             thread_incarnation=thread_incarnation,
+            chat_stdio=chat_mode and is_stdio,
         )
         session_connection = dict(connection)
         # cwd/temp pinning and the workspace snapshot only matter for stdio
         # servers, which run as local subprocesses writing to a real filesystem.
         # SSE/HTTP servers have no local cwd to pin, so skip the filesystem work
         # entirely for them (avoids needless dir creation and recursive walks).
-        is_stdio = session_connection.get("transport", "stdio") == "stdio"
         source_base_dir: Path | None = None
         process_cwd: Path | None = None
         before_files: _FILE_SNAPSHOT | None = None
-        if is_stdio:
+        if is_stdio and not chat_mode:
             paths = get_paths()
             # Bundle the synchronous filesystem prep (dir creation, temp-dir
             # setup, pre-call snapshot) and run it off the event loop — the
@@ -908,6 +921,7 @@ def _make_session_pool_tool(
             user_id=user_id,
             source_base_dir=process_cwd,
             changed_files=changed_files,
+            **({"chat_mode": True} if chat_mode else {}),
         )
 
     return StructuredTool(
@@ -975,6 +989,7 @@ def _make_background_submit_tool(
                     "status_tool": status_tool,
                     "cancel_tool": cancel_tool,
                     "connection_scope": connection_scope,
+                    **({"chat_mode": True} if context.get("mode") == "chat" else {}),
                     **({"agent_auth": agent_reference} if agent_reference is not None else {}),
                 },
             ),

@@ -230,6 +230,55 @@ async def test_real_run_lifecycle_and_automatic_followup(runtime):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="Artifact capture requires POSIX")
+async def test_read_artifact_preserves_completed_output_after_switching_to_chat(runtime):
+    import asyncio
+
+    from deerflow.config.paths import get_paths
+
+    runs, state, request, _, _ = runtime
+    runs = runs.for_plugin("workflows")
+    owner = str(request.state.user.id)
+    thread = await runs.create_thread(thread_id="workflow-output")
+    output = get_paths().sandbox_outputs_dir(thread, user_id=owner) / "report.txt"
+
+    async def produce_report(_prompt, _runtime):
+        await asyncio.to_thread(output.parent.mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(output.write_bytes, b"completed report")
+
+    state.present_worker_report = produce_report
+    run = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "Write the report"}]}, context={"mode": "flash"})
+    assert (await runs.wait(thread_id=thread, run_id=run.run_id, timeout=5)).status == "success"
+    checkpoint = (await runs.get_state(thread_id=thread))["checkpoint_id"]
+    assert checkpoint
+    path = "/mnt/user-data/outputs/report.txt"
+    assert await runs.read_artifact(thread_id=thread, path=path) == b"completed report"
+
+    await state.thread_store.update_metadata(thread, {"mode": "chat"}, user_id=owner)
+    assert (await state.thread_store.get(thread, user_id=owner))["metadata"]["mode"] == "chat"
+    assert await runs.read_artifact(thread_id=thread, path=path) == b"completed report"
+    assert await runs.read_artifact(thread_id=thread, path=path, expected_checkpoint_id=checkpoint) == b"completed report"
+    with pytest.raises(AgentRunError) as stale:
+        await runs.read_artifact(thread_id=thread, path=path, expected_checkpoint_id="stale-checkpoint")
+    assert stale.value.status_code == 412
+
+
+@pytest.mark.asyncio
+async def test_chat_thread_rejects_extension_artifact_import_before_allocation(runtime, monkeypatch):
+    from unittest.mock import Mock
+
+    runs, _, _, _, _ = runtime
+    runs = runs.for_plugin("artifact-fixture")
+    thread = await runs.create_thread(thread_id="chat-import", metadata={"mode": "chat"})
+    provider = Mock(return_value=SimpleNamespace(uses_thread_data_mounts=True))
+    monkeypatch.setattr("app.gateway.extension_artifacts.get_sandbox_provider", provider)
+    with pytest.raises(AgentRunError) as rejected:
+        await runs.import_artifact(thread_id=thread, filename="data.txt", content=b"text")
+    assert rejected.value.status_code == 422
+    provider.assert_not_called()
+
+
+@pytest.mark.asyncio
 @pytest.mark.skipif(os.name != "posix", reason="Descriptor-confined artifact imports require POSIX")
 async def test_team_artifact_import_is_authorized_idempotent_and_confined(runtime):
     import asyncio
@@ -865,6 +914,40 @@ def _png(color):
     output = BytesIO()
     Image.new("RGB", (1, 1), color).save(output, format="PNG")
     return output.getvalue()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("source_mode", "queued_mode"), [("chat", "flash"), ("flash", "chat")])
+async def test_chat_queue_rejects_files_before_staging(worker_gateway, source_mode, queued_mode):
+    import asyncio
+    import json
+
+    from deerflow.config.paths import get_paths
+    from deerflow.runtime.runs.inputs import RunInputs
+
+    client, runs, state, entered, owner = worker_gateway
+    thread = await runs.create_thread(thread_id="chat-queued-files")
+    run = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "wait"}]}, context={"mode": source_mode})
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        body = {"request_id": "file", "text": "", "mode": "queue", "context": {"mode": queued_mode}}
+        response = await client.post(f"/api/threads/{thread}/runs/{run.run_id}/inputs", data={"input": json.dumps(body)}, files={"files": ("hello.txt", b"hello", "text/plain")})
+        assert response.status_code == 422 and "text only" in response.json()["detail"]
+        assert not (get_paths().thread_dir(thread, user_id=owner) / ".queued-uploads").exists()
+        receipt = (await client.get(f"/api/threads/{thread}/inputs")).raise_for_status().json()
+        assert receipt["items"] == []
+
+        # An older Gateway can have accepted a file before this mode check existed.
+        stage = {"id": "a" * 32, "files": [{"filename": "hello.txt", "size": 5}]}
+        inputs = RunInputs(state.run_store, run.run_id, owner)
+        await inputs.submit("legacy-file", "Continue", "queue", context={"mode": queued_mode}, attachment_stage=stage)
+    finally:
+        state.release_worker.set()
+
+    assert (await runs.wait(thread_id=thread, run_id=run.run_id, timeout=5)).status == "success"
+    legacy_input = f"/api/threads/{thread}/runs/{run.run_id}/inputs/legacy-file"
+    assert (await client.post(legacy_input + "/retry")).status_code == 422
+    assert (await client.delete(legacy_input)).status_code == 200
 
 
 @pytest.mark.asyncio

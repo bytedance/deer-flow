@@ -48,8 +48,8 @@ import json
 import logging
 import threading
 from collections import OrderedDict
-from collections.abc import Collection, Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Collection, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -58,7 +58,7 @@ from mcp import ClientSession
 from mcp.shared.exceptions import McpError
 from mcp.types import CONNECTION_CLOSED
 
-from deerflow.mcp_scope import mcp_scope_belongs_to_thread
+from deerflow.mcp_scope import ChatStdioScope, McpSessionScope, mcp_scope_belongs_to_thread
 
 logger = logging.getLogger(__name__)
 
@@ -182,12 +182,23 @@ async def _finish_session_cleanup(
     return cancelled
 
 
+@asynccontextmanager
+async def _chat_stdio_session(connection: dict[str, Any]) -> AsyncIterator[ClientSession]:
+    """Tie a private working directory to the lifetime of this stdio process."""
+    from langchain_mcp_adapters.sessions import create_session
+
+    async with anyio.TemporaryDirectory(prefix="deerflow-chat-mcp-") as directory:
+        env = {**dict.fromkeys(("TMPDIR", "TMP", "TEMP"), directory), **(connection.get("env") or {})}
+        async with create_session({**connection, "cwd": connection.get("cwd") or directory, "env": env}) as session:
+            yield session
+
+
 async def call_pooled_session_tool(
     session: ClientSession,
     pool: MCPSessionPool,
     *,
     server_name: str,
-    scope_key: str,
+    scope_key: McpSessionScope,
     tool_name: str,
     arguments: dict[str, Any],
     call_kwargs: dict[str, Any],
@@ -219,7 +230,7 @@ class MCPSessionPool:
     def __init__(self) -> None:
         # Each entry: (session, owning_loop, owner_task, close_event).
         self._entries: OrderedDict[
-            tuple[str, str, asyncio.AbstractEventLoop, MCPPoolDomain],
+            tuple[str, McpSessionScope, asyncio.AbstractEventLoop, MCPPoolDomain],
             tuple[
                 ClientSession,
                 asyncio.AbstractEventLoop,
@@ -235,7 +246,7 @@ class MCPSessionPool:
         # ``_run_session``), so ``ready`` resolving with a *result* always means
         # the session is registered — never merely handed to one caller.
         self._inflight: dict[
-            tuple[str, str, asyncio.AbstractEventLoop, MCPPoolDomain],
+            tuple[str, McpSessionScope, asyncio.AbstractEventLoop, MCPPoolDomain],
             tuple[
                 asyncio.AbstractEventLoop,
                 asyncio.Future[ClientSession],
@@ -417,7 +428,7 @@ class MCPSessionPool:
     def _session_call(
         self,
         server_name: str,
-        scope_key: str,
+        scope_key: McpSessionScope,
         session: ClientSession,
         *,
         domain: MCPPoolDomain,
@@ -459,7 +470,7 @@ class MCPSessionPool:
 
     def _discard_owner(
         self,
-        key: tuple[str, str, asyncio.AbstractEventLoop, MCPPoolDomain],
+        key: tuple[str, McpSessionScope, asyncio.AbstractEventLoop, MCPPoolDomain],
         owner: asyncio.Task[Any],
     ) -> None:
         """Retire only this owner, including after asyncio.run shuts its loop down."""
@@ -473,7 +484,7 @@ class MCPSessionPool:
 
     async def _run_session(
         self,
-        key: tuple[str, str, asyncio.AbstractEventLoop, MCPPoolDomain],
+        key: tuple[str, McpSessionScope, asyncio.AbstractEventLoop, MCPPoolDomain],
         connection: dict[str, Any],
         ready: asyncio.Future[ClientSession],
         close_evt: asyncio.Event,
@@ -482,7 +493,7 @@ class MCPSessionPool:
         """Own one MCP session and fence promotion against binding replacement."""
         from langchain_mcp_adapters.sessions import create_session
 
-        cm = create_session(connection)
+        cm = _chat_stdio_session(connection) if isinstance(key[1], ChatStdioScope) else create_session(connection)
         try:
             session = await cm.__aenter__()
         except BaseException as error:
@@ -556,7 +567,7 @@ class MCPSessionPool:
     async def get_session(
         self,
         server_name: str,
-        scope_key: str,
+        scope_key: McpSessionScope,
         connection: dict[str, Any],
         *,
         binding: ServerBinding | None = None,
@@ -893,7 +904,7 @@ class MCPSessionPool:
         for loop, ent_ready, ent_task, ent_close in inflight:
             await self._shutdown_entry(loop, ent_task, ent_close, ready=ent_ready)
 
-    async def close_scope(self, scope_key: str) -> None:
+    async def close_scope(self, scope_key: McpSessionScope) -> None:
         """Close all sessions for a scope across ownership domains."""
         with self._lock:
             keys = [k for k in self._entries if k[1] == scope_key]
@@ -931,7 +942,7 @@ class MCPSessionPool:
     async def close_session(
         self,
         server_name: str,
-        scope_key: str,
+        scope_key: McpSessionScope,
         *,
         domain: MCPPoolDomain = "deployment",
     ) -> None:
@@ -946,7 +957,7 @@ class MCPSessionPool:
     async def close_session_if_current(
         self,
         server_name: str,
-        scope_key: str,
+        scope_key: McpSessionScope,
         session: ClientSession,
         *,
         domain: MCPPoolDomain = "deployment",

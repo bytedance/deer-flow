@@ -44,7 +44,7 @@ from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with
 MODEL_LENGTH_CAPPED_STOP_REASON = "model_length_capped"
 # Stamped on the AIMessage this guard rewrote; consumers import it, not the literal.
 MODEL_LENGTH_TERMINATION_MARKER = "model_length_termination"
-_MODEL_LENGTH_CAPPED_CONTENT = "The model reached its output limit before producing a complete final response. Please continue the conversation to resume."
+MODEL_LENGTH_CAPPED_NOTICE = "The model reached its output limit before producing a complete final response. Please continue the conversation to resume."
 logger = logging.getLogger(__name__)
 
 
@@ -106,7 +106,7 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
         return {
             "suppress_truncated_tool_calls": True,
             "mark_text_only_length_termination": True,
-            "length_notice_hash": canonical_hash(_MODEL_LENGTH_CAPPED_CONTENT),
+            "length_notice_hash": canonical_hash(MODEL_LENGTH_CAPPED_NOTICE),
         }
 
     def _detect(self, message: AIMessage) -> ModelLengthTermination | None:
@@ -180,7 +180,7 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
             update={
                 # Text-only caps still need the terminal marker for downstream
                 # guards, but preserve their visible response without a notice.
-                "content": append_visible_text(content_source, _MODEL_LENGTH_CAPPED_CONTENT) if contains_tool_call or not contains_visible_content else content_source.content,
+                "content": append_visible_text(content_source, MODEL_LENGTH_CAPPED_NOTICE) if contains_tool_call or not contains_visible_content else content_source.content,
                 "tool_calls": [],
                 "invalid_tool_calls": [],
                 "additional_kwargs": additional_kwargs,

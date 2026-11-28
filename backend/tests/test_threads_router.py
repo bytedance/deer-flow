@@ -56,7 +56,7 @@ class _PermissiveThreadMetaStore(MemoryThreadMetaStore):
     timestamp wire format.
     """
 
-    async def _get_owned_record(self, thread_id, user_id, method_name):  # type: ignore[override]
+    async def _get_owned_record(self, thread_id, user_id, method_name, *, allow_unowned=False):  # type: ignore[override]
         item = await self._store.aget(THREADS_NS, thread_id)
         return dict(item.value) if item is not None else None
 
@@ -273,6 +273,44 @@ def test_update_state_rejects_external_system_without_writing(monkeypatch) -> No
     assert "synthetic marker" not in response.text
     accessor.aupdate.assert_not_awaited()
     assert asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": "system-role-test"}})) == before
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}]}]},
+        {"messages": [{"role": "user", "content": "See attachment", "additional_kwargs": {"files": ["existing.txt"]}}]},
+        {"messages": [{"role": "tool", "tool_call_id": "lookup", "content": "Result", "artifact": {"resource_links": [{"name": "report.pdf", "uri": "https://example.org/report.pdf"}]}}]},
+        {"tool_artifacts": [{"handle": "existing.txt"}]},
+        {"uploaded_files": [{"filename": "existing.txt"}]},
+    ],
+)
+def test_chat_state_rejects_attachment_before_checkpoint_mutation(monkeypatch, values) -> None:
+    app, _, checkpointer = _build_thread_app()
+    materialize = AsyncMock(side_effect=AssertionError("No graph needed for a rejected attachment"))
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", materialize)
+    config = {"configurable": {"thread_id": "chat-state"}}
+    with TestClient(app) as client:
+        assert client.post("/api/threads", json={"thread_id": "chat-state", "metadata": {"mode": "chat"}}).status_code == 200
+        before = asyncio.run(checkpointer.aget_tuple(config))
+        denied = client.post("/api/threads/chat-state/state", json={"values": values})
+        assert denied.status_code == 422, denied.text
+    materialize.assert_not_awaited()
+    assert asyncio.run(checkpointer.aget_tuple(config)) == before
+
+
+def test_chat_state_accepts_replayed_text_tool_exchange() -> None:
+    app, _, _ = _build_thread_app()
+    messages = [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "lookup", "name": "web_search", "input": {"query": "spring"}}]},
+        {"role": "tool", "tool_call_id": "lookup", "content": [{"type": "json", "json": {"title": "Spring"}}]},
+    ]
+    with TestClient(app) as client:
+        assert client.post("/api/threads", json={"thread_id": "chat-protocol", "metadata": {"mode": "chat"}}).status_code == 200
+        updated = client.post("/api/threads/chat-protocol/state", json={"values": {"messages": messages}})
+        assert updated.status_code == 200, updated.text
+        saved = client.get("/api/threads/chat-protocol/state").json()["values"]["messages"]
+    assert [message["content"] for message in saved] == [message["content"] for message in messages]
 
 
 class _RawStateAccessor:
@@ -1835,13 +1873,9 @@ def test_get_thread_preserves_metadata_status_without_checkpoint(stored_status: 
     assert response.json()["status"] == stored_status
 
 
-@pytest.mark.parametrize("key", [THREAD_PINNED_METADATA_KEY, "deerflow_archived"])
-def test_patch_thread_pin_returns_iso_and_preserves_updated_at(key) -> None:
-    """A pin/unpin PATCH must not bump ``updated_at``.
-
-    Pinning or unpinning a chat does not represent conversation activity.
-    Timestamps are still surfaced as ISO via ``coerce_iso``.
-    """
+@pytest.mark.parametrize("metadata", [{THREAD_PINNED_METADATA_KEY: True}, {"deerflow_archived": True}, {"mode": "chat"}, {THREAD_PINNED_METADATA_KEY: True, "mode": "flash"}])
+def test_patch_thread_preferences_return_iso_and_preserve_updated_at(metadata) -> None:
+    """Preferences preserve activity time and return ISO timestamps."""
     app, store, _checkpointer = _build_thread_app()
     thread_id = "patch-target"
 
@@ -1868,7 +1902,7 @@ def test_patch_thread_pin_returns_iso_and_preserves_updated_at(key) -> None:
     with TestClient(app) as client:
         response = client.patch(
             f"/api/threads/{thread_id}",
-            json={"metadata": {key: True}},
+            json={"metadata": metadata},
         )
 
     assert response.status_code == 200, response.text
@@ -1878,7 +1912,21 @@ def test_patch_thread_pin_returns_iso_and_preserves_updated_at(key) -> None:
     # ``touch=False`` preserves the original ``updated_at``; both timestamps
     # derive from the same legacy value, so they coerce to the same ISO string.
     assert body["updated_at"] == body["created_at"]
-    assert body["metadata"] == {"k": "v0", key: True}
+    assert body["metadata"] == {"k": "v0", **metadata}
+
+
+def test_thread_create_and_patch_reject_unknown_modes_without_overwriting_chat() -> None:
+    app, store, _ = _build_thread_app()
+    with TestClient(app) as client:
+        invalid = client.post("/api/threads", json={"thread_id": "mistyped", "metadata": {"mode": "Chat"}})
+        assert invalid.status_code == 422, invalid.text
+        assert asyncio.run(store.aget(THREADS_NS, "mistyped")) is None
+        created = client.post("/api/threads", json={"thread_id": "text-only", "metadata": {"mode": "chat"}})
+        assert created.status_code == 200, created.text
+        for unsupported in ("future-mode", None):
+            rejected = client.patch("/api/threads/text-only", json={"metadata": {"mode": unsupported}})
+            assert rejected.status_code == 422, rejected.text
+        assert asyncio.run(store.aget(THREADS_NS, "text-only")).value["metadata"]["mode"] == "chat"
 
 
 def test_patch_thread_non_pin_metadata_bumps_updated_at() -> None:
@@ -4557,6 +4605,58 @@ def test_branch_thread_rejects_non_assistant_targets() -> None:
 
     assert response.status_code == 409
     assert "can no longer be branched" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("source_mode", "turn_mode", "source_agent", "checkpoint_agent", "expected_agent"),
+    [
+        ("chat", None, None, "researcher", None),
+        ("flash", "chat", None, "researcher", "researcher"),
+        ("flash", "assistant-chat", None, "researcher", "researcher"),
+        ("chat", "chat", "writer", "researcher", "writer"),
+        ("chat", "chat", "bad id", "researcher", None),
+        ("chat", "chat", None, None, None),
+        ("chat", "chat", None, "__default__", None),
+        ("chat", "chat", None, "bad id", None),
+    ],
+)
+def test_branch_from_chat_inherits_chat_without_copying_workspace(source_mode, turn_mode, source_agent, checkpoint_agent, expected_agent) -> None:
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+
+    app, _, checkpointer = _build_thread_app()
+    app.state.run_event_store = MemoryRunEventStore()
+    thread_id = "chat-source"
+    human = HumanMessage(id="human-chat", content="Hello", additional_kwargs={"deerflow_mode": "chat"} if turn_mode == "chat" else {})
+    ai = AIMessage(id="answer-chat", content="Hi", additional_kwargs={"deerflow_mode": "chat"} if turn_mode == "assistant-chat" else {})
+
+    async def seed(parent: dict):
+        middle = await _write_checkpoint(checkpointer, thread_id, str(uuid6()), [human], step=1, parent_config=parent)
+        binding = {CHECKPOINT_AGENT_NAME_METADATA_KEY: checkpoint_agent} if checkpoint_agent else {}
+        target = await _write_checkpoint(checkpointer, thread_id, str(uuid6()), [human, ai], step=2, parent_config=middle, metadata=binding)
+        if source_mode == "flash":
+            messages = [human, ai, HumanMessage(id="later", content="Else"), AIMessage(id="later-turn", content="Hi")]
+            await _write_checkpoint(checkpointer, thread_id, str(uuid6()), messages, step=3, parent_config=target, metadata={CHECKPOINT_AGENT_NAME_METADATA_KEY: "latest-agent"})
+
+    with TestClient(app) as client, patch.object(threads, "_copy_branch_user_data", new_callable=AsyncMock, return_value="copied") as copy_files:
+        metadata = {"mode": source_mode, "agent_name": "client-supplied"}
+        assert client.post("/api/threads", json={"thread_id": thread_id, "metadata": metadata}).status_code == 200
+        if source_agent:
+            # Mimic persisted rows, including invalid identifiers predating validation.
+            asyncio.run(app.state.thread_store.create(thread_id, assistant_id=source_agent, metadata=metadata))
+        initial = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id}}))
+        asyncio.run(seed(initial.config))
+        branch = client.post(f"/api/threads/{thread_id}/branches", json={"message_id": "answer-chat"})
+        assert branch.status_code == 200, branch.text
+        created = client.get("/api/threads/" + branch.json()["thread_id"])
+        assert created.json()["metadata"].get("mode") == "chat"
+        assert asyncio.run(app.state.thread_store.get(branch.json()["thread_id"]))["assistant_id"] == expected_agent
+        assert created.json()["metadata"].get("agent_name") == expected_agent
+        if expected_agent:
+            assert branch.json()["assistant_id"] == expected_agent
+        else:
+            assert "assistant_id" not in branch.json()
+        assert branch.json()["workspace_clone_mode"] == "skipped_chat_mode"
+        copy_files.assert_not_awaited()
 
 
 def test_branch_thread_best_effort_copies_current_workspace(tmp_path) -> None:

@@ -45,6 +45,22 @@ class ChunkedUpload:
         return self._chunks.pop(0)
 
 
+def test_upload_to_chat_thread_is_rejected_before_storage_or_provider(tmp_path):
+    app = make_authed_test_app()
+    app.state.thread_store.get = AsyncMock(return_value={"metadata": {"mode": "chat"}})
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    app.include_router(uploads.router)
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=tmp_path) as ensure_uploads,
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()) as provider,
+        TestClient(app) as client,
+    ):
+        response = client.post("/api/threads/text-only/uploads", files={"files": ("a.txt", b"hello")})
+    assert response.status_code == 422
+    ensure_uploads.assert_not_called()
+    provider.assert_not_called()
+
+
 def _mounted_provider() -> MagicMock:
     provider = MagicMock()
     provider.uses_thread_data_mounts = True

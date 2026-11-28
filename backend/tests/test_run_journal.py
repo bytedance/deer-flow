@@ -1342,6 +1342,44 @@ class TestLlmCallbacks:
         assert messages[0]["metadata"]["partial"] is True
 
     @pytest.mark.anyio
+    async def test_chat_steering_and_interrupted_history_keep_their_mode_without_relabelling_older_inputs(self):
+        store = MemoryRunEventStore()
+        journal = RunJournal("current", "thread", store, chat_mode=True)
+        past = HumanMessage(content="Earlier upload", additional_kwargs={"files": [{"filename": "old.png"}], "run_id": "previous"})
+        past_chat = HumanMessage(content="Earlier Chat turn", additional_kwargs={"deerflow_mode": "chat"})
+        past_steer = HumanMessage(content="Earlier steer", additional_kwargs={"run_input_id": "old", "run_id": "previous"})
+        steer = HumanMessage(content="Change direction", additional_kwargs={"run_input_id": "new", "run_id": "current"})
+        mixed = [{"type": "text", "text": "Progress"}, {"type": "image", "base64": "bWVkaWE=", "mime_type": "image/png"}]
+        journal.on_chain_start({}, None, run_id=uuid4())
+        journal.on_chat_model_start({}, [[past, past_chat, past_steer, steer]], run_id=uuid4())
+        journal.record_steered_response(AIMessage(id="correction", content=mixed))
+        journal.record_interrupted_ai_responses([AIMessage(id="partial", content=mixed)])
+        await journal.flush()
+
+        rows = await store.list_messages("thread")
+        assert [row["content"]["content"] for row in rows] == ["Change direction", [mixed[0]], [mixed[0]]]
+        assert all(row["content"]["additional_kwargs"].get("deerflow_mode") == "chat" for row in rows)
+        assert rows[-1]["metadata"]["partial"] is True
+        assert past.additional_kwargs["files"] == [{"filename": "old.png"}]
+
+    @pytest.mark.anyio
+    async def test_completed_chat_stream_is_a_canonical_history_message(self):
+        from langchain_core.messages import AIMessageChunk
+        from langchain_core.outputs import ChatGenerationChunk
+
+        store = MemoryRunEventStore()
+        journal = RunJournal("current", "thread", store, chat_mode=True)
+        message = AIMessageChunk(id="stream", content=[{"type": "text", "text": "Visible"}, {"type": "image", "base64": "bWVkaWE="}])
+        journal.on_llm_end(LLMResult(generations=[[ChatGenerationChunk(message=message)]]), run_id=uuid4())
+        await journal.flush()
+
+        (row,) = await store.list_messages("thread")
+        assert row["content"]["type"] == "ai"
+        assert row["content"]["id"] == "stream"
+        assert row["content"]["content"] == [{"type": "text", "text": "Visible"}]
+        assert row["content"]["additional_kwargs"]["deerflow_mode"] == "chat"
+
+    @pytest.mark.anyio
     async def test_completed_response_wins_interruption_race(self, journal_setup):
         j, store = journal_setup
         completed = AIMessage(id="shared-ai", content="Complete answer")
@@ -1464,6 +1502,22 @@ class TestLifecycleCallbacks:
 
 
 class TestToolCallbacks:
+    @pytest.mark.anyio
+    async def test_chat_tool_command_omits_artifacts_from_delivery_and_history(self):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        store = MemoryRunEventStore()
+        journal = RunJournal("run", "thread", store, chat_mode=True)
+        result = ToolMessage(content="Report ready", tool_call_id="lookup", artifact={"resource_links": [{"uri": "file:///report.png"}]})
+        journal.on_tool_end(Command(update={"artifacts": ["/mnt/user-data/outputs/report.png"], "messages": [result]}), run_id=uuid4())
+        await journal.flush()
+        (row,) = await store.list_messages("thread")
+        assert row["content"]["artifact"] is None
+        assert row["content"]["additional_kwargs"]["deerflow_mode"] == "chat"
+        assert journal.get_delivery_content()["paths"] == []
+        assert result.artifact["resource_links"]
+
     @pytest.mark.anyio
     async def test_tool_end_with_tool_message(self, journal_setup):
         """on_tool_end with a ToolMessage stores it as llm.tool.result."""

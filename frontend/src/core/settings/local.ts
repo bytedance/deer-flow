@@ -1,4 +1,4 @@
-import type { ReasoningEffortValue } from "@/core/models/reasoning";
+import type { InputMode, ReasoningEffortValue } from "@/core/models/reasoning";
 
 import type { TokenUsageInlineMode } from "../messages/usage-model";
 import type { AgentThreadContext } from "../threads";
@@ -85,7 +85,7 @@ export interface LocalSettings {
   > & {
     model_name?: string | undefined;
     tool_approval_mode?: "ask" | "auto" | "full";
-    mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
+    mode: InputMode | undefined;
     reasoning_effort?: ReasoningEffortValue;
   };
 }
@@ -96,6 +96,10 @@ function mergeLocalSettings(settings?: Partial<LocalSettings>): LocalSettings {
     context: {
       ...DEFAULT_LOCAL_SETTINGS.context,
       ...settings?.context,
+      mode:
+        settings?.context?.mode === "chat"
+          ? undefined
+          : settings?.context?.mode,
     },
     tokenUsage: {
       ...DEFAULT_LOCAL_SETTINGS.tokenUsage,

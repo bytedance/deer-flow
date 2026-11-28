@@ -686,7 +686,9 @@ function AttachToThreadDialog({
   });
   const writableThreads = (threadsQuery.data?.pages ?? [])
     .flatMap((page) => page)
-    .filter((thread) => !isThreadArchived(thread));
+    .filter(
+      (thread) => !isThreadArchived(thread) && thread.metadata?.mode !== "chat",
+    );
   return (
     <Dialog
       open={document !== null}

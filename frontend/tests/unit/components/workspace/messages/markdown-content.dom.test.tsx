@@ -2,10 +2,31 @@ import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 
 import { MarkdownContent } from "@/components/workspace/messages/markdown-content";
+import { TextOnlyMessageContext } from "@/components/workspace/messages/markdown-link";
 
 afterEach(() => {
   cleanup();
   rs.useRealTimers();
+});
+
+it("renders web links in Chat without opening file links or embedding images", async () => {
+  const { container } = render(
+    <TextOnlyMessageContext.Provider value={true}>
+      <MarkdownContent
+        content={
+          "[Notes](/mnt/user-data/outputs/notes.md) [Source](https://example.com) ![Chart](https://example.com/chart.png)"
+        }
+        isLoading={false}
+      />
+    </TextOnlyMessageContext.Provider>,
+  );
+  await waitFor(() => expect(container.textContent).toContain("Notes"));
+  expect(container.querySelector("img")).toBeNull();
+  expect(
+    [...container.querySelectorAll("a")].map((link) =>
+      link.getAttribute("href"),
+    ),
+  ).toEqual(["https://example.com", "https://example.com/chart.png"]);
 });
 
 describe("MarkdownContent bounded streaming cadence", () => {

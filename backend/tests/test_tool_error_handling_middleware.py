@@ -633,6 +633,15 @@ def test_skill_metadata_disabled_when_read_tool_names_empty():
     assert "skill_context_entry" not in result.additional_kwargs
 
 
+def test_chat_mcp_read_file_does_not_activate_a_local_skill():
+    middleware = next(item for item in build_lead_runtime_middlewares(app_config=_make_app_config(), chat_mode=True) if isinstance(item, ToolErrorHandlingMiddleware))
+    req = _request(name="read_file", tool_call_id="read-1")
+    req.tool_call["args"] = {"path": "/mnt/skills/public/x/SKILL.md"}
+    result = middleware.wrap_tool_call(req, lambda _req: ToolMessage("Remote text", tool_call_id="read-1", name="read_file"))
+    assert result.content == "Remote text"
+    assert "skill_context_entry" not in result.additional_kwargs
+
+
 def test_wrap_tool_call_returns_error_tool_message_on_exception():
     middleware = ToolErrorHandlingMiddleware()
     req = _request(name="web_search", tool_call_id="tc-42")

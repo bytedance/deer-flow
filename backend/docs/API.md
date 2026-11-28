@@ -313,7 +313,8 @@ the response is HTTP 504 with detail
 To queue attachments, send multipart form data with the JSON in `input`
 and one `files` part per file. Set `mode` to `queue`. The text may be empty
 when the message includes files. Upload limits and thread write permission
-apply.
+apply. If the active run or the queued message uses Chat mode, the Gateway
+rejects attachments with HTTP 422 before staging any files.
 
 The input receipt and `GET /api/threads/{thread_id}/inputs` show attachment
 names and sizes. Files become readable by the Agent when the queued message's
@@ -476,6 +477,98 @@ but did not present.
 - `is_plan_mode` (boolean): Enable TodoList middleware for task tracking
 
 **Client Context:**
+
+Set `context.mode` to `"chat"` on a run to have the selected agent answer in
+text. The same request body works with the create, stream and wait endpoints.
+
+```json
+{
+  "assistant_id": "lead_agent",
+  "input": {"messages": [{"role": "user", "content": "Write hello."}]},
+  "context": {"mode": "chat"}
+}
+```
+
+A custom agent uses its usual `context.agent_name`, model, memory settings and
+tool permissions. Chat can call its configured web search and authorized MCP
+tools. The agent returns file requests as text. DeerFlow skips sandbox acquisition,
+Bash and file tools. Inline attachments and uploads to a Chat thread return
+`422`. Set `metadata.mode` to `"chat"` when creating a thread to apply its
+upload policy before the first run. Send `context.mode: "chat"` on the first
+run itself to select Chat for the response. For a custom agent, include its name as
+`assistant_id` on thread creation so queued messages and branches use the same
+agent. When branching a Chat turn, a branch with a known custom agent returns
+its `assistant_id` in the branch response.
+
+Send `context.mode: "chat"` with each new Chat turn. Omitting the mode or
+sending `null` uses the ordinary agent defaults, including on a thread whose
+previous turn selected Chat. The gateway updates the thread's upload policy
+before acknowledging a fresh run that enters or leaves Chat. A client that
+uploads before sending the next run can switch the thread's file policy first
+with a metadata PATCH. The ordinary modes retain their existing reasoning,
+planning, and delegation parameters.
+
+Agent initialization requires workspace tools. A run that combines Chat with
+`is_bootstrap: true` returns `422` before a worker starts.
+
+Retries and continuations of an explicitly selected Chat turn keep that
+turn's restrictions. They preserve a later selection for new requests.
+A structured `human_input_response` names its clarification card by
+`request_id`. The reply uses the mode, reasoning, planning, and delegation
+settings of the turn that issued that card, even if the reply supplies a
+different `context.mode` or a newer card exists. To answer a card on another
+branch, pass its retained `checkpoint_id` or SDK `checkpoint` object. The
+Gateway looks for the card in the history used by the run. The SDK object's
+checkpoint ID must still exist. Its checkpoint map can select a different
+root through the `""` entry. A null or empty root entry, or a child namespace
+without a root entry, uses the current outer history. A missing checkpoint
+returns `404`. If the selected history does not contain the card, the Gateway
+returns `409`. Select a checkpoint that includes the card.
+Prepared edits and regenerations use their target message to locate the
+original turn. A clarification reply can select a new knowledge scope.
+Omitting that selection preserves the issuing turn's scope.
+For older cards, the Gateway recovers available settings from the checkpoint
+that introduced the card. During this history lookup, a temporary storage
+failure returns `503` and a lookup deadline returns `504`. If the source
+has no recorded settings on a saved Chat thread, an ordinary continuation
+returns `409`.
+A plain message follows the usual new-turn rules.
+To send an attachment after a Chat clarification, start a new turn in a mode
+that supports files.
+When a tool is waiting for approval, `command.resume` uses the paused run's
+mode and recorded reasoning, planning, and delegation options. A Flash tool
+call can therefore finish after the user selects Chat for their next
+message. For older runs, the gateway recovers the available options from the
+run or its execution checkpoint. Unrecorded options use the agent defaults.
+Regenerating a reply or editing and resending its prompt uses the original
+turn's mode and its recorded reasoning, planning, and delegation options.
+For example, a Flash turn with an attachment can be regenerated after
+selecting Chat for the next message. Older turns recover settings from their
+source run and can recover a missing mode from the checkpoint that introduced
+the response. If only individual options were recorded, those options apply
+with the ordinary agent defaults. If both sources lack settings, an explicitly
+selected ordinary mode can be used. Selecting Chat in this case replays the
+turn with ordinary agent defaults. A temporary storage error looking up the
+source run returns a retryable `503`. Duplicate answer summaries alone cannot
+identify an original run for preparation (`409`). Editing a backfilled
+answer requires a successful source run on the same thread owned by the
+replaying caller. This also applies to trusted internal callers. An active
+or applied steering input on the caller's original run also prevents partial
+replay of its inherited turn on a branch.
+When regenerating an interrupted answer, forward the checkpoint and metadata
+returned by `runs/regenerate/prepare`. Submitting a run whose original turn
+can no longer be identified returns `409`.
+Supported thread and run mode names are `flash`, `thinking`, `pro`, `ultra`,
+and `chat`. Unknown request values return `422`. If a stored file policy is
+unrecognized, select a supported mode to repair it (`409`). A temporarily
+unavailable file policy can be retried (`503`).
+Files from earlier runs keep their existing access permissions.
+MCP servers execute their own tools under their configured permissions.
+
+Browser navigation and new live browser connections are unavailable in Chat.
+An open live browser connection rechecks its thread mode and owner every five
+seconds and closes if access changes or the check times out. Applications using
+the embedded Python SDK can run Chat through the Gateway HTTP API.
 
 Top-level `context.locale` accepts `en-US` or `zh-CN` as the current run's
 preferred response and automatic DeerMem-writing language. Explicit user

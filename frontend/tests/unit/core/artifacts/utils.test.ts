@@ -415,6 +415,40 @@ describe("artifact URL helpers", () => {
     }
   });
 
+  test("keeps earlier artifacts and ignores file tools invented during a Chat turn", async () => {
+    const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
+    const messages = [
+      { type: "human", content: "normal" },
+      {
+        type: "ai",
+        content: "",
+        tool_calls: [
+          { name: "present_files", args: { filepaths: ["/mnt/old.md"] } },
+        ],
+      },
+      {
+        type: "human",
+        content: "hello",
+        additional_kwargs: { deerflow_mode: "chat" },
+      },
+      {
+        type: "ai",
+        content: "hi",
+        tool_calls: [
+          { name: "present_files", args: { filepaths: ["/mnt/invented.md"] } },
+        ],
+      },
+    ] as Parameters<typeof collectThreadArtifactPaths>[1];
+    expect(collectThreadArtifactPaths(["/mnt/stored.md"], messages)).toEqual([
+      "/mnt/stored.md",
+      "/mnt/old.md",
+    ]);
+    const partialPage = [
+      { ...messages[3]!, additional_kwargs: { deerflow_mode: "chat" } },
+    ];
+    expect(collectThreadArtifactPaths([], partialPage)).toEqual([]);
+  });
+
   test("collectThreadArtifactPaths adds present_files paths missing from state", async () => {
     const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
     const state = ["/mnt/user-data/outputs/a.md"];

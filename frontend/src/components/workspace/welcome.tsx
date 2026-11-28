@@ -4,6 +4,7 @@ import { useSearchParams } from "next/navigation";
 import { useEffect, useMemo } from "react";
 
 import { useI18n } from "@/core/i18n/hooks";
+import type { InputMode } from "@/core/models/reasoning";
 import { cn } from "@/lib/utils";
 
 import { AuroraText } from "../ui/aurora-text";
@@ -23,7 +24,7 @@ export function Welcome({
   mode,
 }: {
   className?: string;
-  mode?: "ultra" | "pro" | "thinking" | "flash";
+  mode?: InputMode;
 }) {
   const { t } = useI18n();
   const searchParams = useSearchParams();

@@ -420,7 +420,8 @@ async def test_durable_task_keeps_agent_identity_after_restart_and_definition_ro
 
 
 @pytest.mark.no_auto_user
-def test_gateway_admits_owner_and_assembles_the_verified_snapshot(agent_auth_env, agent_mcp_transport, tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", ["flash", "chat"])
+def test_gateway_admits_owner_and_assembles_the_verified_snapshot(agent_auth_env, agent_mcp_transport, tmp_path, monkeypatch, mode):
     from _agent_e2e_helpers import FakeToolCallingModel
     from langchain_core.messages import AIMessage
     from starlette.testclient import TestClient
@@ -429,7 +430,9 @@ def test_gateway_admits_owner_and_assembles_the_verified_snapshot(agent_auth_env
     from deerflow.config.agents_config import load_agent_config
     from deerflow.config.extensions_config import reset_extensions_config
     from deerflow.mcp.agent_auth import AGENT_AUTH_CONTEXT_KEY, agent_definition_digest
+    from deerflow.mcp.cache import reset_mcp_tools_cache
 
+    reset_mcp_tools_cache()
     env = agent_auth_env
     data = env.config.model_dump(mode="json", exclude={"extensions"})
     data.update(
@@ -487,7 +490,7 @@ def test_gateway_admits_owner_and_assembles_the_verified_snapshot(agent_auth_env
                     json={
                         "assistant_id": "lead_agent",
                         "input": {"messages": [{"role": "user", "content": "Search tickets."}]},
-                        "context": {"mode": "flash", "subagent_enabled": False, **context},
+                        "context": {"mode": mode, "subagent_enabled": False, **context},
                         "config": {"configurable": {AGENT_AUTH_CONTEXT_KEY: {"binding": "research-tickets", "user_id": "alice"}}},
                     },
                 )
@@ -506,14 +509,18 @@ def test_gateway_admits_owner_and_assembles_the_verified_snapshot(agent_auth_env
             assert "Bearer discovery-secret" in agent_mcp_transport.discoveries
             system = str(prompts[0][0].content)
             assert env.soul in system and "Unreviewed replacement." not in system
+            if mode == "chat":
+                assert "done" == response.json()["messages"][-1]["content"]
+                assert response.json()["messages"][-1]["additional_kwargs"]["deerflow_mode"] == "chat"
+                assert not response.json().get("artifacts")
             response = run({"agent_name": env.agent.name})
             assert response.status_code == 403, response.text
             assert len(agent_mcp_transport.calls) == 1
 
             (directory / "SOUL.md").write_text(env.soul, encoding="utf-8")
-            for context in ({"agent_name": env.agent.name, "is_bootstrap": True}, {}):
+            for context, expected_status in (({"agent_name": env.agent.name, "is_bootstrap": True}, 422 if mode == "chat" else 200), ({}, 200)):
                 response = run(context)
-                assert response.status_code == 200, response.text
+                assert response.status_code == expected_status, response.text
                 assert len(agent_mcp_transport.calls) == 1
             register("other-owner@example.com")
             denied = client.post("/api/mcp/personal/config/servers", json={"mcp_servers": {"tickets": {"type": "http", "url": "https://mcp.example", "agent_auth": True}}})
@@ -523,6 +530,7 @@ def test_gateway_admits_owner_and_assembles_the_verified_snapshot(agent_auth_env
             assert len(agent_mcp_transport.calls) == 1
             assert agent_mcp_transport.token_clients == ["research-client"]
     finally:
+        reset_mcp_tools_cache()
         reset_extensions_config()
         reset_app_config()
 

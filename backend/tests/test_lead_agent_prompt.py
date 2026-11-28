@@ -106,6 +106,30 @@ def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
     assert "`hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`" in prompt
 
 
+def test_chat_prompt_preserves_agent_and_operator_context_and_answers_inline():
+    from deerflow.config.prompt_overlay import PromptOverlay
+
+    config = SimpleNamespace(memory=SimpleNamespace(enabled=True, mode="tool"), lead_prompt_overlay=PromptOverlay(append="Literal tenant policy {unchanged}"))
+    prompt = prompt_module.apply_prompt_template(
+        chat_mode=True,
+        agent_name="analyst",
+        agent_soul="Use <short> answers.",
+        app_config=config,
+        deferred_names=frozenset({"fetch_records"}),
+        interaction_policy=RunInteractionPolicy(RunInteractionMode.SCHEDULED),
+    )
+
+    assert "analyst" in prompt and "Use &lt;short&gt; answers." in prompt
+    assert "inline" in prompt.lower()
+    assert "reply with exactly its intended contents" in prompt
+    assert "User: 生成一个文件，写你好\nAssistant: 你好" in prompt
+    assert "<memory_tool_system>" in prompt
+    assert "<available-deferred-tools>\nfetch_records" in prompt
+    assert "no human available" in prompt
+    assert prompt.endswith("Literal tenant policy {unchanged}")
+    assert all(section not in prompt for section in ("<working_directory", "<subagent_system>", "<self_update>", "/mnt/user-data", "present_files"))
+
+
 def test_apply_prompt_template_uses_non_interactive_clarification_guidance(monkeypatch):
     config = SimpleNamespace(
         sandbox=SimpleNamespace(mounts=[]),
