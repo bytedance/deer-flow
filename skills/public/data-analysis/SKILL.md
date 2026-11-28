@@ -279,6 +279,7 @@ The script automatically caches loaded data to avoid re-parsing files on every c
 
 - On first load, files are parsed into a private DuckDB generation under the system temporary directory (.data-analysis-cache/generations-v1/). Its writer closes before a complete generation and table map become visible together through an atomic manifest replacement
 - The cache key hashes the ordered input basenames and a separate SHA256 digest of each file. Renaming, reordering, or changing inputs creates a new cache; moving unchanged, identically named inputs to another directory preserves reuse. Older flat caches are ignored and rebuilt from source without deleting the old files
+- Missing input paths, unsupported file formats, and CSV import errors stop the command before it exports results or publishes a cache. Earlier caches that may omit an input are rebuilt on demand.
 - Subsequent calls open a complete generation read-only. Overlapping readers can reuse it while another analysis is still running; invalid manifests or damaged databases rebuild from source
 - Cache is transparent — no extra parameters needed
 
