@@ -279,6 +279,14 @@ def _expand_launcher_variables(value: str, environment: dict[str, str]) -> str:
     return re.sub(r"\\\$|\$\$|\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))", replace, value)
 
 
+def _expand_launcher_user(value: str, dotenv_home: str | None) -> str:
+    """Expand ``~`` using dotenv HOME, or the platform default if unset there."""
+    if value == "~" or value.startswith("~/") or (os.name == "nt" and value.startswith("~\\")):
+        home = dotenv_home if dotenv_home is not None else os.path.expanduser("~")
+        return home + value[1:]
+    return os.path.expanduser(value)
+
+
 def _thread_data_roots(project_root: Path) -> list[tuple[Path, str]]:
     """Resolve launcher-relative runtime paths without exporting .env secrets."""
     env_file = project_root / ".env"
@@ -296,6 +304,7 @@ def _thread_data_roots(project_root: Path) -> list[tuple[Path, str]]:
             # serve.sh changes to the checkout before sourcing .env. Keep its
             # assignment order in a private mapping; never export parsed secrets.
             environment = {**os.environ, "PWD": str(project_root.resolve())}
+            dotenv_home: str | None = None
             with StringIO(contents) as stream:
                 for binding in parse_stream(stream):
                     if not binding.key or binding.value is None or binding.error:
@@ -304,9 +313,11 @@ def _thread_data_roots(project_root: Path) -> list[tuple[Path, str]]:
                     value = binding.value
                     if quote != "'":
                         if quote != '"':
-                            value = os.path.expanduser(value)
+                            value = _expand_launcher_user(value, dotenv_home)
                         value = _expand_launcher_variables(value, environment)
                     environment[binding.key] = value
+                    if binding.key == "HOME":
+                        dotenv_home = value
                     if binding.key in names:
                         # Even an empty .env assignment overrides inherited exports.
                         values[binding.key] = value
