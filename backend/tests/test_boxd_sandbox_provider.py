@@ -14,6 +14,7 @@ import errno
 import io
 import os
 import re
+import stat
 import subprocess
 import sys
 import tarfile
@@ -627,6 +628,162 @@ def test_sync_agent_skills_replaces_managed_categories(installed, tmp_path: Path
     assert files["/mnt/skills/custom/mine/SKILL.md"] == b"# mine"
     assert "/mnt/skills/public/old/SKILL.md" not in files
     assert files["/mnt/skills/notes.txt"] == b"unmanaged"
+    skill_scripts = [call["argv"][-1] for call in fake.execs if "/mnt/skills" in call["argv"][-1] and "UPLOAD_OK" in call["argv"][-1]]
+    assert skill_scripts
+    assert "chmod -R -- u+w" in skill_scripts[-1]
+    assert "|| rm -rf --" in skill_scripts[-1]
+    assert 'if [ -e "$p" ]; then' in skill_scripts[-1]
+    assert "chmod -R -- a+rX,a-w" in skill_scripts[-1]
+    assert "chown -R -- root:root" in skill_scripts[-1]
+    user_data_scripts = [call["argv"][-1] for call in fake.execs if "/mnt/user-data" in call["argv"][-1] and "UPLOAD_OK" in call["argv"][-1]]
+    assert not any("a-w" in script for script in user_data_scripts)
+
+
+@posix_only
+def test_upload_trees_readonly_handles_empty_categories_and_reupload(installed, tmp_path: Path) -> None:
+    provider, fake = installed
+    sandbox_id = provider.acquire("thread", user_id="owner")
+    sandbox = provider.get(sandbox_id)
+    assert sandbox is not None
+
+    dest_root = tmp_path / "remote-skills"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_sudo = fake_bin / "sudo"
+    fake_sudo.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    fake_sudo.chmod(0o755)
+
+    def run_in_bash(machine_id: str, argv: list[str], env: dict[str, str]):
+        script = argv[-1]
+        if "UPLOAD_OK" not in script:
+            return None
+        match = re.search(r"tar -xzf (\S+) ", script)
+        assert match is not None
+        remote_tar = match.group(1).strip("'")
+        tar_bytes = fake.files[machine_id].pop(remote_tar)
+        local_tar = tmp_path / Path(remote_tar).name
+        local_tar.write_bytes(tar_bytes)
+        patched_script = script.replace(remote_tar, str(local_tar))
+        completed = subprocess.run(
+            ["bash", "-c", patched_script],
+            env={**os.environ, **env, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return _Result(completed.returncode, completed.stdout, completed.stderr)
+
+    fake.exec_override = run_in_bash
+
+    try:
+        # Leave trailing categories (legacy, integrations) empty to verify set -e handling.
+        first = _projection(tmp_path / "proj-1", {"public/alpha/SKILL.md": "# v1"})
+        sources_1 = [(getattr(first, cat), cat) for cat in ("public", "custom", "legacy", "integrations")]
+        assert provider._upload_trees(sandbox, sources_1, dest_root=str(dest_root), replace=("public", "custom", "legacy", "integrations"), read_only=True)
+        skill_file = dest_root / "public" / "alpha" / "SKILL.md"
+        assert skill_file.read_text(encoding="utf-8") == "# v1"
+        assert not (skill_file.stat().st_mode & 0o222)
+
+        # Second sync must unlock read-only directories before replacing them.
+        second = _projection(tmp_path / "proj-2", {"custom/beta/SKILL.md": "# v2"})
+        sources_2 = [(getattr(second, cat), cat) for cat in ("public", "custom", "legacy", "integrations")]
+        assert provider._upload_trees(sandbox, sources_2, dest_root=str(dest_root), replace=("public", "custom", "legacy", "integrations"), read_only=True)
+        assert not skill_file.exists()
+        new_file = dest_root / "custom" / "beta" / "SKILL.md"
+        assert new_file.read_text(encoding="utf-8") == "# v2"
+        assert not (new_file.stat().st_mode & 0o222)
+    finally:
+        if dest_root.exists():
+            for dirpath, _dirnames, filenames in os.walk(dest_root):
+                os.chmod(dirpath, 0o700)
+                for fname in filenames:
+                    target = Path(dirpath) / fname
+                    if not target.is_symlink():
+                        os.chmod(target, 0o600)
+
+
+@posix_only
+def test_upload_trees_readonly_preserves_runtime_readability_after_chown(installed, tmp_path: Path) -> None:
+    provider, fake = installed
+    sandbox_id = provider.acquire("thread", user_id="owner")
+    sandbox = provider.get(sandbox_id)
+    assert sandbox is not None
+
+    dest_root = tmp_path / "remote-skills"
+    chown_log = tmp_path / "chown.log"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_sudo = fake_bin / "sudo"
+    fake_sudo.write_text(
+        f'#!/bin/sh\nif [ "$1" = "-n" ]; then shift; fi\nif [ "$1" = "chown" ]; then\n  printf \'%s\\n\' "$*" >> "{chown_log}"\n  exit 0\nfi\nexec "$@"\n',
+        encoding="utf-8",
+    )
+    fake_sudo.chmod(0o755)
+
+    def run_in_bash(machine_id: str, argv: list[str], env: dict[str, str]):
+        script = argv[-1]
+        if "UPLOAD_OK" not in script:
+            return None
+        match = re.search(r"tar -xzf (\S+) ", script)
+        assert match is not None
+        remote_tar = match.group(1).strip("'")
+        tar_bytes = fake.files[machine_id].pop(remote_tar)
+        local_tar = tmp_path / Path(remote_tar).name
+        local_tar.write_bytes(tar_bytes)
+        patched_script = script.replace(remote_tar, str(local_tar))
+        completed = subprocess.run(
+            ["bash", "-c", patched_script],
+            env={**os.environ, **env, "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}"},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return _Result(completed.returncode, completed.stdout, completed.stderr)
+
+    fake.exec_override = run_in_bash
+
+    try:
+        proj = _projection(
+            tmp_path / "proj-private",
+            {
+                "public/private-skill/SKILL.md": "# private-mode",
+                "public/private-skill/run.sh": "#!/bin/sh\necho ok\n",
+            },
+        )
+        src_skill_dir = proj.public / "private-skill"
+        (src_skill_dir / "SKILL.md").chmod(0o600)
+        (src_skill_dir / "run.sh").chmod(0o700)
+        src_skill_dir.chmod(0o700)
+
+        sources = [(getattr(proj, cat), cat) for cat in ("public", "custom", "legacy", "integrations")]
+        assert provider._upload_trees(sandbox, sources, dest_root=str(dest_root), replace=("public", "custom", "legacy", "integrations"), read_only=True)
+
+        assert chown_log.exists()
+        assert f"chown -R -- root:root {dest_root / 'public'}" in chown_log.read_text(encoding="utf-8")
+
+        uploaded_dir = dest_root / "public" / "private-skill"
+        uploaded_skill = uploaded_dir / "SKILL.md"
+        uploaded_script = uploaded_dir / "run.sh"
+
+        skill_mode = stat.S_IMODE(uploaded_skill.stat().st_mode)
+        dir_mode = stat.S_IMODE(uploaded_dir.stat().st_mode)
+        script_mode = stat.S_IMODE(uploaded_script.stat().st_mode)
+
+        # Non-root runtime users read via other bits once ownership changes to root:root.
+        assert skill_mode == 0o444
+        assert (dir_mode & (stat.S_IROTH | stat.S_IXOTH)) == (stat.S_IROTH | stat.S_IXOTH)
+        assert not (dir_mode & 0o222)
+        assert (script_mode & (stat.S_IROTH | stat.S_IXOTH)) == (stat.S_IROTH | stat.S_IXOTH)
+        assert not (script_mode & 0o222)
+        assert uploaded_skill.read_text(encoding="utf-8") == "# private-mode"
+    finally:
+        if dest_root.exists():
+            for dirpath, _dirnames, filenames in os.walk(dest_root):
+                os.chmod(dirpath, 0o700)
+                for fname in filenames:
+                    target = Path(dirpath) / fname
+                    if not target.is_symlink():
+                        os.chmod(target, 0o600)
 
 
 def test_sync_agent_skills_on_unknown_sandbox_raises(installed, tmp_path: Path) -> None:

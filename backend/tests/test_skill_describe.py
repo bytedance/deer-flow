@@ -208,6 +208,8 @@ def test_skill_index_custom_container_path():
         container_base_path="/custom/skills",
     )
     assert "/custom/skills" in section
+    assert "read-only runtime assets" in section
+    assert "skill_manage" in section
 
 
 def test_skill_index_names_are_sorted():

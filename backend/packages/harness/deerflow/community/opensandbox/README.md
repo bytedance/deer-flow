@@ -118,8 +118,16 @@ non-portable path components with a warning.
 A pass uploads at most 2,000 files and links, 512 MiB of file content, and
 100 MiB per file. Its 120-second deadline is cooperative: it is checked
 between operations, and an in-flight SDK file call is bounded separately by
-`request_timeout`. The remote image needs `mkdir`, `rm`, `mv`, `rmdir`, and
-`ln -sT` for staging and publication. Unlike output mirroring, a skill sync
+`request_timeout`. The remote image needs `mkdir`, `rm`, `mv`, `rmdir`, `chmod`,
+and `ln -sT` for staging and publication. After swapping the four managed
+category directories into place, the provider runs `chmod -R -- a-w` on them.
+Because OpenSandbox uses the same execution path and runtime user identity for
+skill publication and agent `bash` commands (for example, `root` in the default
+`python:3.11` image), removing write bits alone is best-effort filesystem
+hardening rather than a kernel-enforced read-only boundary: elevated/root
+commands or same-UID processes can still bypass it in `bash`, while
+`write_file` and `str_replace` enforce the read-only guard at the tool layer.
+Unlike output mirroring, a skill sync
 failure fails the acquire or turn. A failed upload before publication leaves
 an existing sandbox unavailable to tools in the same scope's warm pool, where
 normal expiry and eviction still apply. A retry clears the abandoned staging

@@ -655,7 +655,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 raise RuntimeError("OpenSandbox skill projection command failed")
 
         try:
-            run(f"{no_links}; mkdir -p -- {qroot}; rm -rf -- {qstage}; mkdir -m 700 -- {qstage}; mkdir -- {staged}")
+            run(f"{no_links}; mkdir -p -- {qroot}; chmod -R -- u+w {qstage} 2>/dev/null || true; rm -rf -- {qstage}; mkdir -m 700 -- {qstage}; mkdir -- {staged}")
         except Exception as exc:
             raise RuntimeError("Failed to synchronize OpenSandbox skill projection") from exc
         if projection is not None:
@@ -664,7 +664,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             except Exception as exc:
                 raise _SkillUploadError("Failed to synchronize OpenSandbox skill projection") from exc
         try:
-            run(f"{no_links}; test ! -L {qstage}; rm -rf -- {destinations}; mv -- {staged} {qroot}; rmdir -- {qstage}")
+            run(f"{no_links}; test ! -L {qstage}; chmod -R -- u+w {destinations} 2>/dev/null || true; rm -rf -- {destinations}; mv -- {staged} {qroot}; rmdir -- {qstage}; chmod -R -- a-w {destinations}")
         except Exception as exc:
             raise RuntimeError("Failed to synchronize OpenSandbox skill projection") from exc
 

@@ -557,7 +557,7 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
                     archive.addfile(info, fh)
         return True
 
-    def _upload_trees(self, sandbox: BoxdSandbox, sources: list[tuple[Path, str]], *, dest_root: str, replace: tuple[str, ...] = ()) -> bool:
+    def _upload_trees(self, sandbox: BoxdSandbox, sources: list[tuple[Path, str]], *, dest_root: str, replace: tuple[str, ...] = (), read_only: bool = False) -> bool:
         """Upload host directories into ``dest_root`` as one tar archive.
 
         ``sources`` pairs a host directory with its sub-path below
@@ -589,11 +589,23 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
             sandbox._call(lambda: sandbox._client.machines.fs.write(sandbox.machine_id, remote_tar, chunks(), region=sandbox._region))
         root = shlex.quote(dest_root)
         removals = " ".join(shlex.quote(f"{dest_root}/{name}") for name in replace)
+        if read_only and removals:
+            unlock_and_remove = f"sudo -n chmod -R -- u+w {removals} 2>/dev/null || chmod -R -- u+w {removals} 2>/dev/null || true; (sudo -n rm -rf -- {removals} 2>/dev/null || rm -rf -- {removals}); "
+        elif removals:
+            unlock_and_remove = f"rm -rf -- {removals}; "
+        elif read_only:
+            unlock_and_remove = f"chmod -R -- u+w {root} 2>/dev/null || true; "
+        else:
+            unlock_and_remove = ""
+        if read_only and removals:
+            lock_step = f'for p in {removals}; do if [ -e "$p" ]; then chmod -R -- a+rX,a-w "$p"; sudo -n chown -R -- root:root "$p" 2>/dev/null || true; fi; done; '
+        elif read_only:
+            lock_step = f"chmod -R -- a+rX,a-w {root}; "
+        else:
+            lock_step = ""
         script = (
             f"set -e; trap 'rm -f {shlex.quote(remote_tar)}' EXIT; "
-            f"if [ -L {root} ]; then echo 'refusing symlinked destination' >&2; exit 2; fi; "
-            + (f"rm -rf -- {removals}; " if removals else "")
-            + f"mkdir -p -- {root}; tar -xzf {shlex.quote(remote_tar)} -C {root} --no-same-owner; echo UPLOAD_OK"
+            f"if [ -L {root} ]; then echo 'refusing symlinked destination' >&2; exit 2; fi; " + unlock_and_remove + f"mkdir -p -- {root}; tar -xzf {shlex.quote(remote_tar)} -C {root} --no-same-owner; " + lock_step + "echo UPLOAD_OK"
         )
         result = sandbox.run_shell(script, timeout=_UPLOAD_EXTRACT_TIMEOUT)
         stdout = result.stdout if isinstance(result.stdout, str) else bytes(result.stdout).decode("utf-8", "replace")
@@ -647,7 +659,7 @@ class BoxdSandboxProvider(WarmPoolLifecycleMixin[BoxdSandbox], SandboxProvider):
 
     def _upload_skills(self, sandbox: BoxdSandbox, projection: SkillProjectionPaths) -> None:
         sources = [(Path(getattr(projection, category)), category) for category in SKILL_CATEGORIES]
-        if not self._upload_trees(sandbox, sources, dest_root=self._config["skills_container_path"], replace=SKILL_CATEGORIES):
+        if not self._upload_trees(sandbox, sources, dest_root=self._config["skills_container_path"], replace=SKILL_CATEGORIES, read_only=True):
             raise RuntimeError("Skills projection exceeds the boxd upload limit")
 
     def sync_agent_skills(

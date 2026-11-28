@@ -2593,6 +2593,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
         *,
         dest_root: str,
         replace: tuple[str, ...] = (),
+        read_only: bool = False,
     ) -> bool:
         budget = _UploadBudget(max_files=_MAX_UPLOAD_FILES, max_bytes=_MAX_UPLOAD_BYTES)
         complete = True
@@ -2625,7 +2626,12 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             staging_dir = f"{dest_root}/.vefaas-stage-{token}"
             quoted_stage = shlex.quote(staging_dir)
             stage_dirs = " ".join(shlex.quote(f"{staging_dir}/{name}") for name in replace)
-            swap_steps = " ".join(f"rm -rf -- {shlex.quote(f'{dest_root}/{name}')}; mv -- {shlex.quote(f'{staging_dir}/{name}')} {shlex.quote(f'{dest_root}/{name}')};" for name in replace)
+            swap_steps = " ".join(
+                (f"chmod -R -- u+w {shlex.quote(f'{dest_root}/{name}')} 2>/dev/null || true; " if read_only else "")
+                + f"rm -rf -- {shlex.quote(f'{dest_root}/{name}')}; mv -- {shlex.quote(f'{staging_dir}/{name}')} {shlex.quote(f'{dest_root}/{name}')};"
+                + (f" chmod -R -- a-w {shlex.quote(f'{dest_root}/{name}')};" if read_only else "")
+                for name in replace
+            )
             script = (
                 f"set +e; ( set -e; trap 'rm -rf -- {quoted_tar} {quoted_stage}' EXIT; "
                 f"if [ -L {quoted_root} ]; then echo 'Refusing symlinked destination' >&2; exit 2; fi; "
@@ -2634,12 +2640,15 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
                 f"{swap_steps} echo UPLOAD_OK )"
             )
         else:
+            unlock_root = f"chmod -R -- u+w {quoted_root} 2>/dev/null || true; " if read_only else ""
+            lock_root = f"chmod -R -- a-w {quoted_root}; " if read_only else ""
             script = (
                 f"set +e; ( set -e; trap 'rm -f -- {quoted_tar}' EXIT; "
                 f"if [ -L {quoted_root} ]; then echo 'Refusing symlinked destination' >&2; exit 2; fi; "
                 f"mkdir -p -- {quoted_root}; "
+                f"{unlock_root}"
                 f"tar -xzf {quoted_tar} -C {quoted_root} --no-same-owner; "
-                f"echo UPLOAD_OK )"
+                f"{lock_root}echo UPLOAD_OK )"
             )
         output = sandbox.execute_command(script)
         if "UPLOAD_OK" not in output:
@@ -2698,6 +2707,7 @@ class VeFaaSSandboxProvider(WarmPoolLifecycleMixin[_TrackedVeFaaSSandbox], Sandb
             sources,
             dest_root=self._config["skills_container_path"],
             replace=SKILL_CATEGORIES,
+            read_only=True,
         ):
             raise RuntimeError("Skills projection exceeds the veFaaS upload limit")
 
