@@ -3,12 +3,13 @@
 import json
 import logging
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
-from deerflow.community.searxng import tools
+from deerflow.community.searxng import searxng_client, tools
 from deerflow.community.searxng.searxng_client import SearxngClient, SearxngResponseError
 
 
@@ -44,6 +45,37 @@ def _searxng_pages(pages: dict[int, list[dict]]):
 @pytest.mark.asyncio
 class TestSearxngClient:
     """Tests for the SearxngClient class."""
+
+    @pytest.mark.parametrize("last_page_status", [200, 503])
+    async def test_search_reuses_and_closes_one_http_client_for_multiple_pages(self, monkeypatch, last_page_status):
+        clients = []
+        pages = []
+
+        async def respond(request):
+            page = request.url.params["pageno"]
+            pages.append(page)
+            status = last_page_status if page == "2" else 200
+            return httpx.Response(status, json={"results": [{"url": f"https://example.com/{page}"}]})
+
+        def open_client(**kwargs):
+            client = httpx.AsyncClient(transport=httpx.MockTransport(respond), **kwargs)
+            clients.append(client)
+            return client
+
+        monkeypatch.setattr(searxng_client, "httpx", SimpleNamespace(**(vars(httpx) | {"AsyncClient": open_client})))
+
+        client = SearxngClient("http://searxng:8080")
+        if last_page_status == 200:
+            result = await client.search("test", max_results=2)
+            assert result == [{"url": "https://example.com/1"}, {"url": "https://example.com/2"}]
+        else:
+            with pytest.raises(httpx.HTTPStatusError) as error:
+                await client.search("test", max_results=2)
+            assert error.value.response.status_code == 503
+
+        assert pages == ["1", "2"]
+        assert len(clients) == 1
+        assert clients[0].is_closed
 
     async def test_search_success(self):
         """Search returns normalized results."""
