@@ -88,6 +88,8 @@ def test_deploy_waits_for_gateway_readiness_before_success(tmp_path: Path) -> No
         env=env,
         check=False,
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         text=True,
     )
 
@@ -114,6 +116,8 @@ def test_deploy_failure_prints_gateway_diagnostics_and_never_claims_success(tmp_
         env=env,
         check=False,
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         text=True,
     )
 
@@ -171,6 +175,8 @@ def test_production_entry_points_parse_the_compose_project_without_env_files(tmp
         env=env,
         check=False,
         capture_output=True,
+        encoding="utf-8",
+        errors="replace",
         text=True,
     )
 
