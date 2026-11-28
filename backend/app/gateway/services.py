@@ -34,7 +34,7 @@ from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION, get_auth_disabled_user, is_auth_disabled
 from app.gateway.authz import require_cancel_permission_if, resolve_route_permissions
-from app.gateway.checkpoint_lineage import CheckpointLineageError, find_checkpoint_introducing_message
+from app.gateway.checkpoint_lineage import CheckpointLineageError, CheckpointLineageTimeoutError, find_checkpoint_introducing_message, replay_lineage_lookup_deadline, replay_lineage_timeout_http_error
 from app.gateway.checkpoint_mode_errors import CHECKPOINT_MODE_ERRORS, checkpoint_mode_http_error
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
@@ -51,7 +51,7 @@ from app.gateway.thread_mode import selected_mode, state_has_attachments, thread
 from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.chat_mode import CHAT_MODE_KEY, has_attachment_fields
-from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.human_input import extract_unanswered_human_input_request, read_human_input_response
 from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.language import ui_locale
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
@@ -2417,6 +2417,8 @@ def replay_source_read_errors(thread_id: str) -> Iterator[None]:
     """Translate checkpoint policy and storage failures at both replay entry points."""
     try:
         yield
+    except CheckpointLineageTimeoutError as exc:
+        raise replay_lineage_timeout_http_error(thread_id, exc, detail="Timed out recovering the source turn's execution options") from exc
     except CHECKPOINT_MODE_ERRORS as exc:
         raise checkpoint_mode_http_error(exc, thread_id) from exc
     except (IncompleteRunPageError, OSError, sqlite3.OperationalError, DisconnectionError, InterfaceError, OperationalError, SQLAlchemyTimeoutError) as exc:
@@ -2533,12 +2535,25 @@ async def _resume_mode_options(request: Request, thread_id: str, source: Mapping
     return options
 
 
+async def _message_checkpoint_options(accessor: Any, snapshot: Any, message_id: str, *, max_depth: int | None = 32) -> dict[str, Any] | None:
+    """Read execution options from the checkpoint that introduced this message on this branch."""
+    try:
+        origin = await find_checkpoint_introducing_message(accessor, snapshot, message_id, max_depth=max_depth)
+    except CheckpointLineageError:
+        return None
+    metadata = getattr(origin, "metadata", None) or {}
+    if metadata.get("source") in {"input", "loop"}:
+        return _mode_options(metadata) or None
+    return None
+
+
 async def _recover_source_message_metadata(
     request: Request,
     *,
     thread_id: str,
     target_message_id: str | None,
     target_run_id: str | None = None,
+    clarification_id: str | None = None,
     checkpoint_id: str | None = None,
     checkpoint_ns: str = "",
     resuming: bool = False,
@@ -2598,6 +2613,14 @@ async def _recover_source_message_metadata(
                 detail="Could not recover the source user message",
             )
     else:
+        if clarification_id:
+            # A retry or an answer from another tab can name an earlier card.
+            for index in range(len(messages) - 1, -1, -1):
+                card = extract_unanswered_human_input_request((messages[index],))
+                if card and card["request_id"] == clarification_id:
+                    answer = messages[index]
+                    messages = messages[:index]
+                    break
         source = next(
             (message for message in reversed(messages) if _is_scope_source_human_message(message)),
             None,
@@ -2612,6 +2635,17 @@ async def _recover_source_message_metadata(
             if options:
                 metadata.setdefault(_TURN_MODE_OPTIONS, options)
             return metadata
+    if clarification_id and not target_message_id:
+        if answer is None and source is not None:
+            # Retain existing scope and Chat restrictions for a missing card.
+            # An unrelated turn cannot supply its execution options.
+            return {key: value for key, value in metadata.items() if key != _TURN_MODE_OPTIONS}
+        if _TURN_MODE_OPTIONS not in metadata and not metadata.get(CHAT_MODE_KEY) and (card_message_id := _message_identifier(answer)):
+            with replay_source_read_errors(thread_id):
+                async with replay_lineage_lookup_deadline():
+                    options = await _message_checkpoint_options(accessor, snapshot, card_message_id, max_depth=None)
+            if options is not None:
+                return {**metadata, _TURN_MODE_OPTIONS: options}
     if source is not None:
         if target_message_id and _TURN_MODE_OPTIONS not in metadata:
             with replay_source_read_errors(thread_id):
@@ -2620,12 +2654,7 @@ async def _recover_source_message_metadata(
                 if selected_mode(options) is None and answer is not None and not metadata.get(CHAT_MODE_KEY):
                     # A later turn can have changed the head's mode. Only the
                     # checkpoint which introduced this exact answer can supply it.
-                    try:
-                        origin = await find_checkpoint_introducing_message(accessor, snapshot, target_message_id, max_depth=32)
-                    except CheckpointLineageError:
-                        origin = None
-                    origin_metadata = getattr(origin, "metadata", None) or {}
-                    if origin_metadata.get("source") in {"input", "loop"} and (mode := selected_mode(origin_metadata)):
+                    if mode := selected_mode(await _message_checkpoint_options(accessor, snapshot, target_message_id)):
                         options = {**(options or {}), "mode": mode}
             if options is not None:
                 return {**metadata, _TURN_MODE_OPTIONS: options}
@@ -3002,6 +3031,7 @@ async def start_run(
         resuming = isinstance(graph_input, Command)
         replay_requires_scope_recovery = graph_input is None or resuming or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
         is_human_input_response = current_human_message is not None and "human_input_response" in current_human_message.additional_kwargs
+        clarification_response = read_human_input_response(_message_additional_kwargs(current_human_message)) if is_human_input_response else None
         # Clarification and edit-replay messages may intentionally replace the
         # source scope. If either client omits its current selector snapshot,
         # inherit the source turn's authoritative scope instead of widening the
@@ -3021,6 +3051,8 @@ async def start_run(
             # admission already persisted the canonical turn and its scope.
             source_metadata = _stored_turn_metadata(admitted_run)
         elif is_replay:
+            if clarification_response is not None:
+                recovery_args["clarification_id"] = clarification_response["request_id"]
             target_run_id = run_metadata.get("regenerate_from_run_id")
             if isinstance(target_run_id, str) and target_run_id:
                 recovery_args["target_run_id"] = target_run_id
@@ -3044,8 +3076,10 @@ async def start_run(
                 source_options = _stored_mode_options(admitted_run)
             source_chat = selected_mode(source_options) == "chat"
             restore_options = source_options is not None
+        elif isinstance(target_message_id, str) and target_message_id:
+            restore_options = source_options is not None or source_chat or requested_mode == "chat"
         else:
-            restore_options = isinstance(target_message_id, str) and bool(target_message_id) and (source_options is not None or source_chat or requested_mode == "chat")
+            restore_options = clarification_response is not None and (source_options is not None or source_chat)
         if restore_options:
             # The composer selection and its derived flags apply to the next new turn.
             options = _mode_options(source_options)
@@ -3058,7 +3092,7 @@ async def start_run(
             mode = "chat"
         if admitted_run is not None and not (resuming and retry_failed_resume):
             mode = selected_mode(admitted_run.metadata)
-        elif source_metadata is None and source_options is None and mode != "chat":
+        elif source_options is None and mode != "chat" and (source_metadata is None or clarification_response is not None):
             if await thread_mode(run_ctx.thread_store, thread_id, user_id=str(user.id) if user is not None else run_user_id, internal_owner_id=owner_user_id) == "chat":
                 raise HTTPException(409, "Could not recover the source turn for this Chat continuation")
         # The run metadata is echoed and used for retries.
@@ -3078,7 +3112,7 @@ async def start_run(
                 or any(has_attachment_fields(section) for section in (body_context, raw_config.get("context"), raw_config.get("configurable")))
                 or getattr(request.state, "extension_artifact_imports", None)
             ):
-                raise HTTPException(422, "Chat mode accepts text only. Switch modes to send attachments.")
+                raise HTTPException(422, "Chat mode accepts text only. Send attachments in a new turn using a different mode.")
             if current_human_message is not None:
                 current_human_message.additional_kwargs[CHAT_MODE_KEY] = "chat"
         elif current_human_message is not None:

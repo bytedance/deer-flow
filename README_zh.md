@@ -183,6 +183,14 @@ YAML 同名模型优先，已有任务保留原配置快照。托管模型使用
        api_key: $OPPER_API_KEY
        base_url: https://api.opper.ai/v3/compat
 
+     - name: nvidia-nemotron-3.5-super-vl
+       display_name: Nemotron 3.5 Super VL 120B (NVIDIA NIM)
+       use: langchain_openai:ChatOpenAI
+       model: nvidia/nemotron-3.5-super-vl-120b-a12b
+       api_key: $NVIDIA_API_KEY
+       base_url: https://integrate.api.nvidia.com/v1
+       supports_vision: true
+
      - name: api-route-gpt-6.1-sol
        display_name: GPT 6.1 Sol (API Route)
        use: langchain_openai:ChatOpenAI
@@ -419,7 +427,7 @@ DeerFlow 支持多种沙箱模式。
 - **本地工作区**（通过工作区文件工具访问已配置的挂载）
 - **Docker 执行**（在隔离的 Docker 容器里运行 sandbox 代码）
 - **Docker + Kubernetes 执行**（通过 provisioner 服务在 Kubernetes Pod 中运行 sandbox 代码）
-- **BytePlus veFaaS 云端沙箱**（基于 [BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas) Serverless AIO 沙箱，支持推测预热、空闲暂停/自动唤醒、线程级快照、镜像预热与可选 TOS 挂载，详见 [veFaaS Sandbox Provider](backend/packages/harness/deerflow/community/vefaas_sandbox/README.md)）
+- **BytePlus veFaaS 云端沙箱**（基于 [BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) Serverless AIO 沙箱，支持推测预热、空闲暂停/自动唤醒、线程级快照、镜像预热与可选 TOS 挂载，详见 [veFaaS Sandbox Provider](backend/packages/harness/deerflow/community/vefaas_sandbox/README.md)）
 
 Docker 开发时，服务启动行为会遵循 `config.yaml` 里的 sandbox 模式。在 Local / Docker 模式下，不会启动 `provisioner`。
 

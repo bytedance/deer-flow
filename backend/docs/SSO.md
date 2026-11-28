@@ -300,6 +300,8 @@ The frontend handles the post-SSO flow at `/auth/callback`:
 3. On success: redirects to the workspace (or the original `next` path)
 4. On failure: redirects to `/login?error=sso_failed`
 
+The login page shows the localized message for a known `error` code. Any other value, including an inherited object key such as `__proto__` or `constructor`, shows the generic "Authentication failed." message.
+
 ## Security Notes
 
 - **State cookies** are HttpOnly, SameSite=Lax, Max-Age=300 seconds, and signed with the JWT secret

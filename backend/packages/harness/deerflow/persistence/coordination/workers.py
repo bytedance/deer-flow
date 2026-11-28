@@ -202,7 +202,8 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
             if execution is None or execution.task_id != task_id or execution.epoch != task.execution_epoch or task.status != TaskStatus.RUNNING:
                 raise TaskConflict("Task no longer accepts this execution")
             worker = await session.get(Assignment, (task_id, execution.epoch))
-            return worker.to_dict(), execution.frozen_input, task.project_id, task.run_settings
+            root = task if task.root_id == task.id else await self._lookup(session, owner, task.root_id)
+            return worker.to_dict(), execution.frozen_input, task.project_id, task.run_settings, root.channel_origin
 
     async def submit_task_decision(self, owner, task_id, execution_id, run_id, grant_id, tasks):
         if not 1 <= len(tasks) <= 8:
@@ -414,6 +415,7 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
             if task.status != TaskStatus.RUNNING or task.execution_epoch != execution.epoch:
                 return True
             child_statuses = None
+            child_ids = []
             if task.coordinator:
                 child_ids = list(execution.decision["task_ids"].values()) if execution.decision is not None else []
                 child_statuses = await self._child_statuses(session, task, child_ids=child_ids)
@@ -434,7 +436,24 @@ class CoordinationWorkerRepository(CoordinationTaskRepository):
             await self._finish_locked(session, task, outcome, result_ref or f"/api/coordination/tasks/{task_id}", child_statuses=child_statuses)
             execution.status = status
             execution.result_text = result_text
+            if task.channel_origin is not None:
+                results, attachments = await self._completion_outputs(session, child_ids) if outcome == TaskStatus.SUCCEEDED else ([], [])
+                await self._enqueue_completion(session, task, results=results, artifacts=attachments)
             return True
+
+    async def _completion_outputs(self, session, child_ids):
+        results, attachments = [], []
+        # Only the final execution of each child in this accepted decision.
+        # Select IDs separately from bytes so settlement keeps the tree lock briefly.
+        for child_id in child_ids:
+            execution = await session.scalar(self._latest(child_id))
+            if execution is None or execution.status != "success":
+                continue
+            if execution.result_text:
+                results.append(execution.result_text)
+            artifact_ids = await session.scalars(select(Artifact.id).filter_by(execution_id=execution.id).order_by(Artifact.path, Artifact.id))
+            attachments.extend((child_id, artifact_id) for artifact_id in artifact_ids)
+        return results, attachments
 
     @staticmethod
     def _admitted_run(task_id, sequence):

@@ -4546,105 +4546,160 @@ async def test_static_resume_recovers_selected_checkpoint_scope(_stub_app_config
 
 
 @pytest.mark.parametrize(
-    ("include_current_scope", "expected_scope", "recovery_calls"),
+    ("card", "reply_context", "current_scope"),
     [
-        (
-            True,
-            {
-                "version": 1,
-                "mode": "selected",
-                "dataset_ids": ["dataset-current"],
-            },
-            1,
-        ),
-        (False, {"version": 1, "mode": "disabled"}, 1),
+        ("latest", {}, None),
+        ("latest", {"is_plan_mode": False, "subagent_enabled": False}, {"version": 1, "mode": "selected", "dataset_ids": ["dataset-current"]}),
+        ("latest", {"mode": "chat", "is_plan_mode": False, "subagent_enabled": False}, None),
+        ("malformed", {"mode": "chat", "is_plan_mode": False, "subagent_enabled": False}, None),
+        ("earlier", {}, None),
+        ("earlier", {"mode": "ultra", "is_plan_mode": True}, {"version": 1, "mode": "selected", "dataset_ids": ["dataset-current"]}),
+        ("unknown", {"mode": "chat"}, {"version": 1, "mode": "disabled"}),
     ],
-    ids=["current-selection-wins", "omitted-selection-recovers"],
+    ids=["omitted-mode-and-scope", "composer-flags-and-new-scope", "explicit-chat", "malformed-response-keeps-chat", "earlier-chat-and-scope", "earlier-chat-with-new-scope", "unknown-card-keeps-chat"],
 )
 @pytest.mark.asyncio
-async def test_clarification_reply_scope_uses_current_selection_or_recovers_when_omitted(
-    _stub_app_config,
-    include_current_scope,
-    expected_scope,
-    recovery_calls,
-):
-    from unittest.mock import AsyncMock, patch
+async def test_clarification_reply_recovers_source_mode_independently_of_knowledge_scope(_stub_app_config, monkeypatch, card, reply_context, current_scope):
+    from unittest.mock import AsyncMock
 
-    from app.gateway.routers.thread_runs import RunCreateRequest
-    from app.gateway.services import start_run
-    from deerflow.runtime import RunManager
+    from _agent_e2e_helpers import FakeToolCallingModel
+    from langchain.agents import create_agent
+    from langchain_core.messages import AIMessage
+
+    from app.gateway import services
+    from app.gateway.run_models import RunCreateRequest
+    from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+    from deerflow.agents.thread_state import ThreadState
+    from deerflow.runtime import RunManager, RunStatus
     from deerflow.runtime.runs.store.memory import MemoryRunStore
+    from deerflow.runtime.stream_bridge.memory import MemoryStreamBridge
+    from deerflow.tools.builtins.clarification_tool import ask_clarification_tool
 
     set_app_config(
         AppConfig.model_validate(
             {
                 "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
                 "knowledge_base": {"enabled": True, "scope_selection_enabled": True},
-                "tools": [
-                    {
-                        "name": "knowledge_search",
-                        "group": "knowledge",
-                        "use": "deerflow.community.ragflow.tools:knowledge_search_tool",
-                    }
-                ],
+                "tools": [{"name": "knowledge_search", "group": "knowledge", "use": "deerflow.community.ragflow.tools:knowledge_search_tool"}],
             }
         )
     )
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()), stream_bridge=MemoryStreamBridge())
+    question = {"question": "Which dataset?", "clarification_type": "missing_info"}
+    model = FakeToolCallingModel(responses=[AIMessage(content="", tool_calls=[{"name": "ask_clarification", "id": name, "args": question}]) for name in ("earlier", "latest")])
+
+    def source_agent(*, config):
+        return create_agent(model, tools=[ask_clarification_tool], middleware=[ClarificationMiddleware()], state_schema=ThreadState)
+
+    monkeypatch.setattr(services, "resolve_agent_factory", lambda _: source_agent)
+    monkeypatch.setattr(services, "_load_scope_agent_config", AsyncMock(return_value=SimpleNamespace(tool_groups=["knowledge"])))
+
+    thread_id = "thread-clarification-scope"
+    turns = {
+        "earlier": ({"mode": "chat"}, {"version": 1, "mode": "selected", "dataset_ids": ["dataset-earlier"]}),
+        "latest": ({"mode": "ultra", "is_plan_mode": True, "subagent_enabled": True, "reasoning_effort": "high"}, {"version": 1, "mode": "disabled"}),
+    }
+    request_ids = {}
+    for name, (options, scope) in turns.items():
+        original = RunCreateRequest(assistant_id="researcher", context=options, input={"messages": [{"role": "user", "content": "Research this.", "additional_kwargs": {"knowledge_scope": scope}}]})
+        source = await services.start_run(original, thread_id, request)
+        await source.task
+        assert source.status == RunStatus.success
+        request_ids[name] = source.human_input_request["request_id"]
+    assert request_ids["earlier"] != request_ids["latest"]
+
     response_metadata = {
         "version": 1,
         "kind": "human_input_response",
         "source": "ask_clarification",
-        "request_id": "clarification:call-scope",
+        "request_id": request_ids.get(card, "unknown-request"),
         "response_kind": "text",
         "value": "Use the current dataset",
     }
-    additional_kwargs = {
-        "hide_from_ui": True,
-        "human_input_response": response_metadata,
-    }
-    if include_current_scope:
-        additional_kwargs["knowledge_scope"] = {
-            "version": 1,
-            "mode": "selected",
-            "dataset_ids": ["dataset-current"],
-        }
-
-    body = RunCreateRequest(
+    additional_kwargs = {"hide_from_ui": True, "human_input_response": {} if card == "malformed" else response_metadata}
+    if current_scope is not None:
+        additional_kwargs["knowledge_scope"] = current_scope
+    reply = RunCreateRequest(
         assistant_id="researcher",
-        input={
-            "messages": [
-                {
-                    "type": "human",
-                    "content": "Use the current dataset",
-                    "additional_kwargs": additional_kwargs,
-                }
-            ]
-        },
+        input={"messages": [{"role": "user", "content": "Use the current dataset", "additional_kwargs": additional_kwargs}]},
+        context=reply_context,
     )
-    request = _make_start_run_request(RunManager(store=MemoryRunStore()))
-    captured: dict[str, object] = {}
-    recover_scope = AsyncMock(return_value={"knowledge_scope": {"version": 1, "mode": "disabled"}})
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    run = await services.start_run(reply, thread_id, request)
+    await run.task
 
-    async def fake_run_agent(*_args, **kwargs):
-        captured["graph_input"] = kwargs["graph_input"]
+    received = worker.await_args.kwargs
+    expected_options, source_scope = turns.get(card, (reply_context, turns["latest"][1]))
+    assert received["graph_input"]["messages"][0].additional_kwargs["knowledge_scope"] == (current_scope or source_scope)
+    _assert_clarification_mode_options(received["config"], expected_options)
 
-    with (
-        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
-        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
-        patch("app.gateway.services._recover_source_message_metadata", new=recover_scope),
-        patch(
-            "app.gateway.services._load_scope_agent_config",
-            new=AsyncMock(return_value=SimpleNamespace(tool_groups=["knowledge"])),
-        ),
-    ):
-        record = await start_run(body, "thread-clarification-scope", request)
-        await record.task
 
-    graph_input = captured["graph_input"]
-    assert isinstance(graph_input, dict)
-    message = graph_input["messages"][0]
-    assert message.additional_kwargs["knowledge_scope"] == expected_scope
-    assert recover_scope.await_count == recovery_calls
+def _assert_clarification_mode_options(config, expected):
+    for section in ("context", "configurable"):
+        options = config[section]
+        assert {key: options[key] for key in ("mode", "is_plan_mode", "subagent_enabled", "reasoning_effort") if key in options} == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "checkpoint_options", "expected"),
+    [
+        ("pending", {"mode": "ultra", "is_plan_mode": True, "subagent_enabled": True, "reasoning_effort": "high"}, "checkpoint"),
+        ("retry", {"mode": "flash"}, "checkpoint"),
+        ("unknown-card", {"mode": "ultra"}, "request"),
+        ("legacy-no-options", {}, "request"),
+        ("empty-turn-marker", {}, "defaults"),
+        ("ambiguous-on-chat-thread", {}, 409),
+        ("lookup-deadline", {"mode": "ultra"}, 504),
+    ],
+    ids=lambda value: value if isinstance(value, str) else "",
+)
+async def test_clarification_reply_uses_the_cards_execution_checkpoint(_stub_app_config, monkeypatch, case, checkpoint_options, expected):
+    from unittest.mock import AsyncMock
+
+    from fastapi import HTTPException
+    from langchain_core.messages import HumanMessage, ToolMessage
+    from langgraph.checkpoint.base import empty_checkpoint
+
+    from app.gateway import checkpoint_lineage, services
+    from app.gateway.run_models import RunCreateRequest
+
+    request, _, threads = _make_start_run_persistence_context()
+    thread_id = "pre-upgrade-clarification"
+    await threads.create(thread_id, metadata={"mode": "chat"})
+    human = HumanMessage(content="Research this.", id="question", additional_kwargs={"deerflow_mode_options": {}} if case == "empty-turn-marker" else {})
+    card = ToolMessage(content="Which dataset?", id="stored-card-message" if case == "retry" else "card", tool_call_id="ask", artifact={"human_input": {"kind": "human_input_request", "request_id": "card"}})
+    reply_id = "missing" if case == "unknown-card" else "card"
+    response = {"version": 1, "kind": "human_input_response", "source": "ask_clarification", "request_id": reply_id, "response_kind": "text", "value": "current"}
+    history = [([human], {"source": "loop"}), ([human, card], {"source": "loop", **checkpoint_options}), ([human, card], {"source": "update", "mode": "flash"})]
+    if case == "retry":
+        previous_reply = HumanMessage(content="current", id="first-reply", additional_kwargs={"hide_from_ui": True, "human_input_response": response})
+        later_question = HumanMessage(content="Another question", id="later-question", additional_kwargs={"deerflow_mode_options": {"mode": "ultra"}})
+        history.extend([([human, card, previous_reply, later_question], {"source": "update", "mode": "ultra"})] * 36)
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    for step, (messages, metadata) in enumerate(history, start=1):
+        checkpoint = empty_checkpoint()
+        checkpoint["channel_values"] = {"messages": messages}
+        checkpoint["channel_versions"] = {"messages": step}
+        config = await request.app.state.checkpointer.aput(config, checkpoint, {"step": step, **metadata}, {"messages": step})
+
+    reply_options = {} if case == "ambiguous-on-chat-thread" else {"mode": "chat", "is_plan_mode": False, "subagent_enabled": False}
+    reply = RunCreateRequest(input={"messages": [{"role": "user", "content": "current", "additional_kwargs": {"human_input_response": response}}]}, context=reply_options)
+    worker = AsyncMock()
+    monkeypatch.setattr(services, "run_agent", worker)
+    if case == "lookup-deadline":
+        monkeypatch.setattr(checkpoint_lineage, "_REPLAY_LINEAGE_LOOKUP_TIMEOUT_SECONDS", 0)
+    if isinstance(expected, int):
+        with pytest.raises(HTTPException) as error:
+            await services.start_run(reply, thread_id, request)
+        assert error.value.status_code == expected
+        worker.assert_not_awaited()
+        return
+    run = await services.start_run(reply, thread_id, request)
+    await run.task
+    expected_options = {"checkpoint": checkpoint_options, "request": reply_options, "defaults": {}}[expected]
+    _assert_clarification_mode_options(worker.await_args.kwargs["config"], expected_options)
 
 
 @pytest.mark.parametrize(

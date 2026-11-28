@@ -289,7 +289,13 @@ async def test_finalize_accumulates_token_usage_over_retried_attempts(tmp_path) 
 
     item = (await repo.list_items("batch-1", user_id="user-1"))[0]
     assert item["status"] == "succeeded"
-    assert item["token_usage"] == {"input_tokens": 140, "output_tokens": 25, "total_tokens": 165}
+    usage = item["token_usage"]
+    assert {key: usage[key] for key in ("input_tokens", "output_tokens", "total_tokens")} == {"input_tokens": 140, "output_tokens": 25, "total_tokens": 165}
+    # Each attempt with usage is kept with its time and model; the one without usage adds nothing.
+    assert [(attempt["at"], attempt["by_model"]) for attempt in usage["attempts"]] == [
+        (now.isoformat(), {"model-a": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}}),
+        ((now + timedelta(seconds=4)).isoformat(), {"model-a": {"input_tokens": 40, "output_tokens": 5, "total_tokens": 45}}),
+    ]
 
 
 @pytest.mark.asyncio
@@ -305,7 +311,31 @@ async def test_manual_retry_adds_to_the_failed_attempts_token_usage(tmp_path) ->
     again = (await repo.claim_items(now=now + timedelta(seconds=1), lease_owner="worker-2", lease_seconds=60, limit=1))[0]
     await _finalize(repo, again["id"], "worker-2", succeeded=True, token_usage={"total_tokens": 30}, at=now + timedelta(seconds=2))
 
-    assert (await repo.list_items("batch-1", user_id="user-1"))[0]["token_usage"] == {"total_tokens": 100}
+    assert (await repo.list_items("batch-1", user_id="user-1"))[0]["token_usage"]["total_tokens"] == 100
+    # The failed attempt's tokens stay dated when they were spent, not when the retry ran.
+    usage = await repo.list_item_token_usage(user_id="user-1")
+    assert [(entry["at"], entry["total_tokens"]) for entry in usage] == [(now, 70), (now + timedelta(seconds=2), 30)]
+    assert [entry["total_tokens"] for entry in await repo.list_item_token_usage(user_id="user-1", updated_since=now + timedelta(seconds=1))] == [30]
+
+
+@pytest.mark.asyncio
+async def test_item_token_usage_lists_items_with_usage_by_owner_thread_and_time(tmp_path) -> None:
+    repo = await _repo(tmp_path)
+    await _create(repo, count=2, max_live=2, max_running=2)
+    now = datetime.now(UTC)
+    claimed = await repo.claim_items(now=now, lease_owner="worker-1", lease_seconds=60, limit=2)
+    # Only the first item has finished; the second is still leased and has no usage.
+    await _finalize(repo, claimed[0]["id"], "worker-1", succeeded=True, token_usage={"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}, at=now)
+
+    usage = await repo.list_item_token_usage(user_id="user-1", thread_id="thread-1")
+    assert [{key: entry[key] for key in ("item_id", "model_name", "input_tokens", "output_tokens", "total_tokens", "cache_read_tokens")} for entry in usage] == [
+        {"item_id": claimed[0]["id"], "model_name": "model-a", "input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cache_read_tokens": 0}
+    ]
+    assert usage[0]["at"] == now
+    assert await repo.list_item_token_usage(user_id=None) == usage
+    assert await repo.list_item_token_usage(user_id="user-2") == []
+    assert await repo.list_item_token_usage(user_id="user-1", thread_id="thread-2") == []
+    assert await repo.list_item_token_usage(user_id="user-1", updated_since=datetime.now(UTC) + timedelta(hours=1)) == []
 
 
 @pytest.mark.asyncio
@@ -651,3 +681,28 @@ async def test_duplicate_submission_key_returns_original_batch(tmp_path) -> None
     items = await repo.list_items("batch-1", user_id="user-1", include_prompt=True)
     assert items is not None
     assert [item["item_key"] for item in items] == ["item-0"]
+
+
+@pytest.mark.asyncio
+async def test_item_token_usage_splits_an_attempt_by_model(tmp_path) -> None:
+    repo = await _repo(tmp_path)
+    await _create(repo, count=1, max_live=1, max_running=1)
+    now = datetime.now(UTC)
+    item = (await repo.claim_items(now=now, lease_owner="worker-1", lease_seconds=60, limit=1))[0]
+    attempt = {
+        "input_tokens": 110,
+        "output_tokens": 22,
+        "total_tokens": 132,
+        "cache_read_tokens": 60,
+        "by_model": {
+            "model-a": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cache_read_tokens": 60},
+            "summary-model": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+        },
+    }
+    await _finalize(repo, item["id"], "worker-1", succeeded=True, token_usage=attempt, at=now)
+
+    usage = await repo.list_item_token_usage(user_id="user-1")
+    assert [(entry["model_name"], entry["total_tokens"], entry["cache_read_tokens"]) for entry in usage] == [("model-a", 120, 60), ("summary-model", 12, 0)]
+    stored = (await repo.list_items("batch-1", user_id="user-1"))[0]["token_usage"]
+    assert "by_model" not in stored
+    assert stored["cache_read_tokens"] == 60

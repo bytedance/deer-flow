@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from itertools import count
 from typing import Any
 
@@ -54,10 +55,10 @@ class CheckpointLineageTimeoutError(CheckpointLineageError):
     """Raised when the replay lineage lookup exceeds its own deadline."""
 
 
-def replay_lineage_timeout_http_error(thread_id: str, exc: CheckpointLineageTimeoutError) -> HTTPException:
+def replay_lineage_timeout_http_error(thread_id: str, exc: CheckpointLineageTimeoutError, *, detail: str = _REPLAY_LINEAGE_TIMEOUT_DETAIL) -> HTTPException:
     """Log a replay lookup deadline expiry and return its fixed client error."""
     logger.warning("Replay checkpoint lookup timed out for thread %s", sanitize_log_param(thread_id), exc_info=exc)
-    return HTTPException(status_code=504, detail=_REPLAY_LINEAGE_TIMEOUT_DETAIL)
+    return HTTPException(status_code=504, detail=detail)
 
 
 def checkpoint_messages(checkpoint_tuple: Any) -> list[Any]:
@@ -396,20 +397,27 @@ def _checkpoint_exists(checkpoint_tuple: Any) -> bool:
     return isinstance(getattr(checkpoint_tuple, "checkpoint", None), dict)
 
 
+@asynccontextmanager
+async def replay_lineage_lookup_deadline() -> AsyncIterator[None]:
+    """Apply the replay deadline while preserving timeouts raised by the store."""
+    deadline = asyncio.timeout(_REPLAY_LINEAGE_LOOKUP_TIMEOUT_SECONDS)
+    try:
+        async with deadline:
+            yield
+    except TimeoutError as exc:
+        if not deadline.expired():
+            raise  # The checkpoint store raised its own timeout.
+        raise CheckpointLineageTimeoutError(_REPLAY_LINEAGE_TIMEOUT_DETAIL) from exc
+
+
 async def find_replay_checkpoint_before_message(
     accessor: Any,
     head_checkpoint: Any,
     message_id: str,
 ) -> Any:
     """Resolve the replay base for branching, regeneration, or edit replay."""
-    deadline = asyncio.timeout(_REPLAY_LINEAGE_LOOKUP_TIMEOUT_SECONDS)
-    try:
-        async with deadline:
-            return await find_checkpoint_before_message(accessor, head_checkpoint, message_id, max_depth=None)
-    except TimeoutError as exc:
-        if not deadline.expired():
-            raise  # The checkpoint store raised its own timeout.
-        raise CheckpointLineageTimeoutError(_REPLAY_LINEAGE_TIMEOUT_DETAIL) from exc
+    async with replay_lineage_lookup_deadline():
+        return await find_checkpoint_before_message(accessor, head_checkpoint, message_id, max_depth=None)
 
 
 async def find_checkpoint_before_message(
@@ -431,8 +439,8 @@ async def find_checkpoint_before_message(
     return await _find_message_boundary(accessor, head_checkpoint, message_id, max_depth=max_depth, before=True)
 
 
-async def find_checkpoint_introducing_message(accessor: Any, head_checkpoint: Any, message_id: str, *, max_depth: int) -> Any:
-    """Return the checkpoint that added the message on this branch, including pending graph steps."""
+async def find_checkpoint_introducing_message(accessor: Any, head_checkpoint: Any, message_id: str, *, max_depth: int | None) -> Any:
+    """Return the checkpoint that added the message. Callers bound depth-unlimited walks with a deadline."""
     return await _find_message_boundary(accessor, head_checkpoint, message_id, max_depth=max_depth, before=False)
 
 

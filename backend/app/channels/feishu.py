@@ -14,10 +14,12 @@ from collections.abc import Callable, Coroutine
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future
 from dataclasses import dataclass, field, replace
+from io import BytesIO
+from pathlib import PurePosixPath
 from typing import Any, Literal, TypeVar
 
 from app.channels.base import Channel, ChannelStopTimeout, ChannelUnavailable, abort_connection_transport, shutdown_private_loop
-from app.channels.commands import is_known_channel_command, strip_leading_mentions
+from app.channels.commands import is_feishu_task_command, is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity, fallback_store_channel, lookup_thread_id
 from app.channels.feishu_card_interaction import (
     ClarificationCardRequest,
@@ -301,8 +303,8 @@ def _split_card_text(text: str) -> list[str]:
     return cards
 
 
-def _is_feishu_command(text: str) -> bool:
-    return is_known_channel_command(text)
+def _is_feishu_command(text: str, *, coordination_tasks_enabled: bool = False) -> bool:
+    return is_known_channel_command(text) or (coordination_tasks_enabled and is_feishu_task_command(text))
 
 
 def _append_post_file_placeholders(text: str, count: int) -> str:
@@ -771,30 +773,39 @@ class FeishuChannel(Channel):
         # Legacy and group bindings do not prove that their chat is private.
         await self.send_notification(target=target, text_markdown=text_markdown)
 
-    async def _send_notification_card(self, *, receive_id: str, receive_id_type: Literal["open_id", "chat_id"], text_markdown: str) -> None:
+    async def send_task_result(self, *, chat_id: str, text_markdown: str, delivery_id: str) -> None:
+        """Push to the original DM after the outbox validates the binding."""
+        await self._send_notification_card(receive_id=chat_id, receive_id_type="chat_id", text_markdown=_clip_card_text(text_markdown), delivery_id=delivery_id)
+
+    async def _send_notification_card(self, *, receive_id: str, receive_id_type: Literal["open_id", "chat_id"], text_markdown: str, delivery_id: str | None = None) -> None:
         """Send once and wait for the SDK ACK.
 
         The notification outbox owns retries. Transport failures park its row;
         a platform rejection remains a counted delivery attempt.
         """
-        if not self.is_running or not self._api_client:
-            raise ChannelUnavailable("Feishu channel is not running")
+        await self._create_notification_message(receive_id, receive_id_type, "interactive", self._build_card_content(text_markdown), delivery_id)
 
+    async def _create_notification_message(self, receive_id: str, receive_id_type: Literal["open_id", "chat_id"], msg_type: str, content: str, delivery_id: str | None) -> None:
+        client = self._api_client
+        if not self.is_running or not client:
+            raise ChannelUnavailable("Feishu channel is not running")
+        body = self._CreateMessageRequestBody.builder().receive_id(receive_id).msg_type(msg_type).content(content)
+        if delivery_id is not None:
+            body.uuid(delivery_id)
+        request = self._CreateMessageRequest.builder().receive_id_type(receive_id_type).request_body(body.build()).build()
+        response = await self._call_notification_sdk(lambda: client.im.v1.message.create(request))
+        if not response.success():
+            raise RuntimeError(f"Feishu notification rejected: code={response.code}")
+
+    @staticmethod
+    async def _call_notification_sdk(call: Callable[[], _T]) -> _T:
         from requests.exceptions import ConnectionError as RequestsConnectionError
         from requests.exceptions import Timeout as RequestsTimeout
 
-        request = (
-            self._CreateMessageRequest.builder()
-            .receive_id_type(receive_id_type)
-            .request_body(self._CreateMessageRequestBody.builder().receive_id(receive_id).msg_type("interactive").content(self._build_card_content(text_markdown)).build())
-            .build()
-        )
         try:
-            response = await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+            return await asyncio.to_thread(call)
         except (RequestsConnectionError, RequestsTimeout, ConnectionError, TimeoutError, OSError) as exc:
             raise ChannelUnavailable("Feishu notification transport is unavailable") from exc
-        if not response.success():
-            raise RuntimeError(f"Feishu notification rejected: code={response.code}")
 
     async def send_group_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
         if self._connection_repo is None or not owner_user_id:
@@ -858,14 +869,34 @@ class FeishuChannel(Channel):
         response = await asyncio.to_thread(self._upload_image_sync, path)
         return self._uploaded_key(response, "image")
 
+    async def upload_task_attachment(self, *, path: str, content: bytes) -> str:
+        """Upload the saved artifact as a file so Feishu preserves its name and bytes."""
+        if not self.is_running or not self._api_client:
+            raise ChannelUnavailable("Feishu channel is not running")
+        filename = PurePosixPath(path).name
+
+        def upload():
+            with BytesIO(content) as stream:
+                return self._upload_file_stream(stream, filename, self._file_type(PurePosixPath(filename).suffix.lower()))
+
+        response = await self._call_notification_sdk(upload)
+        if not response.success():
+            raise RuntimeError(f"Feishu attachment upload rejected: code={response.code}")
+        return self._uploaded_key(response, "file")
+
+    async def send_task_attachment(self, *, chat_id: str, file_key: str, delivery_id: str) -> None:
+        await self._create_notification_message(chat_id, "chat_id", "file", json.dumps({"file_key": file_key}), delivery_id)
+
+    def _upload_file_stream(self, stream, filename: str, file_type: str):
+        request = self._CreateFileRequest.builder().request_body(self._CreateFileRequestBody.builder().file_type(file_type).file_name(filename).file(stream).build()).build()
+        return self._api_client.im.v1.file.create(request)
+
     def _upload_file_sync(self, path, filename: str, file_type: str):
         with open(str(path), "rb") as f:
-            request = self._CreateFileRequest.builder().request_body(self._CreateFileRequestBody.builder().file_type(file_type).file_name(filename).file(f).build()).build()
-            return self._api_client.im.v1.file.create(request)
+            return self._upload_file_stream(f, filename, file_type)
 
-    async def _upload_file(self, path, filename: str) -> str:
-        """Upload a file to Feishu and return the file_key."""
-        suffix = path.suffix.lower() if hasattr(path, "suffix") else ""
+    @staticmethod
+    def _file_type(suffix: str) -> str:
         if suffix in (".xls", ".xlsx", ".csv"):
             file_type = "xls"
         elif suffix in (".ppt", ".pptx"):
@@ -877,7 +908,12 @@ class FeishuChannel(Channel):
         else:
             file_type = "stream"
 
-        response = await asyncio.to_thread(self._upload_file_sync, path, filename, file_type)
+        return file_type
+
+    async def _upload_file(self, path, filename: str) -> str:
+        """Upload a file to Feishu and return the file_key."""
+        suffix = path.suffix.lower() if hasattr(path, "suffix") else ""
+        response = await asyncio.to_thread(self._upload_file_sync, path, filename, self._file_type(suffix))
         return self._uploaded_key(response, "file")
 
     @staticmethod
@@ -1875,6 +1911,7 @@ class FeishuChannel(Channel):
 
             metadata = {
                 "message_id": parsed.msg_id,
+                "chat_type": parsed.chat_type,
                 "root_id": parsed.root_id,
                 "parent_id": parsed.parent_id,
                 "thread_id": parsed.feishu_thread_id,
@@ -2327,7 +2364,7 @@ class FeishuChannel(Channel):
             # @mentions intact for the agent; the stripped form also flows into the
             # inbound so ChannelManager._handle_command parses the bare command.
             command_text = strip_leading_mentions(text)
-            if _is_feishu_command(command_text):
+            if _is_feishu_command(command_text, coordination_tasks_enabled=getattr(self.bus, "coordination_tasks_enabled", False) is True):
                 parsed.msg_type = InboundMessageType.COMMAND
                 parsed.text = command_text
             elif parsed.post_file_count:

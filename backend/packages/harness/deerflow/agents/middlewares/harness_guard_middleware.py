@@ -35,7 +35,7 @@ from deerflow.agents.middlewares.tool_result_meta import (
 )
 from deerflow.agents.middlewares.tool_transform_meta import append_tool_transform
 from deerflow.config.harness_guard_config import HarnessGuardConfig
-from deerflow.sandbox.tools import _match_line_endings, read_current_file_content
+from deerflow.sandbox.tools import _replace_keeping_line_endings, read_current_file_content
 
 logger = logging.getLogger(__name__)
 
@@ -287,10 +287,8 @@ class HarnessGuardMiddleware(AgentMiddleware):
             if isinstance(old_str, str) and isinstance(new_str, str) and (file_path.endswith(".py") or file_path.endswith(".json")):
                 try:
                     current = read_current_file_content(request.runtime, file_path)
-                    old_str, new_str = _match_line_endings(current, old_str, new_str)
-                    if old_str in current and verify_content_syntax(file_path, current) is None:
-                        replace_all = bool(args.get("replace_all", False))
-                        spliced = current.replace(old_str, new_str) if replace_all else current.replace(old_str, new_str, 1)
+                    spliced = _replace_keeping_line_endings(current, old_str, new_str, bool(args.get("replace_all", False)))
+                    if spliced is not None and verify_content_syntax(file_path, current) is None:
                         err = verify_content_syntax(file_path, spliced)
                 except Exception:
                     # Fail open on sandbox read errors and let str_replace handle execution

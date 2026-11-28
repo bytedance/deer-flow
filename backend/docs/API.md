@@ -513,6 +513,19 @@ Agent initialization requires workspace tools. A run that combines Chat with
 
 Retries and continuations of an explicitly selected Chat turn keep that
 turn's restrictions. They preserve a later selection for new requests.
+A structured `human_input_response` names its clarification card by
+`request_id`. The reply uses the mode, reasoning, planning, and delegation
+settings of the turn that issued that card, even if the reply supplies a
+different `context.mode` or a newer card exists. The reply can select a new
+knowledge scope. Omitting that selection preserves the issuing turn's scope.
+For older cards, the Gateway recovers available settings from the checkpoint
+that introduced the card. During this history lookup, a temporary storage
+failure returns `503` and a lookup deadline returns `504`. If the source
+has no recorded settings on a saved Chat thread, an ordinary continuation
+returns `409`.
+A plain message follows the usual new-turn rules.
+To send an attachment after a Chat clarification, start a new turn in a mode
+that supports files.
 When a tool is waiting for approval, `command.resume` uses the paused run's
 mode and recorded reasoning, planning, and delegation options. A Flash tool
 call can therefore finish after the user selects Chat for their next

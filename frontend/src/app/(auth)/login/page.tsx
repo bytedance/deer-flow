@@ -23,6 +23,18 @@ import {
 } from "@/core/auth/setup";
 import { parseAuthError } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
+import type { Translations } from "@/core/i18n/locales/types";
+
+/** The message for a `?error=` code, or the generic failure. */
+function loginErrorMessage(t: Translations, code: string) {
+  // The code comes from the URL, so only the table's own keys name a message.
+  // An inherited key such as `__proto__` or `constructor` resolves to an
+  // object or a function instead. The page renders the object, and
+  // `useState` calls the function as an initializer; both can crash the page.
+  return Object.hasOwn(t.login.errors, code)
+    ? t.login.errors[code as keyof typeof t.login.errors]
+    : t.login.authFailed;
+}
 
 export default function LoginPage() {
   const router = useRouter();
@@ -54,8 +66,7 @@ export default function LoginPage() {
   const ssrDisabled = useContext(AuthDisabledContext);
   const [error, setError] = useState(
     errorParam
-      ? (t.login.errors[errorParam as keyof typeof t.login.errors] ??
-          t.login.authFailed)
+      ? loginErrorMessage(t, errorParam)
       : ssrDisabled
         ? t.login.errors.account_disabled
         : "",

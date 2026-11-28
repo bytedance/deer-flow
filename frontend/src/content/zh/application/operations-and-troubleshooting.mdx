@@ -89,15 +89,12 @@ grep -i "error\|apikey\|unauthorized" logs/gateway.log | tail -20
 
 **诊断**：
 
-```bash
-# 检查线程用户数据目录是否存在且可写
-ls -la backend/.deer-flow/threads/
-```
+在实际运行目录下检查会话的 `user-data/` 是否存在且可写。按用户隔离的会话位于 `users/<user-id>/threads/<thread-id>/`，旧版会话位于 `threads/<thread-id>/`。
 
 **解决**：
 
-1. 确保 `backend/.deer-flow/` 对运行 DeerFlow 的进程可写。
-2. 在 Docker 部署中，验证卷挂载路径正确（`DEER_FLOW_ROOT` 设置为绝对路径）。
+1. 确保运行目录对 DeerFlow 进程可写。本地启动默认使用仓库的 `backend/.deer-flow/`。
+2. 在 Docker Compose 部署中，按[部署指南](/docs/application/deployment-guide#数据持久化)核对宿主机挂载路径。
 3. 如果使用基于容器的沙箱，确认 Docker 已运行并且容器镜像已拉取。
 
 ---
@@ -173,14 +170,11 @@ grep -i "mcp\|timeout" logs/gateway.log | tail -20
 
 根据你启用的存储后端备份：
 
-- `backend/.deer-flow/threads/`：线程工作目录、上传文件和产出物。
-- `backend/.deer-flow/memory.json` 和 `backend/.deer-flow/agents/`：全局和 Agent 记忆。
+- 完整的运行目录，包含会话工作区、上传文件、产出物和以文件保存的记忆。Docker Compose 部署的宿主机路径见[部署指南](/docs/application/deployment-guide#数据持久化)。
 - `${database.sqlite_dir}/deerflow.db`：当使用 `database.backend: sqlite` 时备份，默认路径为 `.deer-flow/data/deerflow.db`。
 - Postgres 数据库备份：当使用 `database.backend: postgres` 时定期导出。
 - 旧的 `checkpointer.connection_string` 文件：如果你的部署仍配置独立 `checkpointer`。
 - `backend/agents/*/config.yaml`：自定义 Agent 配置。
-
-Docker 部署中，备份绑定挂载的宿主机路径，而不是容器内部文件系统。
 
 ## 停止和重启服务
 

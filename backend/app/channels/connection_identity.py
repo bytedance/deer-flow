@@ -70,3 +70,22 @@ async def lookup_thread_id(msg: InboundMessage, *, repo: Any, store: Any) -> str
     if store is None:
         return None
     return await store.get_thread_id(fallback_store_channel(msg.channel_name, msg.topic_id, repo), msg.chat_id, topic_id=msg.topic_id)
+
+
+def feishu_private_binding(connection: dict) -> dict[str, str] | None:
+    """Return the exact live Feishu DM binding, including its revocation fence."""
+    if connection.get("provider") != "feishu" or connection.get("status") != "connected":
+        return None
+    metadata = connection.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    chat_id = metadata.get("chat_id")
+    if metadata.get("chat_type") != "p2p" or not chat_id or connection.get("workspace_id") != chat_id:
+        return None
+    return {
+        "provider": "feishu",
+        "id": connection["id"],
+        "updated_at": connection["updated_at"],
+        "chat_id": chat_id,
+        "account_id": connection["external_account_id"],
+    }

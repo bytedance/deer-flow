@@ -115,14 +115,14 @@ generated outputs back to thread storage with the same alias and path checks.
 See its [configuration](../../backend/docs/CONFIGURATION.md#sandbox).
 
 The optional [BytePlus veFaaS Cloud Sandbox provider](../../backend/packages/harness/deerflow/community/vefaas_sandbox/README.md)
-runs each user/thread scope in a serverless [BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas)
+runs each user/thread scope in a serverless [BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
 AIO sandbox over the veFaaS OpenAPI (`Version=2024-06-06`, SigV4) with no extra
 cloud SDK dependency. It supports per-agent skill isolation, optional
 thread-scoped TOS mounts or automatic output mirroring on release, speculative
 `sandbox.prewarm`, opt-in idle pause/resume, thread-scoped snapshots with
 retention pruning, and asynchronous image precaching. Multi-worker gateways
 sharing one veFaaS sandbox application should enable `sandbox.ownership.type: redis`.
-See the [veFaaS documentation](https://docs.byteplus.com/en/docs/vefaas/what-is-vefaas)
+See the [veFaaS documentation](https://docs.byteplus.com/en/docs/vefaas/what-is-vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
 and [provider README](../../backend/packages/harness/deerflow/community/vefaas_sandbox/README.md)
 for setup and snapshot retention guidance.
 
@@ -401,7 +401,11 @@ On Linux and macOS, local sandbox `write_file` replacements and `str_replace` st
 
 Loop warnings let agents save collected results before their final answer. If the save is blocked by the read-before-write gate, the agent may read the target file and retry the save once. A looping or stopped tool must be replaced by an available alternative; if no permitted save path exists or the retry fails, the final answer includes the collected results and reports that the file was not saved. When `present_files` is available, the warning also asks the agent to present the files it already created in `/mnt/user-data/outputs` before answering, so finished outputs are delivered. Recovery calls still count toward the loop limits, and a hard stop prevents further tool execution.
 
-Ranged `read_file` calls count lines the same way on every sandbox provider: a line ends only at a newline. On E2B, BoxLite, Tenki, and OpenSandbox, a file with bare carriage returns (such as a saved progress log), form feeds, or Unicode line separators therefore returns the same lines as on the local sandbox, and the `start_line` a truncated read suggests points at the next unread line.
+Ranged `read_file` calls count lines the same way on every sandbox provider: a line ends only at a newline. On AIO, E2B, BoxLite, Tenki, and OpenSandbox, a file with bare carriage returns (such as a saved progress log), form feeds, or Unicode line separators therefore returns the same lines as on the local sandbox, and the `start_line` a truncated read suggests points at the next unread line.
+
+A full `read_file` returns line endings as stored, and `str_replace` changes only the text it matches: every other byte, line endings included, stays as stored. A file without CRLF, including an LF-only or CR-only file, is matched literally and `new_str` is written as given. In a file that contains CRLF, a CRLF counts as one line break. An `old_str` without `\r\n`, such as one copied from a ranged read (whose lines are joined with `\n`) or typed with `\n`, matches wherever its lines end in CRLF, LF or a mix of both. An `old_str` with `\r\n`, such as one copied from a full read, matches as written or with every line break spelled CRLF, and a leading `\n` may also be the end of a CRLF line. A snippet that mixes `\r\n` and `\n` therefore does not match lines whose endings mix in another way; accepting any mix would make the search quadratic, while every search is linear in the size of the file and of `old_str`. Matches are taken in file order: without `replace_all` only the first one changes, and with it every one does. Each line break in `new_str` is written in the ending of the corresponding line break in the matched text, so an edit that keeps the number of lines keeps every line's ending; extra lines take the ending of the last matched line break, and a match without one takes the ending of its line. A match never splits a CRLF. A line that ends in more than one `\r` before its `\n` matches only as stored, because a ranged read drops all of those `\r`.
+
+On AIO, `read_file` and `str_replace` read the stored bytes and fail on a file larger than 100 MB, leaving it unchanged. Because such a file can never be read back, the read-before-write check also blocks `write_file` over it. Read or change it with `bash` (`head`, `tail` or `sed -n`).
 
 Concurrent reads and writes to the same file share a gate across synchronous and asynchronous tool calls. Async callers waiting for that gate do not occupy worker threads needed to finish the current read or write. Cancelling a waiting call leaves the current operation running; a call that already started file inspection still waits for that work to finish before releasing its gate.
 
