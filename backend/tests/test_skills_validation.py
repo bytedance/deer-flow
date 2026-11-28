@@ -366,6 +366,16 @@ class TestSplitSkillMarkdownDuplicateKeys:
             "tier": "basic",
         }
 
+    def test_reused_merged_profile_preserves_explicit_override(self):
+        parts, error = split_skill_markdown(
+            "---\nname: my-skill\ndescription: A valid skill\nmetadata:\n  base: &base\n    owner: team\n  inherited:\n    <<: &profile\n      <<: *base\n      owner: local\n  reuse: *profile\n---\n",
+        )
+
+        assert error is None
+        assert parts is not None
+        assert parts.metadata["metadata"]["inherited"] == {"owner": "local"}
+        assert parts.metadata["metadata"]["reuse"] == {"owner": "local"}
+
     def test_duplicate_yaml_merge_keys_are_rejected(self):
         parts, error = split_skill_markdown(
             "---\nname: my-skill\ndescription: A valid skill\nmetadata:\n  first: &first\n    owner: team\n  second: &second\n    tier: basic\n  merged:\n    <<: *first\n    <<: *second\n---\n",

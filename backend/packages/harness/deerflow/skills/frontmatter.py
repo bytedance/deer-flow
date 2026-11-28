@@ -33,10 +33,69 @@ ALLOWED_FRONTMATTER_PROPERTIES = {
 # indentation or accept a closing line that merely starts with three hyphens.
 _FRONTMATTER_RE = re.compile(r"^\ufeff?---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", re.DOTALL)
 _YAML_MERGE_TAG = "tag:yaml.org,2002:merge"
+_YAML_MERGE_KEY = object()
+_EXPLICIT_MAPPING_VALUE = "_deerflow_explicit_value"
 
 
 class _UniqueKeySafeLoader(yaml.SafeLoader):
     """Safe YAML loader that rejects duplicate mapping keys."""
+
+    def flatten_mapping(self, node: yaml.MappingNode) -> None:
+        """Expand merge keys only after their source mappings are validated."""
+        _validate_mapping_before_flatten(self, node)
+        super().flatten_mapping(node)
+
+
+def _assert_unique_explicit_keys(
+    loader: _UniqueKeySafeLoader,
+    node: yaml.MappingNode,
+    explicit_value: list[tuple[yaml.Node, yaml.Node]],
+    deep: bool = False,
+) -> None:
+    """Assert that a mapping's original YAML keys are unique."""
+    seen: set[Any] = set()
+    for key_node, _ in explicit_value:
+        if key_node.tag == _YAML_MERGE_TAG:
+            key = _YAML_MERGE_KEY
+        else:
+            key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in seen
+        except TypeError:
+            # Let SafeLoader report non-hashable mapping keys itself.
+            continue
+        if duplicate:
+            key_name = "<<" if key is _YAML_MERGE_KEY else key
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate key {key_name!r}",
+                key_node.start_mark,
+            )
+        seen.add(key)
+
+
+def _validate_mapping_before_flatten(
+    loader: _UniqueKeySafeLoader,
+    node: yaml.MappingNode,
+    deep: bool = False,
+) -> None:
+    """Validate explicit keys before PyYAML mutates shared merge sources."""
+    explicit_value = getattr(node, _EXPLICIT_MAPPING_VALUE, None)
+    if explicit_value is None:
+        explicit_value = node.value
+        setattr(node, _EXPLICIT_MAPPING_VALUE, explicit_value)
+        _assert_unique_explicit_keys(loader, node, explicit_value, deep=deep)
+
+    for key_node, value_node in explicit_value:
+        if key_node.tag != _YAML_MERGE_TAG:
+            continue
+        if isinstance(value_node, yaml.MappingNode):
+            _validate_mapping_before_flatten(loader, value_node, deep=deep)
+        elif isinstance(value_node, yaml.SequenceNode):
+            for merge_source in value_node.value:
+                if isinstance(merge_source, yaml.MappingNode):
+                    _validate_mapping_before_flatten(loader, merge_source, deep=deep)
 
 
 def _construct_unique_mapping(
@@ -44,35 +103,8 @@ def _construct_unique_mapping(
     node: yaml.MappingNode,
     deep: bool = False,
 ) -> dict[Any, Any]:
-    """Construct a mapping only when every explicit key is unique."""
-    seen: set[Any] = set()
-    merge_seen = False
-    for key_node, _ in node.value:
-        if key_node.tag == _YAML_MERGE_TAG:
-            # SafeLoader expands merge keys after this constructor runs.
-            if merge_seen:
-                raise yaml.constructor.ConstructorError(
-                    "while constructing a mapping",
-                    node.start_mark,
-                    "found duplicate key '<<'",
-                    key_node.start_mark,
-                )
-            merge_seen = True
-            continue
-        key = loader.construct_object(key_node, deep=deep)
-        try:
-            duplicate = key in seen
-        except TypeError:
-            # Let SafeLoader report non-hashable mapping keys itself.
-            continue
-        if duplicate:
-            raise yaml.constructor.ConstructorError(
-                "while constructing a mapping",
-                node.start_mark,
-                f"found duplicate key {key!r}",
-                key_node.start_mark,
-            )
-        seen.add(key)
+    """Construct a mapping only when every original key is unique."""
+    _validate_mapping_before_flatten(loader, node, deep=deep)
     return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
 
 
