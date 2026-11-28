@@ -1348,3 +1348,70 @@ def test_safe_extract_preserves_host_os_errors(tmp_path):
     with pytest.raises(OSError) as excinfo:
         safe_extract_skill_archive(_FailingZip(), dest)
     assert excinfo.value.errno == errno.EIO
+
+
+def test_safe_extract_translates_optional_zstd_error(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    from deerflow.skills import installer
+
+    class FakeZstdError(Exception):
+        pass
+
+    fake_compression = types.ModuleType("compression")
+    fake_zstd = types.ModuleType("compression.zstd")
+    fake_zstd.ZstdError = FakeZstdError
+    fake_compression.zstd = fake_zstd
+    monkeypatch.setitem(sys.modules, "compression", fake_compression)
+    monkeypatch.setitem(sys.modules, "compression.zstd", fake_zstd)
+
+    errors = installer._load_archive_extract_errors()
+    assert FakeZstdError in errors
+    monkeypatch.setattr(installer, "_ARCHIVE_EXTRACT_ERRORS", errors)
+
+    class _FailingReader:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, _size):
+            raise FakeZstdError("corrupt zstd frame")
+
+    class _FailingZip:
+        def infolist(self):
+            return [zipfile.ZipInfo("skill/a.txt")]
+
+        def open(self, _info):
+            return _FailingReader()
+
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with pytest.raises(ValueError, match="File is not a valid ZIP archive"):
+        safe_extract_skill_archive(_FailingZip(), dest)
+
+
+@pytest.mark.skipif(
+    not hasattr(zipfile, "ZIP_ZSTANDARD"),
+    reason="requires Python 3.14+ ZIP_ZSTANDARD",
+)
+def test_safe_extract_rejects_corrupt_zstd_member(tmp_path):
+    zip_path = tmp_path / "zstd.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_ZSTANDARD) as zf:
+        zf.writestr("skill/SKILL.md", "---\nname: demo\ndescription: demo\n---\n")
+        zf.writestr("skill/references/guide.md", b"a" * 8192 + b"hello world " * 200)
+
+    raw = bytearray(zip_path.read_bytes())
+    with zipfile.ZipFile(zip_path) as zf:
+        info = zf.getinfo("skill/references/guide.md")
+    payload_start = info.header_offset + 30 + len(info.filename.encode("utf-8")) + len(info.extra)
+    raw[payload_start + 4] ^= 0xFF
+    zip_path.write_bytes(bytes(raw))
+
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        with pytest.raises(ValueError, match="File is not a valid ZIP archive"):
+            safe_extract_skill_archive(zf, dest)

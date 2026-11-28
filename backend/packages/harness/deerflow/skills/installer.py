@@ -162,14 +162,25 @@ def resolve_skill_dir_from_archive(temp_path: Path) -> Path:
     return temp_path
 
 
-_ARCHIVE_EXTRACT_ERRORS = (
-    zipfile.BadZipFile,
-    zipfile.LargeZipFile,
-    zlib.error,
-    lzma.LZMAError,
-    EOFError,
-    RuntimeError,
-)
+def _load_archive_extract_errors() -> tuple[type[BaseException], ...]:
+    errors: list[type[BaseException]] = [
+        zipfile.BadZipFile,
+        zipfile.LargeZipFile,
+        zlib.error,
+        lzma.LZMAError,
+        EOFError,
+        RuntimeError,
+    ]
+    try:
+        from compression.zstd import ZstdError
+    except ImportError:
+        pass
+    else:
+        errors.append(ZstdError)
+    return tuple(errors)
+
+
+_ARCHIVE_EXTRACT_ERRORS = _load_archive_extract_errors()
 
 
 def _archive_member_call(op, *args):
