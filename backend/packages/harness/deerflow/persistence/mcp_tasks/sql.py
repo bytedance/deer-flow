@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.mcp.tasks import ATTENTION_TASK_STATUSES, POLLABLE_TASK_STATUSES, TERMINAL_TASK_STATUSES
-from deerflow.mcp.tasks.models import TaskStatus
+from deerflow.mcp.tasks.models import TaskReference, TaskStatus
 from deerflow.persistence.mcp_tasks.model import McpTaskRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.utils.time import coerce_iso
@@ -232,6 +232,18 @@ class McpTaskRepository:
                 thread_id=thread_id,
                 thread_incarnation=expected_thread_incarnation,
             ):
+                # A lifecycle rejection must not make an already-owned remote
+                # handle eligible for compensation. Match the unique key even
+                # when its owner belongs to an old thread or is terminal.
+                existing_owner = await session.scalar(
+                    select(McpTaskRow.id).where(
+                        McpTaskRow.user_id == user_id,
+                        McpTaskRow.server_name == server_name,
+                        McpTaskRow.remote_task_id == remote_task_id,
+                    )
+                )
+                if existing_owner is not None:
+                    raise DuplicateMcpRemoteTaskError(f"Remote MCP task {remote_task_id!r} is already tracked for server {server_name!r} by this user")
                 raise McpTaskThreadMismatchError("MCP task submission crossed a thread lifecycle boundary")
             row.thread_incarnation = expected_thread_incarnation
             session.add(row)
@@ -572,6 +584,47 @@ class McpTaskRepository:
                 row.updated_at = requested_at
                 await session.commit()
             return self._row_to_dict(row)
+
+    async def request_cancel_owned_submission(
+        self,
+        task: TaskReference,
+        *,
+        driver_name: str,
+        requested_at: datetime,
+    ) -> dict[str, Any] | None:
+        """Cancel a newly created receipt without requiring its thread to survive.
+
+        Only the submission owner uses this boundary, after create succeeds.
+        Public cancellation retains its current-thread authorization above.
+        """
+        receipt = (
+            McpTaskRow.id == task.local_task_id,
+            McpTaskRow.user_id == task.user_id,
+            McpTaskRow.thread_id == task.thread_id,
+            McpTaskRow.thread_incarnation.is_not_distinct_from(task.thread_incarnation),
+            McpTaskRow.server_name == task.server_name,
+            McpTaskRow.remote_task_id == task.remote_task_id,
+            McpTaskRow.driver_name == driver_name,
+        )
+        async with self._sf() as session:
+            # A single conditional write also serializes SQLite competitors.
+            # Repeated requests must preserve a cancellation worker's lease;
+            # only the first request invalidates an outstanding poll claim.
+            await session.execute(
+                update(McpTaskRow)
+                .where(*receipt, McpTaskRow.status.not_in(_TERMINAL_STATUS_VALUES), McpTaskRow.cancel_requested_at.is_(None))
+                .values(
+                    cancel_requested_at=requested_at,
+                    next_cancel_at=case((McpTaskRow.next_cancel_at.is_(None), requested_at), else_=McpTaskRow.next_cancel_at),
+                    lease_owner=None,
+                    lease_expires_at=None,
+                    lease_token=None,
+                    updated_at=requested_at,
+                )
+            )
+            row = (await session.execute(select(McpTaskRow).where(*receipt))).scalar_one_or_none()
+            await session.commit()
+            return self._row_to_dict(row) if row is not None else None
 
     async def claim_cancel_requests(
         self,
