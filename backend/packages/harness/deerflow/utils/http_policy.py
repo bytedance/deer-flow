@@ -22,16 +22,21 @@ def control_plane_trust_env(url: str) -> bool:
     """Whether HTTP clients for *url* should inherit environment proxy settings.
 
     Local Docker, DooD, Kubernetes and co-located Gateway endpoints are
-    control-plane connections, not internet traffic. External fully-qualified
-    hosts retain normal environment proxy behavior.
+    control-plane connections, not internet traffic. Generated Kubernetes HTTP
+    Service URLs bypass proxies; HTTPS Service URLs retain environment settings
+    for custom CA bundles and NO_PROXY. External fully-qualified hosts retain
+    normal environment proxy behavior.
     """
     try:
-        hostname = (urlparse(url).hostname or "").rstrip(".").lower()
+        parsed_url = urlparse(url)
+        hostname = (parsed_url.hostname or "").rstrip(".").lower()
     except ValueError:
         return True
     if not hostname:
         return True
-    if hostname == "localhost" or hostname.endswith(".localhost") or hostname.endswith(".docker.internal") or hostname.endswith(".containers.internal"):
+    if hostname == "localhost" or hostname.endswith((".localhost", ".docker.internal", ".containers.internal")):
+        return False
+    if parsed_url.scheme == "http" and hostname.endswith(".svc.cluster.local"):
         return False
     try:
         address = ipaddress.ip_address(hostname)

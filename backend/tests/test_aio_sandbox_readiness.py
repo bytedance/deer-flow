@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ssl
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -59,52 +61,131 @@ class _FakeLoop:
         ("http://host.docker.internal:8080", False),
         ("http://host.containers.internal:8080", False),
         ("http://k3s:30001", False),
+        ("http://sandbox-test-svc.deer-flow.svc.cluster.local:8080", False),
+        ("http://SANDBOX-TEST-SVC.DEER-FLOW.SVC.CLUSTER.LOCAL.:8080", False),
+        ("https://sandbox-test-svc.deer-flow.svc.cluster.local:8443", True),
+        ("https://SANDBOX-TEST-SVC.DEER-FLOW.SVC.CLUSTER.LOCAL.:8443", True),
         ("http://10.0.0.8:8080", False),
         ("http://8.8.8.8:8080", True),
         ("http://[2606:4700:4700::1111]:8080", True),
         ("https://sandbox.example.com", True),
+        ("https://sandbox.svc.cluster.local.example.com", True),
+        ("https://sandbox.not-svc.cluster.local", True),
     ],
 )
 def test_sandbox_http_trust_env_only_uses_proxy_for_external_urls(sandbox_url: str, expected: bool) -> None:
     assert readiness.sandbox_http_trust_env(sandbox_url) is expected
 
 
-def test_wait_for_sandbox_ready_bypasses_environment_proxy_for_docker_host(monkeypatch: pytest.MonkeyPatch) -> None:
-    sessions: list[object] = []
+@pytest.mark.parametrize(
+    ("sandbox_url", "uses_proxy"),
+    [
+        ("http://host.docker.internal:8080", False),
+        ("http://sandbox-test-svc.deer-flow.svc.cluster.local:8080", False),
+        ("https://sandbox-test-svc.deer-flow.svc.cluster.local:8443", True),
+        ("https://sandbox.example.com", True),
+    ],
+)
+def test_wait_for_sandbox_ready_routes_environment_proxy(monkeypatch: pytest.MonkeyPatch, sandbox_url: str, uses_proxy: bool) -> None:
+    import requests
 
-    class FakeSession:
-        trust_env = True
+    calls = []
 
-        def __init__(self) -> None:
-            self.headers: dict[str, str] = {}
+    def send(_adapter, request, **kwargs):
+        calls.append((request, kwargs))
+        response = requests.Response()
+        response.status_code = 200
+        response.request = request
+        response._content = b"{}"
+        return response
 
-        def __enter__(self):
-            sessions.append(self)
-            return self
-
-        def __exit__(self, *_exc_info) -> None:
-            return None
-
-        def get(self, url: str, *, timeout: float):
-            assert url == "http://host.docker.internal:8080/v1/sandbox"
-            # Ample budget remains, so the per-probe timeout clamps to the 5s ceiling.
-            assert timeout == 5
-            return SimpleNamespace(status_code=200)
-
-    monkeypatch.setattr(readiness.requests, "Session", FakeSession)
+    for variable in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(variable, "http://proxy.example:3128")
+    for variable in ("NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(variable, "")
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", send)
 
     headers = {"X-DeerFlow-Relay-Token": "secret-token"}
     assert (
         readiness.wait_for_sandbox_ready(
-            "http://host.docker.internal:8080",
+            sandbox_url,
             timeout=30,
             headers=headers,
         )
         is True
     )
-    assert len(sessions) == 1
-    assert sessions[0].trust_env is False
-    assert sessions[0].headers == headers
+    assert len(calls) == 1
+    request, options = calls[0]
+    assert request.url == f"{sandbox_url}/v1/sandbox"
+    assert request.headers["X-DeerFlow-Relay-Token"] == headers["X-DeerFlow-Relay-Token"]
+    assert options["timeout"] == 5
+    assert bool(options["proxies"]) is uses_proxy
+
+
+@pytest.fixture
+def kubernetes_ca_bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # Use one real CA so an environment-selected trust store is distinguishable
+    # from the default bundle, without generating keys or contacting a server.
+    default_bundle = Path(readiness.requests.certs.where()).read_text(encoding="ascii")
+    _, begin, certificate = default_bundle.partition("-----BEGIN CERTIFICATE-----")
+    certificate, end, _ = certificate.partition("-----END CERTIFICATE-----")
+    bundle = tmp_path / "sandbox-ca.pem"
+    bundle.write_text(begin + certificate + end + "\n", encoding="ascii")
+    for variable in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(variable, "http://proxy.example:3128")
+    for variable in ("NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(variable, "sandbox-test-svc.deer-flow.svc.cluster.local")
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(bundle))
+    monkeypatch.setenv("SSL_CERT_FILE", str(bundle))
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    return bundle
+
+
+def test_https_kubernetes_readiness_preserves_requests_ca_bundle(monkeypatch: pytest.MonkeyPatch, kubernetes_ca_bundle: Path) -> None:
+    calls = []
+
+    def send(_adapter, request, **kwargs):
+        calls.append(kwargs)
+        response = readiness.requests.Response()
+        response.status_code = 200
+        response.request = request
+        response._content = b"{}"
+        return response
+
+    monkeypatch.setattr(readiness.requests.adapters.HTTPAdapter, "send", send)
+
+    assert readiness.wait_for_sandbox_ready("https://sandbox-test-svc.deer-flow.svc.cluster.local:8443") is True
+    assert len(calls) == 1
+    assert not calls[0]["proxies"]  # NO_PROXY already makes this a direct connection.
+    assert calls[0]["verify"] == str(kubernetes_ca_bundle)
+
+
+@pytest.mark.anyio
+async def test_https_kubernetes_readiness_preserves_httpx_ca_bundle(monkeypatch: pytest.MonkeyPatch, kubernetes_ca_bundle: Path) -> None:
+    contexts: list[ssl.SSLContext] = []
+    requests = []
+    create_default_context = ssl.create_default_context
+
+    def create_context(*args, **kwargs):
+        context = create_default_context(*args, **kwargs)
+        contexts.append(context)
+        return context
+
+    async def handle_request(_transport, request):
+        requests.append(str(request.url))
+        return readiness.httpx.Response(200, request=request, json={})
+
+    monkeypatch.setattr(ssl, "create_default_context", create_context)
+    monkeypatch.setattr(readiness.httpx.AsyncHTTPTransport, "handle_async_request", handle_request)
+
+    assert await readiness.wait_for_sandbox_ready_async("https://sandbox-test-svc.deer-flow.svc.cluster.local:8443") is True
+    assert requests == ["https://sandbox-test-svc.deer-flow.svc.cluster.local:8443/v1/sandbox"]
+    expected_ca = ssl.PEM_cert_to_DER_cert(kubernetes_ca_bundle.read_text(encoding="ascii"))
+    assert contexts
+    for context in contexts:
+        assert context.get_ca_certs(binary_form=True) == [expected_ca]
+        assert context.verify_mode == ssl.CERT_REQUIRED
+        assert context.check_hostname is True
 
 
 @pytest.mark.anyio

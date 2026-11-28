@@ -8,6 +8,13 @@ DeerFlow supports multiple sandbox execution modes:
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
 - **Cloud Sandboxes** (serverless remote providers including [BytePlus veFaaS](../../backend/packages/harness/deerflow/community/vefaas_sandbox/README.md), E2B, OpenSandbox, boxd, and Tenki)
 
+Generated Kubernetes HTTP sandbox Service URLs under `.svc.cluster.local` bypass
+environment proxies for readiness checks and sandbox API calls. This keeps an
+outbound model/tool proxy from intercepting ClusterIP traffic. Configured HTTPS
+Service URLs retain environment CA bundles (`REQUESTS_CA_BUNDLE` and
+`SSL_CERT_FILE`) and proxy settings; use `NO_PROXY` for direct HTTPS connections.
+Public sandbox endpoints continue to honor the environment proxy settings.
+
 When a provider returns a structured exit code, Bash tool status follows that
 code, including timeout failures. Providers that return plain text, including
 AIO, use output-based status detection. A command that exits successfully can be
