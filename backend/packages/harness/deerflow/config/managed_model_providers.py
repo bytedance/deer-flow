@@ -160,6 +160,8 @@ def _capabilities(provider: str, model: str) -> dict[str, Any]:
         )
     elif provider in {"minimax", "minimax-cn"} and model in {"MiniMax-M2.7", "MiniMax-M2.7-highspeed"}:
         result["reasoning"] = {"thinking": "required", "dialect": "none", "history": "preserve"}
+    elif provider in {"minimax", "minimax-cn"} and model == "MiniMax-M3.1-Flash":
+        result.update(supports_vision=True, reasoning={"thinking": "required", "dialect": "none", "history": "preserve"})
     elif provider in {"minimax", "minimax-cn"} and model == "MiniMax-M3":
         result.update(
             supports_vision=True,

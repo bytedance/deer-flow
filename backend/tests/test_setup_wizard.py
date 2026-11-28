@@ -182,6 +182,9 @@ class TestProviders:
             provider = providers[name]
             assert provider.extra_config["supports_vision"] is True
             assert provider.extra_config_for("MiniMax-M3")["supports_vision"] is True
+            assert "MiniMax-M3.1-Flash" in provider.models
+            assert provider.extra_config_for("MiniMax-M3.1-Flash")["supports_vision"] is True
+            assert "when_thinking_disabled" not in provider.extra_config_for("MiniMax-M3.1-Flash")
             assert provider.extra_config_for("MiniMax-M2.7")["supports_vision"] is False
             assert provider.extra_config_for("MiniMax-M2.7-highspeed")["supports_vision"] is False
             # Override must not mutate the shared provider-level config.
