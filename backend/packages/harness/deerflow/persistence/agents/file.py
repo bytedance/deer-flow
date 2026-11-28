@@ -126,7 +126,7 @@ class FileAgentStore(AgentStore):
         return result
 
     def create(self, name: str, config: dict, soul: str, *, user_id: str | None = None) -> None:
-        name = validate_agent_name(name)
+        name = validate_agent_name(name, for_creation=True)
         paths = _ac.get_paths()
         effective_user = user_id or _ac.get_effective_user_id()
         agent_dir = paths.user_agent_dir(effective_user, name)
@@ -151,10 +151,20 @@ class FileAgentStore(AgentStore):
             raise
 
     def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> None:
+        # update() upserts: setup_agent and any first-time write mint the agent
+        # directory here, so a name that mints one must pass the same
+        # reserved-device rule as create(). A name that already owns a directory
+        # is an edit instead — an agent an older release created as ``nul`` or
+        # ``con`` must stay editable, and those were only ever creatable on a
+        # POSIX host, where the plain ``mkdir`` below still works (#7939 review).
         name = validate_agent_name(name)
+        paths = _ac.get_paths()
         effective_user = user_id or _ac.get_effective_user_id()
-        agent_dir = _ac.get_paths().user_agent_dir(effective_user, name)
+        agent_dir = paths.user_agent_dir(effective_user, name)
         pre_existing = agent_dir.exists()
+        if not pre_existing and not paths.agent_dir(name).exists():
+            # Neither layout owns the name, so this call creates it.
+            name = validate_agent_name(name, for_creation=True)
         agent_dir.mkdir(parents=True, exist_ok=True)
         try:
             self._write(agent_dir, config, soul)

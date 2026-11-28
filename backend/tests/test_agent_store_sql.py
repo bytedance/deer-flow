@@ -89,6 +89,45 @@ def test_create_duplicate_raises_agent_exists(store):
         store.create("dup", {"name": "dup"}, "s2", user_id="u1")
 
 
+@pytest.mark.parametrize("bad_name", ["NUL", "nul", "COM1", "con", "PRN", "AUX", "LPT9", "CON.txt", "report. "])
+def test_create_rejects_reserved_device_names(store, bad_name):
+    # Mirrors FileAgentStore.create: the SQL backend must enforce the same
+    # reserved-name rule instead of letting callers that bypass the Gateway
+    # router mint a host-path-incompatible agent (see #7939).
+    with pytest.raises(ValueError):
+        store.create(bad_name, {"name": bad_name}, "s", user_id="u1")
+    assert not store.exists(bad_name, user_id="u1")
+
+
+@pytest.mark.parametrize("bad_name", ["NUL", "COM1", "PRN"])
+def test_update_upsert_rejects_reserved_device_names(store, bad_name):
+    # update() is an upsert (first-time writes mint a new agent), so a reserved
+    # name must be rejected here too, not just on the create() path.
+    with pytest.raises(ValueError):
+        store.update(bad_name, {"name": bad_name}, "s", user_id="u1")
+    assert not store.exists(bad_name, user_id="u1")
+
+
+@pytest.mark.parametrize("name", ["nul", "con"])
+def test_update_keeps_legacy_reserved_name_row_editable(store, name):
+    """An existing row stored under a reserved name must stay editable.
+
+    create() refuses these names today, but an older release could mint one on
+    a POSIX host — create only checked the character class. update() is an
+    upsert, so the rule has to key off whether the row exists: refuse only the
+    insert branch, and edit whatever is already stored (#7939 review).
+    """
+    with store._Session() as session:
+        session.add(AgentRow(id="legacy-row", user_id="u1", name=name, config={}, soul="old soul"))
+        session.commit()
+
+    store.update(name, {"name": name, "description": "edited"}, "new soul", user_id="u1")
+
+    assert store.get_soul(name, user_id="u1") == "new soul"
+    assert store.get(name, user_id="u1").description == "edited"
+    assert [cfg.name for cfg in store.list(user_id="u1")] == [name]
+
+
 def test_update_is_upsert_and_partial(store):
     # Upsert: update on a missing agent creates it.
     store.update("a", {"name": "a", "description": "first"}, "soul1", user_id="u1")

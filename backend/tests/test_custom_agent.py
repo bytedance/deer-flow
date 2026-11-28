@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -44,6 +45,48 @@ def test_agent_name_validation_rejects_trailing_newline(name: str) -> None:
         validate_agent_name(name)
     with pytest.raises(ValueError, match="Invalid agent name"):
         agent_facts_directory(Path("memory.json"), name)
+
+
+@pytest.mark.parametrize("name", ["NUL", "nul", "Nul", "CON", "PRN", "AUX", "COM1", "LPT9"])
+def test_host_agent_name_validation_rejects_windows_reserved_names(name: str) -> None:
+    """``^[A-Za-z0-9-]+$`` admits Windows reserved device names.
+
+    A custom agent name is a directory component under the agent root, and
+    ``FileAgentStore.create`` writes ``config.yaml`` inside it. On Windows that
+    open resolves to the device rather than to a file, so creation died with
+    ``FileNotFoundError`` after ``mkdir`` had already appeared to succeed, and
+    the router answered an opaque 500 instead of rejecting the name.
+
+    The shared validator now reuses ``windows_incompatible_segment()`` -- the
+    same check uploads, sandbox writes, skill support files and thread IDs go
+    through -- so the name is refused on every platform by one rule.
+    """
+    from deerflow.config.agents_config import validate_agent_name as validate_host_agent_name
+
+    with pytest.raises(ValueError, match="reserved Windows device name"):
+        validate_host_agent_name(name, for_creation=True)
+
+
+@pytest.mark.parametrize("name", ["NUL", "nul", "CON", "COM1"])
+def test_host_agent_name_allows_reserved_names_on_read_and_delete(name: str) -> None:
+    """Reads and deletes of an already-stored agent must keep working.
+
+    ``windows_incompatible_segment()`` is documented to apply when a name is
+    created, not when an existing path is read or removed. Refusing these names
+    here would strand agents that an older release created on a Linux host: the
+    owner could no longer inspect or delete them.
+    """
+    from deerflow.config.agents_config import validate_agent_name as validate_host_agent_name
+
+    assert validate_host_agent_name(name) == name
+
+
+@pytest.mark.parametrize("name", ["reviewer", "a1-b2", "code-reviewer-2"])
+def test_host_agent_name_validation_keeps_ordinary_names(name: str) -> None:
+    """The reserved-name rule must not narrow the ordinary agent-name grammar."""
+    from deerflow.config.agents_config import validate_agent_name as validate_host_agent_name
+
+    assert validate_host_agent_name(name, for_creation=True) == name
 
 
 def _make_paths(base_dir: Path):
@@ -817,6 +860,100 @@ class TestAgentsAPI:
         """
         assert agent_client.post("/api/agents", json={"name": name}).status_code == 422
         assert agent_client.get("/api/agents").json()["agents"] == []
+
+    @pytest.mark.parametrize("name", ["NUL", "nul", "Nul", "CON", "PRN", "AUX", "COM1", "LPT9"])
+    def test_windows_reserved_device_name_in_agent_name_is_rejected(self, agent_client, name):
+        """A reserved device name must be a 422, not a 500 from the store.
+
+        Accepted by the router grammar, ``nul`` became ``{agents}/nul/config.yaml``;
+        the write raised ``FileNotFoundError`` on Windows hosts and the handler's
+        catch-all turned it into ``500 Failed to create agent``. Nothing is created
+        either way, so the caller should be told the name itself is unusable.
+        """
+        response = agent_client.post("/api/agents", json={"name": name})
+        assert response.status_code == 422
+        assert "reserved Windows device name" in response.json()["detail"]
+        assert agent_client.get("/api/agents").json()["agents"] == []
+
+    @pytest.mark.parametrize("name", ["NUL", "CON", "COM1"])
+    def test_windows_reserved_device_name_update_does_not_mint(self, agent_client, name):
+        """An update that would create the agent is still refused.
+
+        update() is an upsert, so PUT on a name nobody owns is a mint — the one
+        case the reserved-device rule has to cover here. It surfaces as 404
+        (nothing to edit) and, importantly, creates nothing on disk.
+        """
+        response = agent_client.put(f"/api/agents/{name}", json={"description": "x"})
+        assert response.status_code == 404
+        assert agent_client.get("/api/agents").json()["agents"] == []
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="nul/con are Windows device names, so this legacy agent could only have been created on POSIX")
+    @pytest.mark.parametrize("name", ["nul", "con"])
+    def test_legacy_reserved_device_name_agent_stays_editable(self, agent_client, tmp_path, name):
+        """An agent an older release stored under a reserved name must stay editable.
+
+        Before this rule existed, a POSIX host could create an agent called
+        ``nul``. Validating the name as a new path on update would strand it: the
+        owner could read it but every write would 422/500, including the
+        ``setup_agent`` handshake that runs on each visit (#7939 review).
+        """
+        legacy_dir = tmp_path / "users" / "test-user-autouse" / "agents" / name
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "config.yaml").write_text(f"name: {name}\ndescription: old\n", encoding="utf-8")
+        (legacy_dir / "SOUL.md").write_text("old soul", encoding="utf-8")
+
+        response = agent_client.put(f"/api/agents/{name}", json={"soul": "new soul"})
+
+        assert response.status_code == 200
+        assert response.json()["soul"] == "new soul"
+        assert (legacy_dir / "SOUL.md").read_text(encoding="utf-8") == "new soul"
+        # The edit must land on the existing record, not fork a second one.
+        assert agent_client.get("/api/agents").json()["agents"][0]["name"] == name
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="nul/con are Windows device names, so this legacy agent could only have been created on POSIX")
+    @pytest.mark.parametrize("name", ["nul", "con"])
+    def test_legacy_reserved_device_name_agent_still_deletable(self, agent_client, tmp_path, name):
+        """The same legacy agent must also remain removable, not just editable."""
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / name
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "config.yaml").write_text(f"name: {name}\ndescription: old\n", encoding="utf-8")
+        (agent_dir / "SOUL.md").write_text("old soul", encoding="utf-8")
+
+        assert agent_client.delete(f"/api/agents/{name}").status_code == 204
+        assert not agent_dir.exists()
+
+    @pytest.mark.parametrize("name", ["NUL", "CON"])
+    def test_windows_reserved_device_name_can_still_be_deleted(self, agent_client, name):
+        """Delete must not reject a name an older release already stored.
+
+        A Linux host could create such an agent before this rule existed. If
+        deletion validated it as a new name, the owner would be stuck with a row
+        they can neither use nor remove. 404 (absent) is the expected answer here,
+        not 422.
+        """
+        response = agent_client.delete(f"/api/agents/{name}")
+        assert response.status_code == 404
+
+    @pytest.mark.parametrize("name", ["NUL", "CON", "COM1"])
+    def test_windows_reserved_device_name_is_rejected_by_check(self, agent_client, name):
+        """The frontend's availability probe must also see reserved names as unusable.
+
+        ``GET /api/agents/check?name=...`` is what the UI calls as the user types;
+        it flips to ``for_creation=True`` so a reserved name is reported as taken
+        (422) rather than appearing available and only failing on submit.
+        """
+        response = agent_client.get("/api/agents/check", params={"name": name})
+        assert response.status_code == 422
+
+    def test_windows_reserved_device_name_is_rejected_on_import(self, agent_client):
+        """Importing a package under a reserved target name must be a 422."""
+        package = {
+            "format": "deerflow.custom-agent",
+            "version": 1,
+            "agent": {"name": "NUL", "description": "d", "soul": "s"},
+        }
+        response = agent_client.post("/api/agents/import", json=package)
+        assert response.status_code == 422
 
     def test_display_name_round_trip_keeps_stable_identity(self, agent_client):
         response = agent_client.post("/api/agents", json={"name": "code-reviewer", "display_name": "  代码审查助手  "})
