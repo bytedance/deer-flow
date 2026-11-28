@@ -19,12 +19,14 @@ from .nodes import (
 )
 from .types import State
 
-
+# 返回下一个节点
+#有些节点在这个文件里没有显式写出后续连线
+#后面读到节点返回的 Command(goto=...) 就能对应起来
 def continue_to_running_research_team(state: State):
     current_plan = state.get("current_plan")
     if not current_plan or not current_plan.steps:
         return "planner"
-
+    # 所有步骤已完成
     if all(step.execution_res for step in current_plan.steps):
         return "planner"
 
@@ -51,14 +53,18 @@ def _build_base_graph():
     """Build and return the base state graph with all nodes and edges."""
     builder = StateGraph(State)
     builder.add_edge(START, "coordinator")
+    #===主要节点====
     builder.add_node("coordinator", coordinator_node)
     builder.add_node("background_investigator", background_investigation_node)
     builder.add_node("planner", planner_node)
     builder.add_node("reporter", reporter_node)
     builder.add_node("research_team", research_team_node)
+    #=======
+    #===research_team的节点====
     builder.add_node("researcher", researcher_node)
     builder.add_node("analyst", analyst_node)
     builder.add_node("coder", coder_node)
+    #=======
     builder.add_node("human_feedback", human_feedback_node)
     builder.add_edge("background_investigator", "planner")
     builder.add_conditional_edges(
