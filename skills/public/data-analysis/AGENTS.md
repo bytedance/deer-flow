@@ -50,3 +50,5 @@ preserving nulls. Change the XLS cache key when this materialization changes.
   duplicates.
 - **At the CLI boundary a `ValueError` becomes a short stderr message and a
   non-zero exit.** The connection closes in `finally`.
+
+Query exports must reject destinations that refer to an input file, including symbolic and hard links, while allowing separate result files to be overwritten.
