@@ -474,30 +474,40 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         """Return messages with tool results grouped after their tool-call AIMessage.
 
         This normalizes model-bound causal order before provider serialization while
-        preserving already-valid transcripts unchanged.
+        preserving already-valid transcripts unchanged. Reused ids with
+        distinct tool names keep results with the tool that produced them.
         """
         normalized = self._normalize_tool_call_ids(messages)
 
-        tool_messages_by_id: dict[str, deque[ToolMessage]] = defaultdict(deque)
-        for msg in normalized:
-            if isinstance(msg, ToolMessage):
-                tool_messages_by_id[msg.tool_call_id].append(msg)
-
-        tool_call_ids: set[str] = set()
+        tool_names_by_id: dict[str, set[str]] = defaultdict(set)
         for msg in normalized:
             if getattr(msg, "type", None) != "ai":
                 continue
             for tc in self._message_tool_calls(msg):
                 tc_id = tc.get("id")
                 if tc_id:
-                    tool_call_ids.add(tc_id)
+                    names = tool_names_by_id[tc_id]
+                    if not tc.get("invalid_tool_name"):
+                        names.add(tc["name"])
+
+        tool_messages_by_id: dict[str, deque[tuple[int, ToolMessage]]] = defaultdict(deque)
+        tool_messages_by_name: dict[tuple[str, str], deque[tuple[int, ToolMessage]]] = defaultdict(deque)
+        for index, msg in enumerate(normalized):
+            if not isinstance(msg, ToolMessage):
+                continue
+            name = msg.name.strip() if _valid_tool_name(msg.name) else None
+            names = tool_names_by_id.get(msg.tool_call_id, ())
+            if name is not None and len(names) > 1 and name in names:
+                tool_messages_by_name[msg.tool_call_id, name].append((index, msg))
+            else:
+                tool_messages_by_id[msg.tool_call_id].append((index, msg))
 
         patched: list = []
         patch_count = 0
         drop_count = 0
         for msg in normalized:
             if isinstance(msg, ToolMessage):
-                if msg.tool_call_id in tool_call_ids:
+                if msg.tool_call_id in tool_names_by_id:
                     continue  # Will be re-emitted after its AIMessage
                 # Orphan: ToolMessage whose originating AIMessage tool_call is
                 # no longer in the request (e.g. removed by summarization).
@@ -520,7 +530,10 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                     continue
 
                 tool_msg_queue = tool_messages_by_id.get(tc_id)
-                existing_tool_msg = tool_msg_queue.popleft() if tool_msg_queue else None
+                named_queue = None if tc.get("invalid_tool_name") else tool_messages_by_name.get((tc_id, tc["name"]))
+                if named_queue and (not tool_msg_queue or named_queue[0][0] < tool_msg_queue[0][0]):
+                    tool_msg_queue = named_queue
+                existing_tool_msg = tool_msg_queue.popleft()[1] if tool_msg_queue else None
                 if existing_tool_msg is not None:
                     if tc.get("invalid_tool_name") and _has_invalid_tool_name(existing_tool_msg.name):
                         existing_tool_msg = existing_tool_msg.model_copy(update={"name": tc["name"]})
