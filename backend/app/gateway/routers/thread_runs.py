@@ -656,7 +656,9 @@ def _clean_human_message_for_regenerate(message: Any) -> dict[str, Any]:
 
 
 def _still_mentioned(label: str, text: str) -> bool:
-    return bool(label) and re.search(rf"@{re.escape(label)}(?![\w-])", text) is not None
+    # Same left boundary as the composer's mention picker (mentions/query.ts):
+    # an "@" inside an email address or URL is not a mention.
+    return bool(label) and re.search(rf"(?<![^\s（(，,。:：]){re.escape(f'@{label}')}(?![\w-])", text) is not None
 
 
 def _edited_mention_metadata(source_kwargs: dict[str, Any], replacement_text: str) -> dict[str, Any]:

@@ -940,8 +940,11 @@ _ALICE = {"namespace": "example.team", "provider": "members", "id": "alice", "la
         ),
         ("@skill-a review the Globex contract", {"skill_references": ["skill-a"]}),
         ("review the Globex contract (@skill-b)", {"skill_references": ["skill-b"]}),
+        ("审核 Globex 合同，@skill-a", {"skill_references": ["skill-a"]}),
         ("review the Globex contract", {}),
         ("@skill-ab and @Alice Chenko review Globex", {}),
+        ("@skill-b send the report to reviewer@skill-a.example", {"skill_references": ["skill-b"]}),
+        ("see https://wiki.example/@skill-a for Globex", {}),
     ],
 )
 def test_prepare_edit_regenerate_payload_keeps_mentions_still_in_text(replacement_text: str, expected: dict):

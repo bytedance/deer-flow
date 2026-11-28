@@ -41,8 +41,9 @@ The edited message copies its uploaded files and quoted-message context from the
 source message. Its @ selections, `skill_references` and `extension_mentions`, are
 copied only while their "@label" text is still in the replacement text: the
 composer sends each selection as metadata and shows it as that text, so the edit
-box shows the selection as text and deleting the text drops it. Other metadata is
-not copied.
+box shows the selection as text and deleting the text drops it. The "@" must
+start a mention under the composer's picker rule, so "@label" inside an email
+address or URL does not keep a selection. Other metadata is not copied.
 
 A branch reserves the child thread and creates its ownership record before
 writing its replay base and head. The gateway checks the child reservation
