@@ -338,6 +338,17 @@ slot. For a user-requested summary or delivery after background work, the option
 keeps ownership when active. See [batch dependencies and follow-up](../../backend/docs/BATCH_CONTINUATION.md)
 for authorization, cancellation, recovery and result semantics.
 
+Upgrade all batch workers before enabling `subagent_batches.recovery_policy: conservative`,
+then restart the Gateway. Each new batch retains the policy in effect at submission.
+If a worker stops after dispatch and before recording the result, the item becomes
+**Outcome unknown**. A timeout after dispatch has the same effect. The worker
+leaves the item unresolved and the UI hides the retry action because the external operation
+may already have succeeded. Dependents and the requested follow-up wait. Independent
+items can continue, recorded results stay available, and known execution failures
+can be retried explicitly. Recovery has been verified with one Gateway and SQLite.
+See the [recovery contract](../../backend/docs/BATCH_CONTINUATION.md#conservative-recovery-opt-in)
+for cancellation, migration and how to investigate an unknown outcome.
+
 When a source run fails or hits a hard stop, the Gateway attempts each batch
 cancellation independently. A failed cancellation logs the batch and run IDs.
 
@@ -362,9 +373,9 @@ Snapshots preserve whole excerpts, not freshly fetched provider content. They in
 
 Explicitly enabled nested `task` delegation propagates omitted opaque source IDs in its captured artifact. Each outer report filters and deduplicates those IDs, and independently captured evidence can restore an omitted source. The durable snapshot publishes only the final count. Legacy task artifacts without omission IDs cannot reconstruct earlier forwarding losses; unknown prose citations are not treated as captured evidence.
 
-If an item's final lease expires after exhausting the retry budget, the batch reaches a terminal state once all items are terminal: `failed` when none succeeded, or `completed` when at least one succeeded. The item remains `failed` in both cases so partial results stay visible.
+Under the default `retry` policy, if an item's final lease expires after exhausting the retry budget, the batch reaches a terminal state once all items are terminal: `failed` when none succeeded, or `completed` when at least one succeeded. The item remains `failed` in both cases so partial results stay visible.
 
-Paused batches also reconcile expired attempts after a worker exits. Retryable items remain queued without starting new work until you explicitly resume the batch; exhausted attempts become failed and can be retried individually.
+Paused batches also reconcile expired attempts after a worker exits. Retryable items remain queued until you resume the batch. Under the default policy, exhausted attempts become failed and can be retried individually. Resuming a conservative batch preserves unknown outcomes.
 
 Direct `create_deerflow_agent(...)` integrations can own the same boundary explicitly instead of relying on Gateway startup. Construct one `SubagentRuntime` and share it across every graph in that application; its `max_running`, ordinary per-run total, bound `task` tool, and optional durable-batch tools then use the same caller-owned snapshot and execution controller. A runtime with a batch repository owns a worker and must be started before graph construction and stopped during application shutdown:
 

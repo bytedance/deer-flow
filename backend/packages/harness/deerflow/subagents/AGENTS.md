@@ -1,11 +1,9 @@
 # Subagents (`deerflow/subagents/`)
 
-Runs delegated work for the lead agent. `task` starts one in-memory subagent and
-waits for it. `batch_task` writes durable rows that a lease-based batch service
-executes, in the Gateway or in a separate worker. This directory also owns the
-subagent registry, capacity limits, the report contract and the acceptance checks
-that verify a subagent's claims. Batch behaviour and ownership:
-[BATCH_CONTINUATION.md](../../../../docs/BATCH_CONTINUATION.md).
+`task` waits for one in-memory subagent. `batch_task` persists work for a
+lease-based Gateway or standalone worker. This package owns the registry,
+capacity limits, reports and acceptance checks. See
+[batch ownership and recovery](../../../../docs/BATCH_CONTINUATION.md).
 
 ## Verify
 
@@ -43,9 +41,11 @@ from `deerflow.utils.messages`. Keep delayed Steer reports as sanitized history.
 
 ## Durable batches
 
-- **One execution lease per item.** The worker heartbeat covers tool assembly,
-  execution and acceptance. Every write checks the lease owner and the active
-  status in SQL, so a worker that lost its lease cannot write.
+- **One execution lease per item.** Heartbeat through tool assembly, execution
+  and acceptance. Fence each write on owner and active status in SQL.
+- **Freeze the policy at admission.** Under `conservative`, record dispatch
+  before `execute_async`. Only proven admission rejection can clear it for retry.
+  A timeout or missing result after dispatch blocks retry, dependents and follow-up.
 - **Persist data, never live capabilities.** A batch spec stores JSON that a
   different process restores after lease recovery: prompt overlays, knowledge
   scope, acceptance criteria. A malformed stored scope fails the item; it does not

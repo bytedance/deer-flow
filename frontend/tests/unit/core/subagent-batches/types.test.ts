@@ -31,6 +31,17 @@ const BATCH: SubagentBatch = {
 };
 
 describe("subagent batch progress", () => {
+  it("keeps unknown outcomes active without counting them as completed", () => {
+    const batch: SubagentBatch = {
+      ...BATCH,
+      recovery_policy: "conservative",
+      counts: { ...BATCH.counts, running: 0, outcome_unknown: 1 },
+    };
+    expect(isActiveSubagentBatch(batch)).toBe(true);
+    expect(completedSubagentBatchItems(batch)).toBe(4);
+    expect(subagentBatchProgress(batch)).toBe(40);
+  });
+
   it("keeps a completed batch observable while its requested follow-up is pending", () => {
     expect(
       isActiveSubagentBatch({

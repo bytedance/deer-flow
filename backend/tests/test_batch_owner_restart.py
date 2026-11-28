@@ -105,9 +105,9 @@ def _gateway(root, client, port, generation):
             process.wait(timeout=10)
 
 
-@pytest.mark.parametrize("dispatch", ["batch_queue", "restart"])
+@pytest.mark.parametrize(("dispatch", "recovery_policy"), [("batch_queue", "retry"), ("restart", "retry"), ("batch_queue", "conservative")])
 @pytest.mark.parametrize("change", ["disabled", "demoted", "promoted", "unchanged_admin", "unchanged_user"])
-def test_batch_revalidates_owner_at_execution(tmp_path, database, dispatch, change):
+def test_batch_revalidates_owner_at_execution(tmp_path, database, dispatch, recovery_policy, change):
     database_config, read = database
     config = {
         "models": [{"name": "owner-probe", "use": "support.batch_owner:OwnerModel", "model": "offline", "supports_tool_calling": True}],
@@ -120,7 +120,14 @@ def test_batch_revalidates_owner_at_execution(tmp_path, database, dispatch, chan
         "summarization": {"enabled": False},
         "tool_search": {"enabled": False},
         "hitl_approval": {"enabled": False},
-        "subagent_batches": {"enabled": True, "poll_interval_seconds": 0.1, "lease_seconds": 10, "default_max_running_items": 1, "max_attempts": 3 if dispatch == "restart" else 1},
+        "subagent_batches": {
+            "enabled": True,
+            "recovery_policy": recovery_policy,
+            "poll_interval_seconds": 0.1,
+            "lease_seconds": 10,
+            "default_max_running_items": 1,
+            "max_attempts": 3 if dispatch == "restart" else 1,
+        },
         "subagent_runtime": {"max_running": 1},
         "authorization": {"enabled": True, "provider": {"use": "deerflow.authz.rbac:RbacAuthorizationProvider", "config": {"roles": {"admin": {}, "user": {"tools": {"deny": ["owner_admin"]}}}}}},
     }
@@ -156,12 +163,16 @@ def test_batch_revalidates_owner_at_execution(tmp_path, database, dispatch, chan
             _until(lambda: (tmp_path / "reached-first").exists())
             assert not (tmp_path / "reached-second").exists()
             assert not (tmp_path / "calls.jsonl").exists()
-            batch_id, stored_spec = read("SELECT id, execution_spec FROM subagent_batches WHERE user_id = :owner", owner=owner)[0]
+            batch_id, stored_spec, stored_policy = read("SELECT id, execution_spec, recovery_policy FROM subagent_batches WHERE user_id = :owner", owner=owner)[0]
             spec = json.loads(stored_spec) if isinstance(stored_spec, str) else stored_spec
             assert spec["user_role"] == original_role
+            assert stored_policy == recovery_policy
 
             def items():
-                return read("SELECT item_key, status, attempt, error FROM subagent_batch_items WHERE batch_id = :batch_id ORDER BY position", batch_id=batch_id)
+                return read(
+                    "SELECT item_key, status, attempt, error, attempt_id, dispatch_started_at IS NOT NULL AS dispatched FROM subagent_batch_items WHERE batch_id = :batch_id ORDER BY position",
+                    batch_id=batch_id,
+                )
 
             _until(lambda: len(rows := items()) == 2 and rows[1][2] == 0)
             if change == "disabled":
@@ -184,7 +195,17 @@ def test_batch_revalidates_owner_at_execution(tmp_path, database, dispatch, chan
                 # dropped; never manufacture task state for recovery.
                 (tmp_path / "evidence.json").write_text(
                     json.dumps(
-                        {"backend": database_config["backend"], "change": change, "dispatch": dispatch, "old_pid": first.pid, "new_pid": pid, "old_exit": first.returncode, "items": [dict(row._mapping) for row in rows], "calls": calls},
+                        {
+                            "backend": database_config["backend"],
+                            "change": change,
+                            "dispatch": dispatch,
+                            "recovery_policy": recovery_policy,
+                            "old_pid": first.pid,
+                            "new_pid": pid,
+                            "old_exit": first.returncode,
+                            "items": [dict(row._mapping) for row in rows],
+                            "calls": calls,
+                        },
                         indent=2,
                     ),
                     encoding="utf-8",
@@ -195,13 +216,21 @@ def test_batch_revalidates_owner_at_execution(tmp_path, database, dispatch, chan
                 else:
                     assert rows[1][2] == 1
                     assert rows[0][1] == "succeeded"  # Already admitted, outside the revocation gate.
+                if recovery_policy == "conservative":
+                    assert all(row.attempt_id for row in rows)
+                    assert rows[0].dispatched
                 observed = calls if dispatch == "restart" else [call for call in calls if call["item"] == "second"]
                 if change in ("disabled", "demoted", "promoted"):
                     assert rows[1][1] == "failed", (rows, calls)
+                    # Revocation must fail before dispatch intent is committed,
+                    # so conservative recovery does not mark an unlaunched item outcome_unknown.
+                    assert not rows[1].dispatched
                     assert not observed
                     assert not (tmp_path / "reached-second").exists()
                 else:
                     assert all(row[1] == "succeeded" for row in rows), (rows, calls)
+                    if recovery_policy == "conservative":
+                        assert rows[1].dispatched
                     assert all(call["role"] == original_role for call in observed)
                     assert {call["tool"] for call in observed} == ({"admin", "normal"} if original_role == "admin" else {"normal"})
 
