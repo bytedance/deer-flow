@@ -1,5 +1,6 @@
 import base64
 import errno
+import fnmatch
 import json
 import logging
 import math
@@ -56,21 +57,36 @@ def _pattern_file_types(pattern: str) -> list[str] | None:
     """Return a server-side extension filter for a glob pattern, if it has one.
 
     The listing endpoint takes no pattern, so the 404 fallback for images
-    without ``/v1/file/glob`` walks the whole search root. When the pattern
-    ends in a literal ``.<extension>``, every match has that extension, so
-    ``file_types`` can be pushed to the server and files with other extensions
-    stay in the sandbox. Files that share the extension, and every directory
-    entry, still transfer: the endpoint has no result limit. Wildcard
-    extensions (``*.*``, ``*.[jt]s``) are not derivable and return ``None``;
-    the caller then falls back to the full listing. A name that is only
-    ``.<ext>`` (a dotfile such as ``.gitignore``) has no server-side extension
-    and is filtered out, which is the price of the push-down.
+    without ``/v1/file/glob`` walks the whole search root. When the basename
+    pattern ends in a literal ``.<extension>`` and cannot match a name made
+    only of dots followed by that extension, every match is reported with the
+    extension, so ``file_types`` can be pushed and unrelated files stay in the
+    sandbox. Files that share the extension, and every directory entry, still
+    transfer: the endpoint has no result limit. Wildcard extensions (``*.*``,
+    ``*.[jt]s``) are not derivable and return ``None``; the caller then falls
+    back to the full listing.
+
+    A name made only of dots and the extension (``.csv``) is the case that
+    breaks that assumption: the listing endpoint reports it with no extension,
+    while ``path_matches`` accepts it for ``*.csv``. Pushing the extension down
+    would drop it without any truncation signal, so a pattern whose stem can
+    match a run of dots keeps the full listing too.
     """
     segment = pattern.rstrip("/").rsplit("/", 1)[-1]
     before, dot, extension = segment.rpartition(".")
     if not before or not dot or not extension:
         return None
     if any(character in _GLOB_METACHARACTERS for character in extension):
+        return None
+    stem = segment[: len(segment) - len(extension) - 1]
+    # A run of dots in front of the extension is the reachable part of the
+    # extension-less class. The candidates are matched with ``fnmatchcase``
+    # because the client matcher goes through pathlib, which normalizes a bare
+    # ``.`` candidate to nothing; these are ordinary names here. The
+    # search stops at the stem length: a minimal all-dots match spends at
+    # least one character per fixed-length token, while ``*`` can consume
+    # nothing, so a longer run is never the only match.
+    if any(fnmatch.fnmatchcase("." * dots, stem) for dots in range(1, len(stem) + 1)):
         return None
     return [f".{extension}"]
 
@@ -1511,10 +1527,11 @@ class AioSandbox(Sandbox):
         file_types = _pattern_file_types(pattern) if pattern else None
         if file_types:
             # The listing endpoint has no pattern parameter, so a whole-tree
-            # walk is the only fallback for images without /v1/file/glob. A
-            # literal extension the pattern already requires is the one filter
-            # it does accept, and it keeps files with other extensions inside
-            # the sandbox; directories are still returned and filtered here.
+            # walk is the only fallback for images without /v1/file/glob. When
+            # the helper can prove that every match carries one extension, it
+            # sends that as the endpoint's only filter, so files with other
+            # extensions stay inside the sandbox; directories are still
+            # returned and filtered here.
             kwargs["file_types"] = file_types
         result = self._client.file.list_path(**kwargs)
         return result.data.files if result.data and result.data.files else []

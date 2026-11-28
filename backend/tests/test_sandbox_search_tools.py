@@ -588,7 +588,7 @@ def test_aio_sandbox_glob_fallback_pushes_a_literal_extension_to_the_server(monk
     monkeypatch.setattr(sandbox._client.file, "glob_files", missing_glob_files)
     monkeypatch.setattr(sandbox._client.file, "list_path", list_path)
 
-    matches, truncated = sandbox.glob("/mnt/user-data/uploads", "**/*.log")
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", "**/worker.log")
 
     assert seen["file_types"] == [".log"]
     assert matches == ["/mnt/user-data/uploads/logs/worker.log"]
@@ -649,21 +649,129 @@ def test_aio_sandbox_glob_include_dirs_pushes_a_literal_extension_to_the_server(
 
     monkeypatch.setattr(sandbox._client.file, "list_path", list_path)
 
-    matches, truncated = sandbox.glob("/mnt/user-data/uploads", ".cache/*.txt", include_dirs=True)
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", ".cache/trace.txt", include_dirs=True)
 
     assert seen["file_types"] == [".txt"]
     assert matches == ["/mnt/user-data/uploads/.cache/trace.txt"]
     assert truncated is False
 
 
+def test_aio_sandbox_glob_fallback_keeps_a_dotfile_that_matches_the_pattern(monkeypatch) -> None:
+    """``*.csv`` also matches a file named exactly ``.csv``. The listing
+    endpoint reports that name without an extension, so pushing the extension
+    down would drop it silently; the pattern must keep the full listing."""
+    from agent_sandbox.core.api_error import ApiError
+
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+
+    def missing_glob_files(**kwargs):
+        raise ApiError(status_code=404, headers={}, body={"detail": "Not Found"})
+
+    seen: dict = {}
+
+    def list_path(**kwargs):
+        seen.update(kwargs)
+        files = [
+            SimpleNamespace(path="/mnt/user-data/uploads/.csv", is_directory=False),
+            SimpleNamespace(path="/mnt/user-data/uploads/report.csv", is_directory=False),
+        ]
+        # The endpoint reports a name that is only dots plus the extension with
+        # no extension (``os.path.splitext`` drops it entirely), so a pushed
+        # ``file_types`` filter would drop it. This is the stricter of the
+        # plausible endpoint rules, which keeps the assertions sensitive.
+        suffixes = tuple(kwargs.get("file_types") or ())
+        if suffixes:
+            files = [entry for entry in files if entry.is_directory or os.path.splitext(entry.path)[1] in suffixes]
+        return SimpleNamespace(data=SimpleNamespace(files=files))
+
+    monkeypatch.setattr(sandbox._client.file, "glob_files", missing_glob_files)
+    monkeypatch.setattr(sandbox._client.file, "list_path", list_path)
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", "*.csv")
+
+    assert "file_types" not in seen
+    assert matches == ["/mnt/user-data/uploads/.csv", "/mnt/user-data/uploads/report.csv"]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_fallback_keeps_a_dot_only_name_with_a_wildcard_stem(monkeypatch) -> None:
+    """``?*.csv`` matches ``..csv`` as well as ``report.csv``, and the endpoint
+    reports the dot-only name with no extension. The stem can match a run of
+    dots, so the pattern must keep the full listing."""
+    from agent_sandbox.core.api_error import ApiError
+
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+
+    def missing_glob_files(**kwargs):
+        raise ApiError(status_code=404, headers={}, body={"detail": "Not Found"})
+
+    seen: dict = {}
+
+    def list_path(**kwargs):
+        seen.update(kwargs)
+        files = [
+            SimpleNamespace(path="/mnt/user-data/uploads/..csv", is_directory=False),
+            SimpleNamespace(path="/mnt/user-data/uploads/report.csv", is_directory=False),
+        ]
+        suffixes = tuple(kwargs.get("file_types") or ())
+        if suffixes:
+            files = [entry for entry in files if entry.is_directory or os.path.splitext(entry.path)[1] in suffixes]
+        return SimpleNamespace(data=SimpleNamespace(files=files))
+
+    monkeypatch.setattr(sandbox._client.file, "glob_files", missing_glob_files)
+    monkeypatch.setattr(sandbox._client.file, "list_path", list_path)
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", "?*.csv")
+
+    assert "file_types" not in seen
+    assert matches == ["/mnt/user-data/uploads/..csv", "/mnt/user-data/uploads/report.csv"]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_include_dirs_keeps_a_dotfile_that_matches_the_pattern(monkeypatch) -> None:
+    """The include-dirs branch lists through the same helper, so it must keep
+    the dotfile for the same reason."""
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    seen: dict = {}
+
+    def list_path(**kwargs):
+        seen.update(kwargs)
+        files = [
+            SimpleNamespace(path="/mnt/user-data/uploads/.cache", is_directory=True),
+            SimpleNamespace(path="/mnt/user-data/uploads/.cache/.txt", is_directory=False),
+            SimpleNamespace(path="/mnt/user-data/uploads/.cache/trace.txt", is_directory=False),
+        ]
+        suffixes = tuple(kwargs.get("file_types") or ())
+        if suffixes:
+            files = [entry for entry in files if entry.is_directory or os.path.splitext(entry.path)[1] in suffixes]
+        return SimpleNamespace(data=SimpleNamespace(files=files))
+
+    monkeypatch.setattr(sandbox._client.file, "list_path", list_path)
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", ".cache/*.txt", include_dirs=True)
+
+    assert "file_types" not in seen
+    assert matches == ["/mnt/user-data/uploads/.cache/.txt", "/mnt/user-data/uploads/.cache/trace.txt"]
+    assert truncated is False
+
+
 @pytest.mark.parametrize(
     ("pattern", "expected"),
     [
-        ("**/*.log", [".log"]),
-        ("*.txt", [".txt"]),
+        ("**/*.log", None),
+        ("*.txt", None),
+        (".cache/*.txt", None),
+        ("?*.csv", None),
+        ("*?.csv", None),
+        ("..csv", None),
+        ("*.tar.gz", [".gz"]),
         ("notes.txt", [".txt"]),
         ("logs/app.log", [".log"]),
-        ("*.tar.gz", [".gz"]),
+        ("report*.csv", [".csv"]),
+        ("a*.csv", [".csv"]),
         ("*", None),
         ("**/*", None),
         ("*.*", None),

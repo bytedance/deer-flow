@@ -133,10 +133,12 @@ class _Transport:
         self.check(path)
         assert recursive and show_hidden
         # ``file_types`` filters files by extension server-side; directories
-        # are returned regardless, as the real endpoint does.
+        # are returned regardless, as the real endpoint does. The endpoint
+        # drops the whole leading dot-run from a dot-only name, so a name such
+        # as ``.csv`` or ``..csv`` has no extension.
         suffixes = tuple(file_types) if file_types else None
         host = Path(self._to_host(path))
-        entries = [p for p in sorted(host.rglob("*")) if p.is_dir() or suffixes is None or p.suffix in suffixes]
+        entries = [p for p in sorted(host.rglob("*")) if p.is_dir() or suffixes is None or os.path.splitext(p.name)[1] in suffixes]
         return SimpleNamespace(data=SimpleNamespace(files=[SimpleNamespace(path=self._to_virtual(str(p)), is_directory=p.is_dir()) for p in entries]))
 
     def grep_files(self, *, path: str, pattern: str, case_insensitive: bool, fixed_strings: bool, max_results: int, max_file_size: str, recursive: bool, include=None):
@@ -561,6 +563,27 @@ def test_files_only_glob_drops_directories(provider, user_data_tree):
     return every data file the search asked for."""
     matches, truncated = provider.sandbox.glob(user_data_tree.uploads, "**/*")
     assert _user_data_relative(matches, user_data_tree.uploads) == {"app.log", "logs/worker.log", "notes.txt"}
+    assert truncated is False
+
+
+def test_glob_keeps_a_dotfile_that_matches_the_extension_pattern(provider, user_data_tree):
+    """A pattern such as ``*.csv`` also matches a file named exactly ``.csv``.
+
+    The listing endpoint reports a dot-only name with no extension, so a
+    server-side extension filter would drop it even though the client matcher
+    accepts it; the search must still return it with directories included.
+    A wildcard stem has the same problem for a longer dot run (``?*.csv``
+    matches ``..csv``), so both shapes are checked."""
+    (user_data_tree.host_uploads / ".csv").write_text("FATAL bare\n", encoding="utf-8")
+    (user_data_tree.host_uploads / "..csv").write_text("FATAL dots\n", encoding="utf-8")
+    (user_data_tree.host_uploads / "report.csv").write_text("FATAL report\n", encoding="utf-8")
+
+    matches, truncated = provider.sandbox.glob(user_data_tree.uploads, "*.csv", include_dirs=True)
+    assert _user_data_relative(matches, user_data_tree.uploads) == {".csv", "..csv", "report.csv"}
+    assert truncated is False
+
+    matches, truncated = provider.sandbox.glob(user_data_tree.uploads, "?*.csv", include_dirs=True)
+    assert _user_data_relative(matches, user_data_tree.uploads) == {"..csv", "report.csv"}
     assert truncated is False
 
 
