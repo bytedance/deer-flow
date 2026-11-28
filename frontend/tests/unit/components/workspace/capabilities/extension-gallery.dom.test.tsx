@@ -270,6 +270,11 @@ describe("extension directory", () => {
         item.key !== "knowledge",
     ).length;
     expect(screen.getAllByRole("article")).toHaveLength(productionCount);
+    expect(
+      screen.getAllByRole("button", {
+        name: copy.view(copy.catalog.agentTeams.title),
+      }),
+    ).toHaveLength(1);
 
     const toggle = screen.getByRole("button", {
       name: new RegExp(copy.directory.examplesTitle),
@@ -332,6 +337,11 @@ describe("extension directory", () => {
         .getByRole("link", { name: copy.open(copy.catalog.agentTeams.title) })
         .getAttribute("href"),
     ).toBe("/workspace/extensions/community.agent-teams/teams");
+    expect(
+      screen.getAllByRole("button", {
+        name: copy.view(copy.catalog.agentTeams.title),
+      }),
+    ).toHaveLength(1);
 
     // Installed catalog items are not duplicated in the available catalog section.
     const catalogSection = screen

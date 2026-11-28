@@ -41,6 +41,7 @@ FRONTEND_PREFIXES = (
     "examples/",
     "skills/public/",
     "backend/packages/harness/deerflow/capabilities/builtin.json",
+    "backend/packages/harness/deerflow/extensions/documentation.py",
 )
 
 # The backend suite never reads frontend sources, tests or static assets ...

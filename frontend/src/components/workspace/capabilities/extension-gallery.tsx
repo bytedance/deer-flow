@@ -93,7 +93,6 @@ function InstalledExtensionCard({
               type="button"
               className="text-left underline-offset-4 hover:underline"
               onClick={onSelect}
-              aria-label={t.extensions.view(entry.title)}
             >
               {entry.title}
             </button>
@@ -163,7 +162,6 @@ function CatalogExtensionRow({
       description={entry.description}
       icon={<ExtensionIconTile entry={entry} />}
       onDetails={onSelect}
-      detailsLabel={t.extensions.view(entry.title)}
     >
       <Button
         variant="ghost"
