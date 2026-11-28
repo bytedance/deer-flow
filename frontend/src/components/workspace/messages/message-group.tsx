@@ -46,6 +46,7 @@ import {
   extractTextFromMessage,
 } from "@/core/messages/utils";
 import type { ArtifactEntry } from "@/core/threads/types";
+import { stringArg } from "@/core/tools/utils";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -1033,12 +1034,9 @@ function ToolCall({
       </ChainOfThoughtStep>
     );
   } else if (kind === "ls") {
-    let description: string | undefined = (args as { description: string })
-      ?.description;
-    if (!description) {
-      description = t.toolCalls.listFolder;
-    }
-    const path: string | undefined = (args as { path: string })?.path;
+    const description =
+      stringArg(args, "description") ?? t.toolCalls.listFolder;
+    const path = stringArg(args, "path");
     return (
       <ChainOfThoughtStep
         key={id}
@@ -1053,12 +1051,8 @@ function ToolCall({
       </ChainOfThoughtStep>
     );
   } else if (kind === "read_file") {
-    let description: string | undefined = (args as { description: string })
-      ?.description;
-    if (!description) {
-      description = t.toolCalls.readFile;
-    }
-    const { path } = args as { path: string; content: string };
+    const description = stringArg(args, "description") ?? t.toolCalls.readFile;
+    const path = stringArg(args, "path");
     return (
       <ChainOfThoughtStep
         key={id}
@@ -1073,11 +1067,7 @@ function ToolCall({
       </ChainOfThoughtStep>
     );
   } else if (kind === "write_file" || kind === "str_replace") {
-    let description: string | undefined = (args as { description: string })
-      ?.description;
-    if (!description) {
-      description = t.toolCalls.writeFile;
-    }
+    const description = stringArg(args, "description") ?? t.toolCalls.writeFile;
 
     return (
       <ChainOfThoughtStep
@@ -1101,8 +1091,7 @@ function ToolCall({
       </ChainOfThoughtStep>
     );
   } else if (kind === "bash") {
-    const description: string | undefined = (args as { description: string })
-      ?.description;
+    const description = stringArg(args, "description");
     if (!description) {
       return (
         <ChainOfThoughtStep
@@ -1112,7 +1101,7 @@ function ToolCall({
         />
       );
     }
-    const command: string | undefined = (args as { command: string })?.command;
+    const command = stringArg(args, "command");
     return (
       <ChainOfThoughtStep
         key={id}
@@ -1166,8 +1155,7 @@ function ToolCall({
       </ChainOfThoughtStep>
     );
   } else {
-    const description: string | undefined = (args as { description: string })
-      ?.description;
+    const description = stringArg(args, "description");
     return (
       <ChainOfThoughtStep
         key={id}

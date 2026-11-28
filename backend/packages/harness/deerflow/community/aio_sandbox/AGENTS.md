@@ -68,8 +68,14 @@ make test-blocking-io
   only the children first lets it run the rest of the command.
 - **Broker logs carry argument count, exit code and duration**, never argument
   values.
-- **`read_file` returns content or an `Error: ...` string and never raises.** A
-  missing file is expected when a write probes first, and is logged at debug.
+- **`read_file` returns content or an `Error: ...` string.** A missing file is
+  expected when a write probes first, and is logged at debug. Only a file over
+  the download limit raises `EFBIG`: `str_replace` would replace text inside an
+  error string and write it over the file. The read-before-write gate blocks on
+  `EFBIG` instead of failing open, because no read can ever mark that file.
+- **`read_file` reads the download route, not `/v1/file/read`.** That route
+  turns every line ending into `\n` and splits ranges at a bare `\r` too, so
+  `str_replace` would write a CRLF file back as LF.
 
 ## Restricted network mode
 

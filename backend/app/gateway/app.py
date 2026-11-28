@@ -516,7 +516,7 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
     silent backlog, so the enqueue side is detached when delivery cannot start.
     """
     scheduled_task_service = getattr(app.state, "scheduled_task_service", None)
-    if scheduled_task_service is None or notification_repo is None:
+    if notification_repo is None:
         return
 
     from app.channels.service import get_channel_service
@@ -524,7 +524,8 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
     channel_service = get_channel_service()
     if channel_service is None:
         logger.warning("channel_connections.enabled but no channel service is running; disabling scheduled-task IM notification enqueue to avoid a write-only outbox")
-        scheduled_task_service.detach_notification_outbox()
+        if scheduled_task_service is not None:
+            scheduled_task_service.detach_notification_outbox()
         return
 
     try:
@@ -581,6 +582,7 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
             return True
 
         prefs_repo = ImNotificationPreferencesRepository(get_session_factory())
+        coordination = getattr(app.state, "coordination_workers", None)
         worker = NotificationDeliveryWorker(
             delivery_repo=notification_repo,
             resolve_channel=channel_service.get_channel,
@@ -596,13 +598,15 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
             resolve_notification_preferences=prefs_repo.get,
             resolve_notification_event_preferences=prefs_repo.get_event_preferences,
             resolve_human_input_pending=resolve_human_input_pending,
+            read_coordination_artifact=coordination.repo.read_artifact if coordination is not None else None,
             poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
             # Language of notices whose owner has no UI language preference.
             default_locale=startup_config.channel_connections.notification_locale,
         )
         await worker.start()
     except Exception:
-        scheduled_task_service.detach_notification_outbox()
+        if scheduled_task_service is not None:
+            scheduled_task_service.detach_notification_outbox()
         raise
     app.state.notification_delivery_worker = worker
 
@@ -864,9 +868,11 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             # ChannelManager's follow-up-drain watcher (issue #4121 Slice 2)
             # uses to reach the same StreamBridge every other run consumer
             # goes through `get_stream_bridge(request)` for.
+            coordination = getattr(app.state, "coordination_workers", None)
             channel_service = await start_channel_service(
                 startup_config,
                 get_stream_bridge=lambda: getattr(app.state, "stream_bridge", None),
+                dispatch_coordination_task=coordination.dispatch_bound_channel if coordination is not None and scheduled_notification_repo is not None else None,
                 credentials_cipher=credentials_cipher,
                 # channels.leader_lease: auto follows the same multi-process
                 # signal the startup gate used; the lease owner is this

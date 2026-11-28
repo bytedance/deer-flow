@@ -32,6 +32,9 @@ class LLMProvider:
     # For generic OpenAI-compatible gateways the wizard cannot infer whether the
     # user-supplied model supports thinking/reasoning, so prompt for it explicitly.
     ask_thinking_support: bool = False
+    # Optional host environment variables forwarded into sandbox.environment so
+    # multimodal skills (e.g. Seedream image & Seedance video) work with one key.
+    sandbox_env_vars: tuple[str, ...] = ()
 
     def extra_config_for(self, model_name: str) -> dict:
         """Return extra_config for a selected model, applying per-model overrides.
@@ -119,6 +122,40 @@ def with_thinking_support(provider: LLMProvider, supports_thinking: bool) -> LLM
 
 
 LLM_PROVIDERS: list[LLMProvider] = [
+    LLMProvider(
+        name="byteplus_agentplan",
+        display_name="BytePlus Agent Plan",
+        description="One key for LLM, Seedream images/slides & Seedance 2.5 video (Personal & Team)",
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        models=[
+            "dola-seed-2.1-turbo",
+            "deepseek-v4-pro",
+            "deepseek-v4.1-flash",
+            "deepseek-v4.1-flash-economy",
+            "seed-2.0-lite",
+            "seed-2.0-mini",
+        ],
+        default_model="dola-seed-2.1-turbo",
+        env_var="BYTEPLUS_AGENTPLAN_API_KEY",
+        package="langchain-deepseek",
+        extra_config={
+            "api_base": "https://ark.ap-southeast.bytepluses.com/api/plan/v3",
+            "timeout": 600.0,
+            "max_retries": 2,
+            "supports_vision": True,
+            "supports_reasoning_effort": True,
+            **OPENAI_COMPAT_THINKING_CONFIG,
+        },
+        model_vision_overrides={
+            "dola-seed-2.1-turbo": True,
+            "deepseek-v4.1-flash": True,
+            "seed-2.0-lite": True,
+            "seed-2.0-mini": True,
+            "deepseek-v4-pro": False,
+            "deepseek-v4.1-flash-economy": False,
+        },
+        sandbox_env_vars=("BYTEPLUS_AGENTPLAN_API_KEY",),
+    ),
     LLMProvider(
         name="volcengine",
         display_name="Volcengine Doubao",
@@ -427,7 +464,7 @@ LLM_PROVIDERS: list[LLMProvider] = [
         display_name="MiniMax",
         description="International OpenAI-compatible endpoint",
         use="langchain_openai:ChatOpenAI",
-        models=["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"],
+        models=["MiniMax-M3", "MiniMax-M3.1-Flash", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"],
         default_model="MiniMax-M3",
         env_var="MINIMAX_API_KEY",
         package="langchain-openai",
@@ -450,7 +487,7 @@ LLM_PROVIDERS: list[LLMProvider] = [
         display_name="MiniMax CN",
         description="China OpenAI-compatible endpoint",
         use="langchain_openai:ChatOpenAI",
-        models=["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"],
+        models=["MiniMax-M3", "MiniMax-M3.1-Flash", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"],
         default_model="MiniMax-M3",
         env_var="MINIMAX_API_KEY",
         package="langchain-openai",
@@ -518,6 +555,27 @@ LLM_PROVIDERS: list[LLMProvider] = [
             "max_tokens": 8192,
             "temperature": 0.7,
         },
+    ),
+    LLMProvider(
+        name="nvidia",
+        display_name="NVIDIA NIM",
+        description="OpenAI-compatible NVIDIA-hosted and self-hosted NIM endpoints",
+        use="langchain_openai:ChatOpenAI",
+        models=["nvidia/nemotron-3.5-super-vl-120b-a12b"],
+        default_model="nvidia/nemotron-3.5-super-vl-120b-a12b",
+        env_var="NVIDIA_API_KEY",
+        package="langchain-openai",
+        extra_config={
+            "base_url": "https://integrate.api.nvidia.com/v1",
+            "request_timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 8192,
+            "temperature": 0.7,
+            "supports_vision": False,
+        },
+        model_vision_overrides={"nvidia/nemotron-3.5-super-vl-120b-a12b": True},
+        base_url_prompt="NVIDIA NIM base URL",
+        model_prompt="Exact model ID served by your NIM endpoint",
     ),
     LLMProvider(
         name="api_route",

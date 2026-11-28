@@ -272,6 +272,16 @@ models:
     temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
     supports_vision: true
 
+  - name: minimax-m3.1-flash
+    display_name: MiniMax M3.1 Flash
+    use: langchain_openai:ChatOpenAI
+    model: MiniMax-M3.1-Flash
+    api_key: $MINIMAX_API_KEY
+    base_url: https://api.minimax.io/v1
+    max_tokens: 4096
+    temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
+    supports_vision: true  # Thinking is always on (like M2.7); thinking.type=disabled is rejected
+
   - name: minimax-m2.7
     display_name: MiniMax M2.7
     use: langchain_openai:ChatOpenAI
@@ -297,6 +307,14 @@ models:
     model: google/gemini-2.5-flash-preview
     api_key: $OPENAI_API_KEY
     base_url: https://openrouter.ai/api/v1
+
+  - name: nvidia-nemotron-3.5-super-vl
+    display_name: Nemotron 3.5 Super VL 120B (NVIDIA NIM)
+    use: langchain_openai:ChatOpenAI
+    model: nvidia/nemotron-3.5-super-vl-120b-a12b
+    api_key: $NVIDIA_API_KEY
+    base_url: https://integrate.api.nvidia.com/v1
+    supports_vision: true
 ```
 
 If your OpenRouter key lives in a different environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
@@ -354,6 +372,7 @@ are:
 | `qwen-cn` | Alibaba Cloud Bailian / Qwen, China | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Chat Completions / Bearer |
 | `doubao` | Volcengine Beijing, ordinary API | `https://ark.cn-beijing.volces.com/api/v3` | Chat Completions / Bearer |
 | `doubao-coding` | Volcengine Coding Plan, separate key/plan | `https://ark.cn-beijing.volces.com/api/coding/v3` | Chat Completions / Bearer |
+| `byteplus-agent-plan` | BytePlus Agent Plan (Personal & Enterprise), separate key/plan | `https://ark.ap-southeast.bytepluses.com/api/plan/v3` | Chat Completions / Bearer |
 | `moonshot-cn` | Moonshot / Kimi, China API | `https://api.moonshot.cn/v1` | Chat Completions / Bearer |
 | `zhipu-cn` | Zhipu, China ordinary API | `https://open.bigmodel.cn/api/paas/v4` | Chat Completions / Bearer |
 | `zai` | Z.AI, international ordinary API | `https://api.z.ai/api/paas/v4` | Chat Completions / Bearer |
@@ -1889,6 +1908,45 @@ hibernation wake on the call. Downloads are restricted to `/mnt/user-data` and
 capped while streaming. Like the other remote providers, `replicas` is a
 per-Gateway-process soft cap.
 
+**BytePlus veFaaS Cloud Sandbox** (runs each thread sandbox in a serverless [BytePlus veFaaS](https://www.byteplus.com/en/product/vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow) AIO sandbox; see the [veFaaS documentation](https://docs.byteplus.com/en/docs/vefaas/what-is-vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)):
+
+```yaml
+sandbox:
+  use: deerflow.community.vefaas_sandbox:VeFaaSSandboxProvider
+  # prewarm: true                      # optional: overlap sandbox creation with the first model turn
+  vefaas:
+    region: ap-southeast-1
+    endpoint: https://vefaas.ap-southeast-1.byteplusapi.com
+    function_id: $BYTEPLUS_VEFAAS_SANDBOX_APP_ID
+    sandbox_base_url: $BYTEPLUS_VEFAAS_SANDBOX_BASE_URL
+    access_key_env: BYTEPLUS_ACCESS_KEY_ID
+    secret_key_env: BYTEPLUS_SECRET_ACCESS_KEY
+    cpu_milli: 1000
+    memory_mb: 2048
+    timeout_minutes: 60
+    # pause_on_idle: true              # optional: pause idle sandboxes and auto-resume
+    # snapshot_on_idle: true           # optional: thread-scoped snapshots with retention pruning
+    # snapshot_retention_days: 7
+    # max_snapshots_per_sandbox: 3
+    # precache_images:
+    #   - cr-ap-southeast-1.cr.bytepluses.com/namespace/all-in-one-sandbox:latest
+    # precache_on_startup: true
+    tos_mount:
+      enabled: false
+      bucket: $BYTEPLUS_TOS_BUCKET
+      prefix: deerflow-user-data
+  replicas: 3
+  idle_timeout: 600
+  # ownership:                         # required when more than one gateway shares a veFaaS app
+  #   type: redis
+```
+
+No extra Python SDK is needed — `VeFaaSSandboxProvider` talks to the veFaaS
+OpenAPI (`Version=2024-06-06`, SigV4) over `httpx` and reuses `agent-sandbox`
+for the AIO data plane. See the
+[veFaaS sandbox provider README](../packages/harness/deerflow/community/vefaas_sandbox/README.md)
+for the complete option reference, snapshot retention guidance, and TOS mount details.
+
 Choose between local execution or Docker-based isolation:
 
 **Option 1: Local Sandbox** (default, simpler setup):
@@ -2313,6 +2371,7 @@ models:
 - `MIMO_API_KEY` - Xiaomi MiMo API key
 - `NOVITA_API_KEY` - Novita API key (OpenAI-compatible endpoint)
 - `OPPER_API_KEY` - Opper API key (OpenAI-compatible endpoint)
+- `NVIDIA_API_KEY` - NVIDIA API key for hosted or self-hosted NIM endpoints
 - `TAVILY_API_KEY` - Tavily search API key
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
