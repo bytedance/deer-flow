@@ -20,6 +20,9 @@ def doctor_checkout(tmp_path: Path) -> Path:
     scripts_dir.mkdir(parents=True)
     (checkout / "frontend").mkdir()
     shutil.copyfile(REPO_ROOT / "scripts" / "doctor.py", scripts_dir / "doctor.py")
+    # doctor imports `dotenv_exports` from its own directory to read `.env` the
+    # way `serve.sh` exports it, so the disposable checkout needs that sibling.
+    shutil.copyfile(REPO_ROOT / "scripts" / "dotenv_exports.py", scripts_dir / "dotenv_exports.py")
     (checkout / "config.yaml").write_text("config_version: 5\nmodels: []\n", encoding="utf-8")
     return checkout
 
@@ -94,6 +97,33 @@ def test_no_arguments_ignores_inherited_runtime_configuration(doctor_checkout: P
     assert external_config.read_bytes() == config_bytes
     assert external_env.read_bytes() == env_bytes
     assert not external_home.exists()
+
+
+def test_doctor_expands_the_launchers_pwd_in_the_dotenv_selector(doctor_checkout: Path):
+    (doctor_checkout / ".env").write_text("DEER_FLOW_CONFIG_PATH=$PWD/active.yaml\n", encoding="utf-8")
+    (doctor_checkout / "active.yaml").write_text("config_version: 5\nmodels: []\n", encoding="utf-8")
+    # `serve.sh` expands `$PWD` in the checkout `.env`, so the Gateway reads
+    # `active.yaml`. A doctor that keeps the literal `$PWD` reports a file that
+    # does not exist and conflicts with the archive's own config summary.
+    result = _run_doctor(doctor_checkout)
+
+    assert "config.yaml found" in result.stdout
+    assert "$PWD/active.yaml" not in result.stdout
+
+
+def test_doctor_resolves_a_relative_runtime_root_from_backend(doctor_checkout: Path):
+    (doctor_checkout / ".env").write_text("DEER_FLOW_PROJECT_ROOT=profile\n", encoding="utf-8")
+    (doctor_checkout / "profile").mkdir()
+    (doctor_checkout / "profile" / "config.yaml").write_text("config_version: 5\nmodels:\n  - name: checkout\n", encoding="utf-8")
+    (doctor_checkout / "backend" / "profile").mkdir(parents=True)
+    (doctor_checkout / "backend" / "profile" / "config.yaml").write_text("config_version: 5\nmodels: []\n", encoding="utf-8")
+    # The Gateway resolves a relative runtime root from its working directory,
+    # `backend/`, so it reads `backend/profile/config.yaml`; the doctor must
+    # report that file rather than the checkout's `profile/config.yaml`.
+    result = _run_doctor(doctor_checkout)
+
+    assert "no models found" in result.stdout
+    assert "1 model(s)" not in result.stdout
 
 
 class TestMemoryBackendConfigCheck:

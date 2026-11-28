@@ -17,6 +17,11 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from dotenv import main as dotenv_main
+except ImportError:  # A harness that dropped the dependency; callers fall back.
+    dotenv_main = None
+
+try:
     import yaml
 except Exception:  # pragma: no cover - exercised only in broken environments
     yaml = None
@@ -155,7 +160,9 @@ def redact_data(value: Any) -> Any:
     return value
 
 
-def _read_yaml(path: Path) -> Any:
+def _read_yaml(path: Path, error: str | None = None, *, resolution_error: bool = False) -> Any:
+    if error is not None:
+        return {"present": True, "error": error, "resolution_error": resolution_error}
     if not path.exists():
         return {"present": False}
     if yaml is None:
@@ -175,7 +182,7 @@ def _read_json(path: Path) -> Any:
         return {"present": True, "error": f"{type(exc).__name__}: {exc}"}
 
 
-def _run_command(args: list[str], cwd: Path, timeout_s: int = 10) -> dict[str, Any]:
+def _run_command(args: list[str], cwd: Path, timeout_s: int = 10, env: dict[str, str] | None = None) -> dict[str, Any]:
     try:
         result = subprocess.run(
             args,
@@ -187,7 +194,7 @@ def _run_command(args: list[str], cwd: Path, timeout_s: int = 10) -> dict[str, A
             # Python helpers (doctor, pnpm) must emit the encoding we capture,
             # even when the host or inherited stdio setting is not UTF-8.
             # Escape surrogate characters rather than aborting diagnostics.
-            env={**os.environ, "PYTHONIOENCODING": "utf-8:backslashreplace"},
+            env={**(env if env is not None else os.environ), "PYTHONIOENCODING": "utf-8:backslashreplace"},
             timeout=timeout_s,
             check=False,
         )
@@ -238,8 +245,262 @@ def collect_environment(project_root: Path) -> dict[str, Any]:
     }
 
 
-def collect_config_summary(config_path: Path) -> Any:
-    return redact_data(_read_yaml(config_path))
+CONFIG_LOCATION_ENV_VARS = ("DEER_FLOW_CONFIG_PATH", "DEER_FLOW_PROJECT_ROOT")
+
+
+def _read_dotenv_assignments(env_file: Path, scope: dict[str, str], parse_dotenv: Any) -> list[tuple[str, str]] | None:
+    """Return the assignments in one dotenv file, or ``None`` when it is unreadable."""
+    try:
+        text = env_file.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError):
+        return None
+    return parse_dotenv(text, scope)
+
+
+def _checkout_dotenv_assignments(project_root: Path, environment: dict[str, str], parse_dotenv: Any) -> list[tuple[str, str]] | None:
+    """Return the checkout `.env` as the launcher reads it, or ``None``.
+
+    ``environment`` is the process environment captured before the harness was
+    imported. Expanding against the live ``os.environ`` would read the
+    assignments that import already loaded from this same file, so a variable
+    defined later in `.env` would resolve here but not in the launcher.
+    """
+    env_file = project_root / ".env"
+    if not env_file.is_file():
+        return []
+    # The launcher expands `$PWD`/`$NAME` against the checkout, so stage the same
+    # scope: an inherited PWD is wherever the bundle happened to start.
+    scope = dict(environment)
+    scope["PWD"] = str(project_root)
+    return _read_dotenv_assignments(env_file, scope, parse_dotenv)
+
+
+def _installed_dotenv_module() -> Any:
+    """Return ``dotenv.main`` as the Gateway imports it, or ``None``.
+
+    Only called after `deerflow.config.app_config` has been imported, and that
+    module imports `dotenv` at module level, so the import normally succeeds;
+    the guard covers a harness that dropped the dependency.
+    """
+    return dotenv_main
+
+
+def _read_selected_env_file(selected_file: Path, environment: dict[str, str]) -> dict[str, str] | None:
+    """Return the assignments the Gateway's dotenv load applies, or ``None``.
+
+    ``load_selected_env_file`` calls ``load_dotenv(stream=..., override=False)``
+    after the launcher exported the checkout `.env`. Mirroring that call matters
+    for `${NAME}` substitution: python-dotenv resolves ``override=False``
+    references against the process environment before the assignments earlier
+    in this file, so a launcher export wins over a selected-file assignment of
+    the same name. ``dotenv_values`` resolves the other way round and would
+    report a path the Gateway never reads.
+    """
+    # `load_selected_env_file` checks `is_file()` before it opens the selector,
+    # so a FIFO or socket is the Gateway's startup error rather than something
+    # to read: opening one would block the bundle instead of reporting it.
+    if not selected_file.is_file():
+        return None
+    try:
+        text = selected_file.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError):
+        return None
+    previous_environment = dict(os.environ)
+    os.environ.clear()
+    os.environ.update(environment)
+    try:
+        bindings = dotenv_main.parse_stream(StringIO(text))
+        values = dotenv_main.resolve_variables(
+            ((binding.key, binding.value) for binding in bindings),
+            override=False,
+        )
+    finally:
+        os.environ.clear()
+        os.environ.update(previous_environment)
+    return {name: str(value) for name, value in values.items() if value is not None}
+
+
+def _dotenv_config_location(project_root: Path, environment: dict[str, str]) -> dict[str, str]:
+    """Return the config-location variables the launcher resolves.
+
+    ``environment`` is the process environment captured before the harness was
+    imported.
+
+    The launcher exports the checkout `.env`, and the import then loads its
+    ``DEER_FLOW_ENV_FILE`` on top without overriding what is already set.
+    `load_selected_env_file` rejects an unusable selector and the Gateway fails
+    to start, so such a selector is returned as the startup error instead of
+    being skipped.
+    """
+    try:
+        from dotenv_exports import parse_dotenv
+    except ImportError:
+        return {}
+    assignments = _checkout_dotenv_assignments(project_root, environment, parse_dotenv)
+    if assignments is None:
+        # Diagnostics must still work with a broken environment or unreadable .env.
+        return {}
+    # The launcher exports the checkout `.env` over the environment it inherited,
+    # so this is the environment the Gateway starts with before it imports.
+    base = dict(environment)
+    base["PWD"] = str(project_root)
+    for name, value in assignments:
+        base[name] = value
+    if not base.get("DEER_FLOW_PROJECT_ROOT"):
+        # `serve.sh` fills an empty runtime root with the checkout before it
+        # starts the Gateway, so this value reaches the selected file's
+        # `${DEER_FLOW_PROJECT_ROOT}` references ahead of any assignment there.
+        base["DEER_FLOW_PROJECT_ROOT"] = str(project_root)
+    selected = dict(base)
+    selector = base.get("DEER_FLOW_ENV_FILE")
+    resolved_env_file: str | None = None
+    # `load_selected_env_file` checks the switch in the environment the
+    # launcher handed the Gateway, before it reads the file.
+    gateway_disabled = base.get("PYTHON_DOTENV_DISABLED", "").casefold() in {"1", "true", "t", "yes", "y"}
+    # Only an absent selector leaves `load_selected_env_file` to the default
+    # discovery; an inherited empty one names no file and stops the Gateway.
+    if selector is not None:
+        if not selector:
+            return {"DEER_FLOW_CONFIG_PATH": "DEER_FLOW_ENV_FILE is set but empty; the Gateway fails startup"}
+        if gateway_disabled:
+            return {"DEER_FLOW_CONFIG_PATH": ("DEER_FLOW_ENV_FILE cannot be used while PYTHON_DOTENV_DISABLED disables dotenv loading; the Gateway fails startup")}
+        selected_file = Path(selector)
+        # A relative selector uses the Gateway's working directory, `backend/`.
+        if not selected_file.is_absolute():
+            selected_file = project_root / "backend" / selected_file
+        # The launcher's shell expansion already replaced `$PWD` and any
+        # `$NAME` in the selector; python-dotenv's own reader would hand the
+        # Gateway the literal text. Carry the resolved absolute path so a
+        # child (the bundled doctor) loads this file, not the unexpanded one.
+        resolved_env_file = str(selected_file)
+        # The Gateway imports the selected file from `backend/`, so its `$PWD`
+        # is that directory rather than the checkout the launcher used.
+        gateway_environment = {**base, "PWD": str(project_root / "backend")}
+        loader = _installed_dotenv_module()
+        if loader is None:
+            try:
+                text = selected_file.read_text(encoding="utf-8-sig")
+            except (OSError, UnicodeError):
+                return {"DEER_FLOW_CONFIG_PATH": f"DEER_FLOW_ENV_FILE must name a readable file: {selected_file}"}
+            for name, value in parse_dotenv(text, gateway_environment):
+                selected.setdefault(name, value)
+        else:
+            # `load_selected_env_file` loads with `override=False`, so a variable
+            # the launcher already exported keeps its value over the file's.
+            assignments = _read_selected_env_file(selected_file, gateway_environment)
+            if assignments is None:
+                return {"DEER_FLOW_CONFIG_PATH": f"DEER_FLOW_ENV_FILE must name a readable file: {selected_file}"}
+            for name, value in assignments.items():
+                selected.setdefault(name, value)
+    location = {name: selected[name] for name in CONFIG_LOCATION_ENV_VARS if name in selected}
+    # Carry the resolved selector too: a child that re-reads the checkout `.env`
+    # would otherwise hand the harness the literal `$PWD` python-dotenv keeps.
+    if resolved_env_file is not None:
+        location["DEER_FLOW_ENV_FILE"] = resolved_env_file
+        # `load_selected_env_file` reads this switch alongside the selector, so
+        # forward the launcher's effective value too. A child that keeps an
+        # inherited value cannot load the file the bundle resolved.
+        location["PYTHON_DOTENV_DISABLED"] = base.get("PYTHON_DOTENV_DISABLED", "")
+    # The Gateway resolves a relative runtime root and config path from its own
+    # working directory, `backend/`, not from wherever the bundle was started.
+    # Normalize both here so every consumer reads the same file the Gateway would.
+    project_root_value = location.get("DEER_FLOW_PROJECT_ROOT")
+    if project_root_value and not Path(project_root_value).is_absolute():
+        location["DEER_FLOW_PROJECT_ROOT"] = str(project_root / "backend" / project_root_value)
+    config_path = location.get("DEER_FLOW_CONFIG_PATH")
+    if config_path and not Path(config_path).is_absolute():
+        location["DEER_FLOW_CONFIG_PATH"] = str(project_root / "backend" / config_path)
+    return location
+
+
+def resolve_config_path(project_root: Path) -> tuple[Path, str | None, bool, dict[str, str]]:
+    """Resolve the config.yaml the Gateway would load.
+
+    Delegates to the harness resolver so a bundle inspects the same file the
+    Gateway reads. An explicit ``DEER_FLOW_CONFIG_PATH`` naming a missing file
+    is the Gateway's own startup error, so it is reported in the bundle instead
+    of silently falling back to the checkout ``config.yaml``.
+
+    The third element says whether ``error`` came from resolving the location
+    (a missing target or a rejected dotenv selector) rather than from reading
+    the file, so the triage steps name the file that actually needs fixing. The
+    fourth is the launcher environment the lookup ran under, so the bundled
+    doctor can read the same file with the same resolution.
+    """
+    # Importing the harness runs `load_selected_env_file` and the default
+    # `load_dotenv` against whatever `os.environ` holds at that instant, so a
+    # stale inherited `DEER_FLOW_ENV_FILE` fails the import before the staging
+    # below can replace it. The launcher stages the checkout `.env` before it
+    # starts the Gateway, so suppress the inherited selector for the import
+    # only. Snapshot the starting environment and restore it afterwards so a
+    # fresh import leaves later diagnostics with the environment this process
+    # started with, including on the error paths.
+    previous = dict(os.environ)
+    launcher: dict[str, str] = {}
+    try:
+        os.environ.pop("DEER_FLOW_ENV_FILE", None)
+        try:
+            from deerflow.config.app_config import AppConfig
+        except Exception as exc:
+            return project_root / "config.yaml", f"cannot import the DeerFlow harness to resolve it ({type(exc).__name__}: {exc})", True, launcher
+
+        # The harness reads the process environment, so stage the launcher's view
+        # for the duration of the lookup only: the checkout `.env` wins for these
+        # two variables, and the checkout stands in for an unset runtime root.
+        launcher = _dotenv_config_location(project_root, previous)
+        os.environ.update(launcher)
+        if not os.environ.get("DEER_FLOW_PROJECT_ROOT"):
+            os.environ["DEER_FLOW_PROJECT_ROOT"] = str(project_root)
+        launcher["DEER_FLOW_PROJECT_ROOT"] = os.environ["DEER_FLOW_PROJECT_ROOT"]
+        try:
+            return AppConfig.resolve_config_path(), None, False, launcher
+        except FileNotFoundError as exc:
+            config_env = os.environ.get("DEER_FLOW_CONFIG_PATH")
+            if not config_env:
+                # Nothing at the default locations: a plain missing config.
+                return project_root / "config.yaml", None, False, launcher
+            return Path(config_env), str(exc), True, launcher
+        except ValueError as exc:
+            # `DEER_FLOW_PROJECT_ROOT` naming a non-existent or non-directory
+            # path is rejected here too; the fix is that variable, not YAML.
+            return project_root / "config.yaml", str(exc), True, launcher
+    finally:
+        os.environ.clear()
+        os.environ.update(previous)
+
+
+def _doctor_environ(launcher: dict[str, str], config_path: Path, resolution_error: bool) -> dict[str, str]:
+    """Return the environment the bundled doctor runs under.
+
+    The doctor resolves the config itself, so give it the same launcher view the
+    bundle resolved with. That pins the expanded selectors: the doctor's own
+    `.env` load would otherwise reintroduce the unexpanded `$PWD` the resolver
+    already expanded.
+
+    The launcher overlay goes on top of the inherited environment, not in place
+    of it: the doctor probes `PATH` for node/pnpm/uv and reads shell-only model
+    credentials, and a doctor env built from the two selectors alone reports
+    every host tool missing.
+
+    ``DEER_FLOW_LAUNCHER_VIEW_RESOLVED`` tells the doctor the selectors are
+    already final, so it must not re-expand the checkout `.env` over them: doing
+    so resolves ``${DEER_FLOW_PROJECT_ROOT:-profile}`` against the runtime root
+    the bundle just defaulted and picks a different file than the archive. An
+    explicit ``--config`` pins that file in ``launcher`` for the same reason, so
+    the doctor reads the file the archive summarized rather than the checkout
+    selector ``--config`` overrode.
+    """
+    env = {**os.environ, **launcher}
+    if launcher:
+        env["DEER_FLOW_LAUNCHER_VIEW_RESOLVED"] = "1"
+    env.setdefault("PWD", str(config_path.parent))
+    if resolution_error:
+        env["DEER_FLOW_CONFIG_PATH"] = str(config_path)
+    return env
+
+
+def collect_config_summary(config_path: Path, error: str | None = None, *, resolution_error: bool = False) -> Any:
+    return redact_data(_read_yaml(config_path, error=error, resolution_error=resolution_error))
 
 
 def collect_extensions_summary(extensions_config_path: Path) -> Any:
@@ -403,10 +664,10 @@ def collect_thread_summary(project_root: Path, thread_id: str) -> dict[str, Any]
     }
 
 
-def collect_doctor_output(project_root: Path) -> dict[str, Any]:
+def collect_doctor_output(project_root: Path, env: dict[str, str] | None = None) -> dict[str, Any]:
     backend_dir = project_root / "backend"
     cwd = backend_dir if backend_dir.exists() else project_root
-    return _run_command([sys.executable, str(project_root / "scripts" / "doctor.py")], cwd=cwd, timeout_s=60)
+    return _run_command([sys.executable, str(project_root / "scripts" / "doctor.py")], cwd=cwd, timeout_s=60, env=env)
 
 
 def _command_output(command: dict[str, Any] | None) -> str | None:
@@ -475,6 +736,9 @@ def _config_summary(config_summary: Any) -> dict[str, Any]:
         "present": True,
         "config_version": config_summary.get("config_version"),
         "error": config_summary.get("error"),
+        # A resolution error names a config file the Gateway could not locate or
+        # a dotenv selector it refused; `config.yaml` syntax is not the fix.
+        "resolution_error": bool(config_summary.get("resolution_error")),
         "models": len(models) if isinstance(models, list) else 0,
         "tools": sorted(str(tool.get("name")) for tool in tools if isinstance(tool, dict) and tool.get("name")) if isinstance(tools, list) else [],
         "channels": _enabled_mapping_keys(channels),
@@ -517,16 +781,23 @@ def _active_signal_names(signals: dict[str, bool]) -> list[str]:
     return [name for name, enabled in signals.items() if enabled and name in ATTENTION_SIGNAL_NAMES]
 
 
-def _maintainer_next_steps(status: str, signals: dict[str, bool]) -> list[str]:
+def _maintainer_next_steps(status: str, signals: dict[str, bool], resolution_hint: str | None = None) -> list[str]:
     steps: list[str] = []
-    if status == "needs_user_setup":
+    # A resolution error names a file the Gateway never read, so setup guidance
+    # would send the reporter to the wrong file; the hint below replaces it.
+    if status == "needs_user_setup" and resolution_hint is None:
         steps.append("Ask the reporter to complete local setup with `make setup`, then rerun `make doctor` and `make support-bundle`.")
     if signals["node_missing"] or signals["node_version_too_old"]:
         steps.append("Ask the reporter to install Node.js 22+ before treating this as an application bug.")
-    if signals["config_missing"] or signals["models_missing"]:
+    if (signals["config_missing"] or signals["models_missing"]) and resolution_hint is None:
         steps.append("Do not triage model/runtime behavior until `config.yaml` exists and at least one model is configured.")
     if signals["config_error"]:
-        steps.append("Ask the reporter to fix `config.yaml` syntax or regenerate it with `make setup`.")
+        if resolution_hint:
+            # The resolution error names the file and selector that actually
+            # stopped startup; `config.yaml` syntax would be the wrong fix.
+            steps.append(f"Ask the reporter to resolve the config location the Gateway failed on: {resolution_hint}")
+        else:
+            steps.append("Ask the reporter to fix `config.yaml` syntax or regenerate it with `make setup`.")
     if signals["extensions_config_error"]:
         steps.append("Ask the reporter to fix `extensions_config.json` syntax before triaging MCP/skill behavior.")
     if signals["doctor_failed"] and status == "likely_runtime_issue":
@@ -538,16 +809,21 @@ def _maintainer_next_steps(status: str, signals: dict[str, bool]) -> list[str]:
     return steps
 
 
-def _reporter_next_steps(status: str, signals: dict[str, bool]) -> list[str]:
+def _reporter_next_steps(status: str, signals: dict[str, bool], resolution_hint: str | None = None) -> list[str]:
     steps: list[str] = []
-    if status == "needs_user_setup":
+    # A resolution error names a file the Gateway never read, so setup guidance
+    # would send the reporter to the wrong file; the hint below replaces it.
+    if status == "needs_user_setup" and resolution_hint is None:
         steps.append("Run `make setup`, then rerun `make doctor` and `make support-bundle` before filing the issue if the problem changes.")
     if signals["node_missing"] or signals["node_version_too_old"]:
         steps.append("Install Node.js 22+ and rerun `make doctor`.")
-    if signals["config_missing"] or signals["models_missing"]:
+    if (signals["config_missing"] or signals["models_missing"]) and resolution_hint is None:
         steps.append("Create or repair `config.yaml` with `make setup`; model/runtime issues cannot be triaged until at least one model is configured.")
     if signals["config_error"]:
-        steps.append("Fix `config.yaml` syntax or regenerate it with `make setup`.")
+        if resolution_hint:
+            steps.append(f"Fix the config location the Gateway failed on before filing: {resolution_hint}")
+        else:
+            steps.append("Fix `config.yaml` syntax or regenerate it with `make setup`.")
     if signals["doctor_failed"] and status == "likely_runtime_issue":
         steps.append("Paste the generated issue summary into the GitHub issue. Attach the zip if a maintainer asks for the evidence bundle.")
     if not steps:
@@ -607,6 +883,7 @@ def build_triage_report(
         "thread_summary_found": bool(thread_summary and thread_summary.get("found")),
     }
     status = _status_from_signals(signals)
+    resolution_hint = config.get("error") if config.get("resolution_error") else None
     return {
         "schema_version": 1,
         "generated_at": manifest["generated_at"],
@@ -634,8 +911,8 @@ def build_triage_report(
             "included": thread_summary is not None,
             "found": bool(thread_summary and thread_summary.get("found")),
         },
-        "reporter_next_steps": _reporter_next_steps(status, signals),
-        "maintainer_next_steps": _maintainer_next_steps(status, signals),
+        "reporter_next_steps": _reporter_next_steps(status, signals, resolution_hint),
+        "maintainer_next_steps": _maintainer_next_steps(status, signals, resolution_hint),
         "evidence_files": _evidence_files(include_doctor=doctor is not None, include_thread_summary=thread_summary is not None),
         "privacy": manifest["privacy"],
     }
@@ -899,7 +1176,18 @@ def create_support_bundle(
 ) -> Path:
     """Create a redacted support bundle and return the zip path."""
     project_root = project_root.resolve()
-    config_path = (config_path or project_root / "config.yaml").resolve()
+    launcher: dict[str, str] = {}
+    if config_path is not None:
+        config_path = config_path.resolve()
+        config_error = None
+        config_error_is_resolution = False
+        # `--config` bypasses launcher resolution, so there is no dotenv view to
+        # hand the doctor. Pin the explicit file as the resolved selector
+        # instead: the doctor must read the file the archive summarized, not the
+        # checkout `.env` selector `--config` was meant to override.
+        launcher = {"DEER_FLOW_CONFIG_PATH": str(config_path)}
+    else:
+        config_path, config_error, config_error_is_resolution, launcher = resolve_config_path(project_root)
     extensions_config_path = (extensions_config_path or project_root / "extensions_config.json").resolve()
     out_path = (out_path or _default_out_path(project_root)).resolve()
     # `--out` names the zip, so a directory there would only fail inside
@@ -927,11 +1215,11 @@ def create_support_bundle(
     }
 
     environment = collect_environment(project_root)
-    config_summary = collect_config_summary(config_path)
+    config_summary = collect_config_summary(config_path, error=config_error, resolution_error=config_error_is_resolution)
     extensions_summary = collect_extensions_summary(extensions_config_path)
     git_summary = collect_git_summary(project_root)
     thread_summary = collect_thread_summary(project_root, thread_id) if thread_id else None
-    doctor = collect_doctor_output(project_root) if include_doctor else None
+    doctor = collect_doctor_output(project_root, _doctor_environ(launcher, config_path, config_error_is_resolution)) if include_doctor else None
     triage = build_triage_report(
         manifest=manifest,
         environment=environment,
