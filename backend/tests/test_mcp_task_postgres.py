@@ -317,3 +317,102 @@ async def test_postgres_cancel_request_waits_for_poll_claim_and_then_releases_it
     assert requested["lease_owner"] is None
     cancel_claims = await task_repo.claim_cancel_requests(now=now + timedelta(seconds=1), lease_owner="canceller", lease_seconds=60, limit=1)
     assert [row["id"] for row in cancel_claims] == ["task-claim-vs-cancel"]
+
+
+async def _wait_for_postgres_lock_wait(session_factory, blocker_pid: int) -> None:
+    async with session_factory() as observer:
+        async with asyncio.timeout(5):
+            while True:
+                await observer.execute(text("SELECT pg_stat_clear_snapshot()"))
+                blocked_pid = await observer.scalar(
+                    text("SELECT pid FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND :blocker_pid = ANY(pg_blocking_pids(pid)) LIMIT 1"),
+                    {"blocker_pid": blocker_pid},
+                )
+                if blocked_pid is not None:
+                    return
+                await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["renew_poll", "renew_cancel", "apply_poll", "apply_cancel"])
+async def test_postgres_control_write_checks_expiry_after_row_lock(postgres_repositories, operation: str) -> None:
+    """A lease that expires during a row-lock wait must not be renewed or committed."""
+    thread_repo, task_repo, session_factory = postgres_repositories
+    created = await thread_repo.create("thread-1", user_id="user-1")
+    now = datetime.now(UTC)
+    task_id = f"task-lock-expiry-{operation}"
+    await _create_task(task_repo, task_id, thread_incarnation=created["incarnation"])
+    async with session_factory() as session:
+        await session.execute(update(McpTaskRow).where(McpTaskRow.id == task_id).values(next_poll_at=now, next_cancel_at=now))
+        await session.commit()
+
+    phase = "cancel" if operation.endswith("cancel") else "poll"
+    if phase == "cancel":
+        await task_repo.request_cancel(
+            task_id,
+            user_id="user-1",
+            thread_id="thread-1",
+            thread_incarnation=created["incarnation"],
+            requested_at=now,
+        )
+    claim = task_repo.claim_cancel_requests if phase == "cancel" else task_repo.claim_due_tasks
+    claimed = await claim(now=now, lease_owner="worker", lease_seconds=5, limit=1)
+    assert [row["id"] for row in claimed] == [task_id]
+    token = claimed[0]["lease_token"]
+
+    async def write_with_expiring_lease() -> bool:
+        if operation.startswith("renew"):
+            return await task_repo.renew_control_claim(
+                task_id,
+                phase=phase,
+                lease_owner="worker",
+                lease_token=token,
+                now=now,
+                lease_seconds=30,
+            )
+        if phase == "poll":
+            return await task_repo.apply_snapshot(
+                task_id,
+                lease_owner="worker",
+                lease_token=token,
+                status="completed",
+                result={"done": True},
+                result_preview=None,
+                result_truncated=False,
+                result_artifact=None,
+                error=None,
+                input_required=None,
+                next_poll_at=None,
+                polled_at=now,
+            )
+        return await task_repo.apply_cancel_snapshot(
+            task_id,
+            lease_owner="worker",
+            lease_token=token,
+            status="cancelled",
+            result=None,
+            result_preview=None,
+            result_truncated=False,
+            result_artifact=None,
+            error=None,
+            input_required=None,
+            completed_at=now,
+        )
+
+    pending = None
+    try:
+        async with session_factory() as blocker:
+            await blocker.execute(select(McpTaskRow.id).where(McpTaskRow.id == task_id).with_for_update())
+            blocker_pid = await blocker.scalar(text("SELECT pg_backend_pid()"))
+            pending = asyncio.create_task(write_with_expiring_lease())
+            await _wait_for_postgres_lock_wait(session_factory, blocker_pid)
+            # Keep the row locked beyond its five-second lease without changing
+            # the row version; this is the READ COMMITTED clock-ordering race.
+            await asyncio.sleep(5.1)
+            await blocker.commit()
+        assert await asyncio.wait_for(pending, timeout=5) is False
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+        if pending is not None:
+            await asyncio.gather(pending, return_exceptions=True)

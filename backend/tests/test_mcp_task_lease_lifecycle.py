@@ -33,7 +33,7 @@ async def task_repo(tmp_path, monkeypatch):
     async with factory() as session:
         session.add(ThreadMetaRow(thread_id="thread-1", user_id="user-1", metadata_json={}, created_at=Clock.current, updated_at=Clock.current))
         await session.commit()
-    repo = McpTaskRepository(factory)
+    repo = McpTaskRepository(factory, lease_clock=lambda now: now)
     await create_working(repo, "task-1")
     try:
         yield repo

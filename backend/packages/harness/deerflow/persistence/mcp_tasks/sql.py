@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from sqlalchemy import and_, case, or_, select, text, update
+from sqlalchemy import and_, case, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -162,8 +163,70 @@ async def _lock_current_thread_incarnation(
 class McpTaskRepository:
     """Durable source of truth for long-running MCP task lifecycle state."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        lease_clock: Callable[[datetime], datetime] | None = None,
+    ) -> None:
         self._sf = session_factory
+        # Tests inject their controlled clock; production uses the database clock.
+        self._lease_clock = lease_clock
+
+    def _lease_expired_or_null(self, session: AsyncSession, lease, now: datetime):
+        if self._lease_clock is not None:
+            return or_(lease.is_(None), lease < self._lease_clock(now))
+        dialect = session.get_bind().dialect.name
+        if dialect == "postgresql":
+            return or_(lease.is_(None), lease < func.clock_timestamp())
+        if dialect == "sqlite":
+            return or_(lease.is_(None), func.julianday(lease) < func.julianday("now"))
+        raise RuntimeError(f"unsupported MCP lease clock dialect: {dialect}")
+
+    def _lease_is_live(self, session: AsyncSession, lease, now: datetime):
+        if self._lease_clock is not None:
+            return lease >= self._lease_clock(now)
+        dialect = session.get_bind().dialect.name
+        if dialect == "postgresql":
+            return lease >= func.clock_timestamp()
+        if dialect == "sqlite":
+            return func.julianday(lease) >= func.julianday("now")
+        raise RuntimeError(f"unsupported MCP lease clock dialect: {dialect}")
+
+    def _lease_expiry(self, session: AsyncSession, now: datetime, lease_seconds: int):
+        if self._lease_clock is not None:
+            return self._lease_clock(now) + timedelta(seconds=lease_seconds)
+        dialect = session.get_bind().dialect.name
+        if dialect == "postgresql":
+            return func.clock_timestamp() + func.make_interval(0, 0, 0, 0, 0, 0, lease_seconds)
+        if dialect == "sqlite":
+            return func.strftime("%Y-%m-%d %H:%M:%f", "now", f"+{lease_seconds} seconds")
+        raise RuntimeError(f"unsupported MCP lease clock dialect: {dialect}")
+
+    async def _database_now(self, session: AsyncSession, now: datetime) -> datetime:
+        if self._lease_clock is not None:
+            return self._lease_clock(now)
+        dialect = session.get_bind().dialect.name
+        if dialect == "postgresql":
+            value = await session.scalar(select(func.clock_timestamp()))
+        elif dialect == "sqlite":
+            value = await session.scalar(select(func.strftime("%Y-%m-%d %H:%M:%f", "now")))
+            if isinstance(value, str):
+                value = datetime.fromisoformat(value)
+        else:
+            raise RuntimeError(f"unsupported MCP lease clock dialect: {dialect}")
+        if value is None:
+            raise RuntimeError("database clock did not return a timestamp")
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+    async def _lock_control_task_row(self, session: AsyncSession, task_id: str) -> bool:
+        """Lock a PostgreSQL task row before evaluating its lease clock."""
+        if session.get_bind().dialect.name != "postgresql":
+            return True
+        locked_id = await session.scalar(select(McpTaskRow.id).where(McpTaskRow.id == task_id).with_for_update())
+        return locked_id is not None
 
     @staticmethod
     def _row_to_dict(row: McpTaskRow, *, include_internal: bool = False) -> dict[str, Any]:
@@ -306,21 +369,18 @@ class McpTaskRepository:
         limit: int,
         exclude_task_ids: tuple[str, ...] = (),
     ) -> list[dict[str, Any]]:
-        lease_expires_at = now + timedelta(seconds=lease_seconds)
-        claimable = (
-            McpTaskRow.status.in_(_POLLABLE_STATUS_VALUES),
-            McpTaskRow.cancel_requested_at.is_(None),
-            McpTaskRow.next_poll_at.is_not(None),
-            McpTaskRow.next_poll_at <= now,
-            or_(
-                McpTaskRow.lease_expires_at.is_(None),
-                McpTaskRow.lease_expires_at < now,
-            ),
-        )
-        stmt = select(McpTaskRow.id).where(*claimable).order_by(McpTaskRow.next_poll_at.asc(), McpTaskRow.id.asc()).limit(limit).with_for_update(skip_locked=True)
-        if exclude_task_ids:
-            stmt = stmt.where(McpTaskRow.id.not_in(exclude_task_ids))
         async with self._sf() as session:
+            lease_expires_at = self._lease_expiry(session, now, lease_seconds)
+            claimable = (
+                McpTaskRow.status.in_(_POLLABLE_STATUS_VALUES),
+                McpTaskRow.cancel_requested_at.is_(None),
+                McpTaskRow.next_poll_at.is_not(None),
+                McpTaskRow.next_poll_at <= now,
+                self._lease_expired_or_null(session, McpTaskRow.lease_expires_at, now),
+            )
+            stmt = select(McpTaskRow.id).where(*claimable).order_by(McpTaskRow.next_poll_at.asc(), McpTaskRow.id.asc()).limit(limit).with_for_update(skip_locked=True)
+            if exclude_task_ids:
+                stmt = stmt.where(McpTaskRow.id.not_in(exclude_task_ids))
             candidate_ids = list((await session.execute(stmt)).scalars())
             # Atomic fence: ``with_for_update()`` is a no-op on SQLite, so a
             # cancel request can commit between the SELECT and the claim. It
@@ -366,20 +426,22 @@ class McpTaskRepository:
         """Extend only the still-live control claim; never resurrect a lease."""
         if phase not in ("poll", "cancel"):
             raise ValueError("Unknown MCP control claim phase")
-        expires_at = now + timedelta(seconds=lease_seconds)
         async with self._sf() as session:
+            if not await self._lock_control_task_row(session, task_id):
+                return False
+            expires_at = self._lease_expiry(session, now, lease_seconds)
             result = await session.execute(
                 update(McpTaskRow)
                 .where(
                     McpTaskRow.id == task_id,
                     McpTaskRow.lease_owner == lease_owner,
                     McpTaskRow.lease_token == lease_token,
-                    McpTaskRow.lease_expires_at >= now,
+                    self._lease_is_live(session, McpTaskRow.lease_expires_at, now),
                     McpTaskRow.status.not_in(_TERMINAL_STATUS_VALUES),
                     McpTaskRow.cancel_requested_at.is_(None) if phase == "poll" else McpTaskRow.cancel_requested_at.is_not(None),
                 )
                 .values(
-                    # A backward wall-clock correction must not shorten a lease.
+                    # A backward database-clock correction must not shorten a lease.
                     lease_expires_at=case((McpTaskRow.lease_expires_at > expires_at, McpTaskRow.lease_expires_at), else_=expires_at),
                     updated_at=McpTaskRow.updated_at,
                 )
@@ -404,6 +466,11 @@ class McpTaskRepository:
         polled_at: datetime,
     ) -> bool:
         async with self._sf() as session:
+            if not await self._lock_control_task_row(session, task_id):
+                return False
+            # The row lock is acquired before the database-clock predicate below,
+            # so time spent waiting for another writer cannot make an expired
+            # control lease appear live.
             # Atomic fence: a poll result from an older generation must not
             # overwrite a claim a newer generation reclaimed after lease expiry.
             values: dict[str, Any] = {
@@ -431,7 +498,7 @@ class McpTaskRepository:
                     McpTaskRow.id == task_id,
                     McpTaskRow.lease_owner == lease_owner,
                     McpTaskRow.lease_token == lease_token,
-                    McpTaskRow.lease_expires_at >= polled_at,
+                    self._lease_is_live(session, McpTaskRow.lease_expires_at, polled_at),
                     McpTaskRow.status.not_in(_TERMINAL_STATUS_VALUES),
                     McpTaskRow.cancel_requested_at.is_(None),
                 )
@@ -583,25 +650,26 @@ class McpTaskRepository:
         exclude_task_ids: tuple[str, ...] = (),
         task_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        stmt = select(McpTaskRow).where(
-            McpTaskRow.cancel_requested_at.is_not(None),
-            McpTaskRow.status.not_in(_TERMINAL_STATUS_VALUES),
-            McpTaskRow.next_cancel_at.is_not(None),
-            McpTaskRow.next_cancel_at <= now,
-            or_(McpTaskRow.lease_expires_at.is_(None), McpTaskRow.lease_expires_at < now),
-        )
-        if task_id is not None:
-            stmt = stmt.where(McpTaskRow.id == task_id)
-        stmt = stmt.order_by(McpTaskRow.next_cancel_at.asc(), McpTaskRow.id.asc()).limit(limit).with_for_update(skip_locked=True)
-        if exclude_task_ids:
-            stmt = stmt.where(McpTaskRow.id.not_in(exclude_task_ids))
         async with self._sf() as session:
             if session.get_bind().dialect.name == "sqlite":
                 # SQLite ignores FOR UPDATE. Reserve its writer before reading
                 # candidates so two workers cannot return the same claim.
                 await session.execute(text("BEGIN IMMEDIATE"))
+            lease_now = await self._database_now(session, now)
+            stmt = select(McpTaskRow).where(
+                McpTaskRow.cancel_requested_at.is_not(None),
+                McpTaskRow.status.not_in(_TERMINAL_STATUS_VALUES),
+                McpTaskRow.next_cancel_at.is_not(None),
+                McpTaskRow.next_cancel_at <= now,
+                or_(McpTaskRow.lease_expires_at.is_(None), McpTaskRow.lease_expires_at < lease_now),
+            )
+            if task_id is not None:
+                stmt = stmt.where(McpTaskRow.id == task_id)
+            stmt = stmt.order_by(McpTaskRow.next_cancel_at.asc(), McpTaskRow.id.asc()).limit(limit).with_for_update(skip_locked=True)
+            if exclude_task_ids:
+                stmt = stmt.where(McpTaskRow.id.not_in(exclude_task_ids))
             rows = list((await session.execute(stmt)).scalars())
-            expires_at = now + timedelta(seconds=lease_seconds)
+            expires_at = lease_now + timedelta(seconds=lease_seconds)
             for row in rows:
                 row.lease_owner = lease_owner
                 row.lease_expires_at = expires_at
@@ -629,13 +697,15 @@ class McpTaskRepository:
         if status not in _TERMINAL_STATUS_VALUES:
             raise ValueError("A cancellation response must report a terminal task status")
         async with self._sf() as session:
+            if not await self._lock_control_task_row(session, task_id):
+                return False
             update_result = await session.execute(
                 update(McpTaskRow)
                 .where(
                     McpTaskRow.id == task_id,
                     McpTaskRow.lease_owner == lease_owner,
                     McpTaskRow.lease_token == lease_token,
-                    McpTaskRow.lease_expires_at >= completed_at,
+                    self._lease_is_live(session, McpTaskRow.lease_expires_at, completed_at),
                     McpTaskRow.status.not_in(_TERMINAL_STATUS_VALUES),
                 )
                 .values(
