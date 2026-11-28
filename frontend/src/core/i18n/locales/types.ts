@@ -133,10 +133,39 @@ export interface Translations {
       noPageHint: string;
       guideHint: string;
       technicalDetails: string;
+      category: string;
       package: string;
       namespace: string;
       refresh: string;
       refreshHint: string;
+    };
+    directory: {
+      allCategories: string;
+      installed: string;
+      installedTitle: string;
+      installedHint: string;
+      installedEmpty: string;
+      installedFilteredEmpty: string;
+      catalogTitle: string;
+      catalogHint: string;
+      examplesTitle: string;
+      examplesHint: string;
+      openAction: string;
+      categories: {
+        orchestration: string;
+        knowledge: string;
+        workspace: string;
+        governance: string;
+        examples: string;
+        other: string;
+      };
+      hints: {
+        orchestration: string;
+        knowledge: string;
+        workspace: string;
+        governance: string;
+        other: string;
+      };
     };
     catalog: Record<
       | "officePreview"

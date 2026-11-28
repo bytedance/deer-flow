@@ -163,19 +163,53 @@ export const enUS: Translations = {
       guideHint:
         "Read the guide to explore what this extension adds to DeerFlow and how to use it.",
       technicalDetails: "Technical details",
+      category: "Category",
       package: "Package",
       namespace: "Extension ID",
       refresh: "Refresh extensions",
       refreshHint:
         "Refresh the page after your administrator updates an extension.",
     },
+    directory: {
+      allCategories: "All categories",
+      installed: "Installed",
+      installedTitle: "Installed in this workspace",
+      installedHint:
+        "Installed in this deployment by your administrator, including enabled, disabled and failed extensions.",
+      installedEmpty:
+        "No extensions are installed in this deployment yet. Browse the catalog below or ask your administrator to configure one.",
+      installedFilteredEmpty: "No installed extensions match this filter.",
+      catalogTitle: "Available catalog",
+      catalogHint:
+        "Repository extensions grouped by scenario. Ask your administrator to install and enable them.",
+      examplesTitle: "Developer & demo examples",
+      examplesHint:
+        "Reference packages and synthetic demos for extension authors, not connected to production data.",
+      openAction: "Open",
+      categories: {
+        orchestration: "Orchestration",
+        knowledge: "Knowledge & retrieval",
+        workspace: "Workspace & content",
+        governance: "Runtime & governance",
+        examples: "Examples",
+        other: "Other",
+      },
+      hints: {
+        orchestration: "Multi-agent collaboration and inspectable workflows",
+        knowledge: "External knowledge bases, spaces and document ingestion",
+        workspace:
+          "File previews, conversation search, bookmarks, writing and labeling tools",
+        governance:
+          "Run postmortems, context pruning, content screening and skill governance",
+        other: "Extensions without a declared category",
+      },
+    },
     catalog: {
       officePreview: bundledCopy("deerflow-extension-office-preview", "en-US"),
-      workspaceSearch: {
-        title: "Conversation search",
-        description:
-          "Search historical message text and jump to the matching conversation turn.",
-      },
+      workspaceSearch: bundledCopy(
+        "deerflow-extension-workspace-search",
+        "en-US",
+      ),
       agentTeams: bundledCopy("deerflow-extension-agent-teams", "en-US"),
       bookmarks: bundledCopy("deerflow-extension-bookmarks", "en-US"),
       context: bundledCopy("deerflow-extension-jev-context", "en-US"),

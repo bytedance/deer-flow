@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "catalog/skillEvolution",
+  "category": "governance",
+  "icon": "flask-conical",
   "locales": {
     "zh-CN": {
       "title": "证据驱动的技能进化",

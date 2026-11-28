@@ -2,6 +2,8 @@
   "deerflow-extension-agent-teams": {
     "schema_version": 1,
     "id": "community.agent-teams",
+    "category": "orchestration",
+    "icon": "users",
     "locales": {
       "zh-CN": {
         "title": "Agent 团队",
@@ -51,6 +53,8 @@
   "deerflow-extension-bookmarks": {
     "schema_version": 1,
     "id": "community.bookmarks",
+    "category": "workspace",
+    "icon": "bookmark",
     "locales": {
       "zh-CN": {
         "title": "会话书签",
@@ -86,6 +90,8 @@
   "deerflow-extension-example": {
     "schema_version": 1,
     "id": "catalog/example",
+    "category": "examples",
+    "icon": "code-2",
     "locales": {
       "zh-CN": {
         "title": "扩展开发示例",
@@ -121,6 +127,8 @@
   "deerflow-extension-jev-classify": {
     "schema_version": 1,
     "id": "community.jev-classify",
+    "category": "workspace",
+    "icon": "tags",
     "locales": {
       "zh-CN": {
         "title": "文本分类",
@@ -162,6 +170,8 @@
   "deerflow-extension-jev-context": {
     "schema_version": 1,
     "id": "community.jev-context",
+    "category": "governance",
+    "icon": "scissors",
     "locales": {
       "zh-CN": {
         "title": "上下文裁剪",
@@ -203,6 +213,8 @@
   "deerflow-extension-jev-screening": {
     "schema_version": 1,
     "id": "catalog/screening",
+    "category": "governance",
+    "icon": "shield-alert",
     "locales": {
       "zh-CN": {
         "title": "内容风险提示",
@@ -244,6 +256,8 @@
   "deerflow-extension-knowledge": {
     "schema_version": 1,
     "id": "catalog/knowledge",
+    "category": "examples",
+    "icon": "sparkles",
     "locales": {
       "zh-CN": {
         "title": "知识范围选择示例",
@@ -285,6 +299,8 @@
   "deerflow-extension-knowledge-center": {
     "schema_version": 1,
     "id": "knowledge-center",
+    "category": "knowledge",
+    "icon": "book-open",
     "locales": {
       "zh-CN": {
         "title": "知识中心",
@@ -334,6 +350,8 @@
   "deerflow-extension-knowledge-management": {
     "schema_version": 1,
     "id": "knowledge-management",
+    "category": "knowledge",
+    "icon": "file-up",
     "locales": {
       "zh-CN": {
         "title": "知识入库与处理",
@@ -375,6 +393,8 @@
   "deerflow-extension-knowledge-platform": {
     "schema_version": 1,
     "id": "knowledge-platform",
+    "category": "knowledge",
+    "icon": "folder-tree",
     "locales": {
       "zh-CN": {
         "title": "知识空间与连接",
@@ -416,6 +436,8 @@
   "deerflow-extension-lightrag": {
     "schema_version": 1,
     "id": "catalog/lightrag",
+    "category": "knowledge",
+    "icon": "waypoints",
     "locales": {
       "zh-CN": {
         "title": "LightRAG",
@@ -457,6 +479,8 @@
   "deerflow-extension-office-preview": {
     "schema_version": 1,
     "id": "office-preview",
+    "category": "workspace",
+    "icon": "file-text",
     "locales": {
       "en-US": {
         "title": "Office file preview",
@@ -508,6 +532,8 @@
   "deerflow-extension-report-sections": {
     "schema_version": 1,
     "id": "community.report-sections",
+    "category": "workspace",
+    "icon": "pen-line",
     "locales": {
       "zh-CN": {
         "title": "分段长文写作",
@@ -551,6 +577,8 @@
   "deerflow-extension-retrieval": {
     "schema_version": 1,
     "id": "example.retrieval",
+    "category": "examples",
+    "icon": "file-search",
     "locales": {
       "zh-CN": {
         "title": "本地检索示例",
@@ -586,6 +614,8 @@
   "deerflow-extension-run-postmortem": {
     "schema_version": 1,
     "id": "community.run-postmortem",
+    "category": "governance",
+    "icon": "activity",
     "locales": {
       "zh-CN": {
         "title": "运行复盘",
@@ -645,6 +675,8 @@
   "deerflow-extension-skill-evolution": {
     "schema_version": 1,
     "id": "catalog/skillEvolution",
+    "category": "governance",
+    "icon": "flask-conical",
     "locales": {
       "zh-CN": {
         "title": "证据驱动的技能进化",
@@ -696,6 +728,8 @@
   "deerflow-extension-weknora": {
     "schema_version": 1,
     "id": "catalog/weknora",
+    "category": "knowledge",
+    "icon": "database",
     "locales": {
       "zh-CN": {
         "title": "WeKnora 知识检索",
@@ -737,6 +771,8 @@
   "deerflow-extension-workflows": {
     "schema_version": 1,
     "id": "community.workflows",
+    "category": "orchestration",
+    "icon": "git-branch",
     "locales": {
       "zh-CN": {
         "title": "脚本工作流",
@@ -782,5 +818,48 @@
       }
     },
     "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-workflows#readme"
+  },
+  "deerflow-extension-workspace-search": {
+    "schema_version": 1,
+    "id": "catalog/workspaceSearch",
+    "category": "workspace",
+    "icon": "search",
+    "locales": {
+      "zh-CN": {
+        "title": "会话全文搜索",
+        "description": "检索历史消息正文，并跳转到命中的对话轮次。",
+        "usage": [
+          {
+            "title": "打开工作区搜索",
+            "description": "在侧边栏打开搜索，或使用 ⌘K / Ctrl+K 快捷键输入关键词。"
+          },
+          {
+            "title": "按正文结果跳转",
+            "description": "查看命中的消息摘录并点击结果，直接定位到对应会话和对话轮次。首次检索会自动建立当前账号的历史索引。"
+          }
+        ],
+        "requirements": [
+          "管理员已安装并启用此扩展，配置 table_prefix 后重启 Gateway。"
+        ]
+      },
+      "en-US": {
+        "title": "Conversation search",
+        "description": "Search historical message text and jump to the matching conversation turn.",
+        "usage": [
+          {
+            "title": "Open workspace search",
+            "description": "Open Search from the sidebar or press ⌘K / Ctrl+K and enter your query."
+          },
+          {
+            "title": "Jump to matching turns",
+            "description": "Inspect highlighted message excerpts and open a match to jump to that conversation turn. The first query starts an owner-scoped backfill index."
+          }
+        ],
+        "requirements": [
+          "An administrator must install and enable this extension with table_prefix configured, then restart Gateway."
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-workspace-search#readme"
   }
 }

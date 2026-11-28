@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "community.run-postmortem",
+  "category": "governance",
+  "icon": "activity",
   "locales": {
     "zh-CN": {
       "title": "运行复盘",

@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "catalog/knowledge",
+  "category": "examples",
+  "icon": "sparkles",
   "locales": {
     "zh-CN": {
       "title": "知识范围选择示例",

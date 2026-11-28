@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "example.retrieval",
+  "category": "examples",
+  "icon": "file-search",
   "locales": {
     "zh-CN": {
       "title": "本地检索示例",

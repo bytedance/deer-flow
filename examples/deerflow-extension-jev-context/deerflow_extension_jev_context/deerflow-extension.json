@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "community.jev-context",
+  "category": "governance",
+  "icon": "scissors",
   "locales": {
     "zh-CN": {
       "title": "上下文裁剪",

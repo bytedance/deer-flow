@@ -480,7 +480,7 @@ export function mount(root, context) {
 export default {
   apiVersion: 1,
   module: "run-postmortem.v1",
-  icon: "file-text",
+  icon: "activity",
   surfaces: [
     {
       id: "postmortem",
@@ -489,7 +489,7 @@ export default {
       navigation: {
         label: "Run postmortem",
         labelZh: "运行复盘",
-        icon: "file-text",
+        icon: "activity",
       },
       mount,
     },

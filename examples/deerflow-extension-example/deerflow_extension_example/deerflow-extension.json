@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "catalog/example",
+  "category": "examples",
+  "icon": "code-2",
   "locales": {
     "zh-CN": {
       "title": "扩展开发示例",

@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "catalog/weknora",
+  "category": "knowledge",
+  "icon": "database",
   "locales": {
     "zh-CN": {
       "title": "WeKnora 知识检索",

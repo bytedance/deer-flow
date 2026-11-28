@@ -57,6 +57,8 @@ def _workflow(name: str) -> dict:
         (["scripts/pnpm.py"], {"backend": True, "frontend": True}),
         # A frontend test reads the backend's built-in capability catalog.
         (["backend/packages/harness/deerflow/capabilities/builtin.json"], {"backend": True, "frontend": True}),
+        # A frontend test checks parity with the backend's extension documentation contract.
+        (["backend/packages/harness/deerflow/extensions/documentation.py"], {"backend": True, "frontend": True}),
         # A new top-level directory is unknown to both lists: backend runs (skip-list), frontend does not.
         (["brand-new-dir/tool.py"], {"backend": True, "frontend": False}),
         (["scripts/ci_changed_scopes.py"], {"backend": True, "frontend": True}),

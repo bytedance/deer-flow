@@ -23,7 +23,10 @@ export function pluginPages(entries: LoadedContribution[]) {
           contribution,
           surface,
           href: pluginPagePath(contribution.namespace, surface.id),
-          icon: surface.navigation?.icon ?? extension.icon,
+          icon:
+            surface.navigation?.icon ??
+            extension.icon ??
+            contribution.documentation?.icon,
         })),
   );
 }

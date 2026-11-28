@@ -24,8 +24,12 @@ Package `deerflow-extension.json` beside the entrypoint's Python module (beside
 without requiring a browser module. Use the full-stack plugin namespace as `id`,
 or a unique stable ID for a backend-only extension. A v1 document requires an ID,
 at least one locale, and a nonempty **title**, **description** (purpose) and
-**usage** list in every supplied locale. `requirements` and `docs_url` are optional;
-omit requirements when none apply. Keep secrets and deployment configuration out
+**usage** list in every supplied locale. `category`, `icon`, `requirements` and
+`docs_url` are optional; omit requirements when none apply. Supported `category`
+values are `orchestration`, `knowledge`, `workspace`, `governance`, and `examples`
+(omitted or unrecognized categories fall back to "Other" in Capability Center),
+and `icon` selects a curated icon name from `deerflow.extensions.documentation.ICONS`.
+Keep secrets and deployment configuration out
 of this file. Names, purposes and instructions are authored by the package;
 loaded/enabled state and registered tools come from the host.
 
@@ -33,6 +37,8 @@ loaded/enabled state and registered tools come from the host.
 {
   "schema_version": 1,
   "id": "company.helper",
+  "category": "governance",
+  "icon": "wrench",
   "locales": {
     "en-US": {
       "title": "Task statistics",

@@ -2,6 +2,24 @@ import { z } from "zod";
 
 import bundled from "./bundled-documentation.json" with { type: "json" };
 
+export const extensionDocumentCategories = [
+  "orchestration",
+  "knowledge",
+  "workspace",
+  "governance",
+  "examples",
+] as const;
+export type ExtensionDocumentCategory =
+  (typeof extensionDocumentCategories)[number];
+export const extensionDirectoryCategories = [
+  "orchestration",
+  "knowledge",
+  "workspace",
+  "governance",
+  "other",
+] as const;
+export type ExtensionCategory = ExtensionDocumentCategory | "other";
+
 const text = z.string().trim().min(1).max(4000);
 const localized = z.object({
   title: text,
@@ -15,6 +33,8 @@ const localized = z.object({
 export const documentationSchema = z.object({
   schema_version: z.literal(1),
   id: z.string(),
+  category: z.enum(extensionDocumentCategories).optional().catch(undefined),
+  icon: z.string().trim().min(1).max(64).optional().catch(undefined),
   locales: z
     .record(z.string(), localized)
     .refine((value) => Object.keys(value).length > 0),
@@ -53,4 +73,20 @@ export function localizeDocumentation(
 
 export function bundledCopy(name: keyof typeof bundled, locale: string) {
   return localizeDocumentation(bundled[name], locale);
+}
+
+export function bundledMetadata(name: keyof typeof bundled): {
+  category: ExtensionCategory;
+  icon?: string;
+} {
+  const raw = bundled[name] as { category?: string; icon?: string };
+  const category = (extensionDocumentCategories as readonly string[]).includes(
+    raw.category ?? "",
+  )
+    ? (raw.category as ExtensionDocumentCategory)
+    : "other";
+  return {
+    category,
+    icon: raw.icon,
+  };
 }

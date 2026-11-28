@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "knowledge-center",
+  "category": "knowledge",
+  "icon": "book-open",
   "locales": {
     "zh-CN": {
       "title": "知识中心",

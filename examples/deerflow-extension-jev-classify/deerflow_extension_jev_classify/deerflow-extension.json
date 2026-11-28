@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "id": "community.jev-classify",
+  "category": "workspace",
+  "icon": "tags",
   "locales": {
     "zh-CN": {
       "title": "文本分类",

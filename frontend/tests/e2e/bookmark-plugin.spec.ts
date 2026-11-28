@@ -7,6 +7,7 @@ import path from "node:path";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { extensionCatalog } from "../../src/core/extensions/catalog";
+import { bundledMetadata } from "../../src/core/extensions/documentation";
 
 import { mockLangGraphAPI, MOCK_THREAD_ID } from "./utils/mock-api";
 
@@ -471,6 +472,15 @@ for (const locale of ["en-US", "zh-CN"]) {
         exact: true,
       }),
     ).toBeVisible();
+    const productionCatalogCount = extensionCatalog.filter(
+      (item) => bundledMetadata(item.package).category !== "examples",
+    ).length;
+    await expect(page.getByRole("article")).toHaveCount(productionCatalogCount);
+    await page
+      .getByRole("button", {
+        name: new RegExp(zh ? "开发与演示示例" : "Developer & demo examples"),
+      })
+      .click();
     await expect(page.getByRole("article")).toHaveCount(
       extensionCatalog.length,
     );
@@ -829,10 +839,18 @@ test("catalog remains discoverable when runtime discovery fails", async ({
   await expect(
     page.getByRole("alert").filter({ hasText: "Extensions unavailable." }),
   ).toBeVisible();
-  await expect(page.getByRole("article")).toHaveCount(extensionCatalog.length);
+  const productionCatalogCount = extensionCatalog.filter(
+    (item) => bundledMetadata(item.package).category !== "examples",
+  ).length;
   await expect(
-    page.getByRole("article").filter({ hasText: "Catalog extension" }),
-  ).toHaveCount(extensionCatalog.length);
+    page.getByRole("heading", { name: "Installed in this workspace" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Available catalog" }),
+  ).toBeVisible();
+  await expect(page.getByRole("article")).toHaveCount(productionCatalogCount);
+  await page.getByRole("button", { name: /Developer & demo examples/ }).click();
+  await expect(page.getByRole("article")).toHaveCount(extensionCatalog.length);
   await expect(
     page.getByRole("article").filter({ hasText: "Script workflows" }),
   ).toHaveCount(1);
