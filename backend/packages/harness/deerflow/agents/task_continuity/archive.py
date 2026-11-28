@@ -12,20 +12,26 @@ import json
 import logging
 import re
 import sqlite3
-from contextlib import closing
+from collections.abc import Iterable, Iterator
+from contextlib import ExitStack, closing
+from itertools import chain, islice
 from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.config import get_config
 
 from deerflow.agents.human_input import read_human_input_response
-from deerflow.agents.task_continuity.state import normalize_task_history
+from deerflow.agents.task_continuity.state import SOURCE_ID_PATTERN, normalize_task_history
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.tools.types import Runtime
 from deerflow.utils.file_io import run_file_io
 from deerflow.utils.messages import message_content_to_text
 
 logger = logging.getLogger(__name__)
+
+_SEARCH_PAGE_SIZE = 8
+_SEARCH_CURSOR = re.compile(r"1:([0-9]{1,9}):([0-9]{1,9}):([a-f0-9]{32}):([a-f0-9]{16})")
 
 
 def digest(value) -> str:
@@ -195,22 +201,188 @@ async def acapture(*args) -> dict:
         raise
 
 
-def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | None = None, role: str | None = None, excerpts: bool = False, latest_first: bool = False) -> dict:
+def _distinct_archived_sources(rows: Iterable[tuple[str, int]]) -> Iterator[tuple[str, int]]:
+    seen = set()
+    for source_id, rowid in rows:
+        if not isinstance(source_id, str) or SOURCE_ID_PATTERN.fullmatch(source_id) is None:
+            raise sqlite3.DatabaseError("Invalid source ID in archived history index")
+        if source_id not in seen:
+            seen.add(source_id)
+            yield source_id, rowid
+
+
+def _ordered_search_sources(rows: Iterable[tuple[str, int]], active_matches: dict, *, latest_first: bool) -> Iterator[tuple[str, int | None]]:
+    archived = _distinct_archived_sources(rows)
+    if latest_first:
+        return chain(((source_id, None) for source_id in active_matches), (row for row in archived if row[0] not in active_matches))
+    first_archived = list(islice(archived, _SEARCH_PAGE_SIZE))
+    first_archived_ids = {source_id for source_id, _ in first_archived}
+    active_only = {source_id: None for source_id in active_matches if source_id not in first_archived_ids}
+    # Reserve space for active hits on the first page as before, then visit
+    # all remaining hits without letting overlapping sources take two slots.
+    first_archived_count = max(0, _SEARCH_PAGE_SIZE - len(active_only))
+    return chain(
+        first_archived[:first_archived_count],
+        active_only.items(),
+        first_archived[first_archived_count:],
+        (row for row in archived if row[0] not in active_only),
+    )
+
+
+def _archived_page_records(db: sqlite3.Connection, batches: list[str], page: list[tuple[str, int | None]], active: dict, *, canonical: bool) -> dict:
+    archived = [(source_id, rowid) for source_id, rowid in page if source_id not in active]
+    if not archived:
+        return {}
+    placeholders = ",".join("?" for _ in archived)
+    if canonical:
+        # Use the first readable version, as history_read does, even if the
+        # result ranked here through a different archived version.
+        batch_placeholders = ",".join("?" for _ in batches)
+        rows = db.execute(
+            f"SELECT id, payload FROM sources WHERE batch IN ({batch_placeholders}) AND id IN ({placeholders}) ORDER BY rowid",
+            [*batches, *(source_id for source_id, _ in archived)],
+        )
+    else:
+        rows = db.execute(f"SELECT id, payload FROM sources WHERE rowid IN ({placeholders})", [rowid for _, rowid in archived])
+    records_by_id = {}
+    for source_id, payload in rows:
+        if source_id in records_by_id:
+            continue
+        try:
+            row = json.loads(payload)
+        except (ValueError, TypeError) as exc:
+            raise sqlite3.DatabaseError("Invalid JSON in archived history payload") from exc
+        if not isinstance(row, dict) or row.get("id") != source_id or not isinstance(row.get("text"), str) or row.get("role") not in ("human", "ai", "tool") or not isinstance(row.get("truncated"), bool):
+            raise sqlite3.DatabaseError("Invalid archived history record")
+        records_by_id[source_id] = row
+    return records_by_id
+
+
+def _search(state: dict, runtime: Runtime, query: str, role: str | None, excerpts: bool, cursor: str | None, *, latest_first: bool) -> dict:
+    path, owner = scope(runtime)
+    batches = reachable(state, owner)
+    history = normalize_task_history(state.get("task_history"))
+    status = "unavailable" if history.get("status") == "unavailable" else "available"
+    if not batches and history.get("scope") is not None and history["scope"] != owner:
+        status = "scope_unavailable"
+    stale_cursor = {"results": [], "status": "stale_cursor"}
+    messages = state.get("messages", [])
+    offset, message_count = 0, len(messages)
+    fingerprint, rank_fingerprint = None, None
+    if cursor is not None:
+        parsed = _SEARCH_CURSOR.fullmatch(cursor)
+        if parsed is None:
+            return {"results": [], "status": "invalid_cursor"}
+        offset, message_count = map(int, parsed.group(1, 2))
+        if offset == 0 or offset % _SEARCH_PAGE_SIZE:
+            return {"results": [], "status": "invalid_cursor"}
+        if message_count > len(messages):
+            return stale_cursor
+        fingerprint, rank_fingerprint = parsed.group(3, 4)
+
+    keywords = terms(query)
+    if not keywords:
+        return stale_cursor if cursor is not None else {"results": [], "status": "empty_query"}
+    # Search calls append their own messages. Keep the original prefix so
+    # following a cursor neither invalidates it nor ranks the previous page.
+    active_rows = records(messages[:message_count], 64000)
+    if latest_first:
+        active_rows.reverse()
+    active = {row["id"]: row for row in active_rows}
+    active_matches = {source_id: row for source_id, row in active.items() if (role is None or row["role"] == role) and any(term in row["text"].casefold() for term in keywords)}
+    next_cursor = None
+    try:
+        with ExitStack() as stack:
+            db = None
+            stored_batches = []
+            if batches:
+                db = stack.enter_context(closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2)))
+                db.execute("BEGIN")
+                stored_batches = db.execute("SELECT id, created FROM batches ORDER BY id").fetchall()
+                if not set(batches).issubset(batch for batch, _ in stored_batches) and status != "unavailable":
+                    status = "partially_expired"
+            # FTS rank also depends on the currently stored corpus, including
+            # batches not reachable from this checkpoint.
+            snapshot = digest([owner, keywords, role, latest_first, batches, stored_batches, status, message_count, list(active)])
+            if fingerprint is not None and fingerprint != digest([snapshot, offset])[:32]:
+                return stale_cursor
+            rows = ()
+            if db is not None:
+                placeholders = ",".join("?" for _ in batches)
+                match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
+                role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
+                parameters = [match, *batches, *([role] if role is not None else [])]
+                order_by = "rank"
+                if latest_first:
+                    # Recapture changes checkpoint batch order without rewriting row IDs.
+                    batch_positions = " ".join(f"WHEN ? THEN {position}" for position in range(len(batches)))
+                    order_by = f"CASE batch {batch_positions} END DESC, rowid DESC"
+                    parameters.extend(batches)
+                rows = db.execute(f"SELECT id, rowid FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY {order_by}", parameters)
+            ordered = _ordered_search_sources(rows, active_matches, latest_first=latest_first)
+            # A rebuilt index can change unseen hits while leaving the first
+            # page intact. Fingerprint every ranked ID in the read transaction.
+            rank = hashlib.sha256()
+            page = []
+            for index, (source_id, rowid) in enumerate(ordered):
+                rank.update(source_id.encode("ascii"))
+                if offset <= index <= offset + _SEARCH_PAGE_SIZE:
+                    page.append((source_id, rowid))
+            current_rank = rank.hexdigest()[:16]
+            if rank_fingerprint is not None and rank_fingerprint != current_rank:
+                return stale_cursor
+            if len(page) > _SEARCH_PAGE_SIZE:
+                next_offset = offset + _SEARCH_PAGE_SIZE
+                page.pop()
+                next_cursor = f"1:{next_offset}:{message_count}:{digest([snapshot, next_offset])[:32]}:{current_rank}"
+            # Rank against the original prefix, but use the current active text
+            # for selected archive hits just as history_read does.
+            if message_count < len(messages) and any(source_id not in active for source_id, _ in page):
+                active.update((row["id"], row) for row in records(messages[message_count:], 64000))
+            archived = _archived_page_records(db, batches, page, active, canonical=excerpts) if db is not None else {}
+            if any(source_id not in active and source_id not in archived for source_id, _ in page):
+                raise sqlite3.DatabaseError("Archived history source ID does not match its payload")
+            results = [active.get(source_id) or archived[source_id] for source_id, _ in page]
+    except (OSError, sqlite3.Error):
+        if cursor is not None:
+            return stale_cursor
+        status = "unavailable"
+        next_cursor = None
+        results = list(islice(active_matches.values(), _SEARCH_PAGE_SIZE))
+
+    if excerpts:
+        excerpts_result = []
+        for record in results:
+            row = dict(record)
+            row.update(_search_excerpt(row.pop("text"), keywords, substring=row["id"] in active))
+            excerpts_result.append(row)
+        results = excerpts_result
+    result = {"results": results, "status": status}
+    if next_cursor is not None:
+        result["next_cursor"] = next_cursor
+    return result
+
+
+def lookup(
+    state: dict,
+    runtime: Runtime,
+    *,
+    query: str | None = None,
+    source_id: str | None = None,
+    role: str | None = None,
+    excerpts: bool = False,
+    latest_first: bool = False,
+    cursor: str | None = None,
+) -> dict:
+    if query is not None:
+        return _search(state, runtime, query, role, excerpts, cursor, latest_first=latest_first)
+
     path, owner = scope(runtime)
     batches = reachable(state, owner)
     active = records(state.get("messages", []), 64000)
-    keywords = terms(query or "")
-    if query is not None and not keywords:
-        return {"results": [], "status": "empty_query"}
-    found = {}
     history = normalize_task_history(state.get("task_history"))
     status = "unavailable" if history.get("status") == "unavailable" else "available"
-    active_matches = []
-    for row in active:
-        if (source_id and row["id"] == source_id) or (query is not None and (role is None or row["role"] == role) and any(t in row["text"].casefold() for t in keywords)):
-            active_matches.append(row)
-    latest_active = {row["id"]: row for row in reversed(active_matches)} if latest_first else {}
-    archive_limit = max(0, 8 - len(latest_active))
+    archived = None
     if batches:
         try:
             with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
@@ -218,62 +390,13 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                 present = db.execute(f"SELECT count(*) FROM batches WHERE id IN ({placeholders})", batches).fetchone()[0]
                 if present != len(batches) and status != "unavailable":
                     status = "partially_expired"
-                rows = ()
                 if source_id:
-                    rows = db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? ORDER BY rowid LIMIT 1", [*batches, source_id])
-                elif archive_limit:
-                    match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
-                    role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
-                    parameters = [match, *batches, *([role] if role is not None else [])]
-                    order_by = "rank"
-                    if latest_first:
-                        # Recapture moves the checkpoint reference while keeping its stored row IDs.
-                        batch_positions = " ".join(f"WHEN ? THEN {position}" for position in range(len(batches)))
-                        order_by = f"CASE batch {batch_positions} END DESC, rowid DESC"
-                        parameters.extend(batches)
-                    # Sort the bounded archive before taking distinct sources.
-                    # A SQL row limit can hide distinct sources behind duplicates.
-                    rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY {order_by}", parameters)
-                for (payload,) in rows:
-                    row = json.loads(payload)
-                    if row["id"] in latest_active:
-                        continue
-                    # Repeated archives share one result slot in either order.
-                    found.setdefault(row["id"], row)
-                    if len(found) == archive_limit:
-                        break
-                if excerpts and query is not None and found:
-                    # A source may be archived at different lengths; select its first stored version, as history_read does.
-                    ids = list(found)
-                    id_placeholders = ",".join("?" for _ in ids)
-                    canonical = {}
-                    for (payload,) in db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id IN ({id_placeholders}) ORDER BY rowid", [*batches, *ids]):
-                        row = json.loads(payload)
-                        canonical.setdefault(row["id"], row)
-                    found.update(canonical)
+                    row = db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? ORDER BY rowid LIMIT 1", [*batches, source_id]).fetchone()
+                    if row:
+                        archived = json.loads(row[0])
         except (OSError, sqlite3.Error):
             status = "unavailable"
     elif history.get("scope") is not None and history["scope"] != owner:
         status = "scope_unavailable"
-    archived_matches = list(found.values())
-    active_by_id = {row["id"]: row for row in active}
-    archived_matches = [active_by_id.get(row["id"], row) for row in archived_matches]
-    if latest_first:
-        results = [*latest_active.values(), *archived_matches][:8]
-    else:
-        archived_ids = set(found)
-        active_only_by_id = {}
-        for row in active_matches:
-            if row["id"] not in archived_ids:
-                active_only_by_id.setdefault(row["id"], row)
-        active_only = list(active_only_by_id.values())
-        results = archived_matches[: max(0, 8 - len(active_only))] + active_only[:8]
-    if excerpts and query is not None:
-        excerpts_result = []
-        for row in results:
-            # Active text takes precedence when reading by ID, even if only archived FTS matched the source.
-            row = dict(active_by_id.get(row["id"], row))
-            row.update(_search_excerpt(row.pop("text"), keywords, substring=row["id"] in active_by_id))
-            excerpts_result.append(row)
-        results = excerpts_result
-    return {"results": results, "status": status}
+    source = next((row for row in active if row["id"] == source_id), archived)
+    return {"results": [source] if source else [], "status": status}

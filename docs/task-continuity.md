@@ -41,14 +41,31 @@ The standard lead-agent builders (including custom-agent bootstrap) and
 - `history_search`: keyword search over the current messages and compacted source
   batches reachable from the current checkpoint. English words and Chinese
   character bigrams are supported. Returns up to eight excerpts of at most 600 characters.
-  Repeated archives of one source share one result slot, preserving FTS ranking.
+  Repeated archives of one source share one result slot.
   The optional `role="user"`, `"assistant"`, or `"tool"` filters by message author
   type; omission or `null` preserves search across all roles. These values map to
   internal `human`, `ai`, and `tool` roles; returned role values stay unchanged.
   Both active and archived history are filtered before the eight-result limit.
+  Results include `next_cursor` when more distinct sources match in a readable
+  snapshot. Pass it as `cursor` with the same query, role, and order to get the next
+  page. Each page returns at most eight sources, and the last page omits
+  `next_cursor`. Later pages continue in the order chosen when the search started.
+  Search ranks the original active messages, so the tool's own replies stay
+  outside the result order. An archived hit uses the current active version for
+  the excerpt and truncation flag if the same source ID reappears in active
+  history. Changes to the original active prefix or the archive batches can
+  expire the cursor. Each page checks the full ordered source ID sequence, so a
+  change to matching or order after index maintenance also expires it. Python
+  decodes only archived records needed for the returned excerpts. For a `role`
+  filter, SQLite also reads matching candidates' payloads before pagination.
+  If the archive cannot be read or the page needs a malformed archived record,
+  a fresh search returns up to eight active hits with `unavailable` and omits
+  `next_cursor`. A continuation returns `stale_cursor` because the archived
+  result order cannot be continued safely.
+  Start a fresh search for `stale_cursor` or `invalid_cursor`. Each page checks the
+  current thread scope and reachable archive batches before returning sources.
   For example, `history_search(query="replicas", role="user")` narrows the search
   to user messages about replica counts; use `history_read` to verify the source.
-  Filtering does not change ranking or guarantee retrieval of the latest message.
   A matching role does not establish truth or grant current authorization.
 - `history_read`: read the exact source ID in 4,000-character pages. Results mark
   truncation and provide `next_offset` while more stored text remains.
@@ -57,12 +74,13 @@ The standard lead-agent builders (including custom-agent bootstrap) and
 
 Use `history_search(query="replicas", role="user", order="latest")` to look for a
 recent correction or decision. This orders active matches from newest to oldest
-in the current message list, then fills the remaining slots from reachable
-batches in reverse checkpoint order and from newest to oldest within each batch.
+in the current message list, followed by matches from reachable batches in
+reverse checkpoint order and from newest to oldest within each batch.
 Recapturing a batch makes it newest when the updated checkpoint is saved.
 With `order="relevance"` (the default), archived matches use the existing full-text
-rank and active matches use message-list order. Both orders apply the role
-filter and deduplicate source IDs before returning up to eight results.
+rank and active matches use message-list order. The first relevance page reserves
+space for active matches. Both orders apply the role filter and deduplicate
+source IDs before returning up to eight results per page.
 
 ### Matching excerpts and character offsets
 
