@@ -201,7 +201,7 @@ class LocalSkillStorage(SkillStorage):
             zf = zipfile.ZipFile(path, "r")
         except FileNotFoundError:
             raise FileNotFoundError(f"Skill file not found: {archive_path}") from None
-        except (zipfile.BadZipFile, IsADirectoryError):
+        except (zipfile.BadZipFile, zipfile.LargeZipFile, IsADirectoryError):
             raise ValueError("File is not a valid ZIP archive") from None
 
         try:

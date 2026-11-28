@@ -14,6 +14,7 @@ import shutil
 import stat
 import unicodedata
 import zipfile
+import zlib
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from deerflow.skills.package_files import MAX_MODEL_BYTES, MAX_MODEL_FILE_BYTES, MAX_MODEL_FILES, is_code_path, is_executable_binary_prefix
@@ -160,6 +161,47 @@ def resolve_skill_dir_from_archive(temp_path: Path) -> Path:
     return temp_path
 
 
+def _load_archive_extract_errors() -> tuple[type[BaseException], ...]:
+    errors: list[type[BaseException]] = [
+        zipfile.BadZipFile,
+        zipfile.LargeZipFile,
+        zlib.error,
+        EOFError,
+        RuntimeError,
+    ]
+    # LZMA support is an optional extension on CPython builds. Import it
+    # lazily so a build without _lzma can still load the skills module and
+    # install archives that use the codecs that are available.
+    try:
+        import lzma
+    except ImportError:
+        pass
+    else:
+        errors.append(lzma.LZMAError)
+    try:
+        from compression.zstd import ZstdError
+    except ImportError:
+        pass
+    else:
+        errors.append(ZstdError)
+    return tuple(errors)
+
+
+_ARCHIVE_EXTRACT_ERRORS = _load_archive_extract_errors()
+
+
+def _archive_member_call(op, *args):
+    """Translate corrupt/encrypted/unsupported ZIP member errors into ValueError while keeping host OS errors intact."""
+    try:
+        return op(*args)
+    except _ARCHIVE_EXTRACT_ERRORS as exc:
+        raise ValueError("File is not a valid ZIP archive") from exc
+    except OSError as exc:
+        if exc.errno is not None:
+            raise
+        raise ValueError("File is not a valid ZIP archive") from exc
+
+
 def safe_extract_skill_archive(
     zip_ref: zipfile.ZipFile,
     dest_path: Path,
@@ -181,7 +223,8 @@ def safe_extract_skill_archive(
       name fails the install instead of leaving a partially installed skill.
 
     Raises:
-        ValueError: If unsafe members, executable binaries, entry count, or size limit exceeded.
+        ValueError: If unsafe, damaged, encrypted, or unsupported archive members,
+            executable binaries, entry count, or size limit exceeded.
     """
     dest_root = dest_path.resolve()
     host_path_limit = _host_path_limit(dest_root)
@@ -258,9 +301,9 @@ def safe_extract_skill_archive(
             member_path.mkdir(parents=True, exist_ok=True)
             continue
 
-        with zip_ref.open(info) as src, member_path.open("wb") as dst:
+        with _archive_member_call(zip_ref.open, info) as src, member_path.open("wb") as dst:
             first_chunk = True
-            while chunk := src.read(65536):
+            while chunk := _archive_member_call(src.read, 65536):
                 if first_chunk and is_executable_binary_prefix(chunk):
                     raise ValueError(f"Archive contains executable binary member: {info.filename!r}")
                 first_chunk = False

@@ -160,23 +160,37 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("endpoint", ["thread", "upload"])
 @pytest.mark.parametrize("static_enabled", [True, False])
-@pytest.mark.parametrize("invalid_member", ["directory", "crc"])
+@pytest.mark.parametrize("invalid_member", ["directory", "crc", "deflate", "encrypted"])
 def test_install_skill_archive_with_invalid_member_returns_400(monkeypatch, tmp_path, endpoint, static_enabled, invalid_member):
     skills_root = tmp_path / "skills"
     (skills_root / "custom").mkdir(parents=True)
     archive = tmp_path / "dir-skill.skill"
-    with zipfile.ZipFile(archive, "w") as zf:
+    compression = zipfile.ZIP_DEFLATED if invalid_member in {"deflate", "encrypted"} else zipfile.ZIP_STORED
+    with zipfile.ZipFile(archive, "w", compression=compression) as zf:
         if invalid_member == "directory":
             zf.writestr("dir-skill/SKILL.md/notes.md", "# Notes\n")
         else:
             zf.writestr("dir-skill/SKILL.md", _skill_content("dir-skill"))
-            zf.writestr("dir-skill/references/guide.md", b"a" * 8192 + b"corruption-marker")
+            zf.writestr("dir-skill/references/guide.md", b"a" * 8192 + b"corruption-marker " * 100)
     if invalid_member == "crc":
         data = archive.read_bytes()
-        assert data.count(b"corruption-marker") == 1
+        assert data.count(b"corruption-marker") >= 1
         archive.write_bytes(data.replace(b"corruption-marker", b"corruption-MARKER", 1))
         with zipfile.ZipFile(archive) as zf:
             assert zf.testzip() == "dir-skill/references/guide.md"
+    elif invalid_member == "deflate":
+        raw = bytearray(archive.read_bytes())
+        with zipfile.ZipFile(archive) as zf:
+            info = zf.getinfo("dir-skill/references/guide.md")
+        payload_offset = info.header_offset + 30 + len(info.filename.encode("utf-8")) + len(info.extra) + 1
+        raw[payload_offset] ^= 0xFF
+        archive.write_bytes(bytes(raw))
+    elif invalid_member == "encrypted":
+        raw = bytearray(archive.read_bytes())
+        raw[6] |= 1
+        cd_pos = raw.rfind(b"PK\x01\x02")
+        raw[cd_pos + 8] |= 1
+        archive.write_bytes(bytes(raw))
 
     from deerflow.config.paths import Paths
 
