@@ -1267,6 +1267,11 @@ or conflicting member paths, invalid frontmatter, a member CRC-32 mismatch found
 during extraction, or a `SKILL.md` that is missing or is not a file. A skill name
 that already exists returns `409`.
 
+Both archive install routes share a 120-second model review deadline across
+all files, starting after static review and review preparation. If the
+deadline expires, the in-flight model review is cancelled and the archive is
+rejected with `400` before installation.
+
 #### Upload and Install Skill
 
 Upload a local `.skill` archive and install it for the current user. Requires an
