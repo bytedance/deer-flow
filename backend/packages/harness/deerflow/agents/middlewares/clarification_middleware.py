@@ -36,6 +36,7 @@ def _tool_call_id(tool_call: dict) -> str:
     """
     return str(tool_call.get("id") or "")
 
+
 # Whitelisted form field types; anything else degrades to "text" so a bad
 # model-provided type can never produce an unrenderable card.
 FORM_FIELD_TYPES = frozenset({"text", "textarea", "number", "select", "multi_select", "checkbox", "date"})
