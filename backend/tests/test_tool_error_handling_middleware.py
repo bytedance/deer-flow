@@ -128,6 +128,11 @@ def _stub_runtime_middleware_imports(monkeypatch: pytest.MonkeyPatch) -> None:
             SandboxAuditMiddleware=FakeSandboxAuditMiddleware,
         ),
     )
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.identity_hooks_middleware",
+        _module("deerflow.agents.middlewares.identity_hooks_middleware", IdentityHooksMiddleware=FakeMiddleware),
+    )
 
 
 def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware(monkeypatch: pytest.MonkeyPatch):
@@ -198,6 +203,11 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     )
     monkeypatch.setitem(
         sys.modules,
+        "deerflow.agents.middlewares.identity_hooks_middleware",
+        _module("deerflow.agents.middlewares.identity_hooks_middleware", IdentityHooksMiddleware=FakeMiddleware),
+    )
+    monkeypatch.setitem(
+        sys.modules,
         "deerflow.agents.middlewares.input_sanitization_middleware",
         _module(
             "deerflow.agents.middlewares.input_sanitization_middleware",
@@ -226,6 +236,8 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # + 1 ModelContentCompatibilityMiddleware (unconditional read-time
     # sanitizer between DurableContext and the date/coalescer tail).
     # + 1 HarnessGuardMiddleware (enabled by default).
+    # IdentityHooksMiddleware is lead-only (gated with UploadsMiddleware) and
+    # is not part of this subagent chain.
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.dynamic_context_middleware import SubagentDateContextMiddleware
     from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
@@ -521,6 +533,7 @@ def test_build_lead_runtime_middlewares_chain_order_matches_agents_md():
     these, update backend/AGENTS.md "Middleware Chain" in the same change.
     """
     from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+    from deerflow.agents.middlewares.identity_hooks_middleware import IdentityHooksMiddleware
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
     from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
     from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
@@ -540,12 +553,15 @@ def test_build_lead_runtime_middlewares_chain_order_matches_agents_md():
         assert len(matches) == 1, f"expected exactly one {label}, got indices {matches}"
         return matches[0]
 
-    # Mirrors AGENTS.md "Shared runtime base" items 1-10 (non-optional spine).
+    # Relative order of the non-optional lead runtime spine. Optional wrappers
+    # may sit between these. IdentityHooksMiddleware is the lead-only slot
+    # between thread data and uploads.
     expected_order: list[tuple[str, type]] = [
         ("InputSanitizationMiddleware", InputSanitizationMiddleware),
         ("ToolOutputBudgetMiddleware", ToolOutputBudgetMiddleware),
         ("ToolResultSanitizationMiddleware", ToolResultSanitizationMiddleware),
         ("ThreadDataMiddleware", ThreadDataMiddleware),
+        ("IdentityHooksMiddleware", IdentityHooksMiddleware),
         ("UploadsMiddleware", UploadsMiddleware),
         ("SandboxMiddleware", SandboxMiddleware),
         ("DanglingToolCallMiddleware", DanglingToolCallMiddleware),

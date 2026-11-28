@@ -179,6 +179,17 @@ access. See the
 [Parallel Search MCP documentation](https://docs.parallel.ai/integrations/mcp/search-mcp)
 for details.
 
+## Optional identity hooks
+
+For external identity or memory providers, DeerFlow can optionally fire MCP tool
+calls at thread start via an `identityHooks` block in `extensions_config.json`.
+The block is absent by default. When it is missing or `enabled` is false,
+startup does not call MCP and agent behaviour is unchanged. See the frontend
+docs subsection **Optional identity hooks** in
+`frontend/src/content/en/harness/mcp.mdx` for schema, the Lithtrix reference
+integration (`skills/public/use-lithtrix/SKILL.md`, `docs/examples/lithtrix/`),
+and v1 scope (`sessionStart` only; failures are non-fatal).
+
 ## Routing Hints
 
 Use `routing` when an MCP server should be preferred for specific requests, such

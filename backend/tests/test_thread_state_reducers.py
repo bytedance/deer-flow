@@ -407,6 +407,7 @@ class TestThreadStateAnnotations:
             "promoted",
             "delegations",
             "skill_context",
+            "identity_hooks",
             "tool_artifacts",
             "tool_artifact_processed",
             "task_notes",
