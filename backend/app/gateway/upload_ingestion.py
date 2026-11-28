@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 
+from app.gateway.utils import sanitize_log_param
 from deerflow.config.app_config import AppConfig
 from deerflow.uploads.companions import register_companion, unregister_companion
 from deerflow.utils.atomic_write import cleanup_failed_atomic_write
@@ -376,7 +377,7 @@ class ThreadUploadIngestionService:
         }
         if safe_filename != original_filename:
             file_info["original_filename"] = original_filename
-        logger.info(f"Saved file: {safe_filename} ({file_size} bytes) to {file_info['path']}")
+        logger.info("Saved file: %s (%s bytes) to %s", sanitize_log_param(safe_filename), file_size, sanitize_log_param(file_info["path"]))
 
         if convert_source_fd is not None:
             # The companion gets the same atomic no-overwrite commit as the
@@ -470,7 +471,7 @@ class ThreadUploadIngestionService:
                 await run_file_io(unregister_companion, original)
             except Exception:
                 with suppress(Exception):
-                    logger.warning("Failed to remove upload companion record for %s", original, exc_info=True)
+                    logger.warning("Failed to remove upload companion record for %s", sanitize_log_param(str(original)), exc_info=True)
         self._companion_pairs = []
         self._written_paths = []
 

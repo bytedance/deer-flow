@@ -2355,3 +2355,91 @@ def test_upload_files_failed_conversion_does_not_push_the_next_companion_to_suff
     assert result.files[1].markdown_file == "notes.md"
     assert (thread_uploads_dir / "notes.md").read_text(encoding="utf-8") == "FROM:notes.pdf"
     assert not (thread_uploads_dir / "notes_1.md").exists()
+
+
+def test_upload_failure_log_cannot_be_forged_by_client_filename(tmp_path, caplog):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir()
+    forged = "invoice\n2026-11-19 INFO forged entry.txt"
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=False),
+        patch.object(uploads.ThreadUploadIngestionService, "open", new=AsyncMock()),
+        patch.object(uploads.ThreadUploadIngestionService, "ingest_chunks", new=AsyncMock(side_effect=RuntimeError("disk full"))),
+        patch.object(uploads.ThreadUploadIngestionService, "cleanup_written", new=AsyncMock()),
+    ):
+        file = UploadFile(filename=forged, file=BytesIO(b"payload"))
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(call_unwrapped(uploads.upload_files, "thread-log-forgery", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert exc.value.status_code == 500
+    assert any("forged entry.txt" in record.getMessage() for record in caplog.records), "the offending upload must still be named in the log"
+    assert all("\n" not in record.getMessage() for record in caplog.records)
+
+
+def test_unsafe_destination_skip_log_cannot_be_forged_by_client_filename(tmp_path, caplog):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir()
+    forged = "report\n2026-11-19 INFO forged skip.txt"
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=False),
+        patch.object(uploads.ThreadUploadIngestionService, "open", new=AsyncMock()),
+        patch.object(uploads.ThreadUploadIngestionService, "ingest_chunks", new=AsyncMock(side_effect=uploads.UnsafeUploadDestinationError(forged))),
+    ):
+        file = UploadFile(filename=forged, file=BytesIO(b"payload"))
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-log-forgery-skip", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert result.skipped_files == [forged]
+    assert any("forged skip.txt" in record.getMessage() for record in caplog.records), "the skipped name must still reach the log"
+    assert all("\n" not in record.getMessage() for record in caplog.records)
+
+
+def test_successful_upload_info_log_cannot_be_forged_by_client_filename(tmp_path, caplog):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir()
+    forged = "summary\n2026-11-19 INFO forged saved.txt"
+    caplog.set_level("INFO", logger="app.gateway.upload_ingestion")
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=False),
+    ):
+        file = UploadFile(filename=forged, file=BytesIO(b"saved bytes"))
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-info-log-forgery", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert [info.filename for info in result.files] == [forged]
+    assert any("Saved file:" in record.getMessage() for record in caplog.records), "the ingestion success log must still fire"
+    assert all("\n" not in record.getMessage() for record in caplog.records)
+
+
+def test_companion_cleanup_failure_log_cannot_be_forged_by_client_filename(tmp_path, caplog):
+    service = upload_ingestion.ThreadUploadIngestionService(request=None, thread_id="thread-companion-forgery", user_id="user", app_config=SimpleNamespace())
+    forged = tmp_path / "summary\n2026-11-19 INFO forged companion.txt"
+    service._written_paths = [forged]
+    service._companion_pairs = [(forged, tmp_path / "summary.md")]
+    caplog.set_level("WARNING", logger="app.gateway.upload_ingestion")
+    with (
+        patch.object(upload_ingestion, "_uploads", return_value=MagicMock()),
+        patch.object(upload_ingestion, "unregister_companion", side_effect=OSError("companion row gone")),
+    ):
+        asyncio.run(service.cleanup_written())
+
+    assert any("companion record for" in record.getMessage() for record in caplog.records), "the failed companion row must still be named"
+    assert all("\n" not in record.getMessage() for record in caplog.records)
+
+
+def test_delete_failure_log_cannot_be_forged_by_client_filename(caplog):
+    forged = "notes\n2026-11-19 INFO forged delete.txt"
+    with patch.object(uploads, "run_file_io", new=AsyncMock(side_effect=RuntimeError("device busy"))):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(call_unwrapped(uploads.delete_uploaded_file, "thread-delete-forgery", filename=forged, request=MagicMock()))
+
+    assert exc.value.status_code == 500
+    assert any("forged delete.txt" in record.getMessage() for record in caplog.records), "the refused deletion must still name the file"
+    assert all("\n" not in record.getMessage() for record in caplog.records)
