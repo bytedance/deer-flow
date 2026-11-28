@@ -23,9 +23,10 @@ import { resolveArtifactURL } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { useWorkspaceChanges } from "@/core/workspace-changes/hooks";
 import {
+  classifyWorkspaceDiffLines,
   getChangedFileCount,
-  getWorkspaceChangeLineClass,
   sortWorkspaceChanges,
+  type WorkspaceChangeLineClass,
 } from "@/core/workspace-changes/summary";
 import type {
   DiffUnavailableReason,
@@ -170,17 +171,19 @@ function WorkspaceChangeFile({
 function WorkspaceDiff({ diff }: { diff: string }) {
   return (
     <pre className="border-border/70 bg-muted/30 max-h-[520px] overflow-auto border-t p-0 font-mono text-xs leading-5">
-      {diff.split("\n").map((line, index) => (
-        <div
-          key={`${index}:${line}`}
-          className={cn(
-            "min-w-max px-3 whitespace-pre",
-            diffLineClassName(line),
-          )}
-        >
-          {line || " "}
-        </div>
-      ))}
+      {classifyWorkspaceDiffLines(diff.split("\n")).map(
+        ({ line, lineClass }, index) => (
+          <div
+            key={`${index}:${line}`}
+            className={cn(
+              "min-w-max px-3 whitespace-pre",
+              diffLineClassName(lineClass),
+            )}
+          >
+            {line || " "}
+          </div>
+        ),
+      )}
     </pre>
   );
 }
@@ -231,8 +234,7 @@ function unavailableLabel(
   return t.workspaceChanges.diffUnavailable;
 }
 
-function diffLineClassName(line: string) {
-  const lineClass = getWorkspaceChangeLineClass(line);
+function diffLineClassName(lineClass: WorkspaceChangeLineClass) {
   if (lineClass === "addition") {
     return "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
   }
