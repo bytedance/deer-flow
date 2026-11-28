@@ -1,6 +1,7 @@
 {{- if .Values.postgresql.enabled -}}
 {{- $image := printf "%s:%v" .Values.postgresql.image.repository .Values.postgresql.image.tag -}}
-{{- $taggedImage := first (splitList "@" $image) -}}
+{{- $tag := first (splitList "@" (toString .Values.postgresql.image.tag)) -}}
+{{- $postgresRepo := eq (base .Values.postgresql.image.repository) "postgres" -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -54,7 +55,7 @@ spec:
                 secretKeyRef:
                   name: {{ include "deer-flow.databaseUrlSecret" . }}
                   key: postgres-password
-            {{- if regexMatch `^((index\.)?docker\.io/)?(library/)?postgres:16(\.[0-9]+)?$` $taggedImage }}
+            {{- if and (regexMatch `^16(\.[0-9]+)?$` $tag) (dig "useChartDataDirectory" $postgresRepo .Values.postgresql.image) }}
             - name: PGDATA
               value: /var/run/postgresql/deerflow-pgdata
           command:

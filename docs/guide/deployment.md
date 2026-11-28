@@ -14,7 +14,9 @@ Use the table below as a practical starting point when choosing how to run DeerF
 - Linux plus Docker is the recommended deployment target for a persistent server. macOS and Windows are best treated as development or evaluation environments.
 - If CPU or memory usage stays pinned, reduce concurrent runs first, then move to the next sizing tier.
 
-On Helm, the official Docker Hub images `postgres:16` and numeric minor tags such as `postgres:16.16` use the same data directory. You can use the full repository name `docker.io/library/postgres` and pin either tag by appending `@sha256:<hash>` to `postgresql.image.tag`. A new database starts in `pgdata/`, including on a volume with a storage-managed `.snapshot/` directory. An existing database at the volume root stays there. Run `readlink -f "$PGDATA"` in the database Pod to find the physical directory. Use that directory when switching images or taking a file-level backup after a clean shutdown.
+On Helm, the official `postgres:16` image and numeric minor tags such as `postgres:16.16` use the same data directory across registries. To switch to a mirror such as `registry.example.com/library/postgres`, change only `postgresql.image.repository`. If the mirror renames the image (for example, to `registry.example.com/db/pg`), also set `postgresql.image.useChartDataDirectory: true`. For a custom image named `postgres` that uses its own entrypoint, set this value to `false`. You can pin either tag by appending `@sha256:<hash>` to `postgresql.image.tag`.
+
+A new database starts in `pgdata/`, including on a volume with a storage-managed `.snapshot/` directory. An existing database at the volume root stays there. Run `readlink -f "$PGDATA"` in the database Pod to find the physical directory. Use that directory when switching images or taking a file-level backup after a clean shutdown.
 
 ## Option 1: Docker (Recommended)
 

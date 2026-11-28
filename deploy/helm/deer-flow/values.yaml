@@ -265,6 +265,9 @@ postgresql:
   image:
     repository: postgres
     tag: "16"
+    # Numeric 16.x tags use the chart data directory when the repository name
+    # ends in /postgres or is postgres. Override for renamed mirrors or custom images.
+    # useChartDataDirectory: true
   auth:
     database: deerflow
     username: deerflow
