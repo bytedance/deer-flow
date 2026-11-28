@@ -5,7 +5,7 @@ surrounding quotes intact (e.g. ``name: "my-skill"`` → ``'"my-skill"'``).
 This caused a mismatch with ``_validate_skill_frontmatter`` (which uses
 ``yaml.safe_load``) and broke skill lookup after installation.
 
-The parser now uses ``yaml.safe_load`` consistently with ``validation.py``.
+The parser now uses the same safe frontmatter loader as validation and review.
 """
 
 from __future__ import annotations
