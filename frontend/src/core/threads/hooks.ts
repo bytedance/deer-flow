@@ -2896,45 +2896,52 @@ export function useThreadStream({
     !completedRunIdsRef.current.has(knownActiveRunId)
       ? knownActiveRunId
       : null;
-  const unfollowedActiveRunEnded =
-    unfollowedActiveRunId !== null &&
-    !!runsQuery.data?.some(
-      (run) =>
-        run.run_id === unfollowedActiveRunId &&
-        !ACTIVE_RUN_STATUSES.has(String(run.status)),
-    );
+  const runs = runsQuery.data;
   const unfollowedActiveRunRef = useRef<{
     threadId: string;
     runId: string;
   } | null>(null);
   useEffect(() => {
     const previous = unfollowedActiveRunRef.current;
-    if (onStreamThreadId && unfollowedActiveRunId && unfollowedActiveRunEnded) {
-      // The inputs read can still report the run until it is refetched.
-      completedRunIdsRef.current.add(unfollowedActiveRunId);
-      unfollowedActiveRunRef.current = null;
-      setPollUnfollowedActiveRun(false);
-      invalidateStoppedThreadCaches(queryClient, onStreamThreadId, isMock);
-      return;
+    const previousRunId =
+      previous && previous.threadId === onStreamThreadId
+        ? previous.runId
+        : null;
+    // A later runs read can lag and report an ended run as running again, and
+    // the inputs read can still name it. Remember an end the runs read
+    // confirms, so neither can rejoin the run or make the chat busy again.
+    const endedRunIds = [previousRunId, unfollowedActiveRunId].filter(
+      (runId): runId is string =>
+        !!runId &&
+        !!runs?.some(
+          (run) =>
+            run.run_id === runId &&
+            !ACTIVE_RUN_STATUSES.has(String(run.status)),
+        ),
+    );
+    for (const runId of endedRunIds) {
+      completedRunIdsRef.current.add(runId);
     }
     unfollowedActiveRunRef.current =
-      onStreamThreadId && unfollowedActiveRunId
+      onStreamThreadId &&
+      unfollowedActiveRunId &&
+      !endedRunIds.includes(unfollowedActiveRunId)
         ? { threadId: onStreamThreadId, runId: unfollowedActiveRunId }
         : null;
     setPollUnfollowedActiveRun(unfollowedActiveRunRef.current !== null);
     if (
-      previous &&
-      previous.threadId === onStreamThreadId &&
-      previous.runId !== knownActiveRunId
+      onStreamThreadId &&
+      (endedRunIds.length > 0 ||
+        (previousRunId !== null && previousRunId !== knownActiveRunId))
     ) {
-      invalidateStoppedThreadCaches(queryClient, previous.threadId, isMock);
+      invalidateStoppedThreadCaches(queryClient, onStreamThreadId, isMock);
     }
   }, [
     isMock,
     knownActiveRunId,
     onStreamThreadId,
     queryClient,
-    unfollowedActiveRunEnded,
+    runs,
     unfollowedActiveRunId,
   ]);
 

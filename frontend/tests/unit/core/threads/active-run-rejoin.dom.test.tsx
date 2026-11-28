@@ -678,6 +678,34 @@ test.each([
   },
 );
 
+test("keeps a watched run ended when a later runs read lags behind", async () => {
+  const { result, unmount } = renderThread("thread-1", "account-1");
+  await exhaustActiveRunRecovery();
+  await flushFrames();
+  expect(result.current.thread.isLoading).toBe(true);
+
+  // The poll sees the end. The refetch that the end triggers comes from a
+  // read that still says "running".
+  apiMockState.listRuns
+    .mockResolvedValueOnce([{ ...ACTIVE_RUN, status: "success" }])
+    .mockResolvedValue([ACTIVE_RUN]);
+  const runsReads = apiMockState.listRuns.mock.calls.length;
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(2_000);
+  });
+  await flushFrames();
+  expect(apiMockState.listRuns.mock.calls.length).toBeGreaterThan(
+    runsReads + 1,
+  );
+
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(10_000);
+  });
+  expect(streamMockState.joinStream).toHaveBeenCalledTimes(3);
+  expect(result.current.thread.isLoading).toBe(false);
+  unmount();
+});
+
 test("polls runs only while no stream follows the active run", async () => {
   // The SDK's own reconnect is streaming the run.
   streamMockState.isLoading = true;
