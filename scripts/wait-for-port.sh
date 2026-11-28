@@ -39,11 +39,13 @@ is_port_listening() {
         fi
     fi
 
-    if command -v lsof >/dev/null 2>&1; then
-        if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
+    # A loopback TCP connect instead of lsof, which can spin indefinitely on macOS (#1400).
+    local host
+    for host in 127.0.0.1 ::1; do
+        if (exec 3<>"/dev/tcp/$host/$PORT") 2>/dev/null; then
             return 0
         fi
-    fi
+    done
 
     if command -v ss >/dev/null 2>&1; then
         if ss -ltn "( sport = :$PORT )" 2>/dev/null | tail -n +2 | grep -q .; then
