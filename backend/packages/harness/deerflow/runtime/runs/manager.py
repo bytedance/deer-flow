@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from deerflow.runtime.events.terminal import RecoveryTerminalPublisher
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
-from deerflow.utils.time import is_lease_expired
+from deerflow.utils.time import coerce_iso, is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
 from .schemas import EVIDENCE_ORIGINS, DisconnectMode, RunStatus, ThreadOperationKind
@@ -30,8 +30,10 @@ from .store.base import (
     RunIdempotencyConflict,
     RunStore,
     canonical_run_created_at,
+    format_run_cursor_created_at,
     normalize_run_created_at_iso,
     run_is_before_cursor,
+    run_owner_matches,
     run_sort_key,
 )
 
@@ -1178,19 +1180,25 @@ class RunManager:
         run_id: str,
         *,
         user_id: str | None = None,
+        allow_legacy_default: bool = False,
         raise_on_store_error: bool = False,
     ) -> RunRecord | None:
         """Return a run record by ID, or ``None``.
 
         Args:
             run_id: The run ID to look up.
-            user_id: Optional user ID for permission filtering when hydrating from store.
+            user_id: Optional user ID for permission filtering across in-memory
+                and store records.
+            allow_legacy_default: When true with ``user_id="default"``, match
+                legacy records stamped with ``None`` or ``""`` as well.
             raise_on_store_error: Propagate store hydration/mapping failures so
                 lifecycle callers can distinguish them from a missing run.
         """
         async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
         if record is not None and not record.evicted:
+            if not run_owner_matches(record.user_id, user_id, allow_legacy_default=allow_legacy_default):
+                return None
             return record
         # A hidden record is authoritative for "this run is deleted", so never
         # resurrect it from a stale store read. Settle that before any store call
@@ -1199,8 +1207,11 @@ class RunManager:
             return None
         if self._store is None:
             return None
+        store_kwargs: dict[str, Any] = {"user_id": user_id}
+        if allow_legacy_default and user_id == "default":
+            store_kwargs["allow_legacy_default"] = True
         try:
-            row = await self._store.get(run_id, user_id=user_id)
+            row = await self._store.get(run_id, **store_kwargs)
         except Exception:
             if raise_on_store_error:
                 raise
@@ -1211,6 +1222,8 @@ class RunManager:
         async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
         if record is not None and not record.evicted:
+            if not run_owner_matches(record.user_id, user_id, allow_legacy_default=allow_legacy_default):
+                return None
             return record
         if record is not None or row is None:
             return None
@@ -1227,6 +1240,7 @@ class RunManager:
         run_id: str,
         *,
         user_id: str | None = None,
+        allow_legacy_default: bool = False,
         raise_on_store_error: bool = False,
     ) -> RunRecord | None:
         """Return a run record by ID, checking the persistent store as fallback.
@@ -1236,6 +1250,7 @@ class RunManager:
         return await self.get(
             run_id,
             user_id=user_id,
+            allow_legacy_default=allow_legacy_default,
             raise_on_store_error=raise_on_store_error,
         )
 
@@ -1244,6 +1259,7 @@ class RunManager:
         thread_id: str,
         *,
         user_id: str | None = None,
+        allow_legacy_default: bool = False,
         limit: int = 100,
         before_created_at: str | None = None,
         before_run_id: str | None = None,
@@ -1258,7 +1274,10 @@ class RunManager:
 
         Args:
             thread_id: The thread ID to filter by.
-            user_id: Optional user ID for permission filtering when hydrating from store.
+            user_id: Optional user ID for permission filtering across in-memory
+                and store records.
+            allow_legacy_default: When true with ``user_id="default"``, include
+                legacy records stamped with ``None`` or ``""`` before pagination.
             limit: Maximum number of runs to return.
             before_created_at: ISO timestamp of the last run on the previous page.
             before_run_id: Run id of the last run on the previous page.
@@ -1274,6 +1293,9 @@ class RunManager:
             except ValueError:
                 raise ValueError("before_created_at must be an ISO-8601 timestamp") from None
 
+        if limit <= 0:
+            return []
+
         def _page(records: list[RunRecord]) -> list[RunRecord]:
             return sorted(records, key=lambda record: run_sort_key(record.created_at, record.run_id), reverse=True)[:limit]
 
@@ -1283,6 +1305,7 @@ class RunManager:
                 for record in self._thread_records_locked(thread_id)
                 if record.operation_kind == ThreadOperationKind.run
                 and not record.evicted
+                and run_owner_matches(record.user_id, user_id, allow_legacy_default=allow_legacy_default)
                 and run_is_before_cursor(
                     record.created_at,
                     record.run_id,
@@ -1298,31 +1321,65 @@ class RunManager:
         # rows, so subtracting them from the store limit can hide the actual
         # newest run before the merge; querying only ``limit`` can still lose a
         # distinct row when that page is occupied by duplicate local records.
-        store_limit = limit + len(memory_records)
-        store_kwargs: dict[str, Any] = {"user_id": user_id, "limit": store_limit}
-        if before_created_at is not None and before_run_id is not None:
-            store_kwargs["before_created_at"] = before_created_at
-            store_kwargs["before_run_id"] = before_run_id
-        try:
-            rows = await self._store.list_by_thread(thread_id, **store_kwargs)
-        except Exception:
-            logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
-            return _page(memory_records)
-        for row in rows:
-            run_id = row.get("run_id")
-            if not run_id:
-                continue
-            known = self._runs.get(run_id)
-            # A hidden record means this thread was deleted while the record
-            # still had a live finalize tail; the durable row is already gone,
-            # so a store row here can only be a stale or partial read.
-            if known is not None and known.evicted:
-                continue
-            if run_id not in records_by_id:
-                try:
-                    records_by_id[run_id] = self._record_from_store(row)
-                except Exception:
-                    logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
+        # When stored rows are skipped (e.g. unreadable historical rows or
+        # evicted local records), advance using the raw store cursor until
+        # ``limit`` merged records settle at or newer than the cursor or the
+        # store is exhausted.
+        cursor_created_at = before_created_at
+        cursor_run_id = before_run_id
+        cursor_key = run_sort_key(cursor_created_at, cursor_run_id) if cursor_created_at is not None and cursor_run_id is not None else None
+        remaining_memory = len(memory_records)
+        settled_count = 0
+
+        while settled_count < limit:
+            store_limit = limit + remaining_memory
+            store_kwargs: dict[str, Any] = {"user_id": user_id, "limit": store_limit}
+            if allow_legacy_default and user_id == "default":
+                store_kwargs["allow_legacy_default"] = True
+            if cursor_created_at is not None and cursor_run_id is not None:
+                store_kwargs["before_created_at"] = cursor_created_at
+                store_kwargs["before_run_id"] = cursor_run_id
+            try:
+                rows = await self._store.list_by_thread(thread_id, **store_kwargs)
+            except Exception:
+                logger.warning("Failed to hydrate runs for thread %s from store", thread_id, exc_info=True)
+                break
+            for row in rows:
+                run_id = row.get("run_id")
+                if not run_id:
+                    continue
+                known = self._runs.get(run_id)
+                # A hidden record means this thread was deleted while the record
+                # still had a live finalize tail; the durable row is already gone,
+                # so a store row here can only be a stale or partial read. An
+                # authoritative live record owned by another user must likewise
+                # block a stale store row from surfacing.
+                if known is not None and (known.evicted or not run_owner_matches(known.user_id, user_id, allow_legacy_default=allow_legacy_default)):
+                    continue
+                if run_id not in records_by_id:
+                    try:
+                        records_by_id[run_id] = self._record_from_store(row)
+                    except Exception:
+                        logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
+            if len(rows) < store_limit:
+                break
+            last_row = rows[-1]
+            last_run_id = last_row.get("run_id")
+            last_created_at = coerce_iso(last_row.get("created_at"))
+            if not isinstance(last_run_id, str) or not last_run_id or not last_created_at:
+                break
+            try:
+                next_created_at = format_run_cursor_created_at(last_created_at)
+            except ValueError:
+                break
+            next_cursor_key = run_sort_key(next_created_at, last_run_id)
+            if cursor_key is not None and next_cursor_key >= cursor_key:
+                break
+            cursor_created_at = next_created_at
+            cursor_run_id = last_run_id
+            cursor_key = next_cursor_key
+            settled_count = sum(1 for record in records_by_id.values() if run_sort_key(record.created_at, record.run_id) >= cursor_key)
+            remaining_memory = sum(1 for record in memory_records if run_sort_key(record.created_at, record.run_id) < cursor_key)
         return _page(list(records_by_id.values()))
 
     async def list_successful_regenerate_sources(

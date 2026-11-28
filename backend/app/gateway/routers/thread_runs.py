@@ -478,7 +478,7 @@ async def _raise_lease_valid_elsewhere(
     the owner renewed between our read and the conditional UPDATE). Re-read
     from the store to get the fresh value so ``Retry-After`` is accurate.
     """
-    fresh = await run_mgr.get(run_id)
+    fresh = await _get_scoped_run(run_mgr, run_id, user_id=getattr(record, "user_id", None))
     if fresh is not None:
         record = fresh
     retry_after = _compute_retry_after(record.lease_expires_at, run_mgr.grace_seconds)
@@ -1270,6 +1270,42 @@ async def _thread_ownership_established(request: Request, thread_id: str) -> boo
     return meta is not None and bool(meta_owner)
 
 
+async def _optional_request_user_id(request: Request) -> str | None:
+    """Resolve the request's user id, tolerating minimal unit-test request stand-ins."""
+    state = getattr(request, "state", None)
+    if getattr(state, "auth_source", None) is None and getattr(request, "cookies", None) is None:
+        return None
+    return await get_current_user(request)
+
+
+def _allows_legacy_default_owner(request: Request) -> bool:
+    """Whether an ownerless trusted internal caller may match legacy NULL-owner runs."""
+    state = getattr(request, "state", None)
+    user = getattr(state, "user", None)
+    return getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE and get_trusted_internal_owner_user_id(request) is None
+
+
+async def _get_scoped_run(
+    run_mgr,
+    run_id: str,
+    *,
+    user_id: str | None,
+    allow_legacy_default: bool = False,
+) -> RunRecord | None:
+    """Fetch a run by id, passing ``user_id`` only when a caller scope is active.
+
+    When ``allow_legacy_default`` is true (ownerless trusted internal caller
+    scoped to ``"default"``), legacy records with an empty/``None`` owner stamp
+    match the same default-owner contract that ``_require_run_visible_to_scope``
+    enforces.
+    """
+    if user_id is None:
+        return await run_mgr.get(run_id)
+    if allow_legacy_default and user_id == "default":
+        return await run_mgr.get(run_id, user_id=user_id, allow_legacy_default=True)
+    return await run_mgr.get(run_id, user_id=user_id)
+
+
 async def _run_scope_user_id(request: Request, thread_id: str) -> str | None:
     """Resolve the data-filter id for run and message reads, not for authorization.
 
@@ -1301,7 +1337,7 @@ async def _run_scope_user_id(request: Request, thread_id: str) -> str | None:
     state = getattr(request, "state", None)
     user = getattr(state, "user", None)
     if getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE:
-        return await get_current_user(request)
+        return await _optional_request_user_id(request)
     if await _thread_ownership_established(request, thread_id):
         return None
     # Missing or NULL-owner meta row: ownership was never established, so the
@@ -1311,7 +1347,7 @@ async def _run_scope_user_id(request: Request, thread_id: str) -> str | None:
     owner = get_trusted_internal_owner_user_id(request)
     if owner is not None:
         return owner
-    return await get_current_user(request)
+    return await _optional_request_user_id(request)
 
 
 async def _require_run_visible_to_scope(run_id: str, thread_id: str, request: Request) -> None:
@@ -1320,25 +1356,32 @@ async def _require_run_visible_to_scope(run_id: str, thread_id: str, request: Re
 
     These routes query or mutate by ``(thread_id, run_id)``; events and
     messages add only the ``_run_scope_user_id`` data filter, which matches
-    row stamps rather than gating the run itself. For trusted internal
-    callers on threads without established ownership, a missing gate let an
-    internal caller acting for owner A read or cancel owner B's run by id
-    (#5448 review P1 follow-up).
+    row stamps rather than gating the run itself (and the in-memory event
+    store ignores ``user_id`` altogether). On threads without established
+    ownership (missing or NULL-owner meta rows), a missing gate lets a caller
+    read or cancel another owner's run by id (#5448 review P1 follow-up).
     The run's own stamp must therefore match the acting owner's raw value (or
-    the legacy ``"default"`` stamp); every other caller and every
-    established-ownership thread keeps its existing semantics.
+    the legacy ``"default"`` stamp for ownerless internal callers) for
+    internal callers, or the authenticated ``user_id`` for non-internal
+    callers; established-ownership threads keep their existing semantics.
     """
     state = getattr(request, "state", None)
     user = getattr(state, "user", None)
-    if getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE:
-        return
-    if await _thread_ownership_established(request, thread_id):
-        return
-    scope = get_trusted_internal_owner_user_id(request) or "default"
+    is_internal = getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE
+    if is_internal:
+        if await _thread_ownership_established(request, thread_id):
+            return
+        scope = get_trusted_internal_owner_user_id(request) or "default"
+    else:
+        scope = await _optional_request_user_id(request)
+        if scope is None:
+            return
+        if await _thread_ownership_established(request, thread_id):
+            return
     record = await get_run_manager(request).get(run_id)
     if record is None:
         return
-    record_owner = getattr(record, "user_id", None) or "default"
+    record_owner = (getattr(record, "user_id", None) or "default") if is_internal else getattr(record, "user_id", None)
     if record.thread_id != thread_id or record_owner != scope:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
@@ -1349,7 +1392,10 @@ async def list_runs(thread_id: ThreadId, request: Request) -> list[RunResponse]:
     """List the newest runs for a thread (default 100, as a bare array)."""
     run_mgr = get_run_manager(request)
     user_id = await _run_scope_user_id(request, thread_id)
-    records = await run_mgr.list_by_thread(thread_id, user_id=user_id)
+    if user_id == "default" and _allows_legacy_default_owner(request):
+        records = await run_mgr.list_by_thread(thread_id, user_id=user_id, allow_legacy_default=True)
+    else:
+        records = await run_mgr.list_by_thread(thread_id, user_id=user_id)
     return [_record_to_response(r) for r in records]
 
 
@@ -1377,13 +1423,23 @@ async def list_runs_page(
 
     run_mgr = get_run_manager(request)
     user_id = await _run_scope_user_id(request, thread_id)
-    records = await run_mgr.list_by_thread(
-        thread_id,
-        user_id=user_id,
-        limit=limit + 1,
-        before_created_at=before_created_at,
-        before_run_id=before_run_id,
-    )
+    if user_id == "default" and _allows_legacy_default_owner(request):
+        records = await run_mgr.list_by_thread(
+            thread_id,
+            user_id=user_id,
+            allow_legacy_default=True,
+            limit=limit + 1,
+            before_created_at=before_created_at,
+            before_run_id=before_run_id,
+        )
+    else:
+        records = await run_mgr.list_by_thread(
+            thread_id,
+            user_id=user_id,
+            limit=limit + 1,
+            before_created_at=before_created_at,
+            before_run_id=before_run_id,
+        )
     has_more = len(records) > limit
     page = records[:limit]
     last = page[-1] if page and has_more else None
@@ -1401,7 +1457,12 @@ async def get_run(thread_id: ThreadId, run_id: str, request: Request) -> RunResp
     """Get details of a specific run."""
     run_mgr = get_run_manager(request)
     user_id = await _run_scope_user_id(request, thread_id)
-    record = await run_mgr.get(run_id, user_id=user_id)
+    record = await _get_scoped_run(
+        run_mgr,
+        run_id,
+        user_id=user_id,
+        allow_legacy_default=_allows_legacy_default_owner(request),
+    )
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     return _record_to_response(record)
@@ -1429,7 +1490,13 @@ async def cancel_run(
     """
     await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id)
+    user_id = await _run_scope_user_id(request, thread_id)
+    record = await _get_scoped_run(
+        run_mgr,
+        run_id,
+        user_id=user_id,
+        allow_legacy_default=_allows_legacy_default_owner(request),
+    )
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
@@ -1474,7 +1541,13 @@ async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> Stream
     """Join an existing run's SSE stream."""
     await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id)
+    user_id = await _run_scope_user_id(request, thread_id)
+    record = await _get_scoped_run(
+        run_mgr,
+        run_id,
+        user_id=user_id,
+        allow_legacy_default=_allows_legacy_default_owner(request),
+    )
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     bridge = get_stream_bridge(request)
@@ -1523,7 +1596,13 @@ async def _stream_existing_run(
 
     await _require_run_visible_to_scope(run_id, thread_id, request)
     run_mgr = get_run_manager(request)
-    record = await run_mgr.get(run_id)
+    user_id = await _run_scope_user_id(request, thread_id)
+    record = await _get_scoped_run(
+        run_mgr,
+        run_id,
+        user_id=user_id,
+        allow_legacy_default=_allows_legacy_default_owner(request),
+    )
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     bridge = get_stream_bridge(request)
@@ -1805,7 +1884,12 @@ async def list_run_messages(
 
     if data:
         run_mgr = get_run_manager(request)
-        record = await run_mgr.get(run_id)
+        record = await _get_scoped_run(
+            run_mgr,
+            run_id,
+            user_id=user_id,
+            allow_legacy_default=_allows_legacy_default_owner(request),
+        )
         if record:
             durations = compute_run_durations([record])
             if durations:

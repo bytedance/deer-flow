@@ -13,6 +13,7 @@ browser/API sessions.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -29,17 +30,20 @@ from app.gateway.authz import AuthContext, Permissions
 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, get_internal_user
 from app.gateway.routers import thread_runs
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.run.sql import RunRepository
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
-from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.manager import RunManager, RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.runtime.stream_bridge import MemoryStreamBridge
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.workspace_changes.types import WORKSPACE_CHANGES_EVENT_TYPE
 
 THREAD_ID = "thread-scope"
 BROWSER_USER_ID = UUID("00000000-0000-0000-0000-00000000000a")
+OTHER_BROWSER_USER_ID = UUID("00000000-0000-0000-0000-00000000000b")
 # A lossy trusted-owner value: make_safe_user_id normalizes it to
 # "feishu-owner-777-<digest>", which can never equal the raw value stamped on
 # the run row — the exact mismatch class reported in #5437.
@@ -130,8 +134,8 @@ class _RecordingFeedbackRepo:
         return {}
 
 
-def _browser_user() -> User:
-    return User(id=BROWSER_USER_ID, email="scope-test@example.com", password_hash="x", system_role="user")
+def _browser_user(user_id: UUID = BROWSER_USER_ID) -> User:
+    return User(id=user_id, email=f"scope-test-{user_id}@example.com", password_hash="x", system_role="user")
 
 
 def _internal_user(owner_raw: str | None):
@@ -162,19 +166,23 @@ def _make_app(
     user,
     auth_source: str,
     run_store: MemoryRunStore,
+    run_manager: RunManager | None = None,
     event_store: MemoryRunEventStore | None = None,
     feedback_repo: _RecordingFeedbackRepo | None = None,
     thread_store=None,
+    stream_bridge: MemoryStreamBridge | None = None,
 ) -> TestClient:
     app = FastAPI()
     app.add_middleware(_ScopeAuthMiddleware, user=user, auth_source=auth_source)
     app.state.thread_store = thread_store if thread_store is not None else _PermissiveThreadStore()
     app.state.run_store = run_store
-    app.state.run_manager = RunManager(store=run_store)
+    app.state.run_manager = run_manager if run_manager is not None else RunManager(store=run_store)
     if event_store is not None:
         app.state.run_event_store = event_store
     if feedback_repo is not None:
         app.state.feedback_repo = feedback_repo
+    if stream_bridge is not None:
+        app.state.stream_bridge = stream_bridge
     app.include_router(thread_runs.router)
     return TestClient(app)
 
@@ -977,3 +985,391 @@ def test_internal_caller_reads_raw_owner_stamped_run_outputs(db_event_store: DbR
     assert changes.json()["summary"]["created"] == 1
     assert manifest.status_code == 200, manifest.text
     assert manifest.json()["file_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# In-memory run isolation and non-internal run-scoped gating
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ownership", ["missing_meta", "null_owner"])
+def test_live_in_memory_runs_stay_owner_isolated_on_shared_threads(ownership: str) -> None:
+    """Active in-memory runs in RunManager must obey per-user isolation."""
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    if ownership == "null_owner":
+        asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=None))
+    run_store = _RecordingRunStore()
+    run_manager = RunManager(store=run_store)
+    owner_run = asyncio.run(run_manager.create(THREAD_ID, user_id=OWNER_RAW))
+    browser_run = asyncio.run(run_manager.create(THREAD_ID, user_id=str(BROWSER_USER_ID)))
+
+    browser_client = _make_app(
+        user=_browser_user(),
+        auth_source=AUTH_SOURCE_SESSION,
+        run_store=run_store,
+        run_manager=run_manager,
+        thread_store=thread_store,
+    )
+    stranger_internal = _make_app(
+        user=_internal_user("feishu:owner-999"),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        run_manager=run_manager,
+        thread_store=thread_store,
+    )
+    stranger_headers = {INTERNAL_OWNER_USER_ID_HEADER_NAME: "feishu:owner-999"}
+
+    with browser_client:
+        listed = browser_client.get(f"/api/threads/{THREAD_ID}/runs")
+        paged = browser_client.get(f"/api/threads/{THREAD_ID}/runs/page")
+        other_get = browser_client.get(f"/api/threads/{THREAD_ID}/runs/{owner_run.run_id}")
+        own_get = browser_client.get(f"/api/threads/{THREAD_ID}/runs/{browser_run.run_id}")
+
+    assert listed.status_code == 200
+    assert [row["run_id"] for row in listed.json()] == [browser_run.run_id]
+    assert paged.status_code == 200
+    assert [row["run_id"] for row in paged.json()["data"]] == [browser_run.run_id]
+    assert other_get.status_code == 404
+    assert own_get.status_code == 200
+    assert own_get.json()["run_id"] == browser_run.run_id
+
+    with stranger_internal:
+        internal_listed = stranger_internal.get(f"/api/threads/{THREAD_ID}/runs", headers=stranger_headers)
+        internal_paged = stranger_internal.get(f"/api/threads/{THREAD_ID}/runs/page", headers=stranger_headers)
+        internal_get = stranger_internal.get(f"/api/threads/{THREAD_ID}/runs/{owner_run.run_id}", headers=stranger_headers)
+
+    assert internal_listed.status_code == 200
+    assert internal_listed.json() == []
+    assert internal_paged.status_code == 200
+    assert internal_paged.json()["data"] == []
+    assert internal_get.status_code == 404
+
+
+@pytest.mark.parametrize("ownership", ["missing_meta", "null_owner"])
+def test_browser_session_run_subresources_and_mutations_isolated_on_shared_threads(ownership: str) -> None:
+    """Browser users cannot read, join, stream, or cancel another user's run on shared threads."""
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    if ownership == "null_owner":
+        asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=None))
+    run_store = _RecordingRunStore()
+    run_manager = RunManager(store=run_store)
+    owner_run = asyncio.run(run_manager.create(THREAD_ID, user_id=str(BROWSER_USER_ID)))
+    asyncio.run(run_manager.set_status(owner_run.run_id, RunStatus.running))
+
+    event_store = MemoryRunEventStore()
+    _seed_message(event_store, owner_run.run_id, "msg-user-a")
+    asyncio.run(
+        event_store.put(
+            thread_id=THREAD_ID,
+            run_id=owner_run.run_id,
+            event_type=WORKSPACE_CHANGES_EVENT_TYPE,
+            category="outputs",
+            content={"summary": {"created": 1}, "files": []},
+        )
+    )
+    asyncio.run(
+        event_store.put(
+            thread_id=THREAD_ID,
+            run_id=owner_run.run_id,
+            event_type="run.delivery",
+            category="outputs",
+            content={"presented": 1, "by_tool": {"present_files": ["/mnt/user-data/outputs/a.txt"]}},
+        )
+    )
+
+    stream_bridge = MemoryStreamBridge()
+    asyncio.run(stream_bridge.publish_end(owner_run.run_id))
+
+    stranger = _make_app(
+        user=_browser_user(OTHER_BROWSER_USER_ID),
+        auth_source=AUTH_SOURCE_SESSION,
+        run_store=run_store,
+        run_manager=run_manager,
+        event_store=event_store,
+        thread_store=thread_store,
+        stream_bridge=stream_bridge,
+    )
+    owner_client = _make_app(
+        user=_browser_user(BROWSER_USER_ID),
+        auth_source=AUTH_SOURCE_SESSION,
+        run_store=run_store,
+        run_manager=run_manager,
+        event_store=event_store,
+        thread_store=thread_store,
+        stream_bridge=stream_bridge,
+    )
+    base = f"/api/threads/{THREAD_ID}/runs/{owner_run.run_id}"
+
+    with stranger:
+        assert stranger.get(base).status_code == 404
+        assert stranger.get(base + "/messages").status_code == 404
+        assert stranger.get(base + "/events").status_code == 404
+        assert stranger.get(base + "/workspace-changes").status_code == 404
+        assert stranger.get(base + "/join").status_code == 404
+        assert stranger.get(base + "/stream").status_code == 404
+        assert stranger.post(base + "/stream?action=interrupt").status_code == 404
+        assert stranger.post(base + "/cancel?action=interrupt").status_code == 404
+        assert stranger.get(base + "/artifacts/archive").status_code == 404
+        assert stranger.post(base + "/artifacts/archive").status_code == 404
+
+    assert owner_run.status == RunStatus.running
+
+    with owner_client:
+        assert owner_client.get(base).status_code == 200
+        messages = owner_client.get(base + "/messages")
+        events = owner_client.get(base + "/events")
+        changes = owner_client.get(base + "/workspace-changes")
+        assert messages.status_code == 200
+        assert [row["content"]["id"] for row in messages.json()["data"]] == ["msg-user-a"]
+        assert events.status_code == 200
+        assert any(event.get("run_id") == owner_run.run_id for event in events.json())
+        assert changes.status_code == 200
+        assert changes.json()["available"] is True
+        if ownership == "null_owner":
+            cancel = owner_client.post(base + "/cancel?action=interrupt")
+            assert cancel.status_code == 202
+        else:
+            cancel = owner_client.post(base + "/stream?action=interrupt&wait=1")
+            assert cancel.status_code == 200
+
+    assert owner_run.status == RunStatus.interrupted
+
+
+def test_browser_session_cannot_cancel_or_stream_other_users_run_on_established_thread() -> None:
+    """Even on established-ownership threads, cancel/join/stream honor the run's owner scope."""
+    run_store = _RecordingRunStore()
+    run_manager = RunManager(store=run_store)
+    other_run = asyncio.run(run_manager.create(THREAD_ID, user_id=OWNER_RAW))
+    asyncio.run(run_manager.set_status(other_run.run_id, RunStatus.running))
+
+    stream_bridge = MemoryStreamBridge()
+    asyncio.run(stream_bridge.publish_end(other_run.run_id))
+
+    client = _make_app(
+        user=_browser_user(),
+        auth_source=AUTH_SOURCE_SESSION,
+        run_store=run_store,
+        run_manager=run_manager,
+        stream_bridge=stream_bridge,
+    )
+    base = f"/api/threads/{THREAD_ID}/runs/{other_run.run_id}"
+
+    with client:
+        assert client.post(base + "/cancel?action=interrupt").status_code == 404
+        assert client.get(base + "/join").status_code == 404
+        assert client.get(base + "/stream").status_code == 404
+        assert client.post(base + "/stream?action=interrupt").status_code == 404
+
+    assert other_run.status == RunStatus.running
+
+
+@pytest.mark.no_auto_user
+@pytest.mark.parametrize("ownership", ["missing_meta", "null_owner"])
+def test_ownerless_internal_caller_controls_legacy_null_owner_run_on_shared_threads(ownership: str) -> None:
+    """Ownerless internal callers keep join/stream/cancel access to legacy NULL-owner runs."""
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    if ownership == "null_owner":
+        asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=None))
+    run_store = _RecordingRunStore()
+    run_manager = RunManager(store=run_store)
+    legacy_run = asyncio.run(run_manager.create(THREAD_ID, user_id=None))
+    assert legacy_run.user_id is None
+    asyncio.run(run_manager.set_status(legacy_run.run_id, RunStatus.running))
+    _seed_run(run_store, "run-legacy-store-null", user_id=None, status="success")
+    other_run = asyncio.run(run_manager.create(THREAD_ID, user_id=OWNER_RAW))
+    asyncio.run(run_manager.set_status(other_run.run_id, RunStatus.running))
+
+    stream_bridge = MemoryStreamBridge()
+    asyncio.run(stream_bridge.publish_end(legacy_run.run_id))
+    asyncio.run(stream_bridge.publish_end(other_run.run_id))
+
+    client = _make_app(
+        user=_internal_user(None),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        run_manager=run_manager,
+        thread_store=thread_store,
+        stream_bridge=stream_bridge,
+    )
+    legacy_base = f"/api/threads/{THREAD_ID}/runs/{legacy_run.run_id}"
+    other_base = f"/api/threads/{THREAD_ID}/runs/{other_run.run_id}"
+
+    with client:
+        assert client.get(legacy_base + "/join").status_code == 200
+        assert client.get(legacy_base + "/stream").status_code == 200
+        if ownership == "null_owner":
+            assert client.post(legacy_base + "/cancel?action=interrupt").status_code == 202
+            # Store-only legacy NULL-owner terminal run also resolves to 409 (not 404).
+            assert client.post(f"/api/threads/{THREAD_ID}/runs/run-legacy-store-null/cancel?action=interrupt").status_code == 409
+        else:
+            assert client.post(legacy_base + "/stream?action=interrupt").status_code == 200
+
+        # Non-default runs owned by another user remain hidden from ownerless internal callers.
+        assert client.get(other_base + "/join").status_code == 404
+        assert client.get(other_base + "/stream").status_code == 404
+        assert client.post(other_base + "/stream?action=interrupt").status_code == 404
+        assert client.post(other_base + "/cancel?action=interrupt").status_code == 404
+
+    assert legacy_run.status == RunStatus.interrupted
+    assert other_run.status == RunStatus.running
+
+
+@pytest.mark.no_auto_user
+@pytest.mark.parametrize("ownership", ["missing_meta", "null_owner"])
+def test_ownerless_internal_caller_reads_and_paginates_legacy_null_owner_runs(ownership: str) -> None:
+    """Ownerless internal callers see legacy NULL-owner runs in detail, list, and paged history."""
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    if ownership == "null_owner":
+        asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=None))
+    run_store = _RecordingRunStore()
+    run_manager = RunManager(store=run_store)
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
+
+    def _stamp(run_id: str, offset: int, record=None) -> None:
+        ts = (base_time + timedelta(seconds=offset)).isoformat()
+        run_store._runs[run_id]["created_at"] = run_store._runs[run_id]["updated_at"] = ts
+        if record is not None:
+            record.created_at = record.updated_at = ts
+
+    def _seed_at(run_id: str, user_id: str | None, offset: int) -> None:
+        _seed_run(run_store, run_id, user_id=user_id)
+        _stamp(run_id, offset)
+
+    # Interleave >50 non-default runs before and between default-scope rows to exercise multi-batch paging.
+    _seed_at("run-legacy-store-oldest", None, 1)
+    for i in range(55):
+        _seed_at(f"run-owner-old-{i:02d}", OWNER_RAW, 2 + i)
+    _seed_at("run-default-store-mid", "default", 57)
+
+    live_legacy = asyncio.run(run_manager.create(THREAD_ID, user_id=None))
+    assert live_legacy.user_id is None
+    _stamp(live_legacy.run_id, 58, live_legacy)
+
+    for i in range(55):
+        _seed_at(f"run-owner-new-{i:02d}", OWNER_RAW, 59 + i)
+
+    browser_live = asyncio.run(run_manager.create(THREAD_ID, user_id=str(BROWSER_USER_ID)))
+    _stamp(browser_live.run_id, 114, browser_live)
+    other_thread_legacy = asyncio.run(run_manager.create("other-thread", user_id=None))
+
+    ownerless = _make_app(user=_internal_user(None), auth_source=AUTH_SOURCE_INTERNAL, run_store=run_store, run_manager=run_manager, thread_store=thread_store)
+    browser = _make_app(user=_browser_user(), auth_source=AUTH_SOURCE_SESSION, run_store=run_store, run_manager=run_manager, thread_store=thread_store)
+    explicit = _make_app(user=_internal_user(OWNER_RAW), auth_source=AUTH_SOURCE_INTERNAL, run_store=run_store, run_manager=run_manager, thread_store=thread_store)
+    owner_headers = {INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW}
+    expected_ids = [live_legacy.run_id, "run-default-store-mid", "run-legacy-store-oldest"]
+
+    with ownerless:
+        for run_id in expected_ids:
+            assert ownerless.get(f"/api/threads/{THREAD_ID}/runs/{run_id}").status_code == 200
+        for hidden_id in ("run-owner-new-00", browser_live.run_id, other_thread_legacy.run_id):
+            assert ownerless.get(f"/api/threads/{THREAD_ID}/runs/{hidden_id}").status_code == 404
+
+        assert [r["run_id"] for r in ownerless.get(f"/api/threads/{THREAD_ID}/runs").json()] == expected_ids
+
+        p1 = ownerless.get(f"/api/threads/{THREAD_ID}/runs/page", params={"limit": 2}).json()
+        assert [r["run_id"] for r in p1["data"]] == expected_ids[:2]
+        assert p1["has_more"] is True and p1["next_before_run_id"] == "run-default-store-mid"
+
+        p2 = ownerless.get(
+            f"/api/threads/{THREAD_ID}/runs/page",
+            params={"limit": 2, "before_created_at": p1["next_before_created_at"], "before_run_id": p1["next_before_run_id"]},
+        ).json()
+        assert [r["run_id"] for r in p2["data"]] == [expected_ids[2]]
+        assert p2["has_more"] is False and p2["next_before_run_id"] is None
+
+    # Browser and explicit-owner callers still stay strictly isolated from legacy NULL-owner runs.
+    with browser:
+        assert browser.get(f"/api/threads/{THREAD_ID}/runs/{live_legacy.run_id}").status_code == 404
+        assert [r["run_id"] for r in browser.get(f"/api/threads/{THREAD_ID}/runs").json()] == [browser_live.run_id]
+        assert [r["run_id"] for r in browser.get(f"/api/threads/{THREAD_ID}/runs/page").json()["data"]] == [browser_live.run_id]
+
+    with explicit:
+        for run_id in expected_ids:
+            assert explicit.get(f"/api/threads/{THREAD_ID}/runs/{run_id}", headers=owner_headers).status_code == 404
+        listed_ids = {r["run_id"] for r in explicit.get(f"/api/threads/{THREAD_ID}/runs", headers=owner_headers).json()}
+        assert listed_ids.isdisjoint({*expected_ids, browser_live.run_id})
+
+
+@pytest.mark.no_auto_user
+def test_ownerless_internal_caller_reads_and_paginates_legacy_null_owner_runs_sql(db_event_store: DbRunEventStore) -> None:
+    """SQL RunRepository filters legacy/default ownership before pagination, unaffected by other users' unreadable rows."""
+    from sqlalchemy import update
+
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=None))
+    run_store = RunRepository(get_session_factory())
+
+    async def _seed() -> None:
+        await run_store.put("run-sql-legacy-null-old", thread_id=THREAD_ID, user_id=None, status="success")
+        await asyncio.sleep(0.02)
+        await run_store.put("run-sql-default", thread_id=THREAD_ID, user_id="default", status="success")
+        await asyncio.sleep(0.02)
+        await run_store.put("run-sql-legacy-null-new", thread_id=THREAD_ID, user_id=None, status="success")
+        await asyncio.sleep(0.02)
+        # Put >50 newer non-default runs ahead of the default/NULL rows, including one
+        # unreadable historical row in the first unfiltered batch.
+        for i in range(55):
+            await run_store.put(f"run-sql-owner-{i:02d}", thread_id=THREAD_ID, user_id=OWNER_RAW, status="success")
+        async with get_session_factory()() as session:
+            await session.execute(update(RunRow).where(RunRow.run_id == "run-sql-owner-54").values(status="corrupt-status"))
+            await session.commit()
+
+    anyio.run(_seed)
+
+    client = _make_app(user=_internal_user(None), auth_source=AUTH_SOURCE_INTERNAL, run_store=run_store, event_store=db_event_store, thread_store=thread_store)
+    expected_ids = ["run-sql-legacy-null-new", "run-sql-default", "run-sql-legacy-null-old"]
+
+    with client:
+        for run_id in expected_ids:
+            assert client.get(f"/api/threads/{THREAD_ID}/runs/{run_id}").status_code == 200
+        assert client.get(f"/api/threads/{THREAD_ID}/runs/run-sql-owner-00").status_code == 404
+        assert [r["run_id"] for r in client.get(f"/api/threads/{THREAD_ID}/runs").json()] == expected_ids
+
+        p1 = client.get(f"/api/threads/{THREAD_ID}/runs/page", params={"limit": 2}).json()
+        assert [r["run_id"] for r in p1["data"]] == expected_ids[:2] and p1["has_more"] is True
+        p2 = client.get(
+            f"/api/threads/{THREAD_ID}/runs/page",
+            params={"limit": 2, "before_created_at": p1["next_before_created_at"], "before_run_id": p1["next_before_run_id"]},
+        ).json()
+        assert [r["run_id"] for r in p2["data"]] == [expected_ids[2]] and p2["has_more"] is False
+
+
+@pytest.mark.no_auto_user
+def test_ownerless_internal_caller_pages_past_unreadable_default_owned_sql_row(db_event_store: DbRunEventStore) -> None:
+    """An unreadable in-scope row must not shorten the lookahead and drop older default/legacy runs."""
+    from sqlalchemy import update
+
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=None))
+    run_store = RunRepository(get_session_factory())
+
+    async def _seed() -> None:
+        await run_store.put("run-sql-legacy-3", thread_id=THREAD_ID, user_id=None, status="success")
+        await asyncio.sleep(0.02)
+        await run_store.put("run-sql-default-2", thread_id=THREAD_ID, user_id="default", status="success")
+        await asyncio.sleep(0.02)
+        await run_store.put("run-sql-legacy-1", thread_id=THREAD_ID, user_id=None, status="success")
+        await asyncio.sleep(0.02)
+        await run_store.put("run-sql-default-corrupt", thread_id=THREAD_ID, user_id="default", status="success")
+        async with get_session_factory()() as session:
+            await session.execute(update(RunRow).where(RunRow.run_id == "run-sql-default-corrupt").values(status="corrupt-status"))
+            await session.commit()
+
+    anyio.run(_seed)
+
+    client = _make_app(user=_internal_user(None), auth_source=AUTH_SOURCE_INTERNAL, run_store=run_store, event_store=db_event_store, thread_store=thread_store)
+    expected_ids = ["run-sql-legacy-1", "run-sql-default-2", "run-sql-legacy-3"]
+
+    with client:
+        assert [r["run_id"] for r in client.get(f"/api/threads/{THREAD_ID}/runs").json()] == expected_ids
+
+        p1 = client.get(f"/api/threads/{THREAD_ID}/runs/page", params={"limit": 2}).json()
+        assert [r["run_id"] for r in p1["data"]] == expected_ids[:2]
+        assert p1["has_more"] is True and p1["next_before_run_id"] == "run-sql-default-2"
+
+        p2 = client.get(
+            f"/api/threads/{THREAD_ID}/runs/page",
+            params={"limit": 2, "before_created_at": p1["next_before_created_at"], "before_run_id": p1["next_before_run_id"]},
+        ).json()
+        assert [r["run_id"] for r in p2["data"]] == [expected_ids[2]]
+        assert p2["has_more"] is False and p2["next_before_run_id"] is None
