@@ -28,6 +28,41 @@ from app.channels.message_bus import (
 
 logger = logging.getLogger(__name__)
 
+
+class _BoundedRetryAfterRequest:
+    """Normalize unparseable 429 retry_after hints into ``RetryAfter(0)``.
+
+    Telegram's Bot API can send nonnumeric or overflowing ``retry_after``
+    values. The SDK constructs ``RetryAfter`` from that field before the
+    channel ever sees the error, and a malformed value raises a bare
+    ``AttributeError`` / ``OverflowError`` there — so the final-edit retry
+    paths saw no ``retry_after`` attribute and skipped the bounded flood-wait
+    fallback entirely. Converting the failure into ``RetryAfter(0)`` at the
+    response boundary routes it into ``_outbound_retry_delay``, which applies
+    the shared backoff and cap (#8548).
+    """
+
+    @staticmethod
+    def build(**kwargs: Any) -> Any:
+        from telegram.error import RetryAfter
+        from telegram.request import HTTPXRequest
+
+        class BoundedRetryAfterRequest(HTTPXRequest):
+            async def post(self, *args: Any, **post_kwargs: Any) -> Any:
+                try:
+                    return await super().post(*args, **post_kwargs)
+                except OverflowError:
+                    raise RetryAfter(0) from None
+                except AttributeError as exc:
+                    # RetryAfter's constructor reads `.total_seconds` on the
+                    # hint; a nonnumeric hint surfaces exactly this way.
+                    if "total_seconds" in str(exc):
+                        raise RetryAfter(0) from None
+                    raise
+
+        return BoundedRetryAfterRequest(**kwargs)
+
+
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
 TELEGRAM_MAX_RICH_MESSAGE_LENGTH = 32768
 # Telegram's hosted Bot API documents this as 20 MB (decimal bytes).
@@ -202,7 +237,7 @@ class TelegramChannel(Channel):
         self.bus.subscribe_outbound(self._on_outbound)
 
         # Build the application
-        app = ApplicationBuilder().token(bot_token).build()
+        app = ApplicationBuilder().token(bot_token).request(_BoundedRetryAfterRequest.build()).build()
 
         # Command handlers
         app.add_handler(CommandHandler("start", self._cmd_start))
@@ -491,7 +526,8 @@ class TelegramChannel(Channel):
                 if self._is_not_modified(exc):
                     return True
                 if self._is_retry_after(exc) and attempt == 0:
-                    await asyncio.sleep(self._retry_after_seconds(exc))
+                    # Same bounded, validated flood wait as new sends (#8548).
+                    await asyncio.sleep(self._outbound_retry_delay(attempt, exc))
                     continue
                 logger.warning("[Telegram] final edit failed in chat=%s: %s", chat_id, exc)
                 return False
@@ -522,7 +558,8 @@ class TelegramChannel(Channel):
                 return True
             except Exception as exc:
                 if self._is_retry_after(exc) and attempt == 0:
-                    await asyncio.sleep(self._retry_after_seconds(exc))
+                    # Same bounded, validated flood wait as new sends (#8548).
+                    await asyncio.sleep(self._outbound_retry_delay(attempt, exc))
                     continue
                 if isinstance(exc, (BadRequest, EndPointNotFound)):
                     logger.warning("[Telegram] Rich Message rejected in chat=%s; falling back to plain text: %s", chat_id, exc)
@@ -987,7 +1024,7 @@ class TelegramChannel(Channel):
 
         Only sends through ``_send_with_retry`` use this policy. The running
         acknowledgment and intermediate stream updates are best effort.
-        Final edits have their own retry path.
+        Final-edit retries reuse this bounded, validated flood wait.
         """
         delay = super()._outbound_retry_delay(attempt, exc)
         if not self._is_retry_after(exc):
