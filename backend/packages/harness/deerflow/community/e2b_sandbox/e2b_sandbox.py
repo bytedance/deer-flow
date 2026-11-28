@@ -17,7 +17,7 @@ from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
+from deerflow.sandbox.search import GrepMatch, is_user_data_path, path_matches, should_ignore_path_under_root, truncate_line
 
 if TYPE_CHECKING:
     from deerflow.community.e2b_sandbox.e2b_sandbox_provider import MountUploadResult
@@ -135,6 +135,28 @@ class E2BSandbox(Sandbox):
             tail = normalised[len(VIRTUAL_PATH_PREFIX) :].lstrip("/")
             return f"{self._home_dir}/{tail}".rstrip("/") if tail else self._home_dir
         return normalised
+
+    def _virtual_path(self, resolved: str) -> str:
+        """Inverse of :meth:`_resolve_path` — the form callers gave us.
+
+        Everything that *returns* paths (``list_dir``/``glob``/``grep``) reports
+        them under ``VIRTUAL_PATH_PREFIX``, not the sandbox-internal home dir, so
+        results can be fed straight back into the other file APIs.
+        """
+        if resolved == self._home_dir:
+            return VIRTUAL_PATH_PREFIX
+        if resolved.startswith(f"{self._home_dir}/"):
+            return f"{VIRTUAL_PATH_PREFIX}/{resolved[len(self._home_dir) :].lstrip('/')}"
+        return resolved
+
+    def resolve_access_control_path(self, path: str) -> str:
+        """Map a reported virtual path back under ``home_dir`` for access checks.
+
+        ``skills.container_path`` is the sandbox-internal spelling (for example
+        ``/home/user/skills``), so the disabled-skill filter must see those
+        paths in that form rather than under ``VIRTUAL_PATH_PREFIX``.
+        """
+        return self._resolve_path(path)
 
     def execute_command(
         self,
@@ -341,13 +363,15 @@ class E2BSandbox(Sandbox):
             raise OSError(f"Failed to download file '{path}' from sandbox: {e}") from e
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
+        # Label before the rewrite: home_dir can also hold non-user-data trees.
+        user_data = is_user_data_path(path)
         resolved = self._resolve_path(path)
         with self._lock:
             client = self._client
             if client is None:
                 raise RuntimeError("sandbox client has been closed")
             try:
-                result = client.commands.run(remote_list_dir_command(resolved, max_depth))
+                result = client.commands.run(remote_list_dir_command(resolved, max_depth, user_data=user_data))
             except CommandExitException as exc:
                 # The listing script exits nonzero on reachable outcomes (missing
                 # root: 1; head truncating a large listing: SIGPIPE 141). The SDK
@@ -357,11 +381,13 @@ class E2BSandbox(Sandbox):
             except Exception as e:
                 logger.error("Failed to list_dir %s in e2b sandbox: %s", resolved, e)
                 raise OSError(f"Failed to list_dir {resolved} in e2b sandbox: {e}") from e
-            return parse_remote_list_dir_output(
+            entries = parse_remote_list_dir_output(
                 getattr(result, "stdout", "") or "",
                 resolved,
                 pipeline_exit_code=getattr(result, "exit_code", None),
+                user_data=user_data,
             )
+            return [self._virtual_path(entry) for entry in entries]
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         resolved = self._resolve_path(path)
@@ -414,6 +440,8 @@ class E2BSandbox(Sandbox):
         include_dirs: bool = False,
         max_results: int = 200,
     ) -> tuple[list[str], bool]:
+        # Label before the rewrite: home_dir can also hold non-user-data trees.
+        user_data = is_user_data_path(path)
         resolved = self._resolve_path(path)
         types = "f,d" if include_dirs else "f"
         hard_limit = max(max_results * 4, max_results + 50)
@@ -441,13 +469,13 @@ class E2BSandbox(Sandbox):
                 continue
             if entry != root and not entry.startswith(root_prefix):
                 continue
-            if should_ignore_path_under_root(entry, root):
+            if should_ignore_path_under_root(entry, root, glob=pattern, user_data=user_data):
                 continue
             rel_path = entry[len(root) :].lstrip("/")
             if not rel_path:
                 continue
             if path_matches(pattern, rel_path):
-                matches.append(entry)
+                matches.append(self._virtual_path(entry))
                 # Look one match past the cap before deciding: returning on the
                 # max-th match cannot tell a search that held exactly
                 # ``max_results`` from one that held more, so an exhausted tree
@@ -475,6 +503,8 @@ class E2BSandbox(Sandbox):
         if not literal:
             re.compile(pattern, 0 if case_sensitive else re.IGNORECASE)
 
+        # Label before the rewrite: home_dir can also hold non-user-data trees.
+        user_data = is_user_data_path(path)
         resolved = self._resolve_path(path)
         # Build a portable ``grep`` invocation:
         # -r recursive, -n line numbers, -H always print filename, -I skip
@@ -532,7 +562,7 @@ class E2BSandbox(Sandbox):
                 line_number = int(line_no_str)
             except ValueError:
                 continue
-            if should_ignore_path_under_root(file_path, root):
+            if should_ignore_path_under_root(file_path, root, glob=glob, user_data=user_data):
                 continue
             if glob is not None:
                 # Restrict to the caller's real directory scope -- the
@@ -544,7 +574,7 @@ class E2BSandbox(Sandbox):
                     continue
             matches.append(
                 GrepMatch(
-                    path=file_path,
+                    path=self._virtual_path(file_path),
                     line_number=line_number,
                     line=truncate_line(line_text),
                 )

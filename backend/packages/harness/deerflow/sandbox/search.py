@@ -1,11 +1,14 @@
 import errno
 import fnmatch
 import os
+import posixpath
 import re
 import stat
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 
 # Repository noise: version-control metadata, dependency trees, build output
 # and editor scratch. These names are machinery, never user content.
@@ -109,7 +112,11 @@ class IgnoreRules:
 
 
 _REPOSITORY_RULES = IgnoreRules(*_compile_ignore_patterns(IGNORE_PATTERNS))
-_CONTENT_RULES = IgnoreRules(*_compile_ignore_patterns([*REPO_IGNORE_PATTERNS, *STAGING_PATTERNS]))
+# User-data roots keep hiding repository machinery and in-flight uploads; only
+# the data-looking names become content. The remote ``ls`` prune list prunes
+# exactly these names, so it must stay in sync with ``_CONTENT_RULES``.
+USER_DATA_IGNORE_PATTERNS = [*REPO_IGNORE_PATTERNS, *STAGING_PATTERNS]
+_CONTENT_RULES = IgnoreRules(*_compile_ignore_patterns(USER_DATA_IGNORE_PATTERNS))
 
 
 def should_ignore_name(name: str) -> bool:
@@ -119,6 +126,24 @@ def should_ignore_name(name: str) -> bool:
 
 def _names_user_data(pattern: str) -> bool:
     return any(fnmatch.fnmatchcase(part, candidate) for part in pattern.split("/") for candidate in USER_DATA_PATTERNS)
+
+
+def search_uses_content_rules(*, glob: str | None, user_data: bool) -> bool:
+    """Whether a search treats data-looking names (``*.log``, ``logs/``) as content.
+
+    A ``user_data`` root always does; so does an explicit glob that names user
+    data, because asking for ``*.log`` is a request for logs even in a checkout.
+    The in-sandbox ``find`` prune list must make the same choice, or the walk
+    would prune away a name the caller asked for.
+    """
+    return user_data or (glob is not None and _names_user_data(glob))
+
+
+def _rules_for_search(*, glob: str | None, user_data: bool) -> IgnoreRules:
+    """The one place the user-data / explicit-glob rule split is decided."""
+    if search_uses_content_rules(glob=glob, user_data=user_data):
+        return _CONTENT_RULES
+    return _REPOSITORY_RULES
 
 
 def ignore_rules_for(search_root: Path, *, glob: str | None = None, user_data: bool = False) -> IgnoreRules:
@@ -131,13 +156,49 @@ def ignore_rules_for(search_root: Path, *, glob: str | None = None, user_data: b
     glob the caller spelled out wins over the defaults: asking for ``*.log`` is
     a request for logs, even in a checkout.
     """
-    if user_data or (glob is not None and _names_user_data(glob)):
-        return _CONTENT_RULES
-    return _REPOSITORY_RULES
+    return _rules_for_search(glob=glob, user_data=user_data)
 
 
-def should_ignore_path(path: str) -> bool:
-    return any(should_ignore_name(segment) for segment in path.replace("\\", "/").split("/") if segment)
+def normalize_sandbox_path(path: str) -> str:
+    """Collapse redundant separators and ``.`` segments in a POSIX sandbox path.
+
+    Remote tools pass the caller's path through, so ``/mnt//user-data`` and
+    ``/mnt/./user-data`` address the same tree as ``/mnt/user-data`` and must
+    receive the same ignore rules.
+    """
+    normalized = posixpath.normpath(path.replace("\\", "/"))
+    if normalized.startswith("//"):
+        # POSIX reserves a leading ``//``; the sandboxes treat it as ``/``.
+        normalized = "/" + normalized.lstrip("/")
+    return normalized
+
+
+def is_user_data_path(path: str) -> bool:
+    """Whether a container path belongs to the user's own files.
+
+    Providers that keep DeerFlow's virtual paths (local mounts, AIO, Boxlite,
+    OpenSandbox, Boxd) label search roots with this. Providers that rewrite
+    ``/mnt/user-data`` into another directory (e2b, Tenki) must label the
+    original path before rewriting: their backing directory can also hold
+    non-user-data trees.
+    """
+    normalized = normalize_sandbox_path(path)
+    return normalized == VIRTUAL_PATH_PREFIX or normalized.startswith(VIRTUAL_PATH_PREFIX + "/")
+
+
+def user_data_ignore_rules(*, user_data: bool) -> IgnoreRules:
+    """The name filter a ``user_data``-labeled root uses, without glob context.
+
+    ``ls`` has no glob to spell out, so its prune list and parser only need the
+    root label; ``glob``/``grep`` go through :func:`ignore_rules_for` or
+    :func:`should_ignore_path_under_root`, which also honor an explicit glob.
+    """
+    return _CONTENT_RULES if user_data else _REPOSITORY_RULES
+
+
+def should_ignore_path(path: str, *, rules: IgnoreRules | None = None) -> bool:
+    rules = rules if rules is not None else _REPOSITORY_RULES
+    return any(rules.should_ignore(segment) for segment in path.replace("\\", "/").split("/") if segment)
 
 
 def _match_segments(pattern_parts: tuple[str, ...], path_parts: tuple[str, ...]) -> bool:
@@ -154,7 +215,7 @@ def _match_segments(pattern_parts: tuple[str, ...], path_parts: tuple[str, ...])
     return len(path_parts) in reachable
 
 
-def should_ignore_path_under_root(path: str, root: str) -> bool:
+def should_ignore_path_under_root(path: str, root: str, *, glob: str | None = None, user_data: bool = False) -> bool:
     """Apply :func:`should_ignore_path` to ``path`` as seen from ``root``.
 
     Ignore patterns are scoped to the search root, the way ``list_dir`` already
@@ -164,19 +225,27 @@ def should_ignore_path_under_root(path: str, root: str) -> bool:
     soon as the search root, or one of its ancestors, is itself an ignored
     name, so ``glob``/``grep`` reported "no matches" for a directory the local
     walk lists without any trouble.
+
+    ``user_data`` and ``glob`` pick the rule set exactly as
+    :func:`ignore_rules_for` does for the local walk: a user-data root treats
+    ``*.log`` and ``logs/`` as content, and a glob the caller spelled out wins
+    over the defaults. The caller labels the root (see :func:`is_user_data_path`).
+    Both arguments are normalized first, so ``/mnt//user-data`` and
+    ``/mnt/./user-data`` scope like their canonical spelling instead of falling
+    back to an absolute check that sees the root's own name as an ignored one.
     """
-    root_clean = root.rstrip("/")
-    if not root_clean:
-        root_clean = "/"
-    if path == root_clean:
+    rules = _rules_for_search(glob=glob, user_data=user_data)
+    root_clean = normalize_sandbox_path(root) if root else "/"
+    path_clean = normalize_sandbox_path(path) if path else path
+    if path_clean == root_clean:
         # The caller asked for this exact path. There is nothing relative to
         # test, and an ignored name must not hide what was explicitly
         # requested (a single-file ``grep`` hits this on every match).
         return False
     prefix = "/" if root_clean == "/" else f"{root_clean}/"
-    if path.startswith(prefix):
-        return should_ignore_path(path[len(prefix) :])
-    return should_ignore_path(path)
+    if path_clean.startswith(prefix):
+        return should_ignore_path(path_clean[len(prefix) :], rules=rules)
+    return should_ignore_path(path_clean, rules=rules)
 
 
 def path_matches(pattern: str, rel_path: str) -> bool:

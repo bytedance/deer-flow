@@ -261,21 +261,11 @@ def test_grep_tool_invalid_regex_returns_error(tmp_path, monkeypatch) -> None:
 
 
 def test_aio_sandbox_glob_include_dirs_filters_nested_ignored(monkeypatch) -> None:
-    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
-        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
-    monkeypatch.setattr(
-        sandbox._client.file,
-        "list_path",
-        lambda **kwargs: SimpleNamespace(
-            data=SimpleNamespace(
-                files=[
-                    SimpleNamespace(name="src", path="/mnt/workspace/src"),
-                    SimpleNamespace(name="node_modules", path="/mnt/workspace/node_modules"),
-                    # child of node_modules — should be filtered via should_ignore_path
-                    SimpleNamespace(name="lib", path="/mnt/workspace/node_modules/lib"),
-                ]
-            )
-        ),
+    # The find route prunes node_modules during the walk; even if a nested
+    # ignored path reached the client, should_ignore_path_under_root drops it.
+    sandbox = _patched_find_sandbox(
+        monkeypatch,
+        ["/mnt/workspace/src", "/mnt/workspace/node_modules", "/mnt/workspace/node_modules/lib"],
     )
 
     matches, truncated = sandbox.glob("/mnt/workspace", "**", include_dirs=True)
@@ -295,20 +285,7 @@ def test_aio_sandbox_glob_include_dirs_exactly_full_is_not_truncated(monkeypatch
     seen. It now scans one eligible match past the cap, the same rule the
     sibling ``include_dirs=False`` branch has always applied to the full list.
     """
-    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
-        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
-    monkeypatch.setattr(
-        sandbox._client.file,
-        "list_path",
-        lambda **kwargs: SimpleNamespace(
-            data=SimpleNamespace(
-                files=[
-                    SimpleNamespace(name="a", path="/mnt/workspace/a"),
-                    SimpleNamespace(name="b", path="/mnt/workspace/b"),
-                ]
-            )
-        ),
-    )
+    sandbox = _patched_find_sandbox(monkeypatch, ["/mnt/workspace/a", "/mnt/workspace/b"])
 
     matches, truncated = sandbox.glob("/mnt/workspace", "**", include_dirs=True, max_results=2)
 
@@ -318,21 +295,7 @@ def test_aio_sandbox_glob_include_dirs_exactly_full_is_not_truncated(monkeypatch
 
 def test_aio_sandbox_glob_include_dirs_reports_a_dropped_match_as_truncated(monkeypatch) -> None:
     """The counterpart: a match past the cap still reports truncated."""
-    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
-        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
-    monkeypatch.setattr(
-        sandbox._client.file,
-        "list_path",
-        lambda **kwargs: SimpleNamespace(
-            data=SimpleNamespace(
-                files=[
-                    SimpleNamespace(name="a", path="/mnt/workspace/a"),
-                    SimpleNamespace(name="b", path="/mnt/workspace/b"),
-                    SimpleNamespace(name="c", path="/mnt/workspace/c"),
-                ]
-            )
-        ),
-    )
+    sandbox = _patched_find_sandbox(monkeypatch, ["/mnt/workspace/a", "/mnt/workspace/b", "/mnt/workspace/c"])
 
     matches, truncated = sandbox.glob("/mnt/workspace", "**", include_dirs=True, max_results=2)
 
@@ -358,38 +321,75 @@ def _filtered_tail_entries(*, second_eligible: bool):
     return entries
 
 
-def _patched_sandbox(monkeypatch, entries):
+def _find_stdout(paths, status=0):
+    """Render an in-sandbox ``find`` listing the way the remote command prints
+    it: one path per line, then the find-status marker after ``head``."""
+    body = "".join(f"{p}\n" for p in paths)
+    return f"{body}\n__DF_FIND_STATUS__:{status}\n"
+
+
+def _patched_find_sandbox(monkeypatch, paths, *, status=0, seen=None, missing_glob=False):
+    """Patch an AioSandbox whose glob runs the in-sandbox ``find`` command.
+
+    ``paths`` are the candidate lines ``find`` prints (already coarse-filtered
+    server-side). ``seen`` captures the command so a test can assert on the
+    ``-name`` coarse filter, the prune list and the type predicate. When
+    ``missing_glob`` is set the ``/v1/file/glob`` endpoint answers 404, forcing
+    the fallback; otherwise the ``include_dirs`` branch is exercised directly.
+    """
+    from agent_sandbox.core.api_error import ApiError
+
     with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
         sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
-    monkeypatch.setattr(
-        sandbox._client.file,
-        "list_path",
-        lambda **kwargs: SimpleNamespace(data=SimpleNamespace(files=entries)),
-    )
+
+    def exec_command(**kwargs):
+        if seen is not None:
+            seen.update(kwargs)
+        return SimpleNamespace(data=SimpleNamespace(output=_find_stdout(paths, status), exit_code=status, status="completed"))
+
+    monkeypatch.setattr(sandbox._client.shell, "exec_command", exec_command)
+    if missing_glob:
+
+        def _missing(**kwargs):
+            raise ApiError(status_code=404, headers={}, body={"detail": "Not Found"})
+
+        monkeypatch.setattr(sandbox._client.file, "glob_files", _missing)
     return sandbox
 
 
-def test_aio_sandbox_glob_include_dirs_looks_past_a_filtered_tail(monkeypatch) -> None:
-    """Trailing entries the filters reject do not make a full result truncated.
+def test_aio_sandbox_glob_matches_looks_past_a_filtered_tail() -> None:
+    """``_glob_matches`` counts only *eligible* matches toward the cap. A tail of
+    entries the filters reject (ignored, out of root, pattern miss) after two
+    matches leaves the result complete, because the scan continues past them."""
+    sandbox = AioSandbox.__new__(AioSandbox)
+    entries = [e.path for e in _filtered_tail_entries(second_eligible=False)]
 
-    The cap counts *eligible* matches, so the branch has to keep scanning
-    rather than assume the max-th match was the last one: here two matches fill
-    ``max_results`` and everything after them is ignored, out of root, or a
-    pattern miss, which leaves the result complete.
-    """
-    sandbox = _patched_sandbox(monkeypatch, _filtered_tail_entries(second_eligible=False))
-
-    matches, truncated = sandbox.glob("/mnt/workspace", "**/*.py", include_dirs=True, max_results=2)
+    matches, truncated = sandbox._glob_matches(
+        entries,
+        root_path="/mnt/workspace",
+        pattern="**/*.py",
+        user_data=False,
+        include_dirs=True,
+        max_results=2,
+    )
 
     assert matches == ["/mnt/workspace/a.py", "/mnt/workspace/b.py"]
     assert truncated is False
 
 
-def test_aio_sandbox_glob_include_dirs_reports_a_match_after_a_filtered_tail(monkeypatch) -> None:
+def test_aio_sandbox_glob_matches_reports_a_match_after_a_filtered_tail() -> None:
     """An eligible match beyond that filtered tail still reports truncation."""
-    sandbox = _patched_sandbox(monkeypatch, _filtered_tail_entries(second_eligible=True))
+    sandbox = AioSandbox.__new__(AioSandbox)
+    entries = [e.path for e in _filtered_tail_entries(second_eligible=True)]
 
-    matches, truncated = sandbox.glob("/mnt/workspace", "**/*.py", include_dirs=True, max_results=2)
+    matches, truncated = sandbox._glob_matches(
+        entries,
+        root_path="/mnt/workspace",
+        pattern="**/*.py",
+        user_data=False,
+        include_dirs=True,
+        max_results=2,
+    )
 
     assert matches == ["/mnt/workspace/a.py", "/mnt/workspace/b.py"]
     assert truncated is True
@@ -413,13 +413,369 @@ def test_aio_sandbox_glob_parses_json(monkeypatch) -> None:
         sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
     monkeypatch.setattr(
         sandbox._client.file,
-        "find_files",
-        lambda **kwargs: SimpleNamespace(data=SimpleNamespace(files=["/mnt/user-data/workspace/app.py", "/mnt/user-data/workspace/node_modules/skip.py"])),
+        "glob_files",
+        lambda **kwargs: SimpleNamespace(
+            data=SimpleNamespace(
+                files=[
+                    SimpleNamespace(path="/mnt/user-data/workspace/app.py", is_directory=False),
+                    SimpleNamespace(path="/mnt/user-data/workspace/node_modules/skip.py", is_directory=False),
+                ],
+                truncated=False,
+            )
+        ),
     )
 
     matches, truncated = sandbox.glob("/mnt/user-data/workspace", "**/*.py")
 
     assert matches == ["/mnt/user-data/workspace/app.py"]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_drops_directories_before_the_cap(monkeypatch) -> None:
+    """The file API reports directories among matches; a files-only glob drops
+    them before counting toward max_results, so a directory cannot consume a
+    result slot or claim truncation."""
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    seen: dict = {}
+
+    def glob_files(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(
+            data=SimpleNamespace(
+                files=[
+                    SimpleNamespace(path="/mnt/user-data/uploads/logs", is_directory=True),
+                    SimpleNamespace(path="/mnt/user-data/uploads/logs/worker.log", is_directory=False),
+                ],
+                truncated=False,
+            )
+        )
+
+    monkeypatch.setattr(sandbox._client.file, "glob_files", glob_files)
+
+    # ``**/*`` matches the directory too, so a missing is_directory skip would
+    # fill the single slot with it and report truncation.
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", "**/*", max_results=1)
+
+    assert seen["files_only"] is True
+    assert seen["include_hidden"] is True
+    assert seen["include_metadata"] is False
+    assert matches == ["/mnt/user-data/uploads/logs/worker.log"]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_walks_a_basename_pattern_recursively(monkeypatch) -> None:
+    """A basename-only pattern matches at any depth in DeerFlow's contract, but
+    the endpoint anchors its pattern at the requested root, so the request must
+    ask for ``**/`` while the client keeps filtering with the caller's pattern."""
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    seen: dict = {}
+
+    def glob_files(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(
+            data=SimpleNamespace(
+                files=[
+                    SimpleNamespace(path="/mnt/user-data/uploads/notes.txt", is_directory=False),
+                    SimpleNamespace(path="/mnt/user-data/uploads/sub/notes.txt", is_directory=False),
+                    SimpleNamespace(path="/mnt/user-data/uploads/sub/worker.log", is_directory=False),
+                ],
+                truncated=False,
+            )
+        )
+
+    monkeypatch.setattr(sandbox._client.file, "glob_files", glob_files)
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", "*.txt")
+
+    assert seen["pattern"] == "**/*.txt"
+    assert matches == [
+        "/mnt/user-data/uploads/notes.txt",
+        "/mnt/user-data/uploads/sub/notes.txt",
+    ]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_keeps_an_anchored_pattern_as_written(monkeypatch) -> None:
+    """A pattern that already carries a directory component is not prefixed."""
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    seen: dict = {}
+
+    def glob_files(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(
+            data=SimpleNamespace(
+                files=[SimpleNamespace(path="/mnt/user-data/uploads/logs/worker.txt", is_directory=False)],
+                truncated=False,
+            )
+        )
+
+    monkeypatch.setattr(sandbox._client.file, "glob_files", glob_files)
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", "logs/*.txt")
+
+    assert seen["pattern"] == "logs/*.txt"
+    assert matches == ["/mnt/user-data/uploads/logs/worker.txt"]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_translates_a_bare_double_star(monkeypatch) -> None:
+    """``**`` matches every file at any depth locally, but the endpoint returns
+    nothing for that spelling; the request asks for ``**/*`` instead."""
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    seen: dict = {}
+
+    def glob_files(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(
+            data=SimpleNamespace(
+                files=[
+                    SimpleNamespace(path="/mnt/user-data/uploads/notes.txt", is_directory=False),
+                    SimpleNamespace(path="/mnt/user-data/uploads/sub/deep.txt", is_directory=False),
+                ],
+                truncated=False,
+            )
+        )
+
+    monkeypatch.setattr(sandbox._client.file, "glob_files", glob_files)
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", "**")
+
+    assert seen["pattern"] == "**/*"
+    assert matches == [
+        "/mnt/user-data/uploads/notes.txt",
+        "/mnt/user-data/uploads/sub/deep.txt",
+    ]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_matches_a_non_canonical_root(monkeypatch) -> None:
+    """The caller may spell the root with ``//``; the server returns canonical
+    entry paths, so the scope check must normalize the root instead of
+    dropping every entry."""
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    monkeypatch.setattr(
+        sandbox._client.file,
+        "glob_files",
+        lambda **kwargs: SimpleNamespace(
+            data=SimpleNamespace(
+                files=[SimpleNamespace(path="/mnt/user-data/uploads/app.log", is_directory=False)],
+                truncated=False,
+            )
+        ),
+    )
+
+    matches, truncated = sandbox.glob("/mnt//user-data/uploads", "*.log")
+
+    assert matches == ["/mnt/user-data/uploads/app.log"]
+    assert truncated is False
+
+
+def test_aio_sandbox_grep_matches_a_non_canonical_root(monkeypatch) -> None:
+    """grep scopes returned files the same way, so ``/.`` in the root must not
+    turn every match into an out-of-scope result."""
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    monkeypatch.setattr(
+        sandbox._client.file,
+        "grep_files",
+        lambda **kwargs: SimpleNamespace(
+            data=SimpleNamespace(
+                matches=[SimpleNamespace(file="/mnt/user-data/uploads/app.log", line_number=1, line_content="FATAL app")],
+                truncated=False,
+            )
+        ),
+    )
+
+    matches, truncated = sandbox.grep("/mnt/./user-data/uploads", "FATAL")
+
+    assert matches == [GrepMatch(path="/mnt/user-data/uploads/app.log", line_number=1, line="FATAL app")]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_reports_server_truncation(monkeypatch) -> None:
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    monkeypatch.setattr(
+        sandbox._client.file,
+        "glob_files",
+        lambda **kwargs: SimpleNamespace(
+            data=SimpleNamespace(
+                files=[SimpleNamespace(path="/mnt/user-data/uploads/app.log", is_directory=False)],
+                truncated=True,
+            )
+        ),
+    )
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", "**/*.log")
+
+    assert matches == ["/mnt/user-data/uploads/app.log"]
+    assert truncated is True
+
+
+def test_aio_sandbox_glob_falls_back_to_find_when_glob_files_is_missing(monkeypatch) -> None:
+    """Images that predate /v1/file/glob answer 404; the in-sandbox ``find``
+    fallback applies the same files-only rule via ``-type f``."""
+    sandbox = _patched_find_sandbox(
+        monkeypatch,
+        ["/mnt/user-data/uploads/logs/worker.log"],
+        missing_glob=True,
+    )
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", "**/*.log")
+
+    assert matches == ["/mnt/user-data/uploads/logs/worker.log"]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_fallback_pushes_the_basename_to_find(monkeypatch) -> None:
+    """The fallback sends the pattern's basename to ``find -name`` so unrelated
+    files never leave the sandbox, on an image without /v1/file/glob."""
+    seen: dict = {}
+    sandbox = _patched_find_sandbox(
+        monkeypatch,
+        ["/mnt/user-data/uploads/logs/worker.log"],
+        seen=seen,
+        missing_glob=True,
+    )
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", "**/worker.log")
+
+    assert "-name worker.log" in seen["command"]  # shlex.quote leaves a plain word unquoted
+    assert "-type f" in seen["command"]  # files-only walk
+    assert matches == ["/mnt/user-data/uploads/logs/worker.log"]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_fallback_finds_a_match_behind_a_large_ignored_tree(monkeypatch) -> None:
+    """Regression for the silent 10,000-entry cap: the old ``/v1/file/list``
+    fallback truncated BEFORE the ignore rules ran, so a README beside a
+    10,000-file node_modules came back empty with truncated=false. The ``find``
+    route prunes node_modules during the walk, so only real candidates count
+    toward the cap and the README is found with no false truncation."""
+    seen: dict = {}
+    # find prunes node_modules, so only the README reaches the client.
+    sandbox = _patched_find_sandbox(monkeypatch, ["/work/README.md"], seen=seen, missing_glob=True)
+
+    matches, truncated = sandbox.glob("/work", "*.md", max_results=1)
+
+    # node_modules is pruned server-side, before head caps the output.
+    assert "node_modules" in seen["command"]
+    assert "-prune" in seen["command"]
+    assert matches == ["/work/README.md"]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_fallback_reports_truncation_when_find_output_exceeds_the_cap(monkeypatch) -> None:
+    """When find has more candidates than the cap, head cuts the listing and
+    SIGPIPE (141) marks it truncated — the result is never a silent short list."""
+    # find_limit = max_results + 2 = 3; three candidates reach the cap.
+    sandbox = _patched_find_sandbox(
+        monkeypatch,
+        ["/work/a.md", "/work/b.md", "/work/c.md"],
+        status=141,
+        missing_glob=True,
+    )
+
+    matches, truncated = sandbox.glob("/work", "*.md", max_results=1)
+
+    assert truncated is True
+    assert len(matches) <= 1
+
+
+def test_aio_sandbox_glob_fallback_keeps_a_dotfile_that_matches_the_pattern(monkeypatch) -> None:
+    """``*.csv`` also matches a file named exactly ``.csv``. POSIX ``find -name``
+    lets ``*`` match a leading dot, so the walk returns the dotfile and the
+    client matcher accepts it — no extension prefilter can drop it."""
+    seen: dict = {}
+    sandbox = _patched_find_sandbox(
+        monkeypatch,
+        ["/mnt/user-data/uploads/.csv", "/mnt/user-data/uploads/report.csv"],
+        seen=seen,
+        missing_glob=True,
+    )
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", "*.csv")
+
+    # The coarse filter is the basename, not an extension, so dot-only names pass.
+    assert "-name '*.csv'" in seen["command"]
+    assert matches == ["/mnt/user-data/uploads/.csv", "/mnt/user-data/uploads/report.csv"]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_fallback_keeps_a_dot_only_name_with_a_wildcard_stem(monkeypatch) -> None:
+    """``?*.csv`` matches ``..csv`` as well as ``report.csv``; ``find -name``
+    returns both, and the client matcher keeps them."""
+    sandbox = _patched_find_sandbox(
+        monkeypatch,
+        ["/mnt/user-data/uploads/..csv", "/mnt/user-data/uploads/report.csv"],
+        missing_glob=True,
+    )
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", "?*.csv")
+
+    assert matches == ["/mnt/user-data/uploads/..csv", "/mnt/user-data/uploads/report.csv"]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_include_dirs_keeps_a_dotfile_that_matches_the_pattern(monkeypatch) -> None:
+    """The include-dirs branch runs the same find walk, so a dotfile named by
+    the pattern survives it too."""
+    sandbox = _patched_find_sandbox(
+        monkeypatch,
+        ["/mnt/user-data/uploads/.cache/.txt", "/mnt/user-data/uploads/.cache/trace.txt"],
+    )
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", ".cache/*.txt", include_dirs=True)
+
+    assert matches == ["/mnt/user-data/uploads/.cache/.txt", "/mnt/user-data/uploads/.cache/trace.txt"]
+    assert truncated is False
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        ("**/*.log", "*.log"),
+        ("*.txt", "*.txt"),
+        (".cache/*.txt", "*.txt"),
+        ("?*.csv", "?*.csv"),
+        ("..csv", "..csv"),
+        ("*.tar.gz", "*.tar.gz"),
+        ("notes.txt", "notes.txt"),
+        ("logs/app.log", "app.log"),
+        ("report*.csv", "report*.csv"),
+        ("*", "*"),
+        ("**/*", "*"),
+        ("*.{log,txt}", "*.{log,txt}"),
+        ("*.[jt]s", "*.[jt]s"),
+        ("notes", "notes"),
+    ],
+)
+def test_aio_pattern_name_glob(pattern, expected) -> None:
+    """The server-side coarse filter is the pattern's basename. ``find -name``
+    tests only the basename, so this is always a superset of the anchored
+    ``path_matches`` semantics and never drops a match the local walk keeps."""
+    from deerflow.community.aio_sandbox.aio_sandbox import _pattern_name_glob
+
+    assert _pattern_name_glob(pattern) == expected
+
+
+def test_aio_sandbox_glob_include_dirs_keeps_hidden_directory_contents(monkeypatch) -> None:
+    """A hidden directory named by the pattern must not hide its children:
+    ``find`` lists hidden entries by default, so the pattern can match inside a
+    ``.cache`` directory without any special flag."""
+    sandbox = _patched_find_sandbox(
+        monkeypatch,
+        ["/mnt/user-data/uploads/.cache/trace.txt"],
+    )
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", ".cache/*.txt", include_dirs=True)
+
+    assert matches == ["/mnt/user-data/uploads/.cache/trace.txt"]
     assert truncated is False
 
 
@@ -447,6 +803,50 @@ def test_aio_sandbox_grep_parses_json(monkeypatch) -> None:
 
     assert matches == [GrepMatch(path="/mnt/user-data/workspace/app.py", line_number=7, line="TODO = True")]
     assert truncated is False
+
+
+def test_aio_sandbox_grep_forwards_an_explicit_glob_to_the_server(monkeypatch) -> None:
+    """The file API applies its own filter before returning matches, so an
+    explicit glob must reach the server; the basename is the coarse filter and
+    the client still enforces the directory scope."""
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    seen: dict = {}
+
+    def grep_files(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(
+            data=SimpleNamespace(
+                matches=[
+                    SimpleNamespace(file="/mnt/user-data/workspace/logs/app.log", line_number=3, line_content="FATAL app"),
+                    SimpleNamespace(file="/mnt/user-data/workspace/app.log", line_number=4, line_content="FATAL root"),
+                ],
+                truncated=False,
+            )
+        )
+
+    monkeypatch.setattr(sandbox._client.file, "grep_files", grep_files)
+
+    matches, _ = sandbox.grep("/mnt/user-data/workspace", "FATAL", glob="logs/*.log")
+
+    assert seen["include"] == ["*.log"]
+    assert matches == [GrepMatch(path="/mnt/user-data/workspace/logs/app.log", line_number=3, line="FATAL app")]
+
+
+def test_aio_sandbox_grep_does_not_send_include_without_a_glob(monkeypatch) -> None:
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    seen: dict = {}
+
+    def grep_files(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(data=SimpleNamespace(matches=[], truncated=False))
+
+    monkeypatch.setattr(sandbox._client.file, "grep_files", grep_files)
+
+    sandbox.grep("/mnt/user-data/workspace", "FATAL")
+
+    assert "include" not in seen
 
 
 def test_aio_sandbox_grep_accepts_single_file_path(monkeypatch) -> None:
@@ -627,20 +1027,8 @@ def test_glob_tool_honors_smaller_requested_max_results(tmp_path, monkeypatch) -
 
 
 def test_aio_sandbox_glob_include_dirs_enforces_root_boundary(monkeypatch) -> None:
-    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
-        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
-    monkeypatch.setattr(
-        sandbox._client.file,
-        "list_path",
-        lambda **kwargs: SimpleNamespace(
-            data=SimpleNamespace(
-                files=[
-                    SimpleNamespace(name="src", path="/mnt/workspace/src"),
-                    SimpleNamespace(name="src2", path="/mnt/workspace2/src2"),
-                ]
-            )
-        ),
-    )
+    # A sibling root (``/mnt/workspace2``) must not leak into ``/mnt/workspace``.
+    sandbox = _patched_find_sandbox(monkeypatch, ["/mnt/workspace/src", "/mnt/workspace2/src2"])
 
     matches, truncated = sandbox.glob("/mnt/workspace", "**", include_dirs=True)
 
@@ -1019,6 +1407,149 @@ def test_glob_tool_does_not_surface_disabled_skill_from_ancestor_root(tmp_path, 
     assert "/mnt/skills/public/open-skill/SKILL.md" in result
 
 
+def test_glob_tool_drops_disabled_skill_reported_under_a_provider_alias(tmp_path, monkeypatch) -> None:
+    """A provider that reports results under /mnt/user-data but checks skills
+    against the backing home must still filter a disabled skill.
+
+    E2B and Tenki map ``/home/<user>/skills`` to ``/mnt/user-data/skills`` in
+    their results; without resolving the alias the enabled-state check cannot
+    recognize the skill and returns its files.
+    """
+    runtime = _make_runtime(tmp_path)
+    runtime.state["sandbox"] = {"sandbox_id": "e2b-fake"}
+    _make_skills_sandbox(tmp_path, monkeypatch, disabled="secret-skill")
+    monkeypatch.setattr("deerflow.sandbox.tools._get_skills_container_path", lambda: "/home/user/skills")
+
+    class _AliasSandbox:
+        def glob(self, path, pattern, *, include_dirs=False, max_results=200):
+            return [
+                "/mnt/user-data/skills/public/secret-skill/SKILL.md",
+                "/mnt/user-data/skills/public/open-skill/SKILL.md",
+            ], False
+
+        def resolve_access_control_path(self, path):
+            prefix = "/mnt/user-data/skills/"
+            if path.startswith(prefix):
+                return "/home/user/skills/" + path[len(prefix) :]
+            return path
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: _AliasSandbox())
+
+    result = glob_tool.func(
+        runtime=runtime,
+        description="find skills",
+        pattern="**/SKILL.md",
+        path="/mnt/user-data/skills",
+    )
+
+    assert "secret-skill" not in result
+    # ...while the enabled sibling is still returned.
+    assert "/mnt/user-data/skills/public/open-skill/SKILL.md" in result
+
+
+def test_glob_tool_drops_disabled_skill_reported_under_a_non_canonical_skills_root(tmp_path, monkeypatch) -> None:
+    """A shell-backed provider echoes the root spelling, so results may carry
+    ``/mnt//skills``; the filter must normalize before extracting the skill."""
+    runtime = _make_runtime(tmp_path)
+    runtime.state["sandbox"] = {"sandbox_id": "boxlite-fake"}
+    _make_skills_sandbox(tmp_path, monkeypatch, disabled="secret-skill")
+
+    class _SpellingSandbox:
+        def glob(self, path, pattern, *, include_dirs=False, max_results=200):
+            return [
+                "/mnt//skills/public/secret-skill/SKILL.md",
+                "/mnt//skills/public/open-skill/SKILL.md",
+            ], False
+
+        def resolve_access_control_path(self, path):
+            return path
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: _SpellingSandbox())
+
+    result = glob_tool.func(
+        runtime=runtime,
+        description="find skills",
+        pattern="**/SKILL.md",
+        path="/mnt//skills",
+    )
+
+    assert "secret-skill" not in result
+    assert "/mnt//skills/public/open-skill/SKILL.md" in result
+
+
+def test_ls_tool_drops_disabled_skill_reported_under_a_provider_alias(tmp_path, monkeypatch) -> None:
+    """ls descends into results too, so the same alias resolution must apply."""
+    runtime = _make_runtime(tmp_path)
+    runtime.state["sandbox"] = {"sandbox_id": "e2b-fake"}
+    _make_skills_sandbox(tmp_path, monkeypatch, disabled="secret-skill")
+    monkeypatch.setattr("deerflow.sandbox.tools._get_skills_container_path", lambda: "/home/user/skills")
+
+    class _AliasSandbox:
+        def list_dir(self, path):
+            return [
+                "/mnt/user-data/skills/public/secret-skill/SKILL.md",
+                "/mnt/user-data/skills/public/open-skill/SKILL.md",
+            ]
+
+        def resolve_access_control_path(self, path):
+            prefix = "/mnt/user-data/skills/"
+            if path.startswith(prefix):
+                return "/home/user/skills/" + path[len(prefix) :]
+            return path
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: _AliasSandbox())
+
+    result = ls_tool.func(
+        runtime=runtime,
+        description="list skills",
+        path="/mnt/user-data/skills/public",
+    )
+
+    assert "secret-skill" not in result
+    assert "/mnt/user-data/skills/public/open-skill/SKILL.md" in result
+
+
+def test_grep_tool_drops_disabled_skill_reported_under_a_provider_alias(tmp_path, monkeypatch) -> None:
+    """grep results carry the same aliased paths, including their contents."""
+    runtime = _make_runtime(tmp_path)
+    runtime.state["sandbox"] = {"sandbox_id": "e2b-fake"}
+    _make_skills_sandbox(tmp_path, monkeypatch, disabled="secret-skill")
+    monkeypatch.setattr("deerflow.sandbox.tools._get_skills_container_path", lambda: "/home/user/skills")
+
+    class _AliasSandbox:
+        def grep(self, path, pattern, *, glob=None, literal=False, case_sensitive=False, max_results=100):
+            return [
+                GrepMatch(
+                    path="/mnt/user-data/skills/public/secret-skill/SKILL.md",
+                    line_number=1,
+                    line="SECRET_PROCEDURE = step-1-step-2",
+                ),
+                GrepMatch(
+                    path="/mnt/user-data/skills/public/open-skill/SKILL.md",
+                    line_number=1,
+                    line="PUBLIC_PROCEDURE = hello",
+                ),
+            ], False
+
+        def resolve_access_control_path(self, path):
+            prefix = "/mnt/user-data/skills/"
+            if path.startswith(prefix):
+                return "/home/user/skills/" + path[len(prefix) :]
+            return path
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: _AliasSandbox())
+
+    result = grep_tool.func(
+        runtime=runtime,
+        description="search skills",
+        pattern="PROCEDURE",
+        path="/mnt/user-data/skills/public",
+    )
+
+    assert "SECRET_PROCEDURE" not in result
+    assert "PUBLIC_PROCEDURE = hello" in result
+
+
 def test_grep_tool_does_not_surface_disabled_skill_content_from_ancestor_root(tmp_path, monkeypatch) -> None:
     """The strongest leak: grep from /mnt/skills printed a disabled skill's file contents."""
     runtime = _make_runtime(tmp_path)
@@ -1051,6 +1582,21 @@ def test_ls_tool_does_not_surface_disabled_skill_from_category_root(tmp_path, mo
     assert "secret-skill" not in result
     # ...while the enabled sibling is still listed.
     assert "open-skill" in result
+
+
+def test_ls_tool_blocks_a_non_canonical_disabled_skill_path(tmp_path, monkeypatch) -> None:
+    """`/mnt//skills/...` addresses the same skill, so the gate must normalize
+    before the prefix check instead of letting the spelling skip it."""
+    runtime = _make_runtime(tmp_path)
+    _make_skills_sandbox(tmp_path, monkeypatch, disabled="secret-skill")
+
+    result = ls_tool.func(
+        runtime=runtime,
+        description="list the disabled skill",
+        path="/mnt//skills/public/secret-skill",
+    )
+
+    assert "Skill 'secret-skill' is disabled" in result
 
 
 def test_ls_tool_keeps_category_dirs_when_listing_skills_root(tmp_path, monkeypatch) -> None:
@@ -1093,6 +1639,12 @@ def test_extract_skill_name_treats_category_dir_with_trailing_slash_as_root() ->
     assert extract("/mnt/skills/public/bootstrap/SKILL.md") == "bootstrap"
     assert extract("/mnt/skills/my-skill/") == "my-skill"
     assert extract("/mnt/user-data/workspace/file.md") is None
+    # Equivalent spellings address the same skill tree and must not dodge the
+    # prefix check.
+    assert extract("/mnt//skills/public/bootstrap/SKILL.md") == "bootstrap"
+    assert extract("/mnt/./skills/public/bootstrap/SKILL.md") == "bootstrap"
+    assert extract("/mnt//skills/public/") is None
+    assert extract("/mnt//user-data/workspace/file.md") is None
 
 
 def _make_custom_skills_sandbox(tmp_path, monkeypatch, *, user_id: str, disabled: str):
