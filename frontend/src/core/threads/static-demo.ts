@@ -133,6 +133,9 @@ export function isDemoThreadId(threadId: string): boolean {
   return DEMO_THREAD_ID_SET.has(threadId);
 }
 
+/** Route prefix for the public, read-only showcase demo thread pages. */
+export const SHOWCASE_ROUTE_PREFIX = "/showcase";
+
 export function pathOfPublicDemoThread(threadId: string): string {
   return `${SHOWCASE_ROUTE_PREFIX}/${encodeURIComponent(threadId)}`;
 }
