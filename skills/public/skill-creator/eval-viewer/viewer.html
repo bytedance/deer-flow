@@ -1131,7 +1131,15 @@
       if (metadata.skill_name) html += "<strong>" + escapeHtml(metadata.skill_name) + "</strong> &mdash; ";
       if (metadata.timestamp) html += metadata.timestamp + " &mdash; ";
       if (metadata.evals_run) html += "Evals: " + metadata.evals_run.join(", ") + " &mdash; ";
-      html += (metadata.runs_per_configuration || "?") + " runs per configuration";
+      if (metadata.run_counts_by_eval) {
+        html += "uneven run counts";
+        for (const [evalId, counts] of Object.entries(metadata.run_counts_by_eval)) {
+          const breakdown = Object.entries(counts).map(([config, count]) => config + "=" + count).join(", ");
+          html += "<br>" + escapeHtml("Eval " + evalId + ": " + breakdown);
+        }
+      } else {
+        html += (metadata.runs_per_configuration || "?") + " runs per configuration";
+      }
       html += "</p>";
 
       // Summary table
@@ -1159,9 +1167,13 @@
       const configB = configs[1] || "config_b";
       const labelA = configA.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
       const labelB = configB.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
-      const a = summary[configA] || {};
-      const b = summary[configB] || {};
       const delta = summary.delta || {};
+      const incomplete = summary.delta && Object.keys(summary.delta).length === 0;
+      const measured = new Set((data.runs || []).map(r => r.configuration));
+      // Show an unmeasured side as missing rather than as a zero score
+      const statsFor = config => (incomplete && !measured.has(config)) ? {} : (summary[config] || {});
+      const a = statsFor(configA);
+      const b = statsFor(configB);
 
       html += "<thead><tr><th>Metric</th><th>" + escapeHtml(labelA) + "</th><th>" + escapeHtml(labelB) + "</th><th>Delta</th></tr></thead>";
       html += "<tbody>";
@@ -1188,6 +1200,13 @@
       }
 
       html += "</tbody></table>";
+
+      if (incomplete) {
+        html += "<p style='color: var(--text-muted); font-size: 0.875rem;'>Comparison incomplete: delta omitted until both configurations have accepted runs for the same eval.</p>";
+      }
+      if (metadata.delta_eval_ids) {
+        html += "<p style='color: var(--text-muted); font-size: 0.875rem;'>" + escapeHtml("Delta covers only the evals measured in both configurations: " + metadata.delta_eval_ids.join(", ") + ".") + "</p>";
+      }
 
       // Per-eval breakdown (if runs data available)
       const runs = data.runs || [];

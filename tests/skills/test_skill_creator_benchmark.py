@@ -3,6 +3,7 @@
 import builtins
 import json
 import runpy
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -97,7 +98,7 @@ def test_missing_token_measurements_keep_legacy_character_fallback(
     assert benchmark["runs"][0]["result"]["tokens"] == 12450
     expected_time = 23.3 if has_grading_duration else (25.0 if timing else 0.0)
     assert benchmark["runs"][0]["result"]["time_seconds"] == expected_time
-    output = capsys.readouterr().out
+    output = capsys.readouterr().err
     if timing_state == "invalid_json":
         assert "Warning:" in output
         assert str(run_dir / "timing.json") in output
@@ -140,7 +141,7 @@ def test_non_object_timing_keeps_fallback_and_other_runs(
     assert "| Tokens | 12450 ± 0 | 0 ± 0 | +12450 |" in benchmark_script[
         "generate_markdown"
     ](benchmark)
-    output = capsys.readouterr().out
+    output = capsys.readouterr().err
     assert "Warning:" in output
     assert "non-object" in output
     assert str(run_dir / "timing.json") in output
@@ -206,7 +207,7 @@ def test_invalid_timing_field_warns_and_preserves_other_measurements(
     assert summary["time_seconds"]["mean"] == (expected_time + 25.0) / 2
     assert "| Tokens |" in benchmark_script["generate_markdown"](benchmark)
     json.dumps(benchmark, allow_nan=False)
-    output = capsys.readouterr().out
+    output = capsys.readouterr().err
     assert "Warning:" in output
     assert field in output
     assert str(run_dir / "timing.json") in output
@@ -226,7 +227,7 @@ def test_finite_non_negative_timing_numbers_are_preserved(
     assert benchmark["runs"][0]["result"]["tokens"] == tokens
     assert benchmark["runs"][0]["result"]["time_seconds"] == duration
     assert benchmark["run_summary"]["with_skill"]["tokens"]["mean"] == tokens
-    assert capsys.readouterr().out == ""
+    assert capsys.readouterr().err == ""
 
 
 @pytest.mark.parametrize("has_grading_duration", [False, True])
@@ -251,7 +252,7 @@ def test_missing_or_null_timing_fields_use_fallbacks_without_warning(
     assert benchmark["runs"][0]["result"]["time_seconds"] == (
         23.3 if has_grading_duration else 0.0
     )
-    assert capsys.readouterr().out == ""
+    assert capsys.readouterr().err == ""
 
 
 @pytest.mark.parametrize("layout", ["workspace", "legacy"])
@@ -311,8 +312,8 @@ def test_cli_warns_and_writes_reports_for_invalid_timing(
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert "Warning:" in completed.stdout
-    assert str(run_dir / "timing.json") in completed.stdout
+    assert "Warning:" in completed.stderr
+    assert str(run_dir / "timing.json") in completed.stderr
     benchmark = json.loads((tmp_path / "benchmark.json").read_text(encoding="utf-8"))
     results = {run["configuration"]: run["result"] for run in benchmark["runs"]}
     assert set(results) == {"with_skill", "without_skill"}
@@ -385,7 +386,7 @@ def test_unreadable_timing_warns_and_keeps_fallback_and_other_runs(
     assert benchmark["run_summary"]["delta"]["tokens"] == "+12450"
     assert "| Tokens |" in benchmark_script["generate_markdown"](benchmark)
     json.dumps(benchmark, allow_nan=False)
-    output = capsys.readouterr().out
+    output = capsys.readouterr().err
     assert "Warning:" in output
     assert str(timing_file) in output
     assert "timing access denied" in output
@@ -414,3 +415,259 @@ def test_recorded_tokens_propagate_to_summary_delta_and_markdown(
     assert "| Tokens | 84852 ± 0 | 10000 ± 0 | +74852 |" in benchmark_script[
         "generate_markdown"
     ](benchmark)
+
+
+def run_cli(benchmark_script, benchmark_dir):
+    return subprocess.run(
+        [sys.executable, benchmark_script["__file__"], str(benchmark_dir)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+
+
+def assert_single_passing_run(benchmark_dir):
+    benchmark = json.loads(
+        (benchmark_dir / "benchmark.json").read_text(encoding="utf-8")
+    )
+    assert len(benchmark["runs"]) == 1
+    run = benchmark["runs"][0]
+    assert run["eval_id"] == 1
+    assert run["configuration"] == "with_skill"
+    assert run["run_number"] == 1
+    assert run["result"]["pass_rate"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "subdirs,message",
+    [
+        ([], "No eval directories found"),
+        (["eval-1/with_skill/outputs"], "No run results found"),
+    ],
+    ids=["empty", "no-grading"],
+)
+def test_cli_without_run_results_fails_without_writing_files(
+    tmp_path, benchmark_script, subdirs, message
+):
+    for subdir in subdirs:
+        (tmp_path / subdir).mkdir(parents=True)
+
+    completed = run_cli(benchmark_script, tmp_path)
+
+    assert completed.returncode == 1
+    assert message in completed.stderr
+    assert not (tmp_path / "benchmark.json").exists()
+    assert not (tmp_path / "benchmark.md").exists()
+
+
+def test_cli_missing_benchmark_dir_reports_on_stderr(tmp_path, benchmark_script):
+    completed = run_cli(benchmark_script, tmp_path / "missing")
+
+    assert completed.returncode == 1
+    assert "Directory not found" in completed.stderr
+
+
+def test_cli_aggregates_flat_eval_layout_from_skill_md(tmp_path, benchmark_script):
+    # SKILL.md saves outputs to eval-<ID>/<config>/outputs/ and grader.md leaves
+    # grading.json next to outputs/, with no run-N directory.
+    run_dir = write_run(tmp_path)
+    config_dir = run_dir.parent
+    (run_dir / "grading.json").rename(config_dir / "grading.json")
+    run_dir.rmdir()
+    (config_dir / "outputs").mkdir()
+
+    completed = run_cli(benchmark_script, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert_single_passing_run(tmp_path)
+
+
+def test_cli_empty_runs_dir_falls_back_to_eval_dirs(tmp_path, benchmark_script):
+    (tmp_path / "runs").mkdir()
+    write_run(tmp_path)
+
+    completed = run_cli(benchmark_script, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert_single_passing_run(tmp_path)
+
+
+def test_cli_flat_comparison_puts_current_skill_first(tmp_path, benchmark_script):
+    for config, pass_rate in (("old_skill", 0.0), ("with_skill", 1.0)):
+        config_dir = tmp_path / "eval-1" / config
+        config_dir.mkdir(parents=True)
+        (config_dir / "grading.json").write_text(
+            json.dumps({"summary": {"pass_rate": pass_rate}}), encoding="utf-8"
+        )
+
+    completed = run_cli(benchmark_script, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((tmp_path / "benchmark.json").read_text(encoding="utf-8"))
+    assert [run["configuration"] for run in report["runs"]] == [
+        "with_skill",
+        "old_skill",
+    ]
+    assert report["run_summary"]["delta"]["pass_rate"] == "+1.00"
+    assert report["metadata"]["runs_per_configuration"] == 1
+    assert "1 run each per configuration" in (tmp_path / "benchmark.md").read_text(
+        encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize("grading", [{}, {"summary": {}}, {"summary": []}, []])
+def test_cli_flat_grade_without_usable_summary_fails(
+    tmp_path, benchmark_script, grading
+):
+    config_dir = tmp_path / "eval-1" / "with_skill"
+    config_dir.mkdir(parents=True)
+    (config_dir / "grading.json").write_text(json.dumps(grading), encoding="utf-8")
+
+    completed = run_cli(benchmark_script, tmp_path)
+
+    assert completed.returncode == 1
+    assert "No run results found" in completed.stderr
+    assert not (tmp_path / "benchmark.json").exists()
+    assert not (tmp_path / "benchmark.md").exists()
+
+
+def test_cli_reports_uneven_run_counts(tmp_path, benchmark_script):
+    write_run(tmp_path)
+    write_run(tmp_path, run_number=2)
+    write_run(tmp_path, config="without_skill")
+
+    completed = run_cli(benchmark_script, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((tmp_path / "benchmark.json").read_text(encoding="utf-8"))
+    assert report["metadata"]["runs_per_configuration"] is None
+    assert report["metadata"]["run_counts_by_eval"] == {
+        "1": {"with_skill": 2, "without_skill": 1}
+    }
+    markdown = (tmp_path / "benchmark.md").read_text(encoding="utf-8")
+    assert "Eval 1: with_skill=2, without_skill=1" in markdown
+
+
+@pytest.mark.parametrize("baseline_grading", [None, {}])
+def test_cli_omits_delta_without_measured_baseline(
+    tmp_path, benchmark_script, baseline_grading
+):
+    for config, grading in (
+        ("with_skill", {"summary": {"pass_rate": 0.75}}),
+        ("old_skill", baseline_grading),
+    ):
+        if grading is None:
+            continue
+        config_dir = tmp_path / "eval-1" / config
+        config_dir.mkdir(parents=True)
+        (config_dir / "grading.json").write_text(json.dumps(grading), encoding="utf-8")
+
+    completed = run_cli(benchmark_script, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((tmp_path / "benchmark.json").read_text(encoding="utf-8"))
+    assert len(report["runs"]) == 1
+    assert report["run_summary"]["delta"] == {}
+    markdown = (tmp_path / "benchmark.md").read_text(encoding="utf-8")
+    assert "Comparison incomplete" in markdown
+    assert "+0.75" not in markdown
+    assert "+0.75" not in completed.stdout
+    assert "| Pass Rate | 75% ± 0% | — | — |" in markdown
+
+
+def test_cli_omits_delta_when_baseline_runs_have_no_grades(tmp_path, benchmark_script):
+    write_run(tmp_path)
+    (tmp_path / "eval-1" / "without_skill" / "run-1").mkdir(parents=True)
+
+    completed = run_cli(benchmark_script, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((tmp_path / "benchmark.json").read_text(encoding="utf-8"))
+    assert report["run_summary"]["delta"] == {}
+    markdown = (tmp_path / "benchmark.md").read_text(encoding="utf-8")
+    assert "| Pass Rate | 100% ± 0% | — | — |" in markdown
+
+
+def write_flat_grade(benchmark_dir, eval_id, config, pass_rate):
+    config_dir = benchmark_dir / f"eval-{eval_id}" / config
+    config_dir.mkdir(parents=True)
+    grading = {"summary": {"pass_rate": pass_rate}}
+    (config_dir / "grading.json").write_text(json.dumps(grading), encoding="utf-8")
+
+
+def test_cli_omits_delta_when_no_eval_measured_both_sides(tmp_path, benchmark_script):
+    write_flat_grade(tmp_path, 1, "with_skill", 1.0)
+    write_flat_grade(tmp_path, 2, "old_skill", 0.0)
+
+    completed = run_cli(benchmark_script, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((tmp_path / "benchmark.json").read_text(encoding="utf-8"))
+    assert len(report["runs"]) == 2
+    assert report["run_summary"]["delta"] == {}
+    markdown = (tmp_path / "benchmark.md").read_text(encoding="utf-8")
+    assert "Comparison incomplete" in markdown
+    assert "| Pass Rate | 100% ± 0% | 0% ± 0% | — |" in markdown
+    assert "+1.00" not in markdown + completed.stdout
+
+
+def test_cli_computes_delta_over_shared_evals_only(tmp_path, benchmark_script):
+    write_flat_grade(tmp_path, 1, "with_skill", 0.5)
+    write_flat_grade(tmp_path, 1, "old_skill", 0.25)
+    write_flat_grade(tmp_path, 2, "with_skill", 1.0)
+
+    completed = run_cli(benchmark_script, tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((tmp_path / "benchmark.json").read_text(encoding="utf-8"))
+    assert report["run_summary"]["with_skill"]["pass_rate"]["mean"] == 0.75
+    assert report["run_summary"]["delta"]["pass_rate"] == "+0.25"
+    assert report["metadata"]["delta_eval_ids"] == [1]
+    markdown = (tmp_path / "benchmark.md").read_text(encoding="utf-8")
+    assert "Delta covers only the evals measured in both configurations: 1." in markdown
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+@pytest.mark.parametrize(
+    "metadata,expected",
+    [
+        (
+            {
+                "runs_per_configuration": None,
+                "run_counts_by_eval": {"1": {"with_skill": 2, "without_skill": 1}},
+            },
+            "Eval 1: with_skill=2, without_skill=1",
+        ),
+        ({"runs_per_configuration": 3}, "3 runs per configuration"),
+        (
+            {"runs_per_configuration": 1, "delta_eval_ids": [1, 3]},
+            "Delta covers only the evals measured in both configurations: 1, 3.",
+        ),
+    ],
+)
+def test_viewer_shows_run_counts(metadata, expected):
+    viewer = (
+        Path(__file__).resolve().parents[2]
+        / "skills/public/skill-creator/eval-viewer/viewer.html"
+    ).read_text(encoding="utf-8")
+    start = viewer.index("function renderBenchmark()")
+    end = viewer.index("\n    }\n", start) + len("\n    }\n")
+    data = {"benchmark": {"metadata": metadata, "run_summary": {}, "runs": []}}
+    script = f"""
+const elements = {{}};
+const document = {{ getElementById: id => (elements[id] ??= {{ style: {{}} }}) }};
+const escapeHtml = text => String(text);
+const EMBEDDED_DATA = {json.dumps(data)};
+{viewer[start:end]}
+renderBenchmark();
+console.log(elements["benchmark-content"].innerHTML);
+"""
+
+    completed = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, check=False
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert expected in completed.stdout
+    assert "? runs per configuration" not in completed.stdout

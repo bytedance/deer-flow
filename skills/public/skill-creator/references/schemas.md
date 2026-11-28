@@ -219,6 +219,7 @@ Wall clock timing for a run. Located at `<run-dir>/timing.json`.
 ## benchmark.json
 
 Output from Benchmark mode. Located at `benchmarks/<timestamp>/benchmark.json`.
+The example below shows uniform run counts.
 
 ```json
 {
@@ -290,7 +291,9 @@ Output from Benchmark mode. Located at `benchmarks/<timestamp>/benchmark.json`.
   - `skill_name`: Name of the skill
   - `timestamp`: When the benchmark was run
   - `evals_run`: List of eval names or IDs
-  - `runs_per_configuration`: Number of runs per config (e.g. 3)
+  - `runs_per_configuration`: Number of accepted runs per eval and configuration when all counts are equal, or `null` when they differ.
+  - `run_counts_by_eval`: Present only when counts differ. Maps eval IDs to accepted run counts by configuration, including zero for a configuration with no accepted runs in that eval.
+  - `delta_eval_ids`: Present only when `delta` covers a subset of `evals_run`. Lists the eval IDs measured in both configurations.
 - `runs[]`: Individual run results
   - `eval_id`: Numeric eval identifier
   - `eval_name`: Human-readable eval name (used as section header in the viewer)
@@ -302,7 +305,7 @@ Output from Benchmark mode. Located at `benchmarks/<timestamp>/benchmark.json`.
     - An unreadable or non-UTF-8 `timing.json`, malformed JSON, a non-object document, or an invalid timing field emits a warning identifying the file (and field, where applicable). Strings, booleans, arrays, objects, negative values, and non-finite numbers are invalid measurements. Missing or null fields use their fallbacks without a warning. Other runs continue to be aggregated.
 - `run_summary`: Statistical aggregates per configuration
   - `with_skill` / `without_skill`: Each contains `pass_rate`, `time_seconds`, `tokens` objects with `mean` and `stddev` fields
-  - `delta`: Difference strings like `"+0.50"`, `"+13.0"`, `"+1700"`
+  - `delta`: Difference strings like `"+0.50"`, `"+13.0"`, `"+1700"`. Computed over the evals with accepted runs in both compared configurations; an empty object when there is no such eval.
 - `notes`: Freeform observations from the analyzer
 
 **Important:** The viewer reads these field names exactly. Using `config` instead of `configuration`, or putting `pass_rate` at the top level of a run instead of nested under `result`, will cause the viewer to show empty/zero values. Always reference this schema when generating benchmark.json manually.
