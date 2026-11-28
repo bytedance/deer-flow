@@ -506,6 +506,115 @@ def test_subagent_non_owner_preserves_restricted_lead_projection(
     assert not (projected.public / "omitted").exists()
 
 
+def test_lead_projects_authorized_explicit_subagent_skills_without_widening_lead_discovery(
+    projection_env,
+    monkeypatch,
+) -> None:
+    from deerflow.agents.lead_agent.agent import build_middlewares
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.authz.provider import AuthzDecision, Principal
+    from deerflow.authz.skill_filter import ResolvedSkillAuthorization
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.config.subagents_config import CustomSubagentConfig, SubagentsAppConfig
+    from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+
+    env = projection_env
+    specialist_file = _write_skill(env.skills_root / "public", "specialist-skill")
+    (specialist_file.parent / "helper.py").write_text("print('ok')\n", encoding="utf-8")
+    _write_skill(env.skills_root / "public", "denied-skill")
+    _write_skill(env.skills_root / "public", "unreferenced-skill")
+    _write_skill(env.skills_root / "public", "disallowed-subagent-skill")
+
+    class _AllowOnlySpecialistProvider:
+        def authorize(self, request):
+            return AuthzDecision(allow=request.target != "denied-skill")
+
+        def filter_resources(self, principal: Principal, resource: str, names: list[str]) -> list[str]:
+            return [name for name in names if name != "denied-skill"]
+
+    authz_provider = _AllowOnlySpecialistProvider()
+    app_config = AppConfig(
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider", allow_host_bash=False),
+        subagents=SubagentsAppConfig(
+            custom_agents={
+                "specialist": CustomSubagentConfig(
+                    description="Specialist with explicit skills",
+                    system_prompt="Analyze.",
+                    skills=["specialist-skill", "denied-skill"],
+                ),
+                "blocked-worker": CustomSubagentConfig(
+                    description="Excluded by allowed_subagents",
+                    system_prompt="Blocked.",
+                    skills=["disallowed-subagent-skill"],
+                ),
+            }
+        ),
+    )
+    app_config.authorization.enabled = True
+    app_config.authorization.fail_closed = True
+    app_config.skills.path = str(env.skills_root)
+
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: app_config)
+    monkeypatch.setattr("deerflow.sandbox.security.get_app_config", lambda: app_config)
+    monkeypatch.setattr(
+        "deerflow.skills.storage.get_or_new_user_skill_storage",
+        lambda *_args, **_kwargs: env.storage,
+    )
+    provider = LocalSandboxProvider()
+    monkeypatch.setattr("deerflow.sandbox.middleware.get_sandbox_provider", lambda: provider)
+
+    skill_authz = ResolvedSkillAuthorization(
+        provider=authz_provider,
+        principal=Principal(user_id="alice", role="member"),
+        fail_closed=True,
+    )
+    middlewares = build_middlewares(
+        {
+            "configurable": {"subagent_enabled": True},
+            "metadata": {"allowed_subagents": ["general-purpose", "specialist"]},
+        },
+        app_config=app_config,
+        model_name=None,
+        user_id="alice",
+        available_skills=set(),
+        authorization_provider=authz_provider,
+        skill_authorization=skill_authz,
+    )
+    activation_middleware = next(m for m in middlewares if isinstance(m, SkillActivationMiddleware))
+    assert activation_middleware._available_skills == set()
+
+    sandbox_middleware = next(m for m in middlewares if isinstance(m, SandboxMiddleware))
+    projected = sandbox_middleware._prepare_agent_skill_projection("thread-specialist", user_id="alice")
+    assert projected is not None
+
+    sandbox = provider.get(provider.acquire("thread-specialist", user_id="alice"))
+    assert sandbox is not None
+    assert sandbox.read_file("/mnt/skills/public/specialist-skill/SKILL.md") == specialist_file.read_bytes().decode("utf-8")
+    assert sandbox.read_file("/mnt/skills/public/specialist-skill/helper.py") == (specialist_file.parent / "helper.py").read_bytes().decode("utf-8")
+    assert not (projected.public / "denied-skill").exists()
+    assert not (projected.public / "unreferenced-skill").exists()
+    assert not (projected.public / "disallowed-subagent-skill").exists()
+
+    # With subagent_enabled=False, even explicit subagent skills stay out of the projection.
+    disabled_middlewares = build_middlewares(
+        {
+            "configurable": {"subagent_enabled": False},
+            "metadata": {"allowed_subagents": ["general-purpose", "specialist"]},
+        },
+        app_config=app_config,
+        model_name=None,
+        user_id="alice",
+        available_skills=set(),
+        authorization_provider=authz_provider,
+        skill_authorization=skill_authz,
+    )
+    disabled_sandbox_mw = next(m for m in disabled_middlewares if isinstance(m, SandboxMiddleware))
+    projected_disabled = disabled_sandbox_mw._prepare_agent_skill_projection("thread-no-subagents", user_id="alice")
+    assert projected_disabled is not None
+    assert not (projected_disabled.public / "specialist-skill").exists()
+
+
 def test_thread_projection_revokes_removed_skill_before_repopulation(projection_env, monkeypatch) -> None:
     env = projection_env
     _write_skill(env.skills_root / "public", "alpha")

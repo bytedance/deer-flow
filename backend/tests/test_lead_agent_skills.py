@@ -589,3 +589,67 @@ def test_make_lead_agent_keeps_update_agent_on_non_webhook_channels(monkeypatch)
     # Explicit non-webhook channel — telegram is interactive/trusted-by-operator.
     kwargs_tg = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}, "context": {"channel_name": "telegram"}})
     assert "update_agent" in [t.name for t in kwargs_tg["tools"]]
+
+
+def test_make_lead_agent_keeps_lead_prompt_lean_while_forwarding_subagent_projection_policy(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+    from deerflow.sandbox.middleware import SandboxMiddleware
+
+    monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda x=None, **kwargs: "default-model")
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: "model")
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(
+        lead_agent_module,
+        "load_agent_config",
+        lambda x, *, user_id=None: AgentConfig(
+            name="orchestrator",
+            skills=[],
+            allowed_subagents=["specialist"],
+        ),
+    )
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [NamedTool("task"), NamedTool("bash")])
+
+    mock_app_config = MagicMock()
+    mock_app_config.database.checkpoint_delta.snapshot_frequency = 10
+    mock_app_config.database.checkpoint_channel_mode = "full"
+    mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
+    mock_app_config.authorization.enabled = False
+    mock_app_config.pii_redaction.enabled = False
+    mock_app_config.verification.receipts_enabled = False
+    mock_app_config.verification.receipts_render_mode = "delegation_only"
+    mock_app_config.tool_artifacts.enabled = False
+    mock_app_config.guardrails.enabled = False
+    mock_app_config.read_before_write.enabled = False
+    mock_app_config.harness_guard.enabled = False
+    mock_app_config.tool_progress.enabled = False
+    mock_app_config.token_usage.enabled = False
+    mock_app_config.token_budget.enabled = False
+    mock_app_config.loop_detection.enabled = False
+    mock_app_config.safety_finish_reason.enabled = False
+    mock_app_config.memory.enabled = False
+    mock_app_config.memory.mode = "auto"
+    mock_app_config.summarization.enabled = False
+    mock_app_config.tool_search.enabled = False
+    mock_app_config.skills.container_path = "/mnt/skills"
+    mock_app_config.skills.deferred_discovery = True
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: mock_app_config)
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, **kwargs: [])
+
+    captured_prompt_skills = []
+
+    def mock_apply_prompt_template(**kwargs):
+        captured_prompt_skills.append((kwargs.get("available_skills"), kwargs.get("skill_names")))
+        return "lean_orchestrator_prompt"
+
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", mock_apply_prompt_template)
+
+    agent_kwargs = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "orchestrator", "subagent_enabled": True}})
+
+    assert captured_prompt_skills == [(set(), None)]
+    assert "describe_skill" not in [tool.name for tool in agent_kwargs["tools"]]
+    sandbox_mw = next(m for m in agent_kwargs["middleware"] if isinstance(m, SandboxMiddleware))
+    assert sandbox_mw._available_skills == set()
+    assert sandbox_mw._subagent_enabled is True
+    assert sandbox_mw._allowed_subagents == ("specialist",)

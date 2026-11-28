@@ -262,3 +262,61 @@ async def test_task_tool_sandbox_policy_resolves_off_loop(monkeypatch, tmp_path)
     assert "Task Succeeded" in messages[0].content
     assert observed_threads, "the sandbox-policy read must be invoked"
     assert all(thread is not threading.main_thread() for thread in observed_threads)
+
+
+async def test_sandbox_projection_subagent_registry_reads_resolve_off_loop(monkeypatch, tmp_path):
+    """SandboxMiddleware.abefore_agent resolves delegatable subagent skills off the event loop."""
+    from deerflow.sandbox.middleware import SandboxMiddleware
+
+    observed_threads: list = []
+    _install_real_file_store(monkeypatch, tmp_path, observed_threads)
+    managed_root = tmp_path / "managed-subagents"
+    (managed_root / "researcher.json").write_text(
+        ManagedSubagentDefinition(
+            name="researcher",
+            description="Managed researcher",
+            system_prompt="You are researcher.",
+            skills=["specialist-skill"],
+            enabled=True,
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
+    registry._clear_managed_definitions_cache()
+
+    monkeypatch.setattr(registry, "is_host_bash_allowed", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        "deerflow.sandbox.middleware.get_sandbox_provider",
+        lambda: SimpleNamespace(
+            supports_agent_skill_isolation=True,
+            supports_lazy_agent_skill_isolation=True,
+            requires_eager_agent_skill_sync=lambda *_a, **_k: False,
+        ),
+    )
+    monkeypatch.setattr(
+        "deerflow.skills.projection.ensure_thread_skill_projection",
+        lambda _storage, _thread_id, effective_skills, **_kw: SimpleNamespace(skills=effective_skills),
+    )
+    monkeypatch.setattr(
+        "deerflow.skills.storage.get_or_new_user_skill_storage",
+        lambda *_a, **_k: SimpleNamespace(user_id="alice"),
+    )
+
+    mw = SandboxMiddleware(
+        lazy_init=True,
+        available_skills=set(),
+        subagent_enabled=True,
+        app_config=SimpleNamespace(
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+            subagents=SubagentsAppConfig(),
+            authorization=SimpleNamespace(enabled=False),
+        ),
+    )
+    runtime = SimpleNamespace(
+        context={"thread_id": "thread-offloop", "user_id": "alice"},
+        config={},
+    )
+
+    await mw.abefore_agent({"messages": []}, runtime)
+
+    assert observed_threads, "the managed-definition signature sweep must be invoked"
+    assert all(thread is not threading.main_thread() for thread in observed_threads)

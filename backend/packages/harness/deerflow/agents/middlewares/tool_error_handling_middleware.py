@@ -4,8 +4,8 @@ import asyncio
 import logging
 import re
 import secrets
-from collections.abc import Awaitable, Callable, Iterable
-from typing import TYPE_CHECKING, override
+from collections.abc import Awaitable, Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
@@ -418,6 +418,9 @@ def _build_runtime_middlewares(
     authorization_infrastructure_tools: Iterable[object] = (),
     available_skills: set[str] | None = None,
     owns_agent_skill_projection: bool = True,
+    subagent_enabled: bool = False,
+    allowed_subagents: Iterable[str] | None = None,
+    authz_context: Mapping[str, Any] | None = None,
     skill_authorization=None,
     user_id: str | None = None,
     skill_storage: SkillStorage | None = None,
@@ -470,6 +473,11 @@ def _build_runtime_middlewares(
             available_skills=available_skills,
             owns_agent_skill_projection=owns_agent_skill_projection,
             skill_storage=skill_storage,
+            subagent_enabled=subagent_enabled,
+            allowed_subagents=tuple(allowed_subagents) if allowed_subagents is not None else None,
+            app_config=app_config,
+            skill_authorization=skill_authorization,
+            authz_context=authz_context,
         )
     )
 
@@ -620,6 +628,9 @@ def build_lead_runtime_middlewares(
     deferred_setup: "DeferredToolSetup | None" = None,
     available_skills: set[str] | None = None,
     owns_agent_skill_projection: bool = True,
+    subagent_enabled: bool = False,
+    allowed_subagents: Iterable[str] | None = None,
+    authz_context: Mapping[str, Any] | None = None,
     skill_authorization=None,
     user_id: str | None = None,
     skill_storage: SkillStorage | None = None,
@@ -636,6 +647,9 @@ def build_lead_runtime_middlewares(
         authorization_provider=authorization_provider,
         available_skills=available_skills,
         owns_agent_skill_projection=owns_agent_skill_projection,
+        subagent_enabled=subagent_enabled,
+        allowed_subagents=allowed_subagents,
+        authz_context=authz_context,
         authorization_infrastructure_tools=((deferred_setup.tool_search_tool,) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else ()),
         skill_authorization=skill_authorization,
         user_id=user_id,

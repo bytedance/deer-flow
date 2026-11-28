@@ -36,7 +36,7 @@ from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_h
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
 from deerflow.subagents.acceptance_checks import check_acceptance_criteria_async, render_acceptance_section
 from deerflow.subagents.capacity import SubagentExecutionCapacity, configured_subagent_queue_timeout_seconds
-from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
+from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name, resolve_subagent_skills
 from deerflow.subagents.context_snapshot import ParentContextSnapshot
 from deerflow.subagents.executor import (
     SubagentStatus,
@@ -778,17 +778,6 @@ def _get_runtime_app_config(runtime: Any) -> "AppConfig | None":
     return None
 
 
-def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -> list[str] | None:
-    """Return the effective subagent skill allowlist under the parent policy."""
-    if parent is None:
-        return child
-    if child is None:
-        return list(parent)
-
-    parent_set = set(parent)
-    return [skill for skill in child if skill in parent_set]
-
-
 def _task_result_command(
     *,
     tool_call_id: str,
@@ -1097,9 +1086,9 @@ async def task_tool(
     if KNOWLEDGE_SCOPE_RUNTIME_KEY in parent_context:
         knowledge_scope = execution_scope(parent_context[KNOWLEDGE_SCOPE_RUNTIME_KEY])
 
-    parent_available_skills = metadata.get("available_skills")
-    if parent_available_skills is not None:
-        overrides["skills"] = _merge_skill_allowlists(list(parent_available_skills), config.skills)
+    resolved_skills = resolve_subagent_skills(config, metadata.get("available_skills"))
+    if resolved_skills != config.skills:
+        overrides["skills"] = resolved_skills
 
     if overrides:
         config = replace(config, **overrides)

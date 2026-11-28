@@ -546,6 +546,9 @@ def build_middlewares(
     from deerflow.extensions import get_agent_build_extensions
 
     resolved_extensions = extensions if extensions is not None else get_agent_build_extensions()
+    cfg = _get_runtime_config(config)
+    metadata = config.get("metadata") if isinstance(config, Mapping) else None
+    allowed_subagents = metadata.get("allowed_subagents") if isinstance(metadata, Mapping) else None
     runtime_middleware_kwargs = {
         "app_config": resolved_app_config,
         "lazy_init": True,
@@ -554,6 +557,11 @@ def build_middlewares(
         runtime_middleware_kwargs["available_skills"] = available_skills
     if not owns_agent_skill_projection:
         runtime_middleware_kwargs["owns_agent_skill_projection"] = False
+    elif cfg.get("subagent_enabled", False):
+        runtime_middleware_kwargs["subagent_enabled"] = True
+        runtime_middleware_kwargs["authz_context"] = cfg
+        if allowed_subagents is not None:
+            runtime_middleware_kwargs["allowed_subagents"] = allowed_subagents
     if authorization_provider is not None:
         runtime_middleware_kwargs["authorization_provider"] = authorization_provider
     if skill_authorization is not None:
@@ -640,7 +648,6 @@ def build_middlewares(
         middlewares.append(summarization_middleware)
 
     # Add TodoList middleware if plan mode is enabled
-    cfg = _get_runtime_config(config)
     is_plan_mode = cfg.get("is_plan_mode", False)
     todo_list_middleware = _create_todo_list_middleware(is_plan_mode)
     if todo_list_middleware is not None:

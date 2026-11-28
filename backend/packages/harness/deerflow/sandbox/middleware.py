@@ -1,8 +1,8 @@
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace as dc_replace
-from typing import TYPE_CHECKING, NotRequired, override
+from typing import TYPE_CHECKING, Any, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -76,6 +76,11 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         available_skills: set[str] | None = None,
         owns_agent_skill_projection: bool = True,
         skill_storage: "SkillStorage | None" = None,
+        subagent_enabled: bool = False,
+        allowed_subagents: Sequence[str] | None = None,
+        app_config: Any | None = None,
+        skill_authorization: Any | None = None,
+        authz_context: Mapping[str, Any] | None = None,
     ):
         """Initialize sandbox middleware.
 
@@ -88,14 +93,78 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                 subagents share the lead thread sandbox and must preserve the
                 lead-owned view instead of applying their discovery policy to it.
             skill_storage: Explicit catalog for the lead-owned thread projection.
+            subagent_enabled: Whether the owning lead agent can delegate to
+                subagents in this run. When enabled, authorized explicit skills
+                declared on delegatable subagents are included in the shared
+                thread projection without widening lead discovery.
+            allowed_subagents: Optional allowlist of subagent names this lead
+                agent may delegate to.
+            app_config: Explicit AppConfig for skill and subagent resolution.
+            skill_authorization: Resolved Layer-1 skill authorization context.
+            authz_context: Fallback authorization context from agent assembly.
         """
         super().__init__()
         self._lazy_init = lazy_init
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._owns_agent_skill_projection = owns_agent_skill_projection
         self._skill_storage = skill_storage
+        self._subagent_enabled = subagent_enabled
+        self._allowed_subagents = tuple(allowed_subagents) if allowed_subagents is not None else None
+        self._app_config = app_config
+        self._skill_authorization = skill_authorization
+        self._authz_context = dict(authz_context) if authz_context is not None else None
 
-    def _prepare_agent_skill_projection(self, thread_id: str, *, user_id: str):
+    def _effective_projection_skills(
+        self,
+        *,
+        app_config: Any,
+        user_id: str,
+        context: Mapping[str, Any] | None = None,
+    ) -> set[str] | None:
+        """Resolve the skill names to materialize in the shared thread sandbox."""
+        if self._available_skills is None:
+            return None
+        effective = set(self._available_skills)
+        if not self._subagent_enabled:
+            return effective
+
+        from deerflow.subagents import get_available_subagent_names, get_subagent_config
+
+        registry_app_config = app_config if hasattr(app_config, "subagents") or hasattr(app_config, "custom_agents") else None
+        allowed_names = list(self._allowed_subagents) if self._allowed_subagents is not None else None
+        explicit_subagent_skills: set[str] = set()
+        for name in get_available_subagent_names(app_config=registry_app_config, allowed_subagents=allowed_names):
+            subagent_cfg = get_subagent_config(name, app_config=registry_app_config)
+            if subagent_cfg is not None and subagent_cfg.skills:
+                explicit_subagent_skills.update(subagent_cfg.skills)
+
+        extra_skills = explicit_subagent_skills - effective
+        if not extra_skills:
+            return effective
+
+        from deerflow.authz.skill_filter import filter_available_skills_by_authorization
+
+        merged_context: dict[str, Any] = dict(self._authz_context) if self._authz_context is not None else {}
+        if context is not None:
+            merged_context.update(context)
+        authorized_extra = filter_available_skills_by_authorization(
+            extra_skills,
+            context=merged_context,
+            app_config=app_config,
+            user_id=user_id,
+            authorization=self._skill_authorization,
+        )
+        if authorized_extra:
+            effective.update(authorized_extra)
+        return effective
+
+    def _prepare_agent_skill_projection(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        context: Mapping[str, Any] | None = None,
+    ):
         """Build the run's physical skill view before any sandbox is reused."""
         if not self._owns_agent_skill_projection:
             # Subagents inherit the lead's thread id and sandbox state. Their
@@ -125,14 +194,19 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         from deerflow.skills.projection import ensure_thread_skill_projection
         from deerflow.skills.storage import get_or_new_user_skill_storage
 
-        app_config = get_app_config()
+        app_config = self._app_config if self._app_config is not None else get_app_config()
+        effective_skills = self._effective_projection_skills(
+            app_config=app_config,
+            user_id=user_id,
+            context=context,
+        )
         if self._skill_storage is not None:
             from deerflow.skills.storage.skill_storage import validate_injected_skill_storage
 
             validate_injected_skill_storage(self._skill_storage, container_root=app_config.skills.container_path, user_id=user_id)
-            return ensure_thread_skill_projection(self._skill_storage, thread_id, self._available_skills, projection_user_id=user_id)
+            return ensure_thread_skill_projection(self._skill_storage, thread_id, effective_skills, projection_user_id=user_id)
         storage = get_or_new_user_skill_storage(user_id, app_config=app_config)
-        return ensure_thread_skill_projection(storage, thread_id, self._available_skills)
+        return ensure_thread_skill_projection(storage, thread_id, effective_skills)
 
     @staticmethod
     def _require_projection_support(provider, projection) -> None:
@@ -264,7 +338,12 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             return super().before_agent(state, runtime)
         self._apply_network_policy_response(state, runtime)
         user_id = resolve_runtime_user_id(runtime)
-        projection = self._prepare_agent_skill_projection(thread_id, user_id=user_id)
+        context_snapshot = dict(runtime.context) if isinstance(runtime.context, Mapping) else None
+        projection = self._prepare_agent_skill_projection(
+            thread_id,
+            user_id=user_id,
+            context=context_snapshot,
+        )
         owner_id = ensure_sandbox_lease_owner(runtime.context)
 
         if self._can_defer_sandbox_acquisition(state, runtime, projection):
@@ -384,10 +463,12 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             return await super().abefore_agent(state, runtime)
         await run_sync_lifecycle_operation(self._apply_network_policy_response, state, runtime)
         user_id = resolve_runtime_user_id(runtime)
+        context_snapshot = dict(runtime.context) if isinstance(runtime.context, Mapping) else None
         projection = await asyncio.to_thread(
             self._prepare_agent_skill_projection,
             thread_id,
             user_id=user_id,
+            context=context_snapshot,
         )
         owner_id = ensure_sandbox_lease_owner(runtime.context)
 
