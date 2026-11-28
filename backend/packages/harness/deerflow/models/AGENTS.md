@@ -46,6 +46,9 @@ transport, so they check the payload that DeerFlow sends.
   and Codex wrappers and the SDK make a single attempt, and middleware retries
   re-enter admission. Log a warning when this lowers a configured attempt count.
   Unpaced models keep their own retry policy.
+- **Failover caps include provider retry aliases.** Apply the single-attempt
+  settings after merging templates and caller options, and clear the selected
+  adapter's retry aliases first.
 - **`Retry-After` goes through `utils.retry_after`.** HTTP dates are read as UTC,
   a past date means zero, and the delay is bounded. `retry_after_hint_ms` reads
   both header spellings and fractional seconds once, so every provider retry

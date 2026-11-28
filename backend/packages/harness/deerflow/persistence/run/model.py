@@ -50,6 +50,11 @@ class RunRow(Base):
     subagent_tokens: Mapped[int] = mapped_column(default=0)
     middleware_tokens: Mapped[int] = mapped_column(default=0)
     token_usage_by_model: Mapped[dict] = mapped_column(JSON, default=dict, server_default=text("'{}'"))
+    # Compact, structured per-run model-failure ledger for SRE provider health
+    # attribution (retries, circuit transitions, fallback outcomes). Nullable
+    # with no server default per the rolling-upgrade convention: older binaries
+    # sharing the database must still write rows without the column.
+    model_failure_ledger: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     # Follow-up association
     follow_up_to_run_id: Mapped[str | None] = mapped_column(String(64))

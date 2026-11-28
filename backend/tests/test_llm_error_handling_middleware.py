@@ -31,7 +31,9 @@ from deerflow.agents.middlewares.llm_error_handling_middleware import (
     _extract_retry_after_ms,
 )
 from deerflow.config.app_config import AppConfig, LlmCallConfig
+from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.models import create_chat_model
 
 
 @pytest.fixture(autouse=True)
@@ -78,6 +80,26 @@ def _make_app_config() -> AppConfig:
     return AppConfig(sandbox=SandboxConfig(use="test"))
 
 
+def _make_fallback_app_config(retry_max_attempts: int = 2) -> AppConfig:
+    return AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        llm_call=LlmCallConfig(retry_max_attempts=retry_max_attempts),
+        models=[
+            ModelConfig(name="primary", use="test:Model", model="primary", fallback_models=["backup"]),
+            ModelConfig(name="backup", use="test:Model", model="backup"),
+        ],
+    )
+
+
+class _FailoverRequest:
+    def __init__(self, model: object) -> None:
+        self.model = model
+        self.runtime = SimpleNamespace(context={})
+
+    def override(self, **kwargs):
+        return _FailoverRequest(kwargs["model"])
+
+
 class FakeError(Exception):
     def __init__(
         self,
@@ -93,6 +115,373 @@ class FakeError(Exception):
         self.code = code
         self.body = body
         self.response = SimpleNamespace(status_code=status_code, headers=headers or {}) if status_code is not None or headers else None
+
+
+def test_sync_call_fails_over_to_configured_model_after_transient_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(), model_name="primary")
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda _name: "backup-model")
+    attempts = []
+
+    def handler(request):
+        attempts.append(request.model)
+        if request.model == "primary":
+            raise FakeError("provider unavailable", status_code=503)
+        return AIMessage(content="fallback response")
+
+    result = middleware.wrap_model_call(_FailoverRequest("primary"), handler)
+
+    assert attempts == ["primary", "backup-model"]
+    assert result.content == "fallback response"
+
+
+def test_async_call_fails_over_to_configured_model_after_transient_http_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(), model_name="primary")
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda _name: "backup-model")
+    attempts = []
+
+    async def handler(request):
+        attempts.append(request.model)
+        if request.model == "primary":
+            raise FakeError("provider unavailable", status_code=503)
+        return AIMessage(content="fallback response")
+
+    result = asyncio.run(middleware.awrap_model_call(_FailoverRequest("primary"), handler))
+
+    assert attempts == ["primary", "backup-model"]
+    assert result.content == "fallback response"
+
+
+def test_sync_fallback_graph_bubble_up_releases_half_open_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(), model_name="primary")
+    middleware._circuit_state = "half_open"
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda _name: "backup-model")
+
+    def handler(request):
+        if request.model == "primary":
+            raise FakeError("provider unavailable", status_code=503)
+        raise GraphBubbleUp()
+
+    with pytest.raises(GraphBubbleUp):
+        middleware.wrap_model_call(_FailoverRequest("primary"), handler)
+
+    assert middleware._circuit_probe_in_flight is False
+    result = middleware.wrap_model_call(_FailoverRequest("primary"), lambda _request: AIMessage(content="healthy"))
+    assert result.content == "healthy"
+
+
+@pytest.mark.anyio
+async def test_async_fallback_graph_bubble_up_releases_half_open_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(), model_name="primary")
+    middleware._circuit_state = "half_open"
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda _name: "backup-model")
+
+    async def handler(request):
+        if request.model == "primary":
+            raise FakeError("provider unavailable", status_code=503)
+        raise GraphBubbleUp()
+
+    with pytest.raises(GraphBubbleUp):
+        await middleware.awrap_model_call(_FailoverRequest("primary"), handler)
+
+    assert middleware._circuit_probe_in_flight is False
+
+    async def healthy_handler(_request):
+        return AIMessage(content="healthy")
+
+    result = await middleware.awrap_model_call(_FailoverRequest("primary"), healthy_handler)
+    assert result.content == "healthy"
+
+
+# ---------- Wrapped HTTP responses and failover-eligibility predicate (review P2) ----------
+
+
+class _WrappedGeminiClientError(httpx.TransportError):
+    """Stand-in for the Gemini adapter's underlying client error: it carries
+    the HTTP response (status 429) but the adapter wrapper does not expose it,
+    so the middleware only sees the status by walking the exception chain."""
+
+    def __init__(self, message: str, *, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.response = SimpleNamespace(status_code=status_code)
+
+
+class _WrappedGeminiRateError(Exception):
+    """Stand-in for ``ChatGoogleGenerativeAIError``: the HTTP 429 is wrapped
+    here and the HTTP response lives on the underlying client error."""
+
+    def __init__(self, message: str, *, client_error: _WrappedGeminiClientError) -> None:
+        super().__init__(message)
+        self.__cause__ = client_error
+
+
+def test_wrapped_gemini_429_classifies_as_transient_not_generic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """P2: the Gemini adapter wraps native rate limits in
+    ``ChatGoogleGenerativeAIError`` with the HTTP response on the underlying
+    ``ClientError``; classification must recognize the wrapped response and
+    treat the 429 as retriable (transient) instead of generic."""
+    middleware = _build_middleware()
+
+    exc = _WrappedGeminiRateError(
+        "Gemini rate limit hit",
+        client_error=_WrappedGeminiClientError("rate limit", status_code=429),
+    )
+    retriable, reason = middleware._classify_error(exc)
+
+    assert retriable is True
+    assert reason == "transient"
+
+
+def test_wrapped_gemini_429_retries_then_fails_over(monkeypatch: pytest.MonkeyPatch) -> None:
+    """P2: the wrapped HTTP 429 must be recognized in retry classification and
+    failover eligibility - otherwise the Gemini subagent run consumes the
+    whole primary retry budget on the failing endpoint instead of failing
+    over to the backup."""
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(retry_max_attempts=2), model_name="primary")
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+    fallback_attempts: list[str] = []
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda name: fallback_attempts.append(name) or name)
+
+    def handler(_request) -> AIMessage:
+        if _request.model != "primary":
+            return AIMessage(content="backup response")
+        raise _WrappedGeminiRateError(
+            "Gemini rate limit hit",
+            client_error=_WrappedGeminiClientError("rate limit", status_code=429),
+        )
+
+    result = middleware.wrap_model_call(_FailoverRequest("primary"), handler)
+
+    assert fallback_attempts == ["backup"]
+    assert isinstance(result, AIMessage)
+    assert result.content == "backup response"
+
+
+@pytest.mark.anyio
+async def test_async_wrapped_gemini_429_retries_then_fails_over(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Async mirror: the same wrapped response must reach the backup on the
+    async (values-mode subagent) path."""
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(retry_max_attempts=2), model_name="primary")
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    fallback_attempts: list[str] = []
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda name: fallback_attempts.append(name) or name)
+
+    async def handler(_request) -> AIMessage:
+        if _request.model != "primary":
+            return AIMessage(content="backup response")
+        raise _WrappedGeminiRateError(
+            "Gemini rate limit hit",
+            client_error=_WrappedGeminiClientError("rate limit", status_code=429),
+        )
+
+    result = await middleware.awrap_model_call(_FailoverRequest("primary"), handler)
+
+    assert fallback_attempts == ["backup"]
+    assert isinstance(result, AIMessage)
+    assert result.content == "backup response"
+
+
+def test_524_status_is_retriable_by_classification_and_eligible_for_failover(monkeypatch: pytest.MonkeyPatch) -> None:
+    """P2: retry classification accepts every HTTP 5xx while the failover
+    guard previously accepted only a narrow status list, so an OpenAI
+    compatible endpoint returning HTTP 524 consumed both attempts on the
+    primary and never failed over. Classification and eligibility must use
+    the same retryable-status predicate."""
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(retry_max_attempts=2), model_name="primary")
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+    fallback_attempts: list[str] = []
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda name: fallback_attempts.append(name) or name)
+
+    # Classification recognizes the 524 as a retriable transient.
+    exc = FakeError("provider unavailable", status_code=524)
+    retriable, reason = middleware._classify_error(exc)
+    assert retriable is True
+    assert reason == "transient"
+
+    # Failover eligibility matches (524 was not in the narrow set used by the
+    # failover guard): the backup is reached instead of exhausting the primary.
+    def handler(_request) -> AIMessage:
+        if _request.model != "primary":
+            return AIMessage(content="backup response")
+        raise exc
+
+    result = middleware.wrap_model_call(_FailoverRequest("primary"), handler)
+
+    assert fallback_attempts == ["backup"]
+    assert result.content == "backup response"
+
+
+def test_backup_success_records_primary_failure_and_open_circuit_uses_backup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """P2: a successful backup must not reset the primary's failure count -
+    the primary exhausted its retry budget, so the breaker records the
+    primary's failure even though the call served by the backup. With the
+    threshold at 1 the breaker opens, and subsequent eligible calls use the
+    authorized backup without contacting the failing primary again."""
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(retry_max_attempts=2), model_name="primary")
+    middleware.circuit_failure_threshold = 1
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+    fallback_attempts: list[str] = []
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda name: fallback_attempts.append(name) or name)
+    primary_attempts = 0
+
+    def handler(request) -> AIMessage:
+        nonlocal primary_attempts
+        if request.model != "primary":
+            return AIMessage(content="backup response")
+        primary_attempts += 1
+        raise FakeError("provider unavailable", status_code=503)
+
+    result = middleware.wrap_model_call(_FailoverRequest("primary"), handler)
+
+    assert fallback_attempts == ["backup"]
+    assert result.content == "backup response"  # the call still served through the backup
+    assert middleware._circuit_failure_count == 1
+    assert middleware._circuit_state == "open"  # the breaker spared the failing provider
+
+    # Open-circuit calls continue through the authorized backup without
+    # probing the failing primary.
+    result = middleware.wrap_model_call(_FailoverRequest("primary"), handler)
+    assert result.content == "backup response"
+    assert primary_attempts == 1
+    assert fallback_attempts == ["backup", "backup"]
+
+
+@pytest.mark.anyio
+async def test_async_backup_success_records_primary_failure_and_open_circuit_uses_backup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Async mirror: the primary's failure is still recorded when a successful
+    backup serves the async (values-mode subagent) call, and open-circuit
+    calls continue through the backup without contacting the failing primary."""
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(retry_max_attempts=2), model_name="primary")
+    middleware.circuit_failure_threshold = 1
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    fallback_attempts: list[str] = []
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda name: fallback_attempts.append(name) or name)
+    primary_attempts = 0
+
+    async def handler(request) -> AIMessage:
+        nonlocal primary_attempts
+        if request.model != "primary":
+            return AIMessage(content="backup response")
+        primary_attempts += 1
+        raise FakeError("provider unavailable", status_code=503)
+
+    result = await middleware.awrap_model_call(_FailoverRequest("primary"), handler)
+
+    assert fallback_attempts == ["backup"]
+    assert result.content == "backup response"
+    assert middleware._circuit_failure_count == 1
+    assert middleware._circuit_state == "open"
+
+    result = await middleware.awrap_model_call(_FailoverRequest("primary"), handler)
+    assert result.content == "backup response"
+    assert primary_attempts == 1
+    assert fallback_attempts == ["backup", "backup"]
+
+
+def test_async_call_does_not_fail_over_after_read_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(), model_name="primary")
+    fallback_builds = []
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda name: fallback_builds.append(name) or name)
+    attempts = []
+
+    async def handler(request):
+        attempts.append(request.model)
+        raise httpx.ReadTimeout("response stream stalled")
+
+    result = asyncio.run(middleware.awrap_model_call(_FailoverRequest("primary"), handler))
+
+    assert attempts == ["primary", "primary"]
+    assert fallback_builds == []
+    assert result.additional_kwargs["error_type"] == "ReadTimeout"
+
+
+def test_failover_attempts_never_exceed_configured_total(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(
+        app_config=_make_fallback_app_config(retry_max_attempts=3),
+        model_name="primary",
+    )
+    fallback_builds = []
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda name: fallback_builds.append(name) or name)
+    monkeypatch.setattr(middleware, "_max_attempts_for", lambda _exc, _reason: 3)
+    monkeypatch.setattr("deerflow.agents.middlewares.llm_error_handling_middleware.time.sleep", lambda _delay: None)
+    primary_attempts = 0
+
+    def handler(request):
+        nonlocal primary_attempts
+        if request.model != "primary":
+            return AIMessage(content="fallback")
+        primary_attempts += 1
+        if primary_attempts < 3:
+            raise httpx.ReadTimeout("stream stalled")
+        raise FakeError("provider unavailable", status_code=503)
+
+    middleware.wrap_model_call(_FailoverRequest("primary"), handler)
+
+    assert primary_attempts == 3
+    assert fallback_builds == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+async def test_native_gemini_retry_alias_respects_failover_http_budget(async_mode: bool) -> None:
+    requests: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.host)
+        if request.url.host == "primary.invalid":
+            return httpx.Response(503, json={"error": {"code": 503, "message": "Unavailable", "status": "UNAVAILABLE"}})
+        assert request.url.host == "backup.invalid"
+        return httpx.Response(200, json={"candidates": [{"content": {"role": "model", "parts": [{"text": "backup answer"}]}, "finishReason": "STOP"}]})
+
+    google_settings = {"use": "langchain_google_genai:ChatGoogleGenerativeAI", "api_key": "offline-test-key", "vertexai": False}
+    config = AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        llm_call=LlmCallConfig(retry_max_attempts=2),
+        models=[
+            ModelConfig(name="primary", model="gemini-2.5-flash", base_url="https://primary.invalid", fallback_models=["backup"], retries=3, **google_settings),
+            ModelConfig(name="backup", model="gemini-2.5-flash-lite", base_url="https://backup.invalid", **google_settings),
+        ],
+    )
+    model_overrides = {"client_args": {"transport": httpx.MockTransport(respond)}}
+    primary = create_chat_model("primary", app_config=config, attach_tracing=False, model_overrides=model_overrides, disable_provider_retries=True)
+    middleware = LLMErrorHandlingMiddleware(app_config=config, model_name="primary", model_overrides=model_overrides)
+    agent = create_agent(model=primary, middleware=[middleware])
+    state = {"messages": [HumanMessage(content="hello")]}
+
+    result = await agent.ainvoke(state) if async_mode else await asyncio.to_thread(agent.invoke, state)
+
+    assert requests == ["primary.invalid", "backup.invalid"]
+    assert result["messages"][-1].text == "backup answer"
+
+
+def test_sync_call_skips_unauthorized_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    from deerflow.models import selection
+
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(), model_name="primary")
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda _name: pytest.fail("unauthorized model was constructed"))
+
+    def deny_fallback(model_name, *, context, app_config):
+        assert model_name == "backup"
+        raise selection.ModelAuthorizationDenied("denied")
+
+    monkeypatch.setattr(selection, "authorize_selected_model", deny_fallback)
+    attempts = []
+
+    def handler(request):
+        attempts.append(request.model)
+        raise FakeError("provider unavailable", status_code=503)
+
+    middleware.wrap_model_call(_FailoverRequest("primary"), handler)
+
+    assert attempts == ["primary"]
 
 
 # Middleware-level attribute -> ``LlmCallConfig`` field. ``llm_call`` knobs are
@@ -3483,3 +3872,314 @@ async def test_in_stream_error_after_partial_output_is_retried_from_the_start() 
     assert result.content == "recovered"
     assert "deerflow_error_fallback" not in result.additional_kwargs
     assert "".join(streamed) == "partial answrecovered"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+async def test_failover_stays_disabled_after_an_earlier_primary_stream_error(monkeypatch: pytest.MonkeyPatch, async_mode: bool) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(retry_max_attempts=3), model_name="primary")
+    monkeypatch.setattr(middleware, "_build_retry_delay_ms", lambda *_args: 0)
+    requests: list[str] = []
+
+    def frame(text: str) -> dict[str, Any]:
+        return {
+            "id": "chatcmpl-failover",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "test-model",
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": text}, "finish_reason": None}],
+        }
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        requests.append(host)
+        if host == "primary.invalid" and len(requests) == 1:
+            events = [frame("partial answer"), {"error": {"message": "[504]: upstream timed out", "type": "server_error", "code": "gateway_timeout"}}]
+        elif host == "primary.invalid":
+            return httpx.Response(503, json={"error": {"message": "temporarily unavailable"}})
+        else:
+            assert host == "backup.invalid"
+            events = [frame("backup answer")]
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    transport = httpx.MockTransport(respond)
+    with httpx.Client(transport=transport) as sync_client:
+        async with httpx.AsyncClient(transport=transport) as async_client:
+            settings = {"api_key": "offline-test-key", "max_retries": 0, "http_client": sync_client, "http_async_client": async_client}
+            primary = ChatOpenAI(model="primary", base_url="https://primary.invalid/v1", **settings)
+            backup = ChatOpenAI(model="backup", base_url="https://backup.invalid/v1", **settings)
+            monkeypatch.setattr(middleware, "_create_fallback_model", lambda _name: backup)
+            agent = create_agent(model=primary, middleware=[middleware])
+            state = {"messages": [HumanMessage(content="hello")]}
+            stream_modes = ["messages", "values"]
+            if async_mode:
+                events = [event async for event in agent.astream(state, stream_mode=stream_modes)]
+            else:
+                events = await asyncio.to_thread(lambda: list(agent.stream(state, stream_mode=stream_modes)))
+
+    assert requests == ["primary.invalid"] * 3
+    assert any(mode == "messages" and data[0].text == "partial answer" for mode, data in events)
+    assert all(mode != "messages" or data[0].text != "backup answer" for mode, data in events)
+    final_state = [data for mode, data in events if mode == "values"][-1]
+    assert final_state["messages"][-1].additional_kwargs["deerflow_error_fallback"] is True
+
+
+# ---------- Structured model-failure ledger & stream events ----------
+
+
+class _LedgerJournal:
+    """Minimal stand-in for the run journal's ledger recording surface."""
+
+    def __init__(self, run_id: str = "run-ledger") -> None:
+        self.run_id = run_id
+        self.entries: list[dict[str, Any]] = []
+
+    def record_model_failure_ledger_entry(self, entry: dict[str, Any]) -> None:
+        self.entries.append(dict(entry))
+
+
+class _LedgerRequest:
+    def __init__(self, model: object, journal: _LedgerJournal | None) -> None:
+        self.model = model
+        self.runtime = SimpleNamespace(context={"__run_journal": journal} if journal is not None else {})
+
+    def override(self, **kwargs: object) -> _LedgerRequest:
+        journal = self.runtime.context.get("__run_journal")
+        return _LedgerRequest(kwargs["model"], journal)
+
+
+def _make_ledger_app_config(**llm_call: int) -> AppConfig:
+    return AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        llm_call=LlmCallConfig(**llm_call),
+        models=[ModelConfig(name="primary", use="test:Model", model="primary")],
+    )
+
+
+def _make_ledger_fallback_app_config() -> AppConfig:
+    return AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        llm_call=LlmCallConfig(retry_max_attempts=2),
+        models=[
+            ModelConfig(name="primary", use="test:Primary", model="primary", fallback_models=["backup"]),
+            ModelConfig(name="backup", use="test:Backup", model="backup"),
+        ],
+    )
+
+
+def test_retry_records_structured_ledger_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_ledger_app_config(retry_max_attempts=3), model_name="primary")
+    journal = _LedgerJournal()
+    request = _LedgerRequest("primary", journal)
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    def handler(_request) -> AIMessage:
+        raise FakeError("Service unavailable", status_code=503)
+
+    result = middleware.wrap_model_call(request, handler)
+
+    assert result.additional_kwargs["error_reason"] == "transient"
+    retries = [entry for entry in journal.entries if entry["status"] == "retrying"]
+    assert [entry["attempt"] for entry in retries] == [1, 2]
+    for entry in retries:
+        assert entry["model"] == "primary"
+        assert entry["provider"] == "test:Model"
+        assert entry["reason"] == "transient"
+        assert entry["run_id"] == "run-ledger"
+        assert entry["timestamp"]
+
+
+def test_retry_event_carries_structured_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _capture_retry_events(monkeypatch)
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_ledger_app_config(retry_max_attempts=2), model_name="primary")
+    journal = _LedgerJournal()
+
+    def handler(_request) -> AIMessage:
+        raise FakeError("Service unavailable", status_code=503)
+
+    middleware.wrap_model_call(_LedgerRequest("primary", journal), handler)
+
+    assert len(events) == 1
+    event = events[0]
+    assert event["type"] == "llm_retry"
+    assert event["model"] == "primary"
+    assert event["provider"] == "test:Model"
+    assert event["status"] == "retrying"
+    assert event["reason"] == "transient"
+    assert event["attempt"] == 1
+    assert event["run_id"] == "run-ledger"
+    assert event["timestamp"]
+
+
+def test_circuit_transitions_record_structured_ledger_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_ledger_app_config(retry_max_attempts=1), model_name="primary")
+    middleware.circuit_failure_threshold = 1
+    middleware.circuit_recovery_timeout_sec = 0
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+    journal = _LedgerJournal()
+
+    def fail(_request) -> AIMessage:
+        raise FakeError("Service unavailable", status_code=503)
+
+    def healthy(_request) -> AIMessage:
+        return AIMessage(content="healthy")
+
+    # Trip the breaker: closed -> open.
+    middleware.wrap_model_call(_LedgerRequest("primary", journal), fail)
+    assert middleware._circuit_state == "open"
+
+    # Recover: open -> half_open -> closed.
+    result = middleware.wrap_model_call(_LedgerRequest("primary", journal), healthy)
+    assert result.content == "healthy"
+    assert middleware._circuit_state == "closed"
+
+    assert [entry["status"] for entry in journal.entries] == ["circuit_open", "circuit_half_open", "circuit_closed"]
+    for entry in journal.entries:
+        assert entry["model"] == "primary"
+        assert entry["provider"] == "test:Model"
+        assert entry["run_id"] == "run-ledger"
+        assert entry["timestamp"]
+
+
+def test_fallback_success_records_structured_ledger_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_ledger_fallback_app_config(), model_name="primary")
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda _name: "backup-model")
+    journal = _LedgerJournal(run_id="run-fallback-success")
+    request = _LedgerRequest("primary", journal)
+
+    def handler(_request) -> AIMessage:
+        if _request.model == "primary":
+            raise FakeError("provider unavailable", status_code=503)
+        return AIMessage(content="fallback response")
+
+    result = middleware.wrap_model_call(request, handler)
+
+    assert result.content == "fallback response"
+    success = [entry for entry in journal.entries if entry["status"] == "fallback_success"]
+    assert len(success) == 1
+    assert success[0]["model"] == "backup"
+    assert success[0]["provider"] == "test:Backup"
+    assert success[0]["from_model"] == "primary"
+    assert success[0]["run_id"] == "run-fallback-success"
+    assert success[0]["timestamp"]
+
+
+def test_fallback_failure_records_structured_ledger_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_ledger_fallback_app_config(), model_name="primary")
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda _name: "backup-model")
+    journal = _LedgerJournal(run_id="run-fallback-failure")
+    request = _LedgerRequest("primary", journal)
+
+    def handler(_request) -> AIMessage:
+        raise FakeError("provider unavailable", status_code=503)
+
+    result = middleware.wrap_model_call(request, handler)
+
+    assert result.additional_kwargs["error_reason"] == "transient"
+    failure = [entry for entry in journal.entries if entry["status"] == "fallback_failure"]
+    assert len(failure) == 1
+    assert failure[0]["model"] == "backup"
+    assert failure[0]["provider"] == "test:Backup"
+    assert failure[0]["from_model"] == "primary"
+    assert failure[0]["reason"] == "transient"
+    assert failure[0]["run_id"] == "run-fallback-failure"
+    assert failure[0]["timestamp"]
+
+
+def test_subagent_skips_ledger_recording() -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_ledger_app_config(retry_max_attempts=1), model_name="primary")
+    journal = _LedgerJournal()
+    request = SimpleNamespace(runtime=SimpleNamespace(context={"__run_journal": journal, "is_subagent": True}))
+
+    def handler(_request) -> AIMessage:
+        raise FakeError("Service unavailable", status_code=503)
+
+    middleware.wrap_model_call(request, handler)
+
+    assert journal.entries == []
+
+
+class _AppConfigLike:
+    """Minimal AppConfig stand-in that delegates unknown attributes to a real config.
+
+    Subclasses override only the methods they fake (e.g. ``get_model_config``);
+    every other attribute the middleware reads (``circuit_breaker``, ``llm_call``,
+    ...) falls through to the wrapped config so middleware construction stays valid.
+    """
+
+    def __init__(self, config: AppConfig) -> None:
+        self._config = config
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._config, name)
+
+
+class _RegistryWithoutFallback:
+    """AppConfig stand-in that resolves the primary but not the configured fallback,
+    to exercise the fail-closed path without mutating the real config."""
+
+    def __init__(self, config: AppConfig) -> None:
+        self._config = config
+
+    def get_model_config(self, name: str) -> ModelConfig | None:
+        if name == "backup":
+            return None
+        return self._config.get_model_config(name)
+
+
+def test_failover_resolves_configured_fallbacks_when_resolvable() -> None:
+    """Configured fallbacks that resolve are kept as failover candidates."""
+    config = _make_fallback_app_config()
+    middleware = LLMErrorHandlingMiddleware(app_config=config, model_name="primary")
+    assert middleware.fallback_model_names == ("backup",)
+
+
+def test_middleware_without_configured_fallbacks_does_not_require_resolution() -> None:
+    """Primary resolvable but no fallback configured: no failover, no error."""
+    config = _make_app_config()
+    config = AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        models=[
+            ModelConfig(name="primary", use="test:Model", model="primary"),
+        ],
+    )
+    middleware = LLMErrorHandlingMiddleware(app_config=config, model_name="primary")
+    assert middleware.fallback_model_names == ()
+
+
+def test_middleware_fails_closed_when_primary_model_cannot_be_resolved() -> None:
+    """An unresolvable primary model is a config error, not a silent no-op."""
+    with pytest.raises(ValueError, match="could not be resolved"):
+        LLMErrorHandlingMiddleware(app_config=_make_app_config(), model_name="primary")
+
+
+def test_failover_list_all_unresolvable_fallback_names() -> None:
+    """Partial unresolvable fallbacks: the error reports every unresolvable name,
+    not just the first one."""
+    config = _make_fallback_app_config()
+    middleware = LLMErrorHandlingMiddleware(app_config=config, model_name="primary")
+    # Simulate a partially unresolvable candidate list (AppConfig rejects unknown
+    # fallback names at load time, so exercise the resolver directly).
+    middleware.fallback_model_names = ("backup", "not-configured-a", "not-configured-b")
+    with pytest.raises(ValueError, match="not-configured-a.*not-configured-b"):
+        middleware._resolve_configured_fallback_model_names()
+
+
+def test_failover_call_time_excludes_unresolvable_fallbacks_with_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """At the failover trigger point, unresolvable fallbacks are excluded with a
+    warning rather than silently dropping failover (config-reload defense-in-depth)."""
+    config = _make_fallback_app_config()
+    middleware = LLMErrorHandlingMiddleware(app_config=config, model_name="primary")
+    middleware.fallback_model_names = ("backup", "missing-name")
+    resolved = middleware._resolve_fallback_candidates(middleware.fallback_model_names)
+    assert resolved == ("backup",)
+    assert "missing-name" in caplog.text
+
+
+def test_failover_fails_closed_when_configured_fallback_cannot_be_resolved() -> None:
+    """An unresolvable configured fallback must not silently disable failover."""
+    config = _make_fallback_app_config()
+    with pytest.raises(ValueError, match="cannot be resolved"):
+        LLMErrorHandlingMiddleware(app_config=_RegistryWithoutFallback(config), model_name="primary")

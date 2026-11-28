@@ -678,6 +678,7 @@ class RunRepository(RunStore):
         message_count: int = 0,
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
+        model_failure_ledger: list[dict[str, Any]] | None = None,
         error: str | None = None,
         goal_verdict: dict[str, Any] | None = None,
     ) -> bool:
@@ -703,6 +704,8 @@ class RunRepository(RunStore):
             values["last_ai_message"] = last_ai_message[:2000]
         if first_human_message is not None:
             values["first_human_message"] = first_human_message[:2000]
+        if model_failure_ledger is not None:
+            values["model_failure_ledger"] = self._safe_json(model_failure_ledger)
         if not require_terminal and error is not None:
             values["error"] = error
         if not require_terminal and goal_verdict is not None:
@@ -746,6 +749,7 @@ class RunRepository(RunStore):
         message_count: int | None = None,
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
+        model_failure_ledger: list[dict[str, Any]] | None = None,
     ) -> None:
         """Update token usage + convenience fields while a run is still active."""
         values: dict[str, Any] = {"updated_at": datetime.now(UTC)}
@@ -768,6 +772,8 @@ class RunRepository(RunStore):
             values["last_ai_message"] = last_ai_message[:2000]
         if first_human_message is not None:
             values["first_human_message"] = first_human_message[:2000]
+        if model_failure_ledger is not None:
+            values["model_failure_ledger"] = self._safe_json(model_failure_ledger)
         async with self._sf() as session:
             await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status == "running").values(**values))
             await session.commit()

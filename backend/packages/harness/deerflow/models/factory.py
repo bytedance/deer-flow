@@ -34,6 +34,7 @@ _MODEL_METADATA_FIELDS: frozenset[str] = frozenset(
         "when_thinking_disabled",
         "thinking",
         "supports_vision",
+        "fallback_models",
         # Runtime/UI metadata used to size the context indicator. Provider
         # clients do not accept this as a model-constructor argument.
         "context_window",
@@ -539,7 +540,16 @@ def _apply_openai_responses_api_default(model_class: type, model_settings_from_c
     )
 
 
-def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, attach_tracing: bool = True, model_overrides: dict | None = None, **kwargs) -> BaseChatModel:
+def create_chat_model(
+    name: str | None = None,
+    thinking_enabled: bool = False,
+    *,
+    app_config: AppConfig | None = None,
+    attach_tracing: bool = True,
+    model_overrides: dict | None = None,
+    disable_provider_retries: bool = False,
+    **kwargs,
+) -> BaseChatModel:
     """Create a chat model instance from the config.
 
     Args:
@@ -563,6 +573,8 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             the model) and ``session_id`` / ``user_id`` metadata never reach the trace
             because the model becomes a nested observation whose ``langfuse_*`` keys
             get stripped.
+        disable_provider_retries: When True, disable provider/SDK retries so an
+            outer model-fallback policy owns the bounded attempt count.
 
     Returns:
         A chat model instance.
@@ -725,6 +737,17 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     # 先合并再展开，避免同名字段通过两个 **dict 传入时触发 TypeError。
     effective_model_settings = dict(model_settings_from_config)
     effective_model_settings.update({key: value for key, value in kwargs.items() if value is not None})
+    if disable_provider_retries:
+        # Retry caps must win over thinking templates and caller-provided options.
+        for retry_field, limit in (("max_retries", 0), ("retry_max_attempts", 1)):
+            effective_model_settings.pop(retry_field, None)
+            field = model_class.model_fields.get(retry_field)
+            if field is None:
+                continue
+            # Pydantic prefers input aliases, such as Gemini's `retries`.
+            if isinstance(field.validation_alias, str):
+                effective_model_settings.pop(field.validation_alias, None)
+            effective_model_settings[retry_field] = limit
     if (
         issubclass(model_class, BaseChatOpenAI)
         and effective_model_settings.get("model") in OPENAI_GPT6_MODELS

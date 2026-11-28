@@ -309,6 +309,7 @@ class RunRecord:
     message_count: int = 0
     last_ai_message: str | None = None
     first_human_message: str | None = None
+    model_failure_ledger: list[dict[str, Any]] | None = None
     finalizing: bool = False
     owner_worker_id: str | None = None
     run_incarnation: str | None = None
@@ -932,6 +933,7 @@ class RunManager:
             message_count=row.get("message_count") or 0,
             last_ai_message=row.get("last_ai_message"),
             first_human_message=row.get("first_human_message"),
+            model_failure_ledger=row.get("model_failure_ledger"),
             owner_worker_id=row.get("owner_worker_id"),
             run_incarnation=row.get("run_incarnation"),
             producer_epoch=row.get("producer_epoch"),

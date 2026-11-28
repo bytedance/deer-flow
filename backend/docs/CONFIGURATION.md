@@ -196,6 +196,23 @@ models:
     temperature: 0.7               # Sampling temperature
 ```
 
+Add an ordered list of other configured profile names to enable failover:
+
+```yaml
+models:
+  - name: primary
+    use: langchain_openai:ChatOpenAI
+    model: gpt-4o
+    api_key: $OPENAI_API_KEY
+    fallback_models: [backup]
+  - name: backup
+    use: langchain_anthropic:ChatAnthropic
+    model: claude-sonnet-4-6
+    api_key: $ANTHROPIC_API_KEY
+```
+
+`fallback_models` applies to Lead Agent and subagent calls. After the primary profile exhausts transient retries, DeerFlow tries each authorized fallback at most once. `llm_call.retry_max_attempts` caps the total primary-plus-fallback attempts, and configuration is rejected when the chain exceeds that cap. Fallback requires retryable HTTP responses or connection failures known to precede response output. Once a primary attempt may have emitted stream output, any remaining retries stay on that model. Authentication and configuration errors, local admission denials, and empty responses do not trigger failover. Model authorization is checked again for each fallback. Title, summary, memory, and other standalone model calls keep their own retry policies.
+
 **Supported Providers**:
 - OpenAI (`langchain_openai:ChatOpenAI`)
 - Anthropic (`langchain_anthropic:ChatAnthropic`)

@@ -371,6 +371,15 @@ class RunResponse(BaseModel):
     middleware_tokens: int = 0
     message_count: int = 0
     stop_reason: str | None = None
+    model_failure_ledger: list[dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Read-only, structured per-run ledger of model retries, circuit-breaker "
+            "transitions and model-fallback outcomes for SRE provider-health attribution. "
+            "Entries carry no raw error bodies or provider payloads; null for runs written "
+            "before this field existed."
+        ),
+    )
 
 
 class ThreadRunsPageResponse(BaseModel):
@@ -522,6 +531,7 @@ def _record_to_response(record: RunRecord) -> RunResponse:
         middleware_tokens=record.middleware_tokens,
         message_count=record.message_count,
         stop_reason=record.stop_reason,
+        model_failure_ledger=record.model_failure_ledger,
     )
 
 

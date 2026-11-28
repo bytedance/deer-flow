@@ -140,6 +140,11 @@ class ModelConfig(BaseModel):
     request_admission: RequestAdmissionConfig | None = Field(default=None, description="Opt-in process-local RPM pacing. Changing an active group's policy requires a process restart.")
     display_name: str | None = Field(..., default_factory=lambda: None, description="Display name for the model")
     aliases: list[str] = Field(default_factory=list, max_length=16, description="Optional names users can use when selecting this configured model")
+    fallback_models: list[str] = Field(
+        default_factory=list,
+        max_length=4,
+        description="Ordered model profile names to try after this profile exhausts transient retries",
+    )
     description: str | None = Field(..., default_factory=lambda: None, description="Description for the model")
     use: str = Field(
         ...,
@@ -147,6 +152,14 @@ class ModelConfig(BaseModel):
     )
     model: str = Field(..., description="Model name")
     model_config = ConfigDict(extra="allow")
+
+    @field_validator("fallback_models")
+    @classmethod
+    def _fallback_models_are_unique(cls, values: list[str]) -> list[str]:
+        if len(set(values)) != len(values):
+            raise ValueError("fallback_models must not contain duplicates")
+        return values
+
     use_responses_api: bool | None = Field(
         default=None,
         description="Whether to route OpenAI ChatOpenAI calls through the /v1/responses API",
