@@ -736,3 +736,54 @@ test("reconcile sorts re-anchored rows and preserves a stable retained snapshot"
     reconciled,
   );
 });
+
+// An interrupted stream (tab closed/backgrounded mid-run, dropped SSE
+// connection) leaves a partially assembled live copy in memory. It must not
+// replace the complete persisted copy: doing so is what re-renders a
+// reconnected transcript as patchwork while the server holds the full turn.
+test("a truncated live copy never replaces a complete persisted copy", () => {
+  const complete = "一、结论 …… 二、要求逐条比对 …… 三、打分演算 …… 六、自检";
+  const history = [msg("a1", "ai", complete, 2)];
+  const truncatedLive = [msg("a1", "ai", "一、结论")];
+
+  const merged = mergeMessages(history, truncatedLive, []);
+
+  expect(merged.map((message) => message.content)).toEqual([complete]);
+  expect(seqsOf(merged)).toEqual([2]);
+});
+
+// The guard must not block normal streaming growth: a live copy that has
+// caught up with (or overtaken) the persisted one still wins.
+test("a live copy at least as long as the persisted copy still replaces it", () => {
+  const history = [msg("a1", "ai", "draft", 2)];
+  const live = [msg("a1", "ai", "draft, finished", 2)];
+
+  const merged = mergeMessages(history, live, []);
+
+  expect(merged.map((message) => message.content)).toEqual(["draft, finished"]);
+  expect(seqsOf(merged)).toEqual([2]);
+});
+
+// The persisted copy often arrives as a content-block array while the live
+// copy holds only the parts that streamed before the drop. Non-text parts
+// contribute nothing to the length, so a thinking-only live fragment must not
+// replace the completed answer.
+test("a thinking-only live fragment never replaces a persisted block answer", () => {
+  const finished = {
+    ...msg("a1", "ai", "", 2),
+    content: [
+      { type: "thinking", thinking: "reasoning about the answer" },
+      { type: "text", text: "the finished answer" },
+    ],
+  } as unknown as Message;
+  const thinkingOnlyLive = {
+    ...msg("a1", "ai", ""),
+    content: [{ type: "thinking", thinking: "reasoning about the answer" }],
+  } as unknown as Message;
+
+  const merged = mergeMessages([finished], [thinkingOnlyLive], []);
+
+  expect(merged).toHaveLength(1);
+  expect(merged[0]!.content).toEqual(finished.content);
+  expect(seqsOf(merged)).toEqual([2]);
+});
