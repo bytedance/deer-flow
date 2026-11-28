@@ -15,5 +15,7 @@ run in Skill Review CI, independent of package review.
   content.
 - **Skill script tests run offline.** Test a dependency fallback with the
   optional import unavailable, and mock the HTTP transport.
+- **Skill-creator duration validation covers both grading and sibling timing data.**
+  Keep invalid grading durations from bypassing the existing timing fallback.
 - **A skill CLI exits non-zero on failure**, with diagnostics on stderr and
   result URLs on stdout.

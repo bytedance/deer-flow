@@ -19,8 +19,17 @@ def benchmark_script():
     return runpy.run_path(str(script))
 
 
+# Distinguishes an omitted grading timing object from explicit JSON null.
+OMIT_GRADING_TIMING = object()
+
+
 def write_run(
-    root, *, grading_timing=None, timing=None, config="with_skill", run_number=1
+    root,
+    *,
+    grading_timing=OMIT_GRADING_TIMING,
+    timing=None,
+    config="with_skill",
+    run_number=1,
 ):
     run_dir = root / "eval-1" / config / f"run-{run_number}"
     run_dir.mkdir(parents=True)
@@ -28,7 +37,7 @@ def write_run(
         "summary": {"pass_rate": 1.0, "passed": 1, "failed": 0, "total": 1},
         "execution_metrics": {"output_chars": 12450},
     }
-    if grading_timing is not None:
+    if grading_timing is not OMIT_GRADING_TIMING:
         grading["timing"] = grading_timing
     (run_dir / "grading.json").write_text(json.dumps(grading), encoding="utf-8")
     if timing is not None:
@@ -55,7 +64,7 @@ def test_recorded_tokens_used_when_grading_already_has_duration(
 @pytest.mark.parametrize("layout", ["workspace", "legacy"])
 @pytest.mark.parametrize(
     "grading_timing",
-    [None, {}, {"total_duration_seconds": 0}, {"total_duration_seconds": 23.3}],
+    [OMIT_GRADING_TIMING, {}, {"total_duration_seconds": 0}, {"total_duration_seconds": 23.3}],
 )
 @pytest.mark.parametrize("tokens", [0, 84852])
 def test_recorded_tokens_preserved_in_both_layouts(
@@ -82,7 +91,7 @@ def test_recorded_tokens_preserved_in_both_layouts(
 def test_missing_token_measurements_keep_legacy_character_fallback(
     tmp_path, benchmark_script, timing_state, has_grading_duration, capsys
 ):
-    grading_timing = {"total_duration_seconds": 23.3} if has_grading_duration else None
+    grading_timing = {"total_duration_seconds": 23.3} if has_grading_duration else OMIT_GRADING_TIMING
     timing = None
     if timing_state in {"missing_tokens", "null_tokens"}:
         timing = {"total_duration_seconds": 25.0}
@@ -116,7 +125,7 @@ def test_non_object_timing_keeps_fallback_and_other_runs(
     tmp_path, benchmark_script, layout, has_grading_duration, timing_data, capsys
 ):
     root = tmp_path / "runs" if layout == "legacy" else tmp_path
-    grading_timing = {"total_duration_seconds": 23.3} if has_grading_duration else None
+    grading_timing = {"total_duration_seconds": 23.3} if has_grading_duration else OMIT_GRADING_TIMING
     run_dir = write_run(root, grading_timing=grading_timing)
     (run_dir / "timing.json").write_text(json.dumps(timing_data), encoding="utf-8")
     write_run(
@@ -181,7 +190,7 @@ def test_invalid_timing_field_warns_and_preserves_other_measurements(
 ):
     root = tmp_path / "runs" if layout == "legacy" else tmp_path
     timing = {"total_tokens": 0, "total_duration_seconds": 25.0, field: value}
-    grading_timing = {"total_duration_seconds": 23.3} if has_grading_duration else None
+    grading_timing = {"total_duration_seconds": 23.3} if has_grading_duration else OMIT_GRADING_TIMING
     run_dir = write_run(root, grading_timing=grading_timing, timing=timing)
     write_run(
         root, timing={"total_tokens": 0, "total_duration_seconds": 25.0}, run_number=2
@@ -242,7 +251,7 @@ def test_finite_non_negative_timing_numbers_are_preserved(
 def test_missing_or_null_timing_fields_use_fallbacks_without_warning(
     tmp_path, benchmark_script, has_grading_duration, timing, capsys
 ):
-    grading_timing = {"total_duration_seconds": 23.3} if has_grading_duration else None
+    grading_timing = {"total_duration_seconds": 23.3} if has_grading_duration else OMIT_GRADING_TIMING
     write_run(tmp_path, grading_timing=grading_timing, timing=timing)
 
     benchmark = benchmark_script["generate_benchmark"](tmp_path)
@@ -287,7 +296,7 @@ def test_cli_warns_and_writes_reports_for_invalid_timing(
     expected_duration,
 ):
     root = tmp_path / "runs" if layout == "legacy" else tmp_path
-    grading_timing = {"total_duration_seconds": 23.3} if has_grading_duration else None
+    grading_timing = {"total_duration_seconds": 23.3} if has_grading_duration else OMIT_GRADING_TIMING
     run_dir = write_run(root, grading_timing=grading_timing)
     timing_file = run_dir / "timing.json"
     if timing_content is None:
@@ -340,7 +349,7 @@ def test_unreadable_timing_warns_and_keeps_fallback_and_other_runs(
     capsys,
 ):
     root = tmp_path / "runs" if layout == "legacy" else tmp_path
-    grading_timing = {"total_duration_seconds": 23.3} if has_grading_duration else None
+    grading_timing = {"total_duration_seconds": 23.3} if has_grading_duration else OMIT_GRADING_TIMING
     run_dir = write_run(
         root,
         grading_timing=grading_timing,
@@ -414,3 +423,99 @@ def test_recorded_tokens_propagate_to_summary_delta_and_markdown(
     assert "| Tokens | 84852 ± 0 | 10000 ± 0 | +74852 |" in benchmark_script[
         "generate_markdown"
     ](benchmark)
+
+
+@pytest.mark.parametrize("layout", ["workspace", "legacy"])
+@pytest.mark.parametrize(
+    "grading_timing",
+    [
+        None,
+        [],
+        "timing",
+        {"total_duration_seconds": None},
+        {"total_duration_seconds": "12.5"},
+        {"total_duration_seconds": True},
+        {"total_duration_seconds": -1},
+        {"total_duration_seconds": float("nan")},
+        {"total_duration_seconds": float("inf")},
+    ],
+)
+@pytest.mark.parametrize("fallback", [12.5, None])
+def test_invalid_grading_timing_uses_available_fallback(
+    tmp_path, benchmark_script, capsys, layout, grading_timing, fallback
+):
+    root = tmp_path / "runs" if layout == "legacy" else tmp_path
+    sibling = (
+        {"total_duration_seconds": fallback, "total_tokens": 100}
+        if fallback is not None
+        else None
+    )
+    directory = write_run(
+        root, run_number=1, grading_timing=grading_timing, timing=sibling
+    )
+    write_run(
+        root,
+        run_number=2,
+        grading_timing={"total_duration_seconds": 20.0},
+        timing={"total_duration_seconds": 12.5, "total_tokens": 100},
+    )
+
+    benchmark = benchmark_script["generate_benchmark"](tmp_path)
+
+    runs = {run["run_number"]: run["result"] for run in benchmark["runs"]}
+    expected = fallback if fallback is not None else 0.0
+    assert runs[1]["time_seconds"] == expected
+    assert runs[2]["time_seconds"] == 20.0
+    assert runs[1]["tokens"] == (100 if fallback is not None else 12450)
+    assert (
+        benchmark["run_summary"]["with_skill"]["time_seconds"]["mean"]
+        == (expected + 20.0) / 2
+    )
+    json.dumps(benchmark, allow_nan=False)
+    assert "| Time |" in benchmark_script["generate_markdown"](benchmark)
+    warnings = capsys.readouterr().out
+    if grading_timing == {"total_duration_seconds": None}:
+        assert warnings == ""
+    else:
+        assert "Warning:" in warnings
+        assert str(directory / "grading.json") in warnings
+
+
+@pytest.mark.parametrize("duration", [0, 0.0, 5, 5.5])
+def test_valid_grading_duration_keeps_precedence(
+    tmp_path, benchmark_script, capsys, duration
+):
+    write_run(
+        tmp_path,
+        grading_timing={"total_duration_seconds": duration},
+        timing={"total_duration_seconds": 12.5, "total_tokens": 100},
+    )
+
+    benchmark = benchmark_script["generate_benchmark"](tmp_path)
+
+    assert benchmark["runs"][0]["result"]["time_seconds"] == (
+        duration if duration else 12.5
+    )
+    assert capsys.readouterr().out == ""
+
+
+def test_cli_writes_reports_after_null_grading_duration(tmp_path, benchmark_script):
+    write_run(
+        tmp_path,
+        grading_timing={"total_duration_seconds": None},
+        timing={"total_duration_seconds": 12.5, "total_tokens": 100},
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-B", benchmark_script["__file__"], str(tmp_path)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    benchmark = json.loads((tmp_path / "benchmark.json").read_text(encoding="utf-8"))
+    assert benchmark["runs"][0]["result"]["time_seconds"] == 12.5
+    assert "12.5s" in (tmp_path / "benchmark.md").read_text(encoding="utf-8")
