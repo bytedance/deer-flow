@@ -37,6 +37,7 @@ class FakeAioSandbox:
         self.remote_outputs: dict[str, bytes] = {}
         self.closed = False
         self.fail_upload_script = False
+        self.echo_upload_command = False
         self.fail_bootstrap = False
         self.bootstrap_output_override: str | None = None
         self.init_marker_override: str | None = None
@@ -57,7 +58,12 @@ class FakeAioSandbox:
                 return f"INIT_MARKER:{marker.decode('utf-8').strip()}\n"
             return "INIT_MARKER:MISSING\n"
         if "UPLOAD_OK" in command:
-            return "" if self.fail_upload_script else "UPLOAD_OK\n"
+            upload_out = "" if self.fail_upload_script else f"{provider_mod._UPLOAD_OK_MARKER}\n"
+            if self.echo_upload_command:
+                # A persistent PTY prefixes command output with the echoed
+                # command string itself.
+                return f"{command}\n{upload_out}"
+            return upload_out
         if "find /mnt/user-data/outputs" in command:
             return "\n".join(sorted(self.remote_outputs.keys()))
         return ""
