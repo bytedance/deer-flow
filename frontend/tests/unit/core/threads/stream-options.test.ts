@@ -1,6 +1,16 @@
 import { afterEach, expect, test, rs } from "@rstest/core";
+import { QueryClient } from "@tanstack/react-query";
 
-async function captureThreadStreamOptions(assistantId?: string) {
+import { DEFAULT_THREAD_SEARCH_PARAMS } from "@/core/threads/thread-search-query";
+import type { AgentThread } from "@/core/threads/types";
+
+async function captureThreadStreamOptions(
+  assistantId?: string,
+  {
+    hiddenFromThreadLists,
+    queryClient,
+  }: { hiddenFromThreadLists?: boolean; queryClient?: QueryClient } = {},
+) {
   let capturedOptions: Record<string, unknown> | undefined;
 
   rs.resetModules();
@@ -33,10 +43,11 @@ async function captureThreadStreamOptions(assistantId?: string) {
       data: [],
       refetch: rs.fn(),
     }),
-    useQueryClient: () => ({
-      invalidateQueries: rs.fn(),
-      setQueriesData: rs.fn(),
-    }),
+    useQueryClient: () =>
+      queryClient ?? {
+        invalidateQueries: rs.fn(),
+        setQueriesData: rs.fn(),
+      },
   }));
   rs.doMock("@langchain/langgraph-sdk/react", () => ({
     useStream: (options: Record<string, unknown>) => {
@@ -78,6 +89,7 @@ async function captureThreadStreamOptions(assistantId?: string) {
       },
       assistantId,
       isMock: true,
+      hiddenFromThreadLists,
     } as never);
     return null;
   }
@@ -109,4 +121,71 @@ test("forwards the custom-agent assistant identity to the stream", async () => {
   const options = await captureThreadStreamOptions("researcher");
 
   expect(options).toHaveProperty("assistantId", "researcher");
+});
+
+// The @ mention picker reads the unfiltered infinite list and the reference
+// picker the default search; both drop side chats only when they fetch.
+const MENTION_PICKER_KEY = [
+  "threads",
+  "searchInfinite",
+  {
+    sortBy: "updated_at",
+    sortOrder: "desc",
+    select: ["thread_id", "updated_at", "values", "metadata"],
+  },
+];
+const REFERENCE_PICKER_KEY = [
+  "threads",
+  "search",
+  DEFAULT_THREAD_SEARCH_PARAMS,
+];
+
+async function pickerThreadIdsAfterRunCreated(hiddenFromThreadLists: boolean) {
+  const queryClient = new QueryClient();
+  const existing = {
+    thread_id: "main-thread",
+    values: { title: "Main chat" },
+    metadata: {},
+  } as unknown as AgentThread;
+  queryClient.setQueryData(MENTION_PICKER_KEY, {
+    // The fetch already dropped the side chat.
+    pages: [{ threads: [existing], hiddenCount: 1, hasMore: false }],
+    pageParams: [0],
+  });
+  queryClient.setQueryData(REFERENCE_PICKER_KEY, [existing]);
+  const options = await captureThreadStreamOptions(undefined, {
+    hiddenFromThreadLists,
+    queryClient,
+  });
+
+  (options?.onCreated as (meta: { thread_id: string; run_id: string }) => void)(
+    { thread_id: "run-thread", run_id: "run-1" },
+  );
+
+  const mention = queryClient.getQueryData<{
+    pages: { threads: AgentThread[] }[];
+  }>(MENTION_PICKER_KEY);
+  const reference =
+    queryClient.getQueryData<AgentThread[]>(REFERENCE_PICKER_KEY);
+  queryClient.clear();
+  return {
+    mention: mention?.pages.flatMap((page) =>
+      page.threads.map((thread) => thread.thread_id),
+    ),
+    reference: reference?.map((thread) => thread.thread_id),
+  };
+}
+
+test("a run of a chat hidden from thread lists leaves the picker caches alone", async () => {
+  expect(await pickerThreadIdsAfterRunCreated(true)).toEqual({
+    mention: ["main-thread"],
+    reference: ["main-thread"],
+  });
+});
+
+test("a new chat's run still shows in the picker caches right away", async () => {
+  expect(await pickerThreadIdsAfterRunCreated(false)).toEqual({
+    mention: ["run-thread", "main-thread"],
+    reference: ["run-thread", "main-thread"],
+  });
 });

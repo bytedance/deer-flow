@@ -196,6 +196,7 @@ export function SidecarPanel({ className }: { className?: string }) {
     displayThreadId: sidecar.sidecarThreadId ?? undefined,
     context: sidecar.context,
     isMock: sidecar.isMock,
+    hiddenFromThreadLists: true,
     onStart: (createdThreadId) => {
       sidecar.setSidecarThreadId(createdThreadId);
     },

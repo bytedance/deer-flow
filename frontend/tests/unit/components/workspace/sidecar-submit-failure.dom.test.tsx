@@ -175,6 +175,17 @@ it("gives the sidecar send button its Chinese accessible name", async () => {
   expect(button.type).toBe("submit");
 });
 
+it("keeps the side chat's runs out of the thread lists", async () => {
+  render(renderPanel("sidecar-1"));
+
+  await waitFor(() =>
+    expect(mocks.streamOptions).toMatchObject({
+      threadId: "sidecar-1",
+      hiddenFromThreadLists: true,
+    }),
+  );
+});
+
 describe("SidecarPanel keeps the draft when a send fails", () => {
   it("forwards restored interrupts and initial metadata loading to the stream", async () => {
     const interrupts = { task: [{ value: { kind: "hitl_approval" } }] };

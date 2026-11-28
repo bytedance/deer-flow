@@ -128,6 +128,13 @@ export type ThreadStreamOptions = {
   assistantId?: string;
   context: LocalSettings["context"];
   isMock?: boolean;
+  /**
+   * The thread never shows in thread lists, as with a side chat. Its runs then
+   * do not write the run-created "New chat" row into the cached lists. Those
+   * caches drop hidden threads only when they fetch, so a written row would
+   * offer the thread in the conversation pickers until the next refetch.
+   */
+  hiddenFromThreadLists?: boolean;
   onSend?: (threadId: string) => void;
   onStart?: (threadId: string, runId: string) => void;
   onFinish?: (state: AgentThreadState) => void;
@@ -2148,6 +2155,7 @@ export function useThreadStream({
   assistantId = "lead_agent",
   context,
   isMock,
+  hiddenFromThreadLists = false,
   onSend,
   onStart,
   onFinish,
@@ -2436,33 +2444,39 @@ export function useThreadStream({
       }
       submittedRunIdRef.current = meta.run_id;
       handleStreamStart(meta.thread_id, meta.run_id);
-      const now = new Date().toISOString();
-      upsertThreadInSearchCache(queryClient, {
-        thread_id: meta.thread_id,
-        created_at: now,
-        updated_at: now,
-        metadata: context.agent_name ? { agent_name: context.agent_name } : {},
-        status: "busy",
-        values: {
-          title: t.pages.newChat,
-          messages: [],
-          artifacts: [],
-        },
-        interrupts: {},
-      });
-      upsertThreadInInfiniteCache(queryClient, {
-        thread_id: meta.thread_id,
-        created_at: now,
-        updated_at: now,
-        metadata: context.agent_name ? { agent_name: context.agent_name } : {},
-        status: "busy",
-        values: {
-          title: t.pages.newChat,
-          messages: [],
-          artifacts: [],
-        },
-        interrupts: {},
-      });
+      if (!hiddenFromThreadLists) {
+        const now = new Date().toISOString();
+        upsertThreadInSearchCache(queryClient, {
+          thread_id: meta.thread_id,
+          created_at: now,
+          updated_at: now,
+          metadata: context.agent_name
+            ? { agent_name: context.agent_name }
+            : {},
+          status: "busy",
+          values: {
+            title: t.pages.newChat,
+            messages: [],
+            artifacts: [],
+          },
+          interrupts: {},
+        });
+        upsertThreadInInfiniteCache(queryClient, {
+          thread_id: meta.thread_id,
+          created_at: now,
+          updated_at: now,
+          metadata: context.agent_name
+            ? { agent_name: context.agent_name }
+            : {},
+          status: "busy",
+          values: {
+            title: t.pages.newChat,
+            messages: [],
+            artifacts: [],
+          },
+          interrupts: {},
+        });
+      }
       if (context.agent_name && !isMock) {
         void getAPIClient()
           .threads.update(meta.thread_id, {
