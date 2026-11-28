@@ -1159,6 +1159,17 @@ tools:
   #   max_results: 5                  # Clamped to 1-100 by You.com
   #   # api_key: $YDC_API_KEY         # Omit to use the keyless free tier
 
+  # SerpApi (opt-in): replace either existing tool entry, or both.
+  # Set SERPAPI_API_KEY in the Gateway environment.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.serpapi.tools:web_search_tool
+  #   max_results: 5  # Local limit on the first page of Google organic results
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.serpapi.tools:web_fetch_tool
+  #   # Single public URL to Markdown; up to 4096 characters
+
   # Web fetch tool (uses Browserless - headless Chrome, self-hosted or cloud)
   # Browserless renders pages with a real headless Chrome, ideal for JavaScript-heavy
   # sites and SPAs. Deploy your own: https://github.com/browserless/browserless

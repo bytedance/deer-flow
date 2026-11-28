@@ -67,6 +67,7 @@ ENV_TEMPLATE_PLACEHOLDERS = frozenset(
         "your-openviking-user-api-key",
         "your-opper-api-key",
         "your-provisioner-api-key",
+        "your-serpapi-api-key",
         "your-serper-api-key",
         "your-serply-api-key",
         "your-shared-internal-token",

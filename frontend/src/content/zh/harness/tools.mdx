@@ -124,7 +124,7 @@ tools:
 
 ### 网络搜索
 
-<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
+<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com", "SerpApi"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -257,11 +257,21 @@ API Key 可选，可在 [You.com](https://you.com/platform) 获取。
 无需额外依赖。
 
   </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.serpapi.tools:web_search_tool
+    max_results: 5
+```
+设置 `SERPAPI_API_KEY` 后即可使用 [Google 自然搜索](https://serpapi.com/search-api)。数量上限只作用于第一页，不会自动翻页。
+  </Tabs.Tab>
 </Tabs>
 
 ### 网页内容抓取
 
-<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Unbrowse"]}>
+<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Unbrowse", "SerpApi"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -348,6 +358,15 @@ tools:
     # render: auto # auto | never（仅普通 HTTP）| always（云端浏览器）
 ```
 以 Markdown 形式返回页面内容：普通 HTTP 足够时直接抓取，需要 JavaScript 的页面则在托管浏览器中渲染。需要 [Unbrowse](https://unbrowse.ai) API Key。
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_fetch
+    group: web
+    use: deerflow.community.serpapi.tools:web_fetch_tool
+```
+设置 `SERPAPI_API_KEY` 后，可将单个公开网址发送至 [SerpApi Extract](https://serpapi.com/extract-api)。普通网页返回正文，受支持的搜索结果页返回搜索结果，格式均为 Markdown。DeerFlow 最多返回 4096 个字符。此工具不执行 JavaScript，也不抓取页面中的链接。
   </Tabs.Tab>
 </Tabs>
 

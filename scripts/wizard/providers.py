@@ -817,6 +817,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         env_var="SPECSTREAM_API_KEY",
         extra_config={"max_results": 5},
     ),
+    SearchProvider(
+        name="serpapi",
+        display_name="SerpApi (Google)",
+        description="Google organic results, API key required",
+        use="deerflow.community.serpapi.tools:web_search_tool",
+        env_var="SERPAPI_API_KEY",
+        extra_config={"max_results": 5},
+    ),
 ]
 
 WEB_FETCH_PROVIDERS: list[WebProvider] = [
@@ -901,6 +909,14 @@ WEB_FETCH_PROVIDERS: list[WebProvider] = [
         description="Page text as markdown, also PDF, Word and Excel, API key required",
         use="deerflow.community.specstream.tools:web_fetch_tool",
         env_var="SPECSTREAM_API_KEY",
+        tool_name="web_fetch",
+    ),
+    WebProvider(
+        name="serpapi",
+        display_name="SerpApi Extract",
+        description="One public page as Markdown, API key required",
+        use="deerflow.community.serpapi.tools:web_fetch_tool",
+        env_var="SERPAPI_API_KEY",
         tool_name="web_fetch",
     ),
 ]

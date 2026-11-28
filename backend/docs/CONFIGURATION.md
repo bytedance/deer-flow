@@ -1450,9 +1450,32 @@ API checks for both thinking modes, export `DEEPSEEK_API_KEY` and run from
 DEER_FLOW_RUN_LIVE_TESTS=1 uv run pytest tests/test_deepseek_search_live.py -q
 ```
 
+#### SerpApi Google search and Extract
+
+Set `SERPAPI_API_KEY` in the Gateway environment. In `make setup`, choose
+**SerpApi (Google)** for search, **SerpApi Extract** for fetch, or both.
+In `config.yaml`, replace the `use` value on the corresponding tool:
+
+| Tool | `use` | Result |
+| --- | --- | --- |
+| `web_search` | `deerflow.community.serpapi.tools:web_search_tool` | [Google organic results](https://serpapi.com/search-api) as `title`, `url`, `snippet`. `max_results` limits the first page locally (tool argument, then config, then 5). |
+| `web_fetch` | `deerflow.community.serpapi.tools:web_fetch_tool` | [Extract](https://serpapi.com/extract-api) fetches one public HTTP(S) URL in `scrape` mode with `output=md`. Ordinary pages return their content; supported search-results URLs return the dedicated engine's results as Markdown. DeerFlow returns at most 4096 characters, including any truncation notice. |
+
+A tool's `api_key` setting takes precedence over the environment variable.
+Both tools honor `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` for requests to
+`serpapi.com`. Search rejects blank queries without making a request. A
+successful Google search with no organic results returns `No results found`;
+provider failures are reported separately.
+Fetch sends the URL to SerpApi, which resolves the host; URLs with embedded
+credentials and non-public IP literals are rejected locally. Extract does not
+render JavaScript. A whitespace-only page returns `Error: No Markdown content
+found`; indentation in nonblank Markdown is preserved.
+Neither tool retries, follows API redirects, paginates, or
+crawls. Each invocation can consume a SerpApi credit.
+
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, DeepSeek, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
-- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Tavily, Unbrowse)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, DeepSeek, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com, SerpApi)
+- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Tavily, Unbrowse, SerpApi)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
 - `ls` - List directory contents
@@ -2384,6 +2407,7 @@ models:
 - `SPECSTREAM_API_KEY` - [SpecStream](https://specstream.ai) key for `web_search` and `web_fetch`
 - `UNBROWSE_API_KEY` - [Unbrowse](https://unbrowse.ai) key for `web_fetch`
 - `YDC_API_KEY` - You.com Search API key for `web_search` (optional: without it the provider uses You.com's keyless free-tier endpoint)
+- `SERPAPI_API_KEY` - Required for SerpApi Google `web_search` and single-page Extract `web_fetch`.
 - `BROWSERLESS_TOKEN` - Browserless token for `web_fetch` (Browserless provider) and `web_capture`, sent as the `token` query parameter (required by Browserless Cloud and by a self-hosted instance started with `TOKEN`)
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path

@@ -127,7 +127,7 @@ Community tools connect the agent to external services. Each `tools:` entry in `
 
 ### Web search
 
-<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
+<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com", "SerpApi"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -266,11 +266,21 @@ Optional API key from [You.com](https://you.com/platform).
 No extra dependency required.
 
   </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.serpapi.tools:web_search_tool
+    max_results: 5
+```
+Set `SERPAPI_API_KEY` for [Google organic search](https://serpapi.com/search-api). The limit applies to the first page; the tool does not request additional pages.
+  </Tabs.Tab>
 </Tabs>
 
 ### Web fetch (page content extraction)
 
-<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Unbrowse"]}>
+<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Unbrowse", "SerpApi"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -359,6 +369,15 @@ tools:
     # render: auto # auto | never (plain HTTP only) | always (cloud browser)
 ```
 Returns the page as markdown, fetching over plain HTTP when that is enough and rendering JavaScript-heavy pages in a hosted browser. Requires an [Unbrowse](https://unbrowse.ai) API key.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_fetch
+    group: web
+    use: deerflow.community.serpapi.tools:web_fetch_tool
+```
+Set `SERPAPI_API_KEY` to send one public URL to [SerpApi Extract](https://serpapi.com/extract-api). Ordinary pages return their content as Markdown; supported search-results URLs return the results as Markdown. DeerFlow caps the output at 4096 characters. The tool does not render JavaScript or crawl links.
   </Tabs.Tab>
 </Tabs>
 
