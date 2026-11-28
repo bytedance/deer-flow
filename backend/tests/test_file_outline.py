@@ -550,3 +550,32 @@ def test_maple_outline_range_reads_maple_section(tmp_path: Path) -> None:
     )
 
     assert section == "# Maple\nCapacity: 18"
+
+
+# A fence closed by a lone CR still closes (CommonMark line ending), so the
+# prose after the CR is body text and the headings after it are kept (#8743).
+GUIDE_MD = b"# Overview\n```python\nprint(1)\n```\rTrailing prose\n# Getting started\n"
+
+
+def test_cr_terminated_fence_close_keeps_later_heading(tmp_path: Path) -> None:
+    document = tmp_path / "guide.md"
+    document.write_bytes(GUIDE_MD)
+
+    assert extract_outline(document) == [
+        {"title": "Overview", "line": 1},
+        {"title": "Getting started", "line": 5},
+    ]
+
+
+def test_getting_started_outline_range_reads_heading(tmp_path: Path) -> None:
+    document = tmp_path / "guide.md"
+    document.write_bytes(GUIDE_MD)
+    outline = extract_outline(document)
+
+    section = LocalSandbox("t").read_file(
+        str(document),
+        start_line=outline[-1]["line"],
+        end_line=outline[-1]["line"],
+    )
+
+    assert section == "# Getting started"
