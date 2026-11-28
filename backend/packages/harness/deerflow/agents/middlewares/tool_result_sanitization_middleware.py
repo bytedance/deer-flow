@@ -28,7 +28,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import replace as dc_replace
-from typing import override
+from typing import Any, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -64,41 +64,203 @@ _REMOTE_CONTENT_TOOL_NAMES: frozenset[str] = frozenset(
 )
 
 
-def _neutralize_content(content: object) -> object:
-    """Return *content* with untrusted tags neutralized, preserving its shape.
+def _has_untrusted_json_text(
+    value: object,
+    neutralize: Callable[[str], str],
+) -> bool:
+    """Return whether *value* contains any string key or value that *neutralize* rewrites."""
+    seen: set[int] = set()
+    stack: list[object] = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, str):
+            if neutralize(current) != current:
+                return True
+        elif isinstance(current, (list, tuple)):
+            obj_id = id(current)
+            if obj_id in seen:
+                continue
+            seen.add(obj_id)
+            stack.extend(current)
+        elif isinstance(current, dict):
+            obj_id = id(current)
+            if obj_id in seen:
+                continue
+            seen.add(obj_id)
+            for key, item in current.items():
+                if isinstance(key, str) and neutralize(key) != key:
+                    return True
+                stack.append(item)
+    return False
 
-    Handles the two shapes a ToolMessage content can take:
 
-    * plain ``str`` (what every web tool returns today);
-    * a list of content blocks — bare ``str`` elements and
-      ``{"type": "text", "text": ...}`` text blocks are rewritten; non-text
-      blocks (images, etc.) pass through untouched. The bare-``str`` case
-      mirrors ``ToolOutputBudgetMiddleware._message_text``, which already
-      anticipates ``str`` items inside a content list.
+def _disambiguate_sanitized_key(base_key: object, used_keys: set[object]) -> str:
+    """Return a unique string key derived from *base_key* not present in *used_keys*."""
+    suffix = 2
+    candidate = f"{base_key} ({suffix})"
+    while candidate in used_keys:
+        suffix += 1
+        candidate = f"{base_key} ({suffix})"
+    return candidate
+
+
+def _clone_neutralized_json(
+    value: object,
+    neutralize: Callable[[str], str],
+) -> object:
+    """Clone a structured JSON-like payload iteratively with every string key and value neutralized."""
+    memo: dict[int, object] = {}
+    root_box: list[object] = [None]
+    # Populating mutable containers (list/dict) is deferred until the current
+    # tuple stack drains. Because immutable tuples can only form cycles through
+    # a mutable descendant, every containing tuple is finalized in *memo* before
+    # any descendant list/dict resolves its back-references.
+    deferred_mutables: list[tuple[object, Any, Any]] = [(value, root_box, 0)]
+    # Stack frames are either:
+    # - (False, node, container, slot): visit *node* and write clone to container[slot]
+    # - (True, obj_id, placeholder, container, slot): finalize tuple from *placeholder*
+    tuple_stack: list[tuple[Any, ...]] = []
+
+    while tuple_stack or deferred_mutables:
+        if not tuple_stack:
+            node, container, slot = deferred_mutables.pop()
+            tuple_stack.append((False, node, container, slot))
+
+        frame = tuple_stack.pop()
+        if frame[0]:
+            _, obj_id, placeholder, container, slot = frame
+            rebuilt_tuple = tuple(placeholder)
+            memo[obj_id] = rebuilt_tuple
+            container[slot] = rebuilt_tuple
+            continue
+
+        _, current, container, slot = frame
+        if isinstance(current, str):
+            container[slot] = neutralize(current)
+        elif isinstance(current, list):
+            obj_id = id(current)
+            if obj_id in memo:
+                container[slot] = memo[obj_id]
+                continue
+            rebuilt_list: list[object] = [None] * len(current)
+            memo[obj_id] = rebuilt_list
+            container[slot] = rebuilt_list
+            for idx in range(len(current) - 1, -1, -1):
+                deferred_mutables.append((current[idx], rebuilt_list, idx))
+        elif isinstance(current, tuple):
+            obj_id = id(current)
+            if obj_id in memo:
+                container[slot] = memo[obj_id]
+                continue
+            placeholder: list[object] = [None] * len(current)
+            tuple_stack.append((True, obj_id, placeholder, container, slot))
+            for idx in range(len(current) - 1, -1, -1):
+                tuple_stack.append((False, current[idx], placeholder, idx))
+        elif isinstance(current, dict):
+            obj_id = id(current)
+            if obj_id in memo:
+                container[slot] = memo[obj_id]
+                continue
+            rebuilt_dict: dict[object, object] = {}
+            memo[obj_id] = rebuilt_dict
+            container[slot] = rebuilt_dict
+            # Reserve unchanged keys first so a rewritten key colliding with an
+            # existing clean key never displaces or silently overwrites it.
+            reserved_keys: set[object] = set()
+            key_pairs: list[tuple[object, object, object]] = []
+            for key, item in current.items():
+                new_key = neutralize(key) if isinstance(key, str) else key
+                if new_key == key:
+                    reserved_keys.add(key)
+                key_pairs.append((key, new_key, item))
+            used_keys: set[object] = set(reserved_keys)
+            final_entries: list[tuple[object, object]] = []
+            for key, new_key, item in key_pairs:
+                if new_key == key:
+                    final_key = key
+                elif new_key not in used_keys:
+                    final_key = new_key
+                    used_keys.add(final_key)
+                else:
+                    final_key = _disambiguate_sanitized_key(new_key, used_keys)
+                    used_keys.add(final_key)
+                rebuilt_dict[final_key] = None
+                final_entries.append((final_key, item))
+            for final_key, item in reversed(final_entries):
+                deferred_mutables.append((item, rebuilt_dict, final_key))
+        else:
+            container[slot] = current
+
+    return root_box[0]
+
+
+def _neutralize_json_value(
+    value: object,
+    neutralize: Callable[[str], str],
+) -> tuple[object, bool]:
+    """Neutralize string keys and values in a structured JSON payload without mutating it."""
+    if not _has_untrusted_json_text(value, neutralize):
+        return value, False
+    return _clone_neutralized_json(value, neutralize), True
+
+
+def _neutralize_content_checked(content: object) -> tuple[object, bool]:
+    """Return ``(neutralized_content, changed)`` while preserving content shape.
+
+    Handles the shapes a ToolMessage content can take:
+
+    * plain ``str`` (what every built-in web tool returns today);
+    * a list of content blocks — bare ``str`` elements, any dict block carrying
+      a string ``"text"`` field (matching ``ToolOutputBudgetMiddleware`` and
+      ``PiiRedactionMiddleware``), and structured ``"json"`` payloads (all
+      nested string keys and values recursively neutralized without mutating
+      the input). Media and other non-text blocks pass through untouched.
     """
     # Imported lazily so this module can be loaded even when a test stubs the
     # input-sanitization module, and to mirror the codebase's deferred-import style.
     from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 
     if isinstance(content, str):
-        return neutralize_untrusted_tags(content)
+        neutralized = neutralize_untrusted_tags(content)
+        return neutralized, neutralized != content
     if isinstance(content, list):
         rebuilt: list[object] = []
+        changed = False
         for block in content:
             if isinstance(block, str):
-                rebuilt.append(neutralize_untrusted_tags(block))
-            elif isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
-                rebuilt.append({**block, "text": neutralize_untrusted_tags(block["text"])})
+                neutralized = neutralize_untrusted_tags(block)
+                changed = changed or neutralized != block
+                rebuilt.append(neutralized)
+            elif isinstance(block, dict):
+                updated_block = block
+                block_changed = False
+                if isinstance(block.get("text"), str):
+                    neutralized_text = neutralize_untrusted_tags(block["text"])
+                    if neutralized_text != block["text"]:
+                        updated_block = {**updated_block, "text": neutralized_text}
+                        block_changed = True
+                if "json" in block:
+                    neutralized_json, json_changed = _neutralize_json_value(block["json"], neutralize_untrusted_tags)
+                    if json_changed:
+                        updated_block = {**updated_block, "json": neutralized_json}
+                        block_changed = True
+                changed = changed or block_changed
+                rebuilt.append(updated_block)
             else:
                 rebuilt.append(block)
-        return rebuilt
-    return content
+        return (rebuilt, True) if changed else (content, False)
+    return content, False
+
+
+def _neutralize_content(content: object) -> object:
+    """Return *content* with untrusted tags neutralized, preserving its shape."""
+    return _neutralize_content_checked(content)[0]
 
 
 def _sanitize_tool_message(message: ToolMessage) -> ToolMessage:
     """Return a copy of *message* with its content neutralized, or the original."""
-    new_content = _neutralize_content(message.content)
-    if new_content == message.content:
+    new_content, changed = _neutralize_content_checked(message.content)
+    if not changed:
         return message
     new_kwargs = dict(message.additional_kwargs or {})
     append_tool_transform(new_kwargs, "sanitized", by="ToolResultSanitizationMiddleware")
@@ -114,7 +276,7 @@ def _sanitize_result(result: ToolMessage | Command) -> ToolMessage | Command:
         messages = update.get("messages")
         if isinstance(messages, list) and any(isinstance(m, ToolMessage) for m in messages):
             new_messages = [_sanitize_tool_message(m) if isinstance(m, ToolMessage) else m for m in messages]
-            if new_messages != messages:
+            if any(new is not old for new, old in zip(new_messages, messages, strict=True)):
                 return dc_replace(result, update={**update, "messages": new_messages})
     return result
 
