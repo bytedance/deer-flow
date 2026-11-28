@@ -1393,9 +1393,19 @@ def test_safe_extract_translates_optional_zstd_error(monkeypatch, tmp_path):
         safe_extract_skill_archive(_FailingZip(), dest)
 
 
+def _has_stdlib_zstd() -> bool:
+    if not hasattr(zipfile, "ZIP_ZSTANDARD"):
+        return False
+    try:
+        from compression import zstd
+    except ImportError:
+        return False
+    return hasattr(zstd, "ZstdError")
+
+
 @pytest.mark.skipif(
-    not hasattr(zipfile, "ZIP_ZSTANDARD"),
-    reason="requires Python 3.14+ ZIP_ZSTANDARD",
+    not _has_stdlib_zstd(),
+    reason="requires Python 3.14+ ZIP_ZSTANDARD and compression.zstd",
 )
 def test_safe_extract_rejects_corrupt_zstd_member(tmp_path):
     zip_path = tmp_path / "zstd.zip"
