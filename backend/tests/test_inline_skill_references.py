@@ -10,7 +10,7 @@ import pytest
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware, is_slash_skill_activation_reminder
 from deerflow.runtime.secret_context import (
     _SLASH_SECRET_SOURCE_KEY,
     _SLASH_SKILL_ACTIVATION_RUN_KEY,
@@ -86,10 +86,14 @@ def test_inline_batch_activates_once_with_owner_scoped_secrets_and_usage(catalog
     assert [entry["name"] for entry in usages] == names
     assert journal.record_skill_usage.call_count == count
     assert context[_SLASH_SKILL_ACTIVATION_RUN_KEY]
-    # The tool loop's next call sees the answered slash message in state.
+    # The tool loop's next call sees the answered slash message in state and
+    # still carries every selected skill, replayed without a second usage record.
     follow_up = original.override(messages=[*original.messages, response])
-    invoke(follow_up)
-    assert seen[1].messages == follow_up.messages
+    follow_up_response = invoke(follow_up)
+    assert seen[1].messages[1:] == follow_up.messages
+    assert is_slash_skill_activation_reminder(seen[1].messages[0])
+    assert seen[1].messages[0].content == reminder.content
+    assert key not in follow_up_response.additional_kwargs
     assert journal.record_skill_usage.call_count == count
     assert context[ACTIVE_SECRETS_CONTEXT_KEY] == {f"KEY_{i}": f"value-{i}" for i in range(count)}
 

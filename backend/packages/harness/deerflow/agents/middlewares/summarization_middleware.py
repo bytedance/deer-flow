@@ -848,12 +848,18 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         state: AgentState,
         *,
         force: bool = False,
+        runtime: Runtime | None = None,
     ) -> tuple[list[AnyMessage], list[AnyMessage], str | None, int] | None:
         messages = state["messages"]
         self._ensure_message_ids(messages)
 
         previous_summary = state.get("summary_text") if isinstance(state.get("summary_text"), str) else None
         trigger_messages = self._messages_for_trigger_count(messages, previous_summary)
+        # A slash skill replayed into every model call of its run lives only in
+        # the request, not in state. Count it so the trigger sees what the model will.
+        from deerflow.agents.middlewares.skill_activation_middleware import replayed_slash_activation_messages
+
+        trigger_messages = [*trigger_messages, *replayed_slash_activation_messages(messages, getattr(runtime, "context", None))]
         total_tokens = self.token_counter(trigger_messages)
         if not force and not self._should_summarize(trigger_messages, total_tokens):
             return None
@@ -991,7 +997,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         so it can be reported distinctly from "nothing to compact"; the automatic path
         leaves it False and swallows the failure, retrying on a later triggered turn.
         """
-        prepared = self._prepare_compaction(state, force=force)
+        prepared = self._prepare_compaction(state, force=force, runtime=runtime)
         if prepared is None:
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
@@ -1038,7 +1044,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         raise_on_failure: bool = False,
     ) -> ContextCompactionResult | None:
         """Async counterpart of :meth:`compact_state` (see it for ``raise_on_failure``)."""
-        prepared = self._prepare_compaction(state, force=force)
+        prepared = self._prepare_compaction(state, force=force, runtime=runtime)
         if prepared is None:
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
