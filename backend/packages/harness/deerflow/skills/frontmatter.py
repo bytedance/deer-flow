@@ -32,6 +32,45 @@ ALLOWED_FRONTMATTER_PROPERTIES = {
 # Delimiter whitespace must stay on its own line; do not consume body
 # indentation or accept a closing line that merely starts with three hyphens.
 _FRONTMATTER_RE = re.compile(r"^\ufeff?---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", re.DOTALL)
+_YAML_MERGE_TAG = "tag:yaml.org,2002:merge"
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects duplicate mapping keys."""
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeySafeLoader,
+    node: yaml.MappingNode,
+    deep: bool = False,
+) -> dict[Any, Any]:
+    """Construct a mapping only when every explicit key is unique."""
+    seen: set[Any] = set()
+    for key_node, _ in node.value:
+        if key_node.tag == _YAML_MERGE_TAG:
+            # SafeLoader expands merge keys after this constructor runs.
+            continue
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in seen
+        except TypeError:
+            # Let SafeLoader report non-hashable mapping keys itself.
+            continue
+        if duplicate:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate key {key!r}",
+                key_node.start_mark,
+            )
+        seen.add(key)
+    return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+
+
+_UniqueKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
 
 
 @dataclass(frozen=True)
@@ -56,7 +95,10 @@ def split_skill_markdown(content: str) -> tuple[SkillMarkdownParts | None, str |
 
     frontmatter_text = match.group(1)
     try:
-        metadata = yaml.safe_load(frontmatter_text)
+        metadata = yaml.load(  # noqa: S506 - fixed safe loader subclass
+            frontmatter_text,
+            Loader=_UniqueKeySafeLoader,
+        )
     except (yaml.YAMLError, ValueError) as exc:
         return None, f"Invalid YAML in frontmatter: {exc}"
     except AttributeError:
