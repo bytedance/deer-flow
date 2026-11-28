@@ -24,6 +24,25 @@ _PATTERNS = (
 )
 
 
+_DETERMINERS = {"a", "an", "the", "some", "any", "one", "another", "this", "that", "these", "those"}
+
+
+def _describes_a_kind_of_model(query: str) -> bool:
+    """Whether the query names a category rather than one configured chat model.
+
+    "Use a regression model to analyse ..." asks for an analysis method, not a
+    control: a model name never takes "a/an" plus a descriptive modifier, and a
+    query that does carry a version-like token ("the gpt5 model") may still be a
+    real name the catalog does not have. Chinese phrases such as "这个统计模型"
+    read the same way. Callers only consult this after the catalog had no match,
+    so a phrase that does name a configured model never reaches it.
+    """
+    words = re.findall(r"[a-z0-9][a-z0-9.+_-]*", query.casefold())
+    if words and words[0] in _DETERMINERS and words[-1].rstrip("s") == "model":
+        return not any(character.isdigit() for word in words for character in word)
+    return bool(re.fullmatch(r"(?:这个|那个|一个|一种|这类|那种|某)?[\u4e00-\u9fff]{0,6}模型", query.strip()))
+
+
 def _tokens(value: str) -> list[str]:
     # Keep decimal versions intact: 4.1 must not accidentally match 4.10.
     return [part for part in re.findall(r"[a-z]+|\d+(?:\.\d+)*|[\u4e00-\u9fff]+", value.casefold()) if part != "v"]
@@ -71,9 +90,11 @@ def resolve_model_control(text: str, models: list[Any], *, model_name: str | Non
             candidates = [model for model in models if _matches(model_name, model)]
     else:
         candidates = [model for model in models if _matches(query, model)]
-    # "Use Python to ..." is an ordinary task. Unknown versioned or explicitly
-    # named models, however, must not fall through to a misleading model reply.
-    if not candidates and model_name is None and not re.search(r"\bv\d|模型|\bmodel\b", query, re.IGNORECASE):
+    # "Use Python to ..." is an ordinary task, and so is "use a regression model
+    # to ...". Unknown versioned or explicitly named models, however, must not
+    # fall through to a misleading model reply.
+    names_a_model = bool(re.search(r"\bv\d|模型|\bmodel\b", query, re.IGNORECASE)) and not _describes_a_kind_of_model(query)
+    if not candidates and model_name is None and not names_a_model:
         return result
     offset = len(text) - len(text.lstrip()) + match.end()
     if match.groupdict().get("action") in {"处理", "计算", "回答", "分析", "生成", "写", "做"}:

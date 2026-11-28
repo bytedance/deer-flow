@@ -84,6 +84,28 @@ def test_ordinary_tasks_quotes_and_conditional_text_are_not_controls(text):
     assert resolve_model_control(text, [DS, OPUS])["status"] == "none"
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use a regression model to analyze these sales figures",
+        "Use a data model to design the database schema",
+        "Use the attached model to forecast next month's revenue",
+        "使用这个统计模型来分析这批销售数据",
+    ],
+)
+def test_a_kind_of_model_is_a_task_requirement_not_a_control(text):
+    result = resolve_model_control(text, [DS, OPUS])
+    assert result["status"] == "none"
+    # Nobody picked a model, so the whole instruction must reach the model.
+    assert text[result["task_offset"] :] == text
+
+
+def test_unknown_model_that_is_still_named_stays_unavailable():
+    result = resolve_model_control("Use the gpt5 model to analyze these sales figures", [DS])
+    assert result["status"] == "unavailable"
+    assert result["model_name"] is None
+
+
 def test_name_without_scope_requires_a_scope_choice():
     result = resolve_model_control("用 ds flash 帮我算一下", [DS, OPUS])
     assert result["status"] == "ambiguous"
