@@ -95,6 +95,8 @@ LLM title input, and the `/goal` evaluator's input. Memory admission,
 including pre-compaction flushes, also redacts
 detected identifiers in supported text/JSON content, parsed and invalid call arguments/error text,
 provider-raw/legacy function calls and supported user-content provenance.
+The user message that memory recall searches with is redacted before any
+memory backend receives it.
 It is off by default; enabled deployments supply a secret for stable, keyed
 value-derived placeholders. No token-to-raw mapping is persisted. Raw thread
 text and local fallback titles remain available for display; memory redaction

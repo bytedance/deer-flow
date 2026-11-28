@@ -101,7 +101,10 @@ excluded from memory extraction even when they contain visible text.
 DeerMem remains the default local backend. An opt-in `mem0` backend is also
 available for the hosted mem0 Platform API or API-compatible self-hosted
 servers. Its token-bearing `base_url` must use HTTPS by default; plaintext HTTP
-requires an explicit local-development opt-in. See the
+requires an explicit local-development opt-in. Automatic injection uses the
+current user message for a mem0 semantic search, redacted first when
+`pii_redaction` is enabled. When there is no message text, or no match fits the
+injection budget, it injects the most recent memories instead. See the
 [mem0 backend guide](../../backend/packages/harness/deerflow/agents/memory/backends/mem0/README.md).
 
 Malformed, undecodable, or excessively nested mem0 JSON responses, non-object

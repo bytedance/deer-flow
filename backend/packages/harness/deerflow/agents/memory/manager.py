@@ -299,8 +299,8 @@ class MemoryManager(BaseModel):
 
         ``query`` is an optional current-turn query hint. Backends that
         support query-aware ranking (DeerMem with
-        ``retrieval_relevance_enabled``) may rank injected facts against it;
-        other backends ignore it. ``None`` must preserve legacy behavior.
+        ``retrieval_relevance_enabled``, mem0 semantic search) may rank
+        injected facts against it; other backends ignore it. ``None`` must preserve legacy behavior.
 
         Implementations load their memory and format it however they choose;
         the returned string is injected verbatim by call sites. Format
