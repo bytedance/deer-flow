@@ -607,7 +607,8 @@ export function utcToZonedLocalInput(iso: string, timezone: string): string {
  * `run_at` as the agent sent it, usually a wall-clock time with no offset
  * ("2026-10-07T09:00:00") meant in the task's zone, the same way the server
  * reads it; reading it with `new Date()` would use the viewer's zone instead.
- * A value with an offset is already an instant and is returned unchanged.
+ * A value with an offset is already an instant. Hour-only offsets are expanded
+ * to ±HH:00 for browser parsing; other explicit offsets are returned unchanged.
  * A bare date ("2026-10-07") is midnight in the task's zone, as the server's
  * `datetime.fromisoformat` reads it; it is matched first because its trailing
  * "-07" would otherwise pass for a UTC offset.
@@ -621,19 +622,25 @@ export function onceRunAtInstant(runAt: string, timezone: string): string {
       return value;
     }
   }
+  // Reuse the local timestamp grammar for Python's optional minutes/seconds and
+  // comma fractions. Browsers need explicit seconds and offset minutes.
+  const local =
+    /^(\d{4}-\d{2}-\d{2})[T ](\d{2}(?::\d{2})?)(?::([0-5]\d))?([.,]\d+)?([+-]\d{2})?$/i.exec(
+      value,
+    );
+  const wallMinute = local ? String(local[2]).padEnd(5, ":00") : "";
+  if (local?.[5]) {
+    return `${local[1]}T${wallMinute}:${local[3] ?? "00"}${local[4]?.replace(",", ".") ?? ""}${local[5]}:00`;
+  }
   if (!value || /(?:Z|[+-]\d{2}(?::?\d{2})?)$/i.test(value)) {
     return value;
   }
-  const local =
-    /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::([0-5]\d))?([.,]\d+)?$/.exec(
-      value,
-    );
   if (!local) {
     return value;
   }
   try {
     const minute = zonedLocalToUtcIso(
-      `${local[1]}T${local[2]}`,
+      `${local[1]}T${wallMinute}`,
       timezone || "UTC",
     );
     // Offset selection uses the wall minute; retain the stored sub-minute

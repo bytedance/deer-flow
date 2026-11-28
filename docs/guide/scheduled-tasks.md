@@ -13,6 +13,15 @@ offset stays a local time in the task's timezone, so changing just the
 timezone keeps the same wall-clock time. Older tasks use the same response
 format, including after their last run.
 
+Stored timestamps with an explicit hour-only UTC offset (for example,
+`2026-12-12T09:30:00+08`) display the same time as `+08:00` in the summary and
+editor. This also covers comma fractions and omitted seconds, such as
+`2026-12-12T09:30:00,5+08` and `2026-12-12T09:30.5+08`; both denote
+`2026-12-12T01:30:00.5Z`. Opening the editor preserves the original stored
+timestamp spelling. The date/time separator may also be lowercase `t`. Hour-precision times
+such as `2026-12-12T09+08` use zero minutes and seconds and retain their
+original spelling when only the title is edited.
+
 Current MVP capabilities:
 
 - Manage tasks at `/workspace/scheduled-tasks`

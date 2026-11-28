@@ -608,6 +608,30 @@ describe("onceRunAtInstant", () => {
     );
   });
 
+  test.each([
+    ["2026-12-12T09+08", "2026-12-12T09:00:00+08:00"],
+    ["2026-12-12t09-05", "2026-12-12T09:00:00-05:00"],
+    ["2026-12-12T09+00", "2026-12-12T09:00:00+00:00"],
+    ["2026-12-12T09:30:00+08", "2026-12-12T09:30:00+08:00"],
+    ["2026-12-12t09:30:00+08", "2026-12-12T09:30:00+08:00"],
+    ["2026-12-12t09:30,5-05", "2026-12-12T09:30:00.5-05:00"],
+    ["2026-12-12T09:30:00-05", "2026-12-12T09:30:00-05:00"],
+    ["2026-12-12T09:30+00", "2026-12-12T09:30:00+00:00"],
+    ["2026-12-12T09:30:00,5+08", "2026-12-12T09:30:00.5+08:00"],
+    ["2026-12-12T09:30.5+08", "2026-12-12T09:30:00.5+08:00"],
+    ["2026-12-12T09:30,5-05", "2026-12-12T09:30:00.5-05:00"],
+    ["2026-12-12 09:30:45,123+00", "2026-12-12T09:30:45.123+00:00"],
+    ["2026-12-12T09:30:45.123+08", "2026-12-12T09:30:45.123+08:00"],
+  ])(
+    "normalizes an hour-only UTC offset for browser parsing: %s",
+    (value, expected) => {
+      expect(onceRunAtInstant(value, "America/New_York")).toBe(expected);
+      expect(Date.parse(onceRunAtInstant(value, "America/New_York"))).toBe(
+        Date.parse(expected),
+      );
+    },
+  );
+
   test("a run_at with an offset is already an instant", () => {
     for (const value of [
       "2026-10-07T01:00:00Z",
@@ -625,6 +649,30 @@ describe("describeTaskSchedule", () => {
     schedule_spec: { cron },
     timezone,
   });
+
+  test.each([
+    "2026-12-12T09:30:00+08",
+    "2026-12-12T09:30:00,5+08",
+    "2026-12-12T09:30.5+08",
+    "2026-12-12t09:30:00+08",
+  ])(
+    "shows the same one-time summary for short and full offsets: %s",
+    (runAt) => {
+      const task = {
+        schedule_type: "once" as const,
+        schedule_spec: { run_at: runAt },
+        timezone: "Asia/Shanghai",
+      };
+      const summary = describeTaskSchedule(task, "en-US");
+      expect(summary).toEqual(
+        describeTaskSchedule(
+          { ...task, schedule_spec: { run_at: "2026-12-12T09:30:00+08:00" } },
+          "en-US",
+        ),
+      );
+      expect(summary.text).toContain("09:30");
+    },
+  );
 
   test("Mon–Fri reads as weekdays, with the cron only in raw", () => {
     expect(describeTaskSchedule(cronTask("0 9 * * 1-5"), "en-US")).toEqual({
