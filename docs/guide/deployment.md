@@ -258,7 +258,7 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 
 > Cancelling a model recovery probe, including while it is queued or waiting to retry, lets the next call check whether the provider has recovered. Cancellation does not count as a provider failure or release another call's active recovery probe.
 >
-> Model retries honor valid provider `Retry-After` hints up to 24 hours, including waits longer than the local backoff cap. Malformed, non-finite, or over-limit hints use normal backoff instead. This applies to numeric and HTTP-date hints in LLM error handling and Codex's retry path, and integer-second hints in Claude's retry path. Codex prioritizes numeric `retry-after-ms` hints; past HTTP-date hints retry immediately.
+> Model retries honor valid provider hints up to 24 hours, including waits longer than the local backoff cap. LLM error handling accepts numeric and HTTP-date `Retry-After` hints. Claude and Codex prefer a valid `retry-after-ms` hint in milliseconds, then check `Retry-After` for seconds (including fractional values) or an HTTP date. Past HTTP-date hints allow immediate retry. When no valid hint fits the 24-hour limit, retries use local backoff.
 >
 > With lease heartbeat enabled, a transient RunStore renewal error is retried only until the last confirmed lease expires; the stale worker then cancels local execution and suppresses checkpoint, completion-hook, delivery-receipt, and thread-status finalization. A remote tool side effect already in flight may still be outside local cancellation.
 >
