@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 from io import BytesIO
 
 from PIL import Image, ImageOps
@@ -53,7 +54,9 @@ def generate_ppt(
 
     for i, image_path in enumerate(slide_images):
         if not os.path.exists(image_path):
-            return f"Error: Slide image not found: {image_path}"
+            # Raising keeps the caller from mistaking a status string for a
+            # presentation that was written.
+            raise FileNotFoundError(f"Slide image not found: {image_path}")
 
         # Add a blank slide
         slide = prs.slides.add_slide(blank_layout)
@@ -166,4 +169,5 @@ if __name__ == "__main__":
             )
         )
     except Exception as e:
-        print(f"Error while generating presentation: {e}")
+        print(f"Error while generating presentation: {e}", file=sys.stderr)
+        sys.exit(1)

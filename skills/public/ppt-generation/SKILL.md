@@ -160,6 +160,10 @@ Parameters:
 - `--slide-images`: Absolute paths to slide images in order (required, space-separated)
 - `--output-file`: Absolute path to output PPTX file (required)
 
+If a slide image is missing, the plan cannot be read, or composition fails,
+the command writes the diagnostic to stderr and exits with status 1 instead of
+reporting success.
+
 [!NOTE]
 Do NOT read the python file, just call it with the parameters.
 
