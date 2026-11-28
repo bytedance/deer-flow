@@ -148,8 +148,10 @@ def compose_with_extensions(
     resolved = extensions if extensions is not None else get_agent_build_extensions()
 
     if not resolved.has_middleware_contributors:
-        assert_ordering(middlewares, {})
-        return middlewares if isinstance(middlewares, list) else list(middlewares)
+        result = middlewares if isinstance(middlewares, list) else list(middlewares)
+        result = _with_model_headers(result, resolved)
+        assert_ordering(result, {})
+        return result
 
     if ctx is None:
         raise ValueError("AgentBuildContext is required when middleware extensions are loaded")
@@ -165,7 +167,30 @@ def compose_with_extensions(
         isolation_diagnostic_sink=record_runtime_diagnostic,
     )
     _record_diagnostics(diagnostics)
+    result = _with_model_headers(result, resolved)
     assert_ordering(result, provenance)
+    return result
+
+
+def _with_model_headers(middlewares: list[object], extensions: LoadedExtensions) -> list[object]:
+    """Append the host-owned header middleware innermost, before Clarification.
+
+    The provider view must describe the *final* request, so this middleware has
+    to be inner of every request-transforming middleware. ``ClarificationMiddleware``
+    is kept last in the list because it ends the tool loop, but it only runs
+    ``after_model`` hooks and never touches a model request, so sitting directly
+    outside it still gives the provider the final request.
+    """
+    if not extensions.has_model_headers:
+        return middlewares
+
+    from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+    from deerflow.extensions.model_headers import ModelHeadersMiddleware
+
+    middleware = ModelHeadersMiddleware(extensions.model_headers)
+    result = list(middlewares)
+    index = next((position for position, item in enumerate(result) if isinstance(item, ClarificationMiddleware)), len(result))
+    result.insert(index, middleware)
     return result
 
 

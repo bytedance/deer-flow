@@ -164,7 +164,7 @@ LangChain requires unique middleware names and uses them as trace identities and
 
 ## Common pitfalls
 
-- **Expecting to modify calls.** Wrap hooks are observe-only in this release. For request-shaping behavior, use `extensions.middlewares` (see [Customization](/docs/harness/customization)), which imposes no wrapper, and accept that it is trusted configuration rather than a contract.
+- **Expecting to modify calls.** Wrap hooks are observe-only in this release. For request-shaping behavior, use `extensions.middlewares` (see [Customization](/docs/harness/customization)), which imposes no wrapper, and accept that it is trusted configuration rather than a contract. To add HTTP transport headers per request, use `registry.model_headers()` (see [Model request headers](/docs/harness/extensions/reference#model-request-headers)) instead of a wrap hook.
 - **Implementing only `wrap_tool_call`.** Gateway runs take the async path, so a sync-only middleware sees nothing there.
 - **Heavy work in `contribute_middlewares()`.** It runs on every agent assembly. Build expensive clients once in `install()`, or lazily in the app store.
 - **Depending on the concrete anchor.** Choose the placement by the guarantee you need, not by the neighbor it happens to sit next to today.

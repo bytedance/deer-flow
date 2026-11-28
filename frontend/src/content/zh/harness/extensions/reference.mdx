@@ -41,6 +41,7 @@ def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None: ...
 | 方法                                                       | 返回值  | 注册内容                                                                     |
 | ---------------------------------------------------------- | ------- | ---------------------------------------------------------------------------- |
 | `middlewares(contributor: MiddlewareContributor)`          | `None`  | 一个中间件贡献者                                                             |
+| `model_headers(provider: ModelHeadersProvider)`            | `None`  | 主线模型请求的传输头（Lead 与子 Agent 链）                                   |
 | `task_lifecycle(contributor: TaskLifecycleContributor)`    | `None`  | Lead 运行和子 Agent 的开始、结束钩子                                         |
 | `system_model_observer(observer: SystemModelCallObserver)` | `None`  | DeerFlow 自有模型调用的观察者                                                |
 | `agent_assembly_observer(observer: AgentAssemblyObserver)` | `None`  | 已组装 Agent 的观察者                                                        |
@@ -105,6 +106,54 @@ class MiddlewareContributor(Protocol):
 | `budget_warn_fraction`  | `float \| None` | `None`  |
 | `budget_hard_fraction`  | `float \| None` | `None`  |
 | `max_subagents_per_run` | `int \| None`   | `None`  |
+
+## 模型请求头
+
+### `ModelHeadersProvider`
+
+```python
+class ModelHeadersProvider(Protocol):
+    def provide_model_headers(
+        self, view: ModelRequestView
+    ) -> Mapping[str, str] | None: ...
+```
+
+为最终发给 provider 的请求提供 HTTP 传输头。宿主在模型调用前、于事件循环内直接调用它，每次 provider 尝试调用一次（重试会重新进入），并把返回的映射合并进请求的 `extra_headers`。这是把逐请求 HTTP 头送上线路的受支持方式：中间件贡献无法改写请求，而 `extensions.middlewares` 属于受信任配置而非契约。
+
+- **只允许头。** 不能修改消息、工具、系统提示或请求的其他字段；除 SDK 的头处理外，请求体逐字节不变。
+- **两条链上的每次主线调用。** 对 Lead 与子 Agent 的模型请求生效；DeerFlow 自有的辅助调用（标题、摘要、goal、记忆）不经过该链，因此不会被调用。
+- **后注册者覆盖先注册者。** 按注册顺序调用，后者覆盖同名的前者；两者都会覆盖上游中间件已设置的 `extra_headers`。
+- **建议性、fail-open。** provider 抛错、返回非映射、或返回键/值不是字符串的条目，都会被跳过并记警告，模型调用照常进行。实现必须快速，且不得做阻塞 I/O。
+- **重试复用同一视图。** 同一次逻辑调用在每次重试时都会重新进入 provider；同一请求返回同样的头。
+
+### `ModelRequestView`
+
+```python
+@dataclass(frozen=True)
+class ModelRequestView:
+    model_name: str | None = None
+    model: Any = None
+    messages: Sequence[Any] = ()
+    system_message: Any = None
+    tools: Sequence[Any] = ()
+    state: Mapping[str, Any] = field(default_factory=dict)
+    runtime: Any = None
+```
+
+provider 即将收到的请求的只读快照，在所有请求变换中间件运行之后构建。
+
+| 成员 | 类型 | 含义 |
+| --- | --- | --- |
+| `model_name` | `str \| None` | 解析出的模型名（`model_name` / `model` / `model_id`） |
+| `model` | `Any` | 在用的 chat model 实例；只读使用 |
+| `messages` | `Sequence[Any]` | 输入消息，不含系统消息 |
+| `system_message` | `Any` | 系统消息，可能为 `None` |
+| `tools` | `Sequence[Any]` | 本次请求绑定的工具 |
+| `state` | `Mapping[str, Any]` | 已分离、深度只读的 Agent 状态 |
+| `runtime` | `Any` | 本次调用的 LangGraph runtime |
+| `message_count` | `int`（属性） | `len(messages)` |
+| `system_present` | `bool`（属性） | 是否有系统消息 |
+| `tool_names` | `tuple[str, ...]`（属性） | 绑定顺序的工具名 |
 
 ## 状态
 
@@ -553,5 +602,6 @@ class ReleasePolicyProvider(Protocol):
 | 0.2.8 | [#6920](https://github.com/bytedance/deer-flow/pull/6920)、[#5645](https://github.com/bytedance/deer-flow/pull/5645)、[#7075](https://github.com/bytedance/deer-flow/pull/7075) | `AgentRuns.configuration_evidence()`、`read_artifact()`、`configuration_revision()`，以及 `ActionContext.interaction`（#6920）。已完成运行的证据，以及由宿主执行的已有自定义技能更新：`ExtensionRuntimeDeps.completed_run_evidence` 和 `skill_mutations`，以及 `CompletedRunEvidenceReader`、`CompletedRunSnapshot`、`CompletedRunEvent`、`CompletedRunEventPage`、`EvidenceLimits`、`SkillMutationService`、`MutationCapabilities`、`Proposal`、`ProposalBundle`、`BundleFile`、`Operation`、`AssessmentRef`、`AssetRevision`、`HostCheckResult`、`SkillRevisionView` 和共用的 `HostCapabilityError`（#5645）。`configuration_revision()` 的 `durable` 参数（#7075） |
 | 0.2.9 | [#7138](https://github.com/bytedance/deer-flow/pull/7138) | `ExecutionFence`，以及 `AgentRuns.start()` 和 `cancel()` 的 `execution_fence` 参数 |
 | 0.2.10 | [#7729](https://github.com/bytedance/deer-flow/pull/7729)、[#7831](https://github.com/bytedance/deer-flow/pull/7831) | `AgentRuns.send_input()`、`list_inputs()`、`authorize_control()`、`dispatch_input()`（#7729）。`CompactionEvent.task_id`、`run_id`、`thread_id`；压缩观察者收到活跃的任务存储，每个任务存储都带有自己的 `TaskInfo`（#7831） |
+| 0.2.14 | [#8711](https://github.com/bytedance/deer-flow/pull/8711) | 模型请求头：`ExtensionRegistry.model_headers()`，以及 `ModelHeadersProvider`、`ModelRequestView` |
 
 至今没有任何版本移除过公开名称。
