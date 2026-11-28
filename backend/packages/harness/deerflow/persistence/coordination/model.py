@@ -3,7 +3,7 @@
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Double, ForeignKey, ForeignKeyConstraint, Index, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Double, ForeignKey, ForeignKeyConstraint, Index, LargeBinary, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -26,6 +26,7 @@ class CoordinationTaskRow(Base):
         UniqueConstraint("owner_id", "request_id", name="uq_coord_task_request"),
         Index("ix_coord_tasks_owner_root", "owner_id", "root_id"),
         Index("ix_coord_tasks_owner_parent", "owner_id", "parent_id"),
+        Index("ix_coord_tasks_owner_created", "owner_id", "created_at", "id", sqlite_where=text("parent_id IS NULL"), postgresql_where=text("parent_id IS NULL")),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

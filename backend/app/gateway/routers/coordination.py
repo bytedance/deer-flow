@@ -1,5 +1,6 @@
 """Session-authorized task execution shared by coordination entry points."""
 
+from datetime import datetime
 from hashlib import sha256
 from pathlib import PurePosixPath
 from typing import Annotated
@@ -37,6 +38,16 @@ class CreateWorkerTask(BaseModel):
     run: WorkerRunSettings | None = None
 
 
+class WorkerTaskSummary(BaseModel):
+    id: str
+    objective: str
+    project_id: str | None
+    status: TaskStatus
+    run_settings: dict[str, int | bool] | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class WorkerInput(BaseModel):
     request_id: RequestId
     content: TaskText
@@ -66,6 +77,19 @@ async def create_worker_task(body: CreateWorkerTask, request: Request):
         return await await_drained(dispatch())
     except (TaskConflict, TaskNotFound, AgentRunError) as exc:
         raise worker_error(exc) from exc
+
+
+@router.get("", response_model=list[WorkerTaskSummary])
+@require_permission("runs", "read")
+async def list_worker_tasks(
+    request: Request,
+    status: TaskStatus | None = None,
+    project_id: str | None = Query(default=None, min_length=1, max_length=64),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=2**63 - 1),
+):
+    service, owner, _runs = worker_context(request)
+    return await service.repo.list_root_tasks(owner, status=status, project_id=project_id, limit=limit, offset=offset)
 
 
 @router.get("/{task_id}")

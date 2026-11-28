@@ -83,6 +83,26 @@ class CoordinationTaskRepository:
         async with self._sessions() as session:
             return _snapshot(await self._lookup(session, owner_id, task_id))
 
+    async def list_root_tasks(
+        self,
+        owner_id: str,
+        *,
+        limit: int,
+        offset: int,
+        status: TaskStatus | None = None,
+        project_id: str | None = None,
+    ) -> list[dict]:
+        if not 1 <= limit <= 100 or not 0 <= offset <= 2**63 - 1:
+            raise ValueError("Invalid task page")
+        query = select(CoordinationTaskRow).where(CoordinationTaskRow.owner_id == owner_id, CoordinationTaskRow.parent_id.is_(None))
+        if status is not None:
+            query = query.where(CoordinationTaskRow.status == status)
+        if project_id is not None:
+            query = query.where(CoordinationTaskRow.project_id == project_id)
+        query = query.order_by(CoordinationTaskRow.created_at.desc(), CoordinationTaskRow.id.desc()).limit(limit).offset(offset)
+        async with self._sessions() as session:
+            return [_snapshot(row) for row in await session.scalars(query)]
+
     async def create(
         self,
         owner_id: str,

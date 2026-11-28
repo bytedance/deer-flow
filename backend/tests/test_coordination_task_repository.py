@@ -2,6 +2,8 @@
 
 import asyncio
 import os
+from datetime import UTC, datetime, timedelta
+from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
@@ -53,6 +55,14 @@ async def repo(database):
     engine, backend, schema = database
     await bootstrap.bootstrap_schema(engine, backend=backend, postgres_schema=schema)
     return CoordinationTaskRepository(async_sessionmaker(engine))
+
+
+async def _assert_task_list_index(engine):
+    async with engine.connect() as conn:
+        indexes = await conn.run_sync(lambda sync: inspect(sync).get_indexes("coord_tasks"))
+    index = next(index for index in indexes if index["name"] == "ix_coord_tasks_owner_created")
+    assert index["column_names"] == ["owner_id", "created_at", "id"]
+    assert str(index["dialect_options"][f"{engine.dialect.name}_where"]).strip("()") == "parent_id IS NULL"
 
 
 async def _finish(repo, task, *, covered_input_seq=None, outcome=TaskStatus.SUCCEEDED):
@@ -180,6 +190,61 @@ async def test_concurrent_replay_and_owner_isolation(repo):
 
 
 @pytest.mark.asyncio
+async def test_root_task_listing_filters_before_paging_and_breaks_timestamp_ties(repo, database, monkeypatch):
+    created_at = datetime(2026, 11, 24, tzinfo=UTC)
+    clock = Mock()
+    clock.now.return_value = created_at
+    monkeypatch.setattr("deerflow.persistence.coordination.sql.datetime", clock)
+    old = await repo.create("alice", request_id="old", objective="Earlier", project_id="project")
+    old = await repo.start("alice", old["id"], expected_revision=old["revision"])
+
+    clock.now.return_value = created_at + timedelta(seconds=1)
+    settings = {"recursion_limit": 400, "thinking_enabled": False}
+    recent = await repo.create("alice", request_id="recent", objective="Review", project_id="project", run_settings=settings)
+    other_project = await repo.create("alice", request_id="other-project", objective="Unassigned")
+    await repo.create("alice", request_id="child", objective="Child work", parent_id=old["id"])
+    await repo.create("bob", request_id="other-owner", objective="Other owner", project_id="project")
+
+    recent_ids = sorted([recent["id"], other_project["id"]], reverse=True)
+    engine, backend, _ = database
+    await _assert_task_list_index(engine)
+    statements = []
+
+    def record_statement(_conn, _cursor, statement, parameters, _context, _executemany):
+        statements.append((statement, parameters))
+
+    event.listen(engine.sync_engine, "before_cursor_execute", record_statement)
+    try:
+        first_page = await repo.list_root_tasks("alice", limit=2, offset=0)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", record_statement)
+    statement, parameters = statements[0]
+    if backend == "sqlite":
+        async with engine.connect() as conn:
+            plan = await conn.exec_driver_sql("EXPLAIN QUERY PLAN " + statement, parameters)
+            details = [row[3] for row in plan]
+        assert any("ix_coord_tasks_owner_created" in detail for detail in details)
+        assert not any("TEMP B-TREE" in detail for detail in details)
+    else:
+        async with engine.begin() as conn:
+            # Tiny fixtures can favor sorting; verify the sort-free index path.
+            await conn.execute(text("SET LOCAL enable_sort = off"))
+            result = await conn.exec_driver_sql("EXPLAIN (FORMAT JSON) " + statement, parameters)
+            plan = result.scalar_one()[0]["Plan"]
+        scan = plan["Plans"][0]
+        assert scan.get("Index Name") == "ix_coord_tasks_owner_created", plan
+        assert scan["Scan Direction"] == "Backward"
+    assert [task["id"] for task in first_page] == recent_ids
+    assert next(task["run_settings"] for task in first_page if task["id"] == recent["id"]) == settings
+    assert [task["id"] for task in await repo.list_root_tasks("alice", limit=2, offset=2)] == [old["id"]]
+    assert [task["id"] for task in await repo.list_root_tasks("alice", project_id="project", limit=1, offset=1)] == [old["id"]]
+    running = await repo.list_root_tasks("alice", project_id="project", status=TaskStatus.RUNNING, limit=1, offset=0)
+    assert [task["id"] for task in running] == [old["id"]]
+    assert running[0]["run_settings"] is None
+    assert await repo.list_root_tasks("alice", project_id="missing", limit=2, offset=0) == []
+
+
+@pytest.mark.asyncio
 async def test_dependencies_release_in_order_and_completion_covers_current_input(repo):
     root = await repo.create("alice", request_id="root", project_id="project", objective="Release")
     first = await repo.create("alice", request_id="a", parent_id=root["id"], objective="Research")
@@ -269,7 +334,8 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
     previous = "0059_coordination_grants"
     run_settings_revision = "0060_coordination_run_settings"
     scheduled_task_subagents_revision = "0063_scheduled_task_subagents"
-    revision = "0064_coordination_channel_origin"
+    channel_origin_revision = "0064_coordination_channel_origin"
+    revision = "0065_coord_task_list_index"
     await asyncio.to_thread(command.upgrade, config, "0055_thread_shares")
     await asyncio.to_thread(command.upgrade, config, previous)
     async with engine.begin() as conn:
@@ -283,6 +349,7 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
     await asyncio.to_thread(command.upgrade, config, run_settings_revision)
     await asyncio.to_thread(command.upgrade, config, scheduled_task_subagents_revision)
     await asyncio.to_thread(command.upgrade, config, revision)
+    await _assert_task_list_index(engine)
     async with engine.connect() as conn:
 
         def diff(sync):
@@ -304,6 +371,36 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
     assert configured["coordinator"] is True
     assert (await repo.get("alice", configured["id"]))["run_settings"] == settings
 
+    task_list_index = next(index for index in Base.metadata.tables["coord_tasks"].indexes if index.name == "ix_coord_tasks_owner_created")
+    async with engine.connect() as conn:
+        tables_before = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
+        columns_before = await conn.run_sync(lambda sync: {item["name"] for item in inspect(sync).get_columns("coord_tasks")})
+        indexes_before = await conn.run_sync(lambda sync: {index["name"] for index in inspect(sync).get_indexes("coord_tasks")})
+    assert "mcp_agent_grants" in tables_before
+    assert task_list_index.name in indexes_before
+
+    await asyncio.to_thread(command.downgrade, config, channel_origin_revision)
+    async with engine.begin() as conn:
+        tables_after = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
+        columns_after = await conn.run_sync(lambda sync: {item["name"] for item in inspect(sync).get_columns("coord_tasks")})
+        indexes_after = await conn.run_sync(lambda sync: {index["name"] for index in inspect(sync).get_indexes("coord_tasks")})
+        assert tables_after == tables_before
+        assert columns_after == columns_before
+        assert indexes_after == indexes_before - {task_list_index.name}
+        assert "channel_origin" in columns_after
+        scheduled_columns = await conn.run_sync(lambda sync: {column["name"] for column in inspect(sync).get_columns("scheduled_tasks")})
+        assert "subagent_enabled" in scheduled_columns
+        # Retry an upgrade interrupted after creating the index, before stamping.
+        await conn.run_sync(task_list_index.create)
+    assert await repo.get("alice", configured["id"]) == configured
+    await asyncio.to_thread(command.upgrade, config, revision)
+    async with engine.begin() as conn:
+        # Likewise, a downgrade can be interrupted after dropping the index.
+        await conn.run_sync(task_list_index.drop)
+    await asyncio.to_thread(command.downgrade, config, channel_origin_revision)
+    await asyncio.to_thread(command.upgrade, config, revision)
+    await _assert_task_list_index(engine)
+
     await asyncio.to_thread(command.downgrade, config, scheduled_task_subagents_revision)
     async with engine.connect() as conn:
         columns = await conn.run_sync(lambda sync: {item["name"] for item in inspect(sync).get_columns("coord_tasks")})
@@ -313,6 +410,7 @@ async def test_coordination_migration_matches_model_and_downgrades(database):
         assert "subagent_enabled" in scheduled_columns
         assert "coordinator" in columns
     await asyncio.to_thread(command.upgrade, config, revision)
+    await _assert_task_list_index(engine)
     assert (await repo.get("alice", configured["id"]))["coordinator"] is True
 
     await asyncio.to_thread(command.downgrade, config, run_settings_revision)
