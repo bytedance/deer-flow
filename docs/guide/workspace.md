@@ -35,6 +35,10 @@ message and **Stop current task** while a response is streaming, in the
 workspace language. Use the separate **Send update** button to queue or steer
 a running task when those controls are available.
 
+If a chat cannot reconnect to a running task's live output, it keeps checking
+the task's status. When the task ends, the chat stops showing it as running and
+loads its final messages without a page reload.
+
 ## Search conversations and messages
 
 Use **Search** in the sidebar or **⌘K / Ctrl+K** to find conversation titles and

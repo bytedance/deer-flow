@@ -476,6 +476,7 @@ const ACTIVE_RUN_STATUSES = new Set(["pending", "running"]);
 const ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS = [1_000, 2_000] as const;
 const MAX_ACTIVE_RUN_REJOIN_ATTEMPTS =
   ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS.length + 1;
+const UNFOLLOWED_ACTIVE_RUN_POLL_MS = 2_000;
 
 type ActiveRunRejoinState = {
   attempts: number;
@@ -2221,8 +2222,12 @@ export function useThreadStream({
     enabled: !isMock,
     pendingSupersededRunIds,
   });
+  const [pollUnfollowedActiveRun, setPollUnfollowedActiveRun] = useState(false);
   const runsQuery = useThreadRuns(onStreamThreadId ?? undefined, {
     enabled: !isMock,
+    refetchInterval: pollUnfollowedActiveRun
+      ? UNFOLLOWED_ACTIVE_RUN_POLL_MS
+      : false,
   });
   const activeRunId = useMemo(
     () =>
@@ -2886,6 +2891,66 @@ export function useThreadStream({
     },
     [onStreamThreadId],
   );
+
+  // A run that no stream follows gets no onFinish: recovery gave up on it, or
+  // the Gateway cannot stream it. Either source may be the one that knows the
+  // run (the inputs read covers a failed runs read), so watch the known run:
+  // poll the runs read, and refresh the thread as a finish would once the run
+  // leaves the active set or the runs read reports it ended.
+  const unfollowedActiveRunId =
+    !isThreadLoading &&
+    knownActiveRunId &&
+    !completedRunIdsRef.current.has(knownActiveRunId)
+      ? knownActiveRunId
+      : null;
+  const runs = runsQuery.data;
+  const unfollowedActiveRunRef = useRef<{
+    threadId: string;
+    runId: string;
+  } | null>(null);
+  useEffect(() => {
+    const previous = unfollowedActiveRunRef.current;
+    const previousRunId =
+      previous && previous.threadId === onStreamThreadId
+        ? previous.runId
+        : null;
+    // A later runs read can lag and report an ended run as running again, and
+    // the inputs read can still name it. Remember an end the runs read
+    // confirms, so neither can rejoin the run or make the chat busy again.
+    const endedRunIds = [previousRunId, unfollowedActiveRunId].filter(
+      (runId): runId is string =>
+        !!runId &&
+        !!runs?.some(
+          (run) =>
+            run.run_id === runId &&
+            !ACTIVE_RUN_STATUSES.has(String(run.status)),
+        ),
+    );
+    for (const runId of endedRunIds) {
+      completedRunIdsRef.current.add(runId);
+    }
+    unfollowedActiveRunRef.current =
+      onStreamThreadId &&
+      unfollowedActiveRunId &&
+      !endedRunIds.includes(unfollowedActiveRunId)
+        ? { threadId: onStreamThreadId, runId: unfollowedActiveRunId }
+        : null;
+    setPollUnfollowedActiveRun(unfollowedActiveRunRef.current !== null);
+    if (
+      onStreamThreadId &&
+      (endedRunIds.length > 0 ||
+        (previousRunId !== null && previousRunId !== knownActiveRunId))
+    ) {
+      invalidateStoppedThreadCaches(queryClient, onStreamThreadId, isMock);
+    }
+  }, [
+    isMock,
+    knownActiveRunId,
+    onStreamThreadId,
+    queryClient,
+    runs,
+    unfollowedActiveRunId,
+  ]);
 
   const stopThread = useCallback(async () => {
     settlePendingApproval(false);
@@ -4380,7 +4445,10 @@ export function useInfiniteThreads(
 
 export function useThreadRuns(
   threadId?: string,
-  { enabled = true }: { enabled?: boolean } = {},
+  {
+    enabled = true,
+    refetchInterval = false,
+  }: { enabled?: boolean; refetchInterval?: number | false } = {},
 ) {
   const apiClient = getAPIClient();
   return useQuery<AppRun[]>({
@@ -4393,6 +4461,7 @@ export function useThreadRuns(
       return response as AppRun[];
     },
     enabled: enabled && Boolean(threadId),
+    refetchInterval,
     refetchOnWindowFocus: false,
     retry: false,
   });

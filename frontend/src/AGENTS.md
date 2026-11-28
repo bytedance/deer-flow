@@ -29,9 +29,9 @@ pnpm test:e2e                    # Playwright, for anything that depends on a re
 - **A stream gap is not the end of a run.** When the server reports a replay gap,
   reload durable state and rejoin. Do not finish the turn and do not cancel the
   backend run.
-- **Do not rejoin a completed run.** Recovery for a reopened chat lists active
-  runs, and that read can be stale. Run IDs that the mounted hook has seen complete
-  stay excluded.
+- **Do not rejoin a completed run.** Recovery's runs read can be stale, so run IDs
+  the mounted hook has seen complete stay excluded. A run no stream follows gets
+  no `onFinish`; poll that read for its end.
 - **Unsupported stream modes fail before the request.** Forwarding part of the
   list, or defaulting to `values`, hides a caller bug.
 - **Stream updates use the SDK `throttle: true` mode.** A numeric delay changes
