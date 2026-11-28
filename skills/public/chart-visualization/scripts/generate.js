@@ -120,8 +120,7 @@ async function main() {
   let failed = false;
 
   for (const item of specs) {
-    const tool = item.tool;
-    const args = item.args || {};
+    const tool = item?.tool;
 
     if (!tool) {
       console.error(
@@ -138,6 +137,7 @@ async function main() {
       continue;
     }
 
+    const args = item.args || {};
     const isMapChartTool = [
       "generate_district_map",
       "generate_path_map",
