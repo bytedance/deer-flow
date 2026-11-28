@@ -11,6 +11,20 @@ from typing import Any, Literal
 
 ModelScope = Literal["task", "turn", "conversation"]
 
+# A version next to one of these heads names an API, SDK or service, not a
+# chat model: "v2 of the API", "v3 SDK for this turn", "API v12 to fetch the
+# data", "这次用 v2 接口".
+_NON_MODEL_VERSION = re.compile(
+    # Latin nouns end on a word boundary so "Serverless" (a product tier) is not
+    # read as "server"; the Chinese forms have no such boundary.
+    r"\bv\d+(?:\.\d+)*(?:\s+of)?\s+(?:the\s+)?(?:apis?|sdks?|endpoints?|servers?|services?|interfaces?|clients?|versions?)\b"
+    r"|\b(?:apis?|sdks?|endpoints?|servers?|services?|interfaces?|clients?)\s+v\d+(?:\.\d+)*"
+    # "服务版" is a product tier, not a service reference, so the compact Chinese
+    # branch stops before that suffix.
+    r"|\bv\d+(?:\.\d+)*(?:\s+of)?\s*(?:接口|服务)(?!版)",
+    re.IGNORECASE,
+)
+
 _PATTERNS = (
     ("conversation", r"^(?:请)?(?:以后|今后|接下来)(?:这个对话|这段对话|这里)?(?:都|一直|默认)?(?:用|使用|改用|换成)\s*(.+?)(?:模型)?(?:[，。：:]|$)"),
     ("conversation", r"^(?:please\s+)?from now on\s+use\s+(.+?)(?:[,:]|$)"),
@@ -49,6 +63,33 @@ def _matches(query: str, model: Any) -> bool:
     return False
 
 
+def _names_a_model(query: str, scope: ModelScope | None) -> bool:
+    """A model noun names a choice only when the request says so.
+
+    A name carrying a version ("GPT-4", "Qwen3") is a product wherever it
+    appears, and so is a two-word capitalised name ("Claude Sonnet",
+    "Gemini Flash"). Statistical wording is not: the broad "use … to …" grammar
+    reads "a Bayesian model", "an ARIMA model" and "a Monte Carlo model" as
+    task text, and the indefinite article marks them as common nouns. A single
+    capitalised word stays text too unless the request is scoped to this turn or
+    the conversation ("for this turn", "这次用", "以后"); no grammar separates
+    "the Bayesian model" from "the Claude model", so the scoped form is where a
+    bare name counts.
+    """
+    if not re.search(r"\bmodels?\b|模型", query, re.IGNORECASE):
+        return False
+    if re.search(r"[A-Za-z][A-Za-z0-9._\-]*\d", query):
+        return True
+    # A two-word family and tier directly before the noun ("the Claude Sonnet
+    # model"). An indefinite article marks a common noun instead ("a Monte
+    # Carlo model").
+    if not re.match(r"(?:a|an)\s", query) and re.search(r"\b[A-Z][a-z][A-Za-z0-9._\-]*\s+[A-Z][a-z][A-Za-z0-9._\-]*\s+models?\b", query):
+        return True
+    if scope not in {"turn", "conversation"}:
+        return False
+    return re.search(r"[A-Z][A-Za-z0-9._\-]*|[A-Za-z][A-Za-z0-9._\-]*\s*模型", query) is not None
+
+
 def resolve_model_control(text: str, models: list[Any], *, model_name: str | None = None, scope: ModelScope | None = None) -> dict[str, Any]:
     """Return a read-only decision; explicit selections are checked afresh.
 
@@ -71,16 +112,20 @@ def resolve_model_control(text: str, models: list[Any], *, model_name: str | Non
             candidates = [model for model in models if _matches(model_name, model)]
     else:
         candidates = [model for model in models if _matches(query, model)]
-    # "Use Python to ..." is an ordinary task. Unknown versioned or explicitly
-    # named models, however, must not fall through to a misleading model reply.
-    if not candidates and model_name is None and not re.search(r"\bv\d|模型|\bmodel\b", query, re.IGNORECASE):
+    # A versioned name ("opus v4") is a model choice the user expects, so it
+    # must not run on the default. The noun by itself is task wording ("use a
+    # regression model to analyze"), and a version on an API or SDK is a tool
+    # reference; blocking either would drop the user's task wording.
+    chosen_scope = scope or found_scope
+    versioned = re.search(r"\bv\d", query, re.IGNORECASE) is not None and _NON_MODEL_VERSION.search(query) is None
+    if not candidates and model_name is None and not versioned and not _names_a_model(query, chosen_scope):
         return result
     offset = len(text) - len(text.lstrip()) + match.end()
     if match.groupdict().get("action") in {"处理", "计算", "回答", "分析", "生成", "写", "做"}:
         offset = len(text) - len(text.lstrip()) + match.start("action")
     while offset < len(text) and (text[offset].isspace() or text[offset] in "，。：:,"):
         offset += 1
-    result.update(scope=scope or found_scope, query=query, candidates=[{"name": m.name, "label": m.display_name or m.name} for m in candidates], task_offset=offset)
+    result.update(scope=chosen_scope, query=query, candidates=[{"name": m.name, "label": m.display_name or m.name} for m in candidates], task_offset=offset)
     if not candidates:
         result["status"] = "unavailable"
     elif len(candidates) != 1 or result["scope"] is None:
