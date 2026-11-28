@@ -624,6 +624,60 @@ test("settles a run that finishes after recovery gives up", async () => {
   unmount();
 });
 
+test.each([
+  { inputsAfterEnd: null, case: "drops it" },
+  // A lagging or failed inputs refetch: the runs read alone must end the run.
+  { inputsAfterEnd: "run-active", case: "still reports it" },
+])(
+  "settles a run known only from the inputs read when that read $case",
+  async ({ inputsAfterEnd }) => {
+    // The first runs read fails, so only the inputs read knows the run.
+    apiMockState.listRuns.mockRejectedValue(new Error("offline"));
+    apiMockState.inputsActiveRunId = "run-active";
+    const { result, unmount } = renderThread("thread-1", "account-1");
+    // Recovery joins once the features and inputs reads resolve.
+    await act(async () => {
+      await rs.advanceTimersByTimeAsync(100);
+    });
+    expect(streamMockState.joinStream).toHaveBeenCalledWith("run-active");
+    await exhaustActiveRunRecovery();
+    await flushFrames();
+    expect(result.current.thread.isLoading).toBe(true);
+
+    // Still offline: keep watching the run, without a 4th join.
+    const runsReads = apiMockState.listRuns.mock.calls.length;
+    await act(async () => {
+      await rs.advanceTimersByTimeAsync(4_000);
+    });
+    expect(apiMockState.listRuns.mock.calls.length).toBe(runsReads + 2);
+    expect(result.current.thread.isLoading).toBe(true);
+
+    // The connection recovers after the run ended. The cached inputs read still
+    // reports the run, so the runs read must end it.
+    apiMockState.listRuns.mockResolvedValue([
+      { ...ACTIVE_RUN, status: "success" },
+    ]);
+    apiMockState.inputsActiveRunId = inputsAfterEnd;
+    const historyBefore = historyReads();
+    await act(async () => {
+      await rs.advanceTimersByTimeAsync(2_000);
+    });
+    await flushFrames();
+
+    expect(result.current.activeRunId).toBeUndefined();
+    expect(result.current.thread.isLoading).toBe(false);
+    expect(historyReads()).toBeGreaterThan(historyBefore);
+
+    const settledReads = apiMockState.listRuns.mock.calls.length;
+    await act(async () => {
+      await rs.advanceTimersByTimeAsync(10_000);
+    });
+    expect(apiMockState.listRuns.mock.calls.length).toBe(settledReads);
+    expect(streamMockState.joinStream).toHaveBeenCalledTimes(3);
+    unmount();
+  },
+);
+
 test("polls runs only while no stream follows the active run", async () => {
   // The SDK's own reconnect is streaming the run.
   streamMockState.isLoading = true;

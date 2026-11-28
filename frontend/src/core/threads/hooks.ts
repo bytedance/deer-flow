@@ -2886,20 +2886,37 @@ export function useThreadStream({
   );
 
   // A run that no stream follows gets no onFinish: recovery gave up on it, or
-  // the Gateway cannot stream it. The runs read is then its only end signal,
-  // so poll it, and refresh the thread as a finish would once the run ends.
+  // the Gateway cannot stream it. Either source may be the one that knows the
+  // run (the inputs read covers a failed runs read), so watch the known run:
+  // poll the runs read, and refresh the thread as a finish would once the run
+  // leaves the active set or the runs read reports it ended.
   const unfollowedActiveRunId =
     !isThreadLoading &&
-    activeRunId &&
-    !completedRunIdsRef.current.has(activeRunId)
-      ? activeRunId
+    knownActiveRunId &&
+    !completedRunIdsRef.current.has(knownActiveRunId)
+      ? knownActiveRunId
       : null;
+  const unfollowedActiveRunEnded =
+    unfollowedActiveRunId !== null &&
+    !!runsQuery.data?.some(
+      (run) =>
+        run.run_id === unfollowedActiveRunId &&
+        !ACTIVE_RUN_STATUSES.has(String(run.status)),
+    );
   const unfollowedActiveRunRef = useRef<{
     threadId: string;
     runId: string;
   } | null>(null);
   useEffect(() => {
     const previous = unfollowedActiveRunRef.current;
+    if (onStreamThreadId && unfollowedActiveRunId && unfollowedActiveRunEnded) {
+      // The inputs read can still report the run until it is refetched.
+      completedRunIdsRef.current.add(unfollowedActiveRunId);
+      unfollowedActiveRunRef.current = null;
+      setPollUnfollowedActiveRun(false);
+      invalidateStoppedThreadCaches(queryClient, onStreamThreadId, isMock);
+      return;
+    }
     unfollowedActiveRunRef.current =
       onStreamThreadId && unfollowedActiveRunId
         ? { threadId: onStreamThreadId, runId: unfollowedActiveRunId }
@@ -2908,15 +2925,16 @@ export function useThreadStream({
     if (
       previous &&
       previous.threadId === onStreamThreadId &&
-      previous.runId !== activeRunId
+      previous.runId !== knownActiveRunId
     ) {
       invalidateStoppedThreadCaches(queryClient, previous.threadId, isMock);
     }
   }, [
-    activeRunId,
     isMock,
+    knownActiveRunId,
     onStreamThreadId,
     queryClient,
+    unfollowedActiveRunEnded,
     unfollowedActiveRunId,
   ]);
 
