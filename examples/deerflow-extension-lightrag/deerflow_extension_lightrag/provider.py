@@ -14,6 +14,8 @@ from deerflow.knowledge.providers import validate_scope_capabilities
 from deerflow.knowledge.sources import redact_strings
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator
 
+_SUPPORTS_EVIDENCE_DEPENDENCIES = "depends_on" in RetrievalHit.model_fields
+
 
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -80,10 +82,12 @@ def normalize_relations(data: dict) -> RetrievalResult:
                 evidence_positions[key] = len(hits)
             positions.append(evidence_positions[key])
         if positions:
-            # Evidence precedes its users, so prefix budgeting cannot leave an
-            # emitted edge referring to a chunk omitted by the shared formatter.
-            evidence_refs = ", ".join(f"result [{position}]" for position in positions)
-            hits.append(RetrievalHit(content=f"Evidence: {evidence_refs}.\n{path}"))
+            if _SUPPORTS_EVIDENCE_DEPENDENCIES:
+                hits.append(RetrievalHit(content=path, depends_on=positions))
+            else:
+                # Older hosts still expect the references in the hit text.
+                evidence_refs = ", ".join(f"result [{position}]" for position in positions)
+                hits.append(RetrievalHit(content=f"Evidence: {evidence_refs}.\n{path}"))
         elif evidence_omitted:
             hits.append(RetrievalHit(content=path + "\nEvidence omitted for this edge: bounded view."))
         else:
