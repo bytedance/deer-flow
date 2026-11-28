@@ -17,6 +17,8 @@ pnpm catalog:sync   # after a change to the capability catalog
 
 ## Requests and dialogs
 
+- **Batch items with `outcome_unknown` stay unresolved.** Localize their status,
+  count and waiting follow-up, and hide retry for these items.
 - **A dialog aborts its requests when it closes**, and ignores a callback that
   arrives for an earlier user, skill or thread. A late response must not write
   into a dialog that now shows something else.
