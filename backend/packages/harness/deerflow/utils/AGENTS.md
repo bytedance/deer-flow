@@ -61,8 +61,10 @@ make test-blocking-io
 ## Network
 
 - **`http_policy.control_plane_trust_env` decides whether a client inherits the
-  proxy environment.** Loopback, private, container-internal and cluster-local
-  hosts bypass the proxy; public hosts keep it. The module has no third-party
+  proxy environment.** Loopback, private and container-internal hosts, plus
+  generated cluster-local HTTP Service URLs, bypass the proxy. HTTPS Service URLs
+  keep environment CA bundles and `NO_PROXY`; public hosts keep the environment.
+  The module has no third-party
   imports, so the Gateway and the channels import it without loading the sandbox
   stack. Keep it that way.
 - **Bound every provider retry hint with `retry_after`.** An unbounded
