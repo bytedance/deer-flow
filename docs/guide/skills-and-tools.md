@@ -476,6 +476,8 @@ cd backend
 uv run python -m deerflow.skills.review.cli ../skills/public/data-analysis --format text --fail-on error --fail-on-incomplete
 ```
 
+Resource review resolves Markdown links such as `[guide](references/guide.md?plain=1#examples)` to the packaged `references/guide.md`; URL queries and fragments do not become part of the filename.
+
 Invalid YAML dates or timestamps in frontmatter produce a `structure.invalid-frontmatter` blocker in the review report. Quote a date-like metadata value if it is intended as literal text.
 
 Public-skill CI waivers are exact, expiring exceptions in `.github/skill-review-waivers.v1.json`. Because only the trusted base manifest can suppress a finding, a file-changing pull request can be preauthorized safely by first merging a manifest-only change that lists the reviewed future full-file SHA-256 in `preapproved_file_sha256s`; the file change can then land in a later pull request.

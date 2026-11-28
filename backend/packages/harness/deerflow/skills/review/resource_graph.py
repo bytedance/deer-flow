@@ -115,10 +115,10 @@ def _quoted_title_end(content: str, terminator: int) -> int:
 
 def _extract_references(content: str) -> set[str]:
     refs: set[str] = set()
-    # Markdown link syntax fixes the fragment semantics: the text after '#'
-    # in a link target is ALWAYS a URL fragment, never part of the filename
+    # Markdown link syntax fixes URL semantics: the query after '?' and the
+    # fragment after '#' are never part of the resource filename
     # — a link to a file literally named "faq.md#pricing" would have to
-    # percent-encode it. So links always strip the fragment, and their full
+    # percent-encode it. So links strip queries and fragments, and their full
     # construct is blanked out of the residual text: the code-span and
     # bare-path passes below are literal-path contexts where '#' may be
     # part of a real filename, and they must never see link-internal text.
@@ -181,7 +181,7 @@ def _extract_references(content: str) -> set[str]:
                 # prefix is skipped.
                 position = content.rfind("]", closer, terminator) + 1
                 continue
-        refs.add(content[target:terminator].split("#", 1)[0].rstrip(_TRAILING_SENTENCE_PUNCTUATION))
+        refs.add(content[target:terminator].split("#", 1)[0].split("?", 1)[0].rstrip(_TRAILING_SENTENCE_PUNCTUATION))
         spans.append((start, end))
         position = end
     # Blank matched spans by position, not by text: `str.replace` blanks an
