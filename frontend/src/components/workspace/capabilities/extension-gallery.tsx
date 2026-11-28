@@ -33,6 +33,7 @@ import { PluginRow } from "./plugin-directory";
 
 type CategoryFilter = "all" | ExtensionCategory;
 type ScopeFilter = "all" | "installed";
+type DiscoveryState = "pending" | "error" | "ready";
 
 function ExtensionIconTile({
   entry,
@@ -62,26 +63,30 @@ function installedPriority(entry: ExtensionCatalogEntry) {
 
 function InstalledExtensionCard({
   entry,
-  discoveryReady,
+  discovery,
   onSelect,
 }: {
   entry: ExtensionCatalogEntry;
-  discoveryReady: boolean;
+  discovery: DiscoveryState;
   onSelect: () => void;
 }) {
   const { t } = useI18n();
   const loaded = entry.loaded;
-  const failed = discoveryReady && !!loaded?.error;
-  const enabled =
-    discoveryReady && !failed && loaded?.settings.enabled === true;
+  const available = discovery === "ready";
+  const failed = available && !!loaded?.error;
+  const enabled = available && !failed && loaded?.settings.enabled === true;
   const primaryPage = enabled && loaded ? pluginPages([loaded])[0] : undefined;
-  const statusLabel = failed
-    ? t.extensions.moduleUnavailable
-    : enabled
-      ? loaded?.runtime_only
-        ? t.extensions.detail.loaded
-        : t.capabilities.enabled
-      : t.capabilities.disabled;
+  const statusLabel = !available
+    ? discovery === "pending"
+      ? t.extensions.loading
+      : t.extensions.unavailable
+    : failed
+      ? t.extensions.moduleUnavailable
+      : enabled
+        ? loaded?.runtime_only
+          ? t.extensions.detail.loaded
+          : t.capabilities.enabled
+        : t.capabilities.disabled;
 
   return (
     <article className="bg-card hover:bg-muted/35 flex min-w-0 items-center gap-4 rounded-xl border px-4 py-4 transition-colors">
@@ -194,6 +199,12 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
     locale,
   );
   const source = publicQuery;
+  const discovery: DiscoveryState = source.isPending
+    ? "pending"
+    : source.isError
+      ? "error"
+      : "ready";
+  const discoveryReady = discovery === "ready";
 
   function select(namespace?: string) {
     const next = new URLSearchParams(params);
@@ -203,18 +214,23 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
     router.replace(`${pathname}?${next.toString()}`, { scroll: false });
   }
 
-  const status = source.isPending ? (
-    <p role="status" className="text-muted-foreground text-sm">
-      {t.extensions.loading}
-    </p>
-  ) : source.isError ? (
-    <div role="alert" className="flex flex-wrap items-center gap-3 text-sm">
-      <p>{t.extensions.unavailable}</p>
-      <Button variant="outline" size="sm" onClick={() => void source.refetch()}>
-        {t.extensions.retry}
-      </Button>
-    </div>
-  ) : null;
+  const status =
+    discovery === "pending" ? (
+      <p role="status" className="text-muted-foreground text-sm">
+        {t.extensions.loading}
+      </p>
+    ) : discovery === "error" ? (
+      <div role="alert" className="flex flex-wrap items-center gap-3 text-sm">
+        <p>{t.extensions.unavailable}</p>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => void source.refetch()}
+        >
+          {t.extensions.retry}
+        </Button>
+      </div>
+    ) : null;
 
   const reload = (
     <Button
@@ -246,16 +262,13 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
         </div>
         {status}
         {!entry ? (
-          <p className="text-muted-foreground py-8">
-            {t.extensions.notInstalled}
-          </p>
+          discoveryReady ? (
+            <p className="text-muted-foreground py-8">
+              {t.extensions.notInstalled}
+            </p>
+          ) : null
         ) : (
-          <ExtensionDetail
-            entry={entry}
-            discovery={
-              source.isPending ? "pending" : source.isError ? "error" : "ready"
-            }
-          />
+          <ExtensionDetail entry={entry} discovery={discovery} />
         )}
       </div>
     );
@@ -317,10 +330,10 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
             matchesQuery(entry),
         );
 
-  const showExamples =
-    isSearching || examplesExpanded || activeCategory === "examples";
+  const examplesForcedOpen = isSearching || activeCategory === "examples";
+  const showExamples = examplesForcedOpen || examplesExpanded;
   const showInstalledSection =
-    scope === "installed" || installedVisible.length > 0;
+    installedVisible.length > 0 || (scope === "installed" && discoveryReady);
   const showCatalogSection = catalogVisible.length > 0;
   const showExamplesSection = examplesVisible.length > 0;
   const nothingMatched =
@@ -328,6 +341,25 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
     !installedVisible.length &&
     !catalogVisible.length &&
     !examplesVisible.length;
+
+  const examplesHeader = (
+    <div className="min-w-0">
+      <div className="flex items-baseline gap-2.5">
+        <h2
+          id={`${groupId}-examples`}
+          className="text-muted-foreground text-sm font-semibold"
+        >
+          {dir.examplesTitle}
+        </h2>
+        <span className="text-muted-foreground/70 text-xs tabular-nums">
+          {examplesVisible.length}
+        </span>
+      </div>
+      <p className="text-muted-foreground mt-0.5 text-xs leading-5">
+        {dir.examplesHint}
+      </p>
+    </div>
+  );
 
   return (
     <div className="space-y-6">
@@ -364,7 +396,7 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
             <TabsTrigger value="all">{t.extensions.all}</TabsTrigger>
             <TabsTrigger value="installed" className="gap-1.5">
               <span>{dir.installed}</span>
-              {totalInstalled > 0 && (
+              {discoveryReady && totalInstalled > 0 && (
                 <span className="text-muted-foreground text-[11px] tabular-nums">
                   {totalInstalled}
                 </span>
@@ -389,9 +421,11 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
               <h2 id={`${groupId}-installed`} className="text-xl font-semibold">
                 {dir.installedTitle}
               </h2>
-              <span className="text-muted-foreground/70 text-xs tabular-nums">
-                {installedVisible.length}
-              </span>
+              {discoveryReady && (
+                <span className="text-muted-foreground/70 text-xs tabular-nums">
+                  {installedVisible.length}
+                </span>
+              )}
             </div>
             <p className="text-muted-foreground text-sm">{dir.installedHint}</p>
           </div>
@@ -401,12 +435,12 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
                 <InstalledExtensionCard
                   key={entry.id}
                   entry={entry}
-                  discoveryReady={!source.isPending && !source.isError}
+                  discovery={discovery}
                   onSelect={() => select(entry.id)}
                 />
               ))}
             </div>
-          ) : (
+          ) : discoveryReady ? (
             <div className="text-muted-foreground rounded-xl border border-dashed px-6 py-10 text-center text-sm">
               <p>
                 {totalInstalled === 0
@@ -433,7 +467,7 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
                 </Button>
               ) : null}
             </div>
-          )}
+          ) : null}
         </section>
       )}
 
@@ -504,35 +538,24 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
             (showInstalledSection || showCatalogSection) && "border-t pt-6",
           )}
         >
-          <button
-            type="button"
-            aria-expanded={showExamples}
-            onClick={() => setExamplesExpanded((open) => !open)}
-            className="hover:bg-muted/40 flex w-full items-center justify-between gap-4 rounded-xl px-3 py-3 text-left transition-colors"
-          >
-            <div className="min-w-0">
-              <div className="flex items-baseline gap-2.5">
-                <h2
-                  id={`${groupId}-examples`}
-                  className="text-muted-foreground text-sm font-semibold"
-                >
-                  {dir.examplesTitle}
-                </h2>
-                <span className="text-muted-foreground/70 text-xs tabular-nums">
-                  {examplesVisible.length}
-                </span>
-              </div>
-              <p className="text-muted-foreground mt-0.5 text-xs leading-5">
-                {dir.examplesHint}
-              </p>
-            </div>
-            <ChevronDownIcon
-              className={cn(
-                "text-muted-foreground size-4 shrink-0 transition-transform",
-                showExamples && "rotate-180",
-              )}
-            />
-          </button>
+          {examplesForcedOpen ? (
+            <div className="px-3 py-3">{examplesHeader}</div>
+          ) : (
+            <button
+              type="button"
+              aria-expanded={examplesExpanded}
+              onClick={() => setExamplesExpanded((open) => !open)}
+              className="hover:bg-muted/40 flex w-full items-center justify-between gap-4 rounded-xl px-3 py-3 text-left transition-colors"
+            >
+              {examplesHeader}
+              <ChevronDownIcon
+                className={cn(
+                  "text-muted-foreground size-4 shrink-0 transition-transform",
+                  examplesExpanded && "rotate-180",
+                )}
+              />
+            </button>
+          )}
           {showExamples && (
             <div className="grid grid-cols-1 gap-x-9 lg:grid-cols-2">
               {examplesVisible.map((entry) => (

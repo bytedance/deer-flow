@@ -247,6 +247,21 @@ describe("extension detail", () => {
     expect(screen.getByRole("button", { name: copy.all })).toBeTruthy();
     expect(screen.queryByRole("note")).toBeNull();
   });
+
+  it.each(["pending", "error"] as const)(
+    "waits for discovery before declaring an unknown extension not installed while %s",
+    (state) => {
+      galleryMock.search = "tab=extensions&extension=acme.private";
+      galleryMock.pending = state === "pending";
+      galleryMock.error = state === "error";
+      render(<ExtensionGallery />);
+
+      expect(screen.queryByText(copy.notInstalled)).toBeNull();
+      expect(
+        screen.getByText(state === "pending" ? copy.loading : copy.unavailable),
+      ).toBeTruthy();
+    },
+  );
 });
 
 describe("extension directory", () => {
@@ -363,16 +378,138 @@ describe("extension directory", () => {
     expect(screen.getByText("Broken internal plugin")).toBeTruthy();
   });
 
-  it("auto-expands developer examples when search matches them", () => {
+  it("renders a non-interactive Examples heading during search and preserves saved disclosure state", () => {
     galleryMock.search = "tab=extensions";
-    render(<ExtensionGallery query="sample documents" />);
+    const { rerender } = render(<ExtensionGallery query="" />);
 
-    expect(screen.getByText(copy.catalog.knowledge.title)).toBeTruthy();
-    const toggle = screen.getByRole("button", {
+    const initialToggle = screen.getByRole("button", {
       name: new RegExp(copy.directory.examplesTitle),
     });
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(initialToggle.getAttribute("aria-expanded")).toBe("false");
+
+    rerender(<ExtensionGallery query="sample documents" />);
+    expect(screen.getByText(copy.catalog.knowledge.title)).toBeTruthy();
+    expect(
+      screen.getByRole("heading", { name: copy.directory.examplesTitle }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", {
+        name: new RegExp(copy.directory.examplesTitle),
+      }),
+    ).toBeNull();
+
+    // Clearing the search restores the collapsible button in its saved collapsed state.
+    rerender(<ExtensionGallery query="" />);
+    const restoredCollapsed = screen.getByRole("button", {
+      name: new RegExp(copy.directory.examplesTitle),
+    });
+    expect(restoredCollapsed.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText(copy.catalog.knowledge.title)).toBeNull();
+
+    // Manually expanding before searching preserves the expanded state after clearing.
+    fireEvent.click(restoredCollapsed);
+    expect(restoredCollapsed.getAttribute("aria-expanded")).toBe("true");
+    rerender(<ExtensionGallery query="sample documents" />);
+    expect(
+      screen.queryByRole("button", {
+        name: new RegExp(copy.directory.examplesTitle),
+      }),
+    ).toBeNull();
+    rerender(<ExtensionGallery query="" />);
+    const restoredExpanded = screen.getByRole("button", {
+      name: new RegExp(copy.directory.examplesTitle),
+    });
+    expect(restoredExpanded.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText(copy.catalog.knowledge.title)).toBeTruthy();
   });
+
+  it.each(["pending", "error"] as const)(
+    "waits for discovery before declaring Installed empty while %s",
+    (state) => {
+      galleryMock.search = "tab=extensions";
+      galleryMock.pending = state === "pending";
+      galleryMock.error = state === "error";
+      const { rerender } = render(<ExtensionGallery />);
+
+      const installedTab = screen.getByRole("tab", {
+        name: new RegExp(copy.directory.installed),
+      });
+      fireEvent.mouseDown(installedTab, { button: 0, ctrlKey: false });
+      fireEvent.click(installedTab);
+
+      expect(
+        screen.getByText(state === "pending" ? copy.loading : copy.unavailable),
+      ).toBeTruthy();
+      expect(screen.queryByText(copy.directory.installedEmpty)).toBeNull();
+      expect(
+        screen.queryByText(copy.directory.installedFilteredEmpty),
+      ).toBeNull();
+      expect(
+        screen.queryByRole("heading", { name: copy.directory.installedTitle }),
+      ).toBeNull();
+
+      // Once discovery succeeds with zero extensions, the empty inventory message appears.
+      galleryMock.pending = false;
+      galleryMock.error = false;
+      rerender(<ExtensionGallery />);
+      const installedSection = screen
+        .getByRole("heading", { name: copy.directory.installedTitle })
+        .closest("section")!;
+      expect(
+        within(installedSection).getByText(copy.directory.installedEmpty),
+      ).toBeTruthy();
+    },
+  );
+
+  it.each(["pending", "error"] as const)(
+    "does not label installed cards as disabled while discovery is %s",
+    (state) => {
+      galleryMock.search = "tab=extensions";
+      galleryMock.pending = state === "pending";
+      galleryMock.error = state === "error";
+      galleryMock.loaded = [
+        contribution({
+          namespace: "community.agent-teams",
+          settings: { enabled: true },
+          extension: {
+            apiVersion: 1,
+            module: "teams.v1",
+            surfaces: [
+              {
+                id: "teams",
+                slot: "page",
+                title: "Teams",
+                mount: () => ({ dispose: () => undefined }),
+              },
+            ],
+          },
+        }),
+      ];
+      render(<ExtensionGallery />);
+
+      const installedTab = screen.getByRole("tab", {
+        name: new RegExp(copy.directory.installed),
+      });
+      expect(installedTab.textContent).toBe(copy.directory.installed);
+
+      const installedSection = screen
+        .getByRole("heading", { name: copy.directory.installedTitle })
+        .closest("section")!;
+      expect(
+        within(installedSection).queryByText(enUS.capabilities.disabled),
+      ).toBeNull();
+      expect(
+        within(installedSection).getByText(
+          state === "pending" ? copy.loading : copy.unavailable,
+        ),
+      ).toBeTruthy();
+      expect(
+        within(installedSection).queryByRole("link", {
+          name: copy.open(copy.catalog.agentTeams.title),
+        }),
+      ).toBeNull();
+    },
+  );
 
   it("reveals the Examples filter pill when an example extension is installed and lets filtered empty states reset", () => {
     galleryMock.search = "tab=extensions";
@@ -394,8 +531,26 @@ describe("extension directory", () => {
     expect(
       within(installedSection).getByText(copy.catalog.retrieval.title),
     ).toBeTruthy();
-    // Remaining uninstalled examples stay accessible and expanded under the Examples pill.
+    // Remaining uninstalled examples stay accessible under a non-interactive heading while the Examples pill is active.
     expect(screen.getByText(copy.catalog.example.title)).toBeTruthy();
+    expect(
+      screen.getByRole("heading", { name: copy.directory.examplesTitle }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("button", {
+        name: new RegExp(copy.directory.examplesTitle),
+      }),
+    ).toBeNull();
+
+    // Returning to All categories restores the interactive disclosure toggle in its saved collapsed state.
+    fireEvent.click(
+      screen.getByRole("button", { name: copy.directory.allCategories }),
+    );
+    const restoredToggle = screen.getByRole("button", {
+      name: new RegExp(copy.directory.examplesTitle),
+    });
+    expect(restoredToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText(copy.catalog.example.title)).toBeNull();
 
     // Filtering Installed view to a category with 0 installed matches offers a reset button.
     fireEvent.click(
