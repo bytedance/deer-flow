@@ -23,6 +23,7 @@ class _RunStream:
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     ended: bool = False
     start_offset: int = 0
+    last_timestamp_ms: int = 0
     last_evicted_event_id: str | None = None
     retired: bool = False
 
@@ -48,11 +49,13 @@ class MemoryStreamBridge(StreamBridge):
             self._counters[run_id] = 0
         return self._streams[run_id]
 
-    def _next_id(self, run_id: str) -> str:
+    def _next_id(self, run_id: str, stream: _RunStream) -> str:
         self._counters[run_id] = self._counters.get(run_id, 0) + 1
-        ts = int(time.time() * 1000)
+        # Wall time may step backwards. Keep the timestamp and sequence pair
+        # increasing within this generation so its replay cursors stay ordered.
+        stream.last_timestamp_ms = max(stream.last_timestamp_ms, int(time.time() * 1000))
         seq = self._counters[run_id] - 1
-        return f"{ts}-{seq}"
+        return f"{stream.last_timestamp_ms}-{seq}"
 
     @staticmethod
     def _parse_event_seq(event_id: str) -> int | None:
@@ -123,7 +126,7 @@ class MemoryStreamBridge(StreamBridge):
             # Cleanup or END may win the Condition after this producer captures the generation.
             if stream.retired or stream.ended:
                 return
-            entry = StreamEvent(id=self._next_id(run_id), event=event, data=data)
+            entry = StreamEvent(id=self._next_id(run_id, stream), event=event, data=data)
             stream.events.append(entry)
             if len(stream.events) > self._maxsize:
                 overflow = len(stream.events) - self._maxsize

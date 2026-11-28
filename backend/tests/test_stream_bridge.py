@@ -5,6 +5,7 @@ import os
 import re
 import uuid
 from collections import defaultdict
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import anyio
@@ -482,6 +483,21 @@ async def test_event_id_format(bridge: MemoryStreamBridge):
 
     event = received[0]
     assert re.match(r"^\d+-\d+$", event.id), f"Expected timestamp-seq format, got {event.id}"
+
+
+@pytest.mark.anyio
+async def test_memory_event_ids_remain_ordered_when_wall_clock_moves_backwards(bridge, monkeypatch):
+    timestamps = iter([100, 99, 101])
+    monkeypatch.setattr("deerflow.runtime.stream_bridge.memory.time", SimpleNamespace(time=lambda: next(timestamps)))
+    run_id = "run-clock-rollback"
+    for step in range(3):
+        await bridge.publish(run_id, "updates", {"step": step})
+    await bridge.publish_end(run_id)
+
+    events = [entry async for entry in bridge.subscribe(run_id) if entry is not END_SENTINEL]
+    assert all(_stream_id_gt(current.id, previous.id) for previous, current in zip(events, events[1:], strict=False))
+    replay = [entry async for entry in bridge.subscribe(run_id, last_event_id=events[1].id) if entry is not END_SENTINEL]
+    assert replay == events[2:]
 
 
 @pytest.mark.anyio
