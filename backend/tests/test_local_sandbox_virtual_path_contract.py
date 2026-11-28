@@ -17,6 +17,7 @@ shim required.
 
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -95,6 +96,24 @@ def test_write_then_read_via_public_api_with_virtual_path(provider):
     virtual = "/mnt/user-data/workspace/hello.txt"
     sbx.write_file(virtual, "hi there")
     assert sbx.read_file(virtual) == "hi there"
+
+
+def test_read_file_rejects_a_file_above_the_download_limit(provider, monkeypatch):
+    """An unbounded full read could exhaust the Gateway; the gate needs EFBIG."""
+    import deerflow.sandbox.local.local_sandbox as local_module
+
+    monkeypatch.setattr(local_module, "DEFAULT_DOWNLOAD_LIMIT", 64)
+    sbx = provider.get(provider.acquire("alpha"))
+    virtual = "/mnt/user-data/workspace/big.log"
+    sbx.write_file(virtual, "x" * 64)
+    assert sbx.read_file(virtual) == "x" * 64
+
+    sbx.write_file(virtual, "x" * 65)
+    # Both a full and a ranged read are bounded, like the remote providers.
+    for kwargs in ({}, {"start_line": 1, "end_line": 1}):
+        with pytest.raises(OSError) as raised:
+            sbx.read_file(virtual, **kwargs)
+        assert raised.value.errno == errno.EFBIG
 
 
 def test_list_dir_via_public_api_with_virtual_path(provider):

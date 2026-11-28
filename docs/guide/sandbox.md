@@ -407,6 +407,8 @@ A full `read_file` returns line endings as stored, and `str_replace` changes onl
 
 On AIO, `read_file` and `str_replace` read the stored bytes and fail on a file larger than 100 MB, leaving it unchanged. Because such a file can never be read back, the read-before-write check also blocks `write_file` over it. Read or change it with `bash` (`head`, `tail` or `sed -n`).
 
+The local provider applies the same 100 MB limit before it reads, so a larger file cannot be buffered into the Gateway and the read-before-write check blocks a write over it. Use `bash` to read or change such a file.
+
 Concurrent reads and writes to the same file share a gate across synchronous and asynchronous tool calls. Async callers waiting for that gate do not occupy worker threads needed to finish the current read or write. Cancelling a waiting call leaves the current operation running; a call that already started file inspection still waits for that work to finish before releasing its gate.
 
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.

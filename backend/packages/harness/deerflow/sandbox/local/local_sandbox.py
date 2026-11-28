@@ -1330,6 +1330,16 @@ class LocalSandbox(Sandbox):
         resolved_path = self._resolve_path(path)
         should_slice = start_line is not None or end_line is not None
         try:
+            # Never buffer an unbounded file: the read_file tool truncates only
+            # after reading, and the read-before-write gate hashes the full
+            # content. Remote providers raise EFBIG above the same download
+            # limit; the gate blocks writes when it sees that error.
+            if os.path.getsize(resolved_path) > DEFAULT_DOWNLOAD_LIMIT:
+                raise OSError(
+                    errno.EFBIG,
+                    f"File is larger than {DEFAULT_DOWNLOAD_LIMIT // (1024 * 1024)} MB; read part of it with bash (head, tail or sed -n)",
+                    path,
+                )
             # newline="\n" returns line endings as stored, like the remote
             # providers (a translated read hid CRLF from str_replace, which then
             # wrote the whole file back as LF), and ends lines only at "\n", the
