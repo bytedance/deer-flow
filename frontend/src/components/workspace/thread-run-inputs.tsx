@@ -14,6 +14,9 @@ import {
   type RunInput,
 } from "@/core/threads/run-inputs";
 
+import { FileName } from "./file-name";
+import { FileTypeIcon } from "./file-type-icon";
+
 export function ThreadRunInputs({
   threadId,
   isRunning,
@@ -84,9 +87,26 @@ export function ThreadRunInputs({
                   ? t.inputBox.runInputQueued
                   : t.inputBox.runInputSteering}
           </span>
-          <span className="min-w-0 flex-1 truncate" title={input.text}>
-            {input.text}
-          </span>
+          <div className="min-w-0 flex-1">
+            {input.text && (
+              <p className="truncate" title={input.text}>
+                {input.text}
+              </p>
+            )}
+            {!!input.files?.length && (
+              <ul className="flex flex-wrap gap-1">
+                {input.files.map((file, index) => (
+                  <li
+                    key={`${file.filename}:${index}`}
+                    className="flex max-w-full min-w-0 items-center gap-1 rounded-md border px-1 py-0.5"
+                  >
+                    <FileTypeIcon filename={file.filename} compact />
+                    <FileName filename={file.filename} />
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
           {!isRunning && canCreate && (
             <Button
               size="icon-sm"

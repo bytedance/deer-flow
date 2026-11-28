@@ -3,10 +3,12 @@
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import JSON, BigInteger, DateTime, Double, ForeignKey, ForeignKeyConstraint, Index, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Double, ForeignKey, ForeignKeyConstraint, Index, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
+
+TASK_NOTIFICATION_SOURCE = "coordination_task"
 
 
 class TaskStatus(StrEnum):
@@ -34,6 +36,9 @@ class CoordinationTaskRow(Base):
     parent_id: Mapped[str | None] = mapped_column(ForeignKey("coord_tasks.id"))
     depends_on: Mapped[list[str]] = mapped_column(JSON)
     objective: Mapped[str] = mapped_column(Text)
+    coordinator: Mapped[bool | None] = mapped_column(Boolean)
+    channel_origin: Mapped[dict[str, str] | None] = mapped_column(JSON(none_as_null=True))
+    run_settings: Mapped[dict[str, int | bool] | None] = mapped_column(JSON(none_as_null=True))
     status: Mapped[str] = mapped_column(String(16))
     revision: Mapped[int] = mapped_column(BigInteger)
     execution_epoch: Mapped[int] = mapped_column(BigInteger)
@@ -41,6 +46,10 @@ class CoordinationTaskRow(Base):
     result_ref: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    def to_dict(self, *, exclude: set[str] | None = None) -> dict:
+        # Transport identifiers stay in the host, outside public Task views.
+        return super().to_dict(exclude={"channel_origin"} | (exclude or set()))
 
 
 class CoordinationInputRow(Base):
@@ -91,6 +100,8 @@ class CoordinationExecutionRow(Base):
     frozen_input: Mapped[dict] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(32))
     run_id: Mapped[str | None] = mapped_column(String(64), unique=True)
+    decision: Mapped[dict | None] = mapped_column(JSON(none_as_null=True))
+    result_text: Mapped[str | None] = mapped_column(Text)
 
 
 class CoordinationArtifactRow(Base):

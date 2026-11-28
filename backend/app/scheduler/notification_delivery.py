@@ -20,8 +20,11 @@ from typing import Any
 
 from app.channels.base import ChannelUnavailable
 from app.channels.capabilities import supports_proactive_group_notifications, supports_proactive_notifications
+from app.channels.connection_identity import feishu_private_binding
 from app.channels.notification_groups import is_notification_group
 from app.scheduler.notification_text import DEFAULT_NOTIFICATION_LOCALE, redact_egress_text, render_notification_text, wants_result_summary
+from deerflow.persistence.coordination.model import TASK_NOTIFICATION_SOURCE
+from deerflow.persistence.coordination.sql import TaskNotFound
 from deerflow.persistence.user.im_notifications import (
     DISABLED_BY_OWNER,
     IM_RUNTIME_NOTIFICATION_EVENTS,
@@ -83,6 +86,7 @@ class NotificationDeliveryWorker:
         resolve_notification_preferences: Callable[[str], Any] | None = None,
         resolve_notification_event_preferences: Callable[[str], Any] | None = None,
         resolve_human_input_pending: Callable[..., Any] | None = None,
+        read_coordination_artifact: Callable[..., Any] | None = None,
         stale_sending_timeout_seconds: int = _STALE_SENDING_TIMEOUT_SECONDS,
         stop_timeout_seconds: float = _STOP_TIMEOUT_SECONDS,
         default_locale: str = DEFAULT_NOTIFICATION_LOCALE,
@@ -95,6 +99,7 @@ class NotificationDeliveryWorker:
         self._resolve_notification_preferences = resolve_notification_preferences
         self._resolve_notification_event_preferences = resolve_notification_event_preferences
         self._resolve_human_input_pending = resolve_human_input_pending
+        self._read_coordination_artifact = read_coordination_artifact
         self._poll_interval_seconds = poll_interval_seconds
         self._batch_size = batch_size
         self._stale_sending_timeout_seconds = stale_sending_timeout_seconds
@@ -219,7 +224,8 @@ class NotificationDeliveryWorker:
         owner_user_id = delivery.get("owner_user_id")
         provider = delivery.get("provider")
         target = delivery.get("target")
-        is_group = (delivery.get("payload") or {}).get("target_type") == "group"
+        payload = delivery.get("payload") or {}
+        is_group = payload.get("target_type") == "group"
         if not owner_user_id or not provider or not target:
             return None
         try:
@@ -245,6 +251,12 @@ class NotificationDeliveryWorker:
             # owner-scoped still cannot make another user's binding count.
             row_owner = connection.get("owner_user_id")
             if row_owner is not None and row_owner != owner_user_id:
+                continue
+            if delivery.get("source_kind") == TASK_NOTIFICATION_SOURCE:
+                if row_owner == owner_user_id and provider == "feishu" and connection.get("external_account_id") == target:
+                    origin = feishu_private_binding(connection)
+                    if origin is not None and origin == payload.get("origin"):
+                        return True
                 continue
             if is_group:
                 if (
@@ -367,25 +379,9 @@ class NotificationDeliveryWorker:
                 terminal=True,
             )
             return
-        if self._resolve_connections is not None or target_type == "group":
-            # Re-check the binding at delivery time, before anything else: a
-            # target the owner has disconnected since enqueue must never
-            # receive the push, however long the row waited, and it must not
-            # sit in parking for a day either when the channel is also down
-            # (disconnecting a provider revokes its connections and stops its
-            # channel together). A lookup failure parks instead, so a
-            # transient store error neither drops nor sends the row.
-            still_connected = await self._target_still_connected(delivery)
-            if still_connected is False:
-                await self._delivery_repo.mark_failed(
-                    delivery_id,
-                    claim_token=delivery.get("claim_token"),
-                    error=f"target is no longer a connected {provider} identity of its owner",
-                    terminal=True,
-                )
-                return
-            if still_connected is None:
-                await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error="could not verify the target's channel connection", count_attempt=False)
+        is_coordination = delivery.get("source_kind") == TASK_NOTIFICATION_SOURCE
+        if self._resolve_connections is not None or target_type == "group" or is_coordination:
+            if not await self._check_target(delivery):
                 return
         if not await self._check_notification_preference(delivery):
             return
@@ -420,12 +416,16 @@ class NotificationDeliveryWorker:
         if callable(is_active_claim) and not await is_active_claim(delivery_id, claim_token=delivery.get("claim_token")):
             return
         try:
-            send = channel.send_group_notification_for_owner if target_type == "group" else channel.send_notification_for_owner
-            await send(
-                owner_user_id=delivery.get("owner_user_id") or "",
-                target=delivery.get("target") or "",
-                text_markdown=render_notification_text(enriched, default_locale=self._default_locale),
-            )
+            if is_coordination:
+                if not await self._send_coordination_delivery(delivery, channel):
+                    return
+            else:
+                send = channel.send_group_notification_for_owner if target_type == "group" else channel.send_notification_for_owner
+                await send(
+                    owner_user_id=delivery.get("owner_user_id") or "",
+                    target=delivery.get("target") or "",
+                    text_markdown=render_notification_text(enriched, default_locale=self._default_locale),
+                )
         except ChannelUnavailable as exc:
             await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error=str(exc), count_attempt=False)
             return
@@ -433,6 +433,55 @@ class NotificationDeliveryWorker:
             await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error=str(exc))
             return
         await self._delivery_repo.mark_sent(delivery_id, claim_token=delivery.get("claim_token"))
+
+    async def _check_target(self, delivery: dict[str, Any]) -> bool:
+        # A revoked binding terminates delivery. An unavailable lookup parks it.
+        connected = await self._target_still_connected(delivery)
+        if connected is True:
+            return True
+        error = f"target is no longer a connected {delivery['provider']} identity of its owner" if connected is False else "could not verify the target's channel connection"
+        await self._delivery_repo.mark_failed(delivery["id"], claim_token=delivery.get("claim_token"), error=error, count_attempt=connected is False, terminal=connected is False)
+        return False
+
+    async def _coordination_delivery_is_current(self, delivery: dict[str, Any]) -> bool:
+        # A binding lookup can overlap with opt-out, which clears the claim
+        # even if the owner enables notifications again before we resume.
+        return await self._check_target(delivery) and await self._check_notification_preference(delivery) and await self._delivery_repo.is_active_claim(delivery["id"], claim_token=delivery.get("claim_token"))
+
+    async def _send_coordination_delivery(self, delivery, channel) -> bool:
+        payload = delivery["payload"]
+        chat_id = payload["origin"]["chat_id"]
+        delivery_id = delivery["id"]
+        if "artifact_id" not in payload:
+            if not await self._coordination_delivery_is_current(delivery):
+                return False
+            notice = f"Task ID: {payload['task_id']}\nStatus: {delivery['event']}"
+            if payload["attachment_count"]:
+                notice += f"\nAttachments: {payload['attachment_count']}"
+            if results := payload["results"]:
+                notice += "\n\n" + redact_egress_text("\n\n".join(results))[:6000]
+            await channel.send_task_result(chat_id=chat_id, text_markdown=notice, delivery_id=delivery_id)
+            return True
+
+        if self._read_coordination_artifact is None:
+            raise ChannelUnavailable("Task artifact storage is unavailable")
+        try:
+            path, content = await self._read_coordination_artifact(delivery["owner_user_id"], payload["worker_task_id"], payload["artifact_id"])
+        except TaskNotFound:
+            await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error="Task artifact no longer exists", terminal=True)
+            return False
+        if not content or len(content) > 30 * 1024 * 1024:
+            await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error="Unsupported Feishu attachment size", terminal=True)
+            return False
+        if not await self._coordination_delivery_is_current(delivery):
+            return False
+        file_key = await channel.upload_task_attachment(path=path, content=content)
+        # Upload can take time. Verify the destination and the claim again
+        # before committing the file message to the original private chat.
+        if not await self._coordination_delivery_is_current(delivery):
+            return False
+        await channel.send_task_attachment(chat_id=chat_id, file_key=file_key, delivery_id=delivery_id)
+        return True
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():

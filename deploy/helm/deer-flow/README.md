@@ -397,7 +397,10 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   `PROVISIONER_API_KEY`: the provisioner's `verify_api_key` middleware
   answers 401 to every `/api/*` request while its key is empty or differs
   from the one the gateway sends, so a deployment without it cannot create a
-  single sandbox. The chart injects the same Secret value into both Pods and
+  single sandbox. Each side strips surrounding whitespace from its
+  configured value before comparing, so a key that arrives with a trailing
+  newline (for example from `kubectl create secret --from-file`) still
+  authenticates. The chart injects the same Secret value into both Pods and
   the default `config` references it as `sandbox.provisioner_api_key:
   $PROVISIONER_API_KEY` (keep that line when you override `config:`; the
   harness refuses to start when a referenced variable is unset). With
@@ -494,7 +497,7 @@ container escalates privileges or runs as uid 0.
 | frontend | 1000 (`node`) | 1000 | `emptyDir` at `/app/frontend/.next/cache` (root-owned in the image) |
 | nginx | 101 (`nginx`) | 101 | command writes the rendered config to `/tmp/nginx.conf` and loads `nginx -c /tmp/nginx.conf` (since `/etc/nginx` is root-owned); `emptyDir` at `/var/cache/nginx` |
 | provisioner | 1000 | — | no PVC; `PYTHONDONTWRITEBYTECODE=1` |
-| postgres | 999 (`postgres`) | 999 | official `postgres:16` entrypoint detects non-root and skips the chown/gosu dance; data PVC group-writable via fsGroup |
+| postgres | 999 (`postgres`) | 999 | the default `postgres:16` initializes a new database in `pgdata/` on the writable volume and reuses an existing database at the volume root |
 | redis | 999 (`redis`) | 999 | official `redis:7-alpine` entrypoint detects non-root and skips the gosu dance; data PVC group-writable via fsGroup |
 
 Every container sets:
@@ -519,6 +522,8 @@ triggers a rolling restart.
 `nginx.resources`, `provisioner.resources`, `postgresql.primary.resources`,
 `redis.primary.resources`). The gateway's init containers have their own
 `gateway.initContainers.resources` and `gateway.initContainers.image`.
+Set `provisioner.sandboxResources` for each new sandbox Pod. See
+[Kubernetes sandbox Pod resources](../../../docs/guide/sandbox.md#kubernetes-sandbox-pod-resources).
 
 ### Not yet enforced (deferred hardening)
 

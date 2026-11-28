@@ -10,6 +10,35 @@ const settings = {
 } as unknown as LocalSettings["context"];
 
 describe("buildRunContext", () => {
+  it("keeps Ultra delegation separate from its lead reasoning defaults", () => {
+    const input = {
+      settings: {
+        ...settings,
+        mode: "ultra" as const,
+        reasoning_effort: "high",
+      },
+      threadId: "dispatch",
+    };
+    expect(buildRunContext(input)).toMatchObject({
+      thinking_enabled: true,
+      reasoning_effort: "high",
+      mode_default_fields: ["thinking_enabled", "reasoning_effort"],
+      is_plan_mode: true,
+      subagent_enabled: true,
+    });
+    expect(
+      buildRunContext({
+        ...input,
+        extraContext: { thinking_enabled: false, reasoning_effort: "high" },
+      }),
+    ).toMatchObject({
+      thinking_enabled: false,
+      reasoning_effort: "high",
+      mode_default_fields: [],
+      subagent_enabled: true,
+    });
+  });
+
   it("uses the current UI locale instead of stale saved or caller context", () => {
     const stale = { ...settings, locale: "en-US" };
     const context = buildRunContext({

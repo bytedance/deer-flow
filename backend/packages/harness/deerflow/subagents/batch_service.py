@@ -99,14 +99,26 @@ _pending_releases: set[Future[None]] = set()
 _TERMINAL_CLEANUP_GRACE_SECONDS = 60.0
 
 
-def _usage(records: list[dict[str, Any]] | None) -> dict[str, int] | None:
+def _usage(records: list[dict[str, Any]] | None, model_name: str | None = None) -> dict[str, Any] | None:
+    """One attempt's usage: totals plus ``by_model`` (records without a
+    provider-reported model count for ``model_name``), keeping cache hits so
+    the usage views can price each model at its own rate."""
     if not records:
         return None
-    return {
-        "input_tokens": sum(int(row.get("input_tokens") or 0) for row in records),
-        "output_tokens": sum(int(row.get("output_tokens") or 0) for row in records),
-        "total_tokens": sum(int(row.get("total_tokens") or 0) for row in records),
-    }
+    counters = ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens")
+    by_model: dict[str, dict[str, int]] = {}
+    for row in records:
+        bucket = by_model.setdefault(str(row.get("model_name") or model_name or "unknown"), dict.fromkeys(counters, 0))
+        for key in counters:
+            bucket[key] += int(row.get(key) or 0)
+    usage: dict[str, Any] = {key: sum(bucket[key] for bucket in by_model.values()) for key in counters}
+    if not usage["cache_read_tokens"]:
+        del usage["cache_read_tokens"]
+    for bucket in by_model.values():
+        if not bucket["cache_read_tokens"]:
+            del bucket["cache_read_tokens"]
+    usage["by_model"] = by_model
+    return usage
 
 
 async def _release_when_terminal(execution_id: str, *, poll_seconds: float, max_wait_seconds: float) -> None:
@@ -501,6 +513,8 @@ class SubagentBatchService:
     async def _execute_leased_item(self, item: dict[str, Any], lease: BatchItemLease) -> None:
         item_id = item["id"]
         execution_id: str | None = None
+        result = None
+        effective_model: str | None = None
         try:
             batch = item["batch"]
             self._item_batches[item_id] = batch["id"]
@@ -656,7 +670,7 @@ class SubagentBatchService:
                 result_truncated=truncated,
                 error=result.error,
                 stop_reason=result.stop_reason,
-                token_usage=_usage(result.token_usage_records),
+                token_usage=_usage(result.token_usage_records, effective_model),
                 model_name=effective_model,
                 completed_at=datetime.now(UTC),
                 acceptance_verdict=acceptance_verdict,
@@ -671,6 +685,10 @@ class SubagentBatchService:
                 "Durable subagent batch item failed (item_id=%s)",
                 item_id,
             )
+            # Keep the tokens this attempt spent, e.g. when the finalize that
+            # carried them rolled back. If that finalize committed, the lease
+            # is gone and this call writes nothing, so nothing counts twice.
+            usage = _usage(getattr(result, "token_usage_records", None), effective_model)
             await self._repository.finalize_item(
                 item_id,
                 lease_owner=lease.owner,
@@ -680,8 +698,8 @@ class SubagentBatchService:
                 result_truncated=False,
                 error=str(exc)[:4_000],
                 stop_reason=None,
-                token_usage=None,
-                model_name=None,
+                token_usage=usage,
+                model_name=effective_model if usage else None,
                 completed_at=datetime.now(UTC),
             )
         finally:

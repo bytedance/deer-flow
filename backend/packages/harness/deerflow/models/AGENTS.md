@@ -47,7 +47,9 @@ transport, so they check the payload that DeerFlow sends.
   re-enter admission. Log a warning when this lowers a configured attempt count.
   Unpaced models keep their own retry policy.
 - **`Retry-After` goes through `utils.retry_after`.** HTTP dates are read as UTC,
-  a past date means zero, and the delay is bounded.
+  a past date means zero, and the delay is bounded. `retry_after_hint_ms` reads
+  both header spellings and fractional seconds once, so every provider retry
+  loop parses the same hint.
 - **HTTP 429 hints extend the opted-in group's admission schedule**, including
   on the last middleware attempt. Shorter hints never shorten a pause. Keep
   FIFO, cancellation and deadlines intact; unrelated groups stay independent.

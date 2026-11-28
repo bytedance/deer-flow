@@ -32,6 +32,7 @@ def store(tmp_path, monkeypatch):
         ("deepseek", "https://api.deepseek.com", "deerflow.models.patched_deepseek:PatchedChatDeepSeek"),
         ("qwen-cn", "https://dashscope.aliyuncs.com/compatible-mode/v1", "deerflow.models.patched_deepseek:PatchedChatDeepSeek"),
         ("doubao", "https://ark.cn-beijing.volces.com/api/v3", "deerflow.models.patched_deepseek:PatchedChatDeepSeek"),
+        ("byteplus-agent-plan", "https://ark.ap-southeast.bytepluses.com/api/plan/v3", "deerflow.models.patched_deepseek:PatchedChatDeepSeek"),
         ("moonshot-cn", "https://api.moonshot.cn/v1", "deerflow.models.patched_deepseek:PatchedChatDeepSeek"),
         ("zai", "https://api.z.ai/api/paas/v4", "deerflow.models.patched_deepseek:PatchedChatDeepSeek"),
         ("minimax", "https://api.minimax.io/v1", "deerflow.models.patched_minimax:PatchedChatMiniMax"),
@@ -261,7 +262,7 @@ async def test_probe_and_chat_share_real_sdk_protocol_and_auth(store, wire, prov
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider,model", [("deepseek", "deepseek-v4-flash"), ("anthropic", "claude-sonnet-4-5-20250929"), ("minimax", "MiniMax-M3"), ("moonshot-cn", "kimi-k2.5")])
+@pytest.mark.parametrize("provider,model", [("deepseek", "deepseek-v4-flash"), ("anthropic", "claude-sonnet-4-5-20250929"), ("minimax", "MiniMax-M3"), ("moonshot-cn", "kimi-k2.5"), ("byteplus-agent-plan", "dola-seed-2.1-turbo")])
 async def test_known_optional_thinking_disabled_only_for_probe(store, wire, provider, model):
     profile = ManagedModel(provider=provider, model=model, api_key="secret-test-key")
     config = profile.runtime_config()
@@ -273,8 +274,12 @@ async def test_known_optional_thinking_disabled_only_for_probe(store, wire, prov
 
 
 @pytest.mark.asyncio
-async def test_required_thinking_uses_auto_selection_and_bounded_budget(store, wire):
-    profile = ManagedModel(provider="minimax", model="MiniMax-M2.7", api_key="secret-test-key")
+@pytest.mark.parametrize("provider,model,vision", [("minimax", "MiniMax-M2.7", False), ("minimax", "MiniMax-M3.1-Flash", True), ("minimax-cn", "MiniMax-M3.1-Flash", True)])
+async def test_required_thinking_uses_auto_selection_and_bounded_budget(store, wire, provider, model, vision):
+    profile = ManagedModel(provider=provider, model=model, api_key="secret-test-key")
+    config = profile.runtime_config()
+    assert config.supports_vision is vision
+    assert config.when_thinking_disabled is None
     assert await router.test_model(_ADMIN, router.SaveModelRequest(config=profile)) == {"ok": True, "message": "success"}
     body = wire.requests[0][1]
     assert body["tool_choice"] == "auto"
@@ -400,6 +405,17 @@ async def _admin_request(request, call_next):
 def test_reasoning_cannot_override_preset_routing_or_credentials(path):
     with pytest.raises(ValidationError):
         ManagedModel(provider="openai", model="x", api_key="secret-test-key", reasoning={"thinking": "required", "effort": {"values": ["high"], "default": "high", "path": path}})
+
+
+def test_byteplus_agent_plan_vision_capabilities_match_documented_models():
+    for model_id in ("dola-seed-2.1-turbo", "deepseek-v4.1-flash", "seed-2.0-lite", "seed-2.0-mini"):
+        runtime = ManagedModel(provider="byteplus-agent-plan", model=model_id, api_key="test-key").runtime_config()
+        assert runtime.supports_vision is True
+        assert runtime.supports_thinking is True
+    for model_id in ("deepseek-v4-pro", "deepseek-v4.1-flash-economy"):
+        runtime = ManagedModel(provider="byteplus-agent-plan", model=model_id, api_key="test-key").runtime_config()
+        assert runtime.supports_vision is False
+        assert runtime.supports_thinking is True
 
 
 def test_reasoning_contract_override_is_preserved_and_validated(store):

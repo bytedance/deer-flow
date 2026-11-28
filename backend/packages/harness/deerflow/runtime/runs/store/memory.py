@@ -38,9 +38,16 @@ class MemoryRunStore(RunStore):
         row["run_inputs"] = state
         return copy.deepcopy(state)
 
-    async def list_input_runs(self, thread_id, *, user_id=None, limit=10):
-        rows = [x for x in await self.list_by_thread(thread_id, user_id=user_id, limit=len(self._runs_by_thread.get(thread_id, {}))) if (x.get("run_inputs") or {}).get("items")]
-        return copy.deepcopy(rows[:limit])
+    async def list_input_runs(self, thread_id, *, user_id=None, limit=10, ignore_scope_case=False):
+        if ignore_scope_case:
+            thread_id = thread_id.lower()
+            owner = user_id.lower() if user_id is not None else None
+            rows = [row for row in self._runs.values() if row["thread_id"].lower() == thread_id and row.get("operation_kind", "run") == "run" and (owner is None or (row.get("user_id") or "").lower() == owner)]
+            rows.sort(key=lambda row: run_sort_key(row.get("created_at"), row["run_id"]), reverse=True)
+        else:
+            rows = await self.list_by_thread(thread_id, user_id=user_id, limit=len(self._runs_by_thread.get(thread_id, {})))
+        with_inputs = [row for row in rows if (row.get("run_inputs") or {}).get("items")]
+        return copy.deepcopy(with_inputs[:limit])
 
     async def active_input_run(self, thread_id, *, user_id=None):
         for run_id in reversed(self._runs_by_thread.get(thread_id, {})):

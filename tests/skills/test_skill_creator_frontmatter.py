@@ -55,6 +55,26 @@ def test_optimizer_rejects_invalid_metadata(tmp_path, frontmatter):
         load_script("utils").parse_skill_md(tmp_path)
 
 
+# PyYAML's timestamp constructor raises ValueError/AttributeError, not a
+# YAMLError, for an explicit date-like value it cannot build.
+_INVALID_YAML_TIMESTAMPS = ["2026-02-30", "2026-11-26T25:00:00Z", "!!timestamp 2026-11-26T13:45:00+08:0"]
+
+
+@pytest.mark.parametrize("updated", _INVALID_YAML_TIMESTAMPS)
+def test_quick_validate_reports_an_invalid_yaml_timestamp(tmp_path, updated):
+    (tmp_path / "SKILL.md").write_text(f"---\nname: example\ndescription: text\nmetadata:\n  updated: {updated}\n---\n# Body\n", encoding="utf-8")
+    valid, message = load_script("quick_validate").validate_skill(tmp_path)
+    assert valid is False
+    assert message.startswith("Invalid YAML in frontmatter:")
+
+
+@pytest.mark.parametrize("updated", _INVALID_YAML_TIMESTAMPS)
+def test_optimizer_rejects_an_invalid_yaml_timestamp(tmp_path, updated):
+    (tmp_path / "SKILL.md").write_text(f"---\nname: example\ndescription: text\nmetadata:\n  updated: {updated}\n---\n# Body\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="Invalid YAML in SKILL.md frontmatter"):
+        load_script("utils").parse_skill_md(tmp_path)
+
+
 @pytest.mark.parametrize("name", ["utils", "quick_validate"])
 def test_script_loader_preserves_bytecode_setting(monkeypatch, tmp_path, name):
     isolated = tmp_path / "skill"
@@ -67,7 +87,15 @@ def test_script_loader_preserves_bytecode_setting(monkeypatch, tmp_path, name):
 
 
 @pytest.mark.parametrize("command", ["run_eval", "run_loop", "improve_description"])
-@pytest.mark.parametrize("metadata", ["name: example\ndescription: [", "name: true\ndescription: example", "missing frontmatter"])
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "name: example\ndescription: [",
+        "name: true\ndescription: example",
+        "missing frontmatter",
+        "name: example\ndescription: example\nmetadata:\n  updated: !!timestamp 2026-11-26T13:45:00+08:0",
+    ],
+)
 def test_cli_reports_invalid_frontmatter_without_traceback(tmp_path, command, metadata):
     skill = tmp_path / "input-skill"
     skill.mkdir()

@@ -33,15 +33,17 @@ log_level: debug # debug | info | warning | error
 
 ## Health checks
 
-Verify each service is responding:
+Use the nginx address and port for your workspace (shown here with the defaults). These checks work from the host with local processes and Docker Compose.
 
 ```bash
-# Gateway health
-curl http://localhost:8001/health
+# Is the Gateway process responding?
+curl -i http://localhost:2026/health
 
-# Through nginx (verifies full proxy chain)
-curl http://localhost:2026/api/models
+# Are the dependencies needed to serve runs ready?
+curl -i http://localhost:2026/health/ready
 ```
+
+If liveness returns 200 but readiness returns 503, inspect the readiness response for the failing dependency.
 
 ## Upgrading an existing checkout
 
@@ -161,13 +163,10 @@ If MCP tools appear in `extensions_config.json` but are not available in the age
 
 Back up the storage backends you use:
 
-- `backend/.deer-flow/threads/` for thread working directories, uploads, and artifacts.
-- `backend/.deer-flow/memory.json` and `backend/.deer-flow/agents/` for learned memory.
+- The full runtime directory for thread workspaces, uploads, artifacts, and file-backed memory. For Docker Compose, use the host path listed in the [deployment guide](/docs/application/deployment-guide#data-persistence).
 - `${database.sqlite_dir}/deerflow.db` when using `database.backend: sqlite` (default: `.deer-flow/data/deerflow.db`).
 - Regular database dumps when using `database.backend: postgres`.
 - The legacy `checkpointer.connection_string` file if your deployment still configures a standalone `checkpointer`.
-
-In Docker deployments, back up the bind-mounted host paths rather than the container filesystem.
 
 ## Restarting services
 

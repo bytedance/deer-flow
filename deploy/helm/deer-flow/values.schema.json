@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "postgresql": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "object",
+          "properties": {
+            "useChartDataDirectory": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "provisioner": {
+      "type": "object",
+      "properties": {
+        "sandboxResources": {
+          "type": "object",
+          "properties": {
+            "requests": { "$ref": "#/definitions/sandboxResourceQuantities" },
+            "limits": { "$ref": "#/definitions/sandboxResourceQuantities" }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  },
+  "definitions": {
+    "sandboxResourceQuantities": {
+      "type": "object",
+      "properties": {
+        "cpu": {},
+        "memory": {},
+        "ephemeral-storage": {}
+      },
+      "additionalProperties": false
+    }
+  }
+}

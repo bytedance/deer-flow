@@ -9,6 +9,7 @@ from uuid import uuid4
 from deerflow_extension_api.agent_runs import AgentRunError
 from fastapi import HTTPException
 
+from app.channels.connection_identity import feishu_private_binding
 from app.gateway.deps import get_agent_runs
 from deerflow.persistence.coordination.model import TaskStatus
 from deerflow.persistence.coordination.sql import TaskConflict, TaskNotFound
@@ -33,6 +34,7 @@ class CoordinationWorkers:
         self._wakeups = set()
         self._cancellations = {}
         self._recovery = None
+        self._recovery_wakeup = asyncio.Event()
 
     def start_recovery(self):
         self._recovery = asyncio.create_task(self._recover())
@@ -56,16 +58,18 @@ class CoordinationWorkers:
             "expires_at": time() + GRANT_LIFETIME,
         }
 
-    async def dispatch(self, runs, owner, task_id, assistant_id, *, channel=None):
+    async def dispatch(self, runs, owner, task_id, assistant_id, *, channel=None, background=False):
         grant = self._new_grant(runs.capture_authority(), channel=channel)
         turn = await self.repo.prepare(owner, task_id, assistant_id, initial_grant=grant)
-        if turn is not None:
+        if turn is not None and background:
+            self._recovery_wakeup.set()
+        elif turn is not None:
             authorized, grant_id = await self.authority(owner, task_id)
             await self._admit(authorized, owner, task_id, turn, grant_id)
             self.watch(authorized, owner, task_id, grant_id)
         return await self.view(owner, task_id)
 
-    async def dispatch_bound_channel(self, message, *, request_id, objective, assistant_id="lead_agent"):
+    async def dispatch_bound_channel(self, message, *, request_id, objective, assistant_id="lead_agent", notify_completion=False):
         """Entry point for a Gateway-side adapter after provider authentication."""
         from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
         from app.gateway.authz import resolve_route_permissions
@@ -80,17 +84,22 @@ class CoordinationWorkers:
         owner = message.owner_user_id
         if connection is None or connection["id"] != message.connection_id or connection["owner_user_id"] != owner:
             raise AgentRunError(403, "The messaging identity is no longer bound")
+        origin = None
+        if notify_completion:
+            origin = feishu_private_binding(connection)
+            if origin is None or message.metadata.get("chat_type") != "p2p" or origin["chat_id"] != message.chat_id:
+                raise AgentRunError(403, "Tasks require a connected Feishu private chat")
         user = await self._host.load_user(owner)
         if user is None or user.disabled or user.needs_setup:
             raise AgentRunError(403, "The task owner is unavailable")
         permissions = WORKER_PERMISSIONS.intersection(await resolve_route_permissions(user, is_internal=False))
-        if "runs:create" not in permissions:
-            raise AgentRunError(403, "Permission denied: runs:create")
+        if not WORKER_RUN_PERMISSIONS.issubset(permissions):
+            raise AgentRunError(403, "Permission denied to run a managed task")
         snapshot = {"token_version": user.token_version, "source": AUTH_SOURCE_SESSION, "permissions": sorted(permissions)}
         runs = await self._host.restore_delegated_authority(user_id=owner, grant=snapshot)
         request_key = sha256(f"{connection['id']}:{request_id}".encode()).hexdigest()
-        task = await self.repo.create(owner, request_id=f"im:{request_key}", objective=objective)
-        return await self.dispatch(runs, owner, task["id"], assistant_id, channel={"id": connection["id"], "updated_at": connection["updated_at"]})
+        task = await self.repo.create(owner, request_id=f"im:{request_key}", objective=objective, coordinator=notify_completion, channel_origin=origin)
+        return await self.dispatch(runs, owner, task["id"], assistant_id, channel={"id": connection["id"], "updated_at": connection["updated_at"]}, background=notify_completion)
 
     async def authority(self, owner, task_id, *, cancelling=False):
         grant = await self.repo.grant(owner, task_id)
@@ -123,6 +132,14 @@ class CoordinationWorkers:
         receipt = await self.repo.append_input(owner, task_id, request_id=request_id, content=content)
         self.watch(runs, owner, task_id, grant_id)
         return receipt
+
+    async def submit_task_decision(self, owner, task_id, execution_id, run_id, grant_id, tasks):
+        _, current_grant_id = await self.authority(owner, task_id)
+        if grant_id != current_grant_id:
+            raise AgentRunError(403, "Coordinator authorization is no longer current")
+        task_ids = await self.repo.submit_task_decision(owner, task_id, execution_id, run_id, grant_id, tasks)
+        self._recovery_wakeup.set()
+        return task_ids
 
     async def view(self, owner, task_id):
         view = await self.repo.view(owner, task_id)
@@ -159,11 +176,15 @@ class CoordinationWorkers:
 
     async def _recover(self):
         while True:
+            self._recovery_wakeup.clear()
             try:
                 await self.recover_once()
             except Exception:
                 logger.exception("Coordination recovery scan failed")
-            await asyncio.sleep(RECOVERY_INTERVAL)
+            try:
+                await asyncio.wait_for(self._recovery_wakeup.wait(), timeout=RECOVERY_INTERVAL)
+            except TimeoutError:
+                pass
 
     async def _admit(self, runs, owner, task_id, turn, grant_id):
         worker, execution, project = turn
@@ -227,8 +248,13 @@ class CoordinationWorkers:
             except TimeoutError:
                 continue
             artifacts = []
+            result_text = None
             status = run.status
-            if run.stop_reason == WORKER_SHUTDOWN or (run.stop_reason == ORPHAN_RECOVERY_STOP_REASON and run.error in (STARTUP_ORPHAN_RECOVERY_ERROR, LEASE_ORPHAN_RECOVERY_ERROR)):
+            restart = run.stop_reason == WORKER_SHUTDOWN or (run.stop_reason == ORPHAN_RECOVERY_STOP_REASON and run.error in (STARTUP_ORPHAN_RECOVERY_ERROR, LEASE_ORPHAN_RECOVERY_ERROR))
+            if "expected_revision" in execution["frozen_input"]:
+                if restart and await self.repo.recover_checkpoint(owner, task_id, execution["id"], run.run_id, None):
+                    continue
+            elif restart:
                 state = await runs.coordination_recovery_checkpoint(thread_id=thread, run_id=run.run_id)
                 if state and state.get("checkpoint_id") and state.get("metadata", {}).get(WORKER_CHECKPOINT_RUN) == run.run_id and state.get("next"):
                     if any(task.get("interrupts") for task in state.get("tasks", [])):
@@ -239,13 +265,18 @@ class CoordinationWorkers:
             elif status == "success" and not run.stop_reason:
                 try:
                     artifacts = await runs.coordination_artifacts(thread_id=thread, run_id=run.run_id)
+                    if execution["frozen_input"].get("collect_result"):
+                        result_text = await runs.coordination_result_text(thread_id=thread, run_id=run.run_id)
                 except AgentRunError as exc:
                     if exc.status_code >= 500:
                         raise
                     status = "delivery_failed"
             elif status == "success":
                 status = "stopped"
-            await self.repo.settle(owner, task_id, execution["id"], run.run_id, status, artifacts)
+            if not await self.repo.settle(owner, task_id, execution["id"], run.run_id, status, artifacts, result_text=result_text):
+                return  # The Coordinator's children are still running.
+            if "expected_revision" in execution["frozen_input"] or execution["frozen_input"].get("collect_result"):
+                self._recovery_wakeup.set()
 
     async def cancel(self, runs, owner, task_id, revision):
         task = await self.repo.request_cancel(owner, task_id, expected_revision=revision)

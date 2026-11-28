@@ -6,6 +6,7 @@ Supports schema inspection, SQL queries, statistical summaries, and result expor
 """
 
 import argparse
+import glob
 import hashlib
 import json
 import logging
@@ -49,7 +50,11 @@ def compute_files_hash(files: list[str]) -> str:
         name = os.fsencode(os.path.basename(file_path))
         hasher.update(len(name).to_bytes(8, "big"))
         hasher.update(name)
-        if os.path.splitext(file_path)[1].lower() == ".xls":
+        extension = os.path.splitext(file_path)[1].lower()
+        if extension == ".csv":
+            # Older generations may contain rows from a glob-matched neighbor.
+            hasher.update(b"literal-csv-path\0")
+        elif extension == ".xls":
             # Rebuild legacy caches that might have dropped a mixed-type sheet.
             hasher.update(b"legacy-xls-v2\0")
         file_hasher = hashlib.sha256()
@@ -359,6 +364,29 @@ def _load_legacy_excel(
                 logger.warning(f"  Failed to load sheet '{sheet_name}': {e}")
 
 
+@contextmanager
+def _csv_source(file_path: str):
+    """Give DuckDB one local file, even when its name looks like a glob."""
+    path = str(Path(file_path).absolute())
+    pattern = glob.escape(path)
+    if pattern == path:
+        yield path
+    elif int(duckdb.__version__.split(".")[0]) >= 2:
+        # DuckDB accepts a list of explicit file entries without expanding globs.
+        yield [{"filename": path}]
+    elif os.name == "nt" or "\\" not in path:
+        yield pattern
+    else:
+        # Older glob readers split even POSIX filenames on literal backslashes.
+        with tempfile.TemporaryDirectory() as directory:
+            alias = Path(directory) / "input.csv"
+            try:
+                alias.symlink_to(path)
+            except OSError:
+                shutil.copyfile(path, alias)
+            yield glob.escape(str(alias))
+
+
 def _load_csv(
     con: duckdb.DuckDBPyConnection, file_path: str, table_map: dict[str, str]
 ) -> None:
@@ -367,13 +395,11 @@ def _load_csv(
     alias, table_name = _allocate_table_names(base_name, table_map)
 
     try:
-        con.execute(
-            f"""
-            CREATE TABLE {_quote_identifier(table_name)} AS
-            SELECT * FROM read_csv_auto(?)
-        """,
-            [file_path],
-        )
+        with _csv_source(file_path) as source:
+            con.execute(
+                f"CREATE TABLE {_quote_identifier(table_name)} AS SELECT * FROM read_csv_auto(?)",
+                [source],
+            )
         table_map[alias] = table_name
         row_count = con.execute(
             f"SELECT COUNT(*) FROM {_quote_identifier(table_name)}"

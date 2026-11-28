@@ -34,7 +34,12 @@ def _response(provider, encoded):
 
 def _generate(monkeypatch, tmp_path, provider, encoded, output):
     monkeypatch.setenv("IMAGE_GENERATION_PROVIDER", provider)
-    for key in ("MINIMAX_API_KEY", "GEMINI_API_KEY", "IMAGE_GENERATION_API_KEY"):
+    for key in (
+        "MINIMAX_API_KEY",
+        "GEMINI_API_KEY",
+        "IMAGE_GENERATION_API_KEY",
+        "BYTEPLUS_AGENTPLAN_API_KEY",
+    ):
         monkeypatch.setenv(key, "offline-fixture")
     monkeypatch.setenv("IMAGE_GENERATION_MODEL", "gpt-image-1")
     monkeypatch.setattr(
@@ -47,7 +52,7 @@ def _generate(monkeypatch, tmp_path, provider, encoded, output):
     return image.generate_image(str(prompt), [], str(output))
 
 
-@pytest.mark.parametrize("provider", ["gemini", "openai"])
+@pytest.mark.parametrize("provider", ["gemini", "openai", "byteplus_agentplan"])
 @pytest.mark.parametrize(
     "existing", [False, True], ids=["new-output", "existing-output"]
 )
@@ -74,7 +79,7 @@ def test_decode_failure_preserves_output(
         assert not output.parent.exists()
 
 
-@pytest.mark.parametrize("provider", ["gemini", "openai"])
+@pytest.mark.parametrize("provider", ["gemini", "openai", "byteplus_agentplan"])
 @pytest.mark.parametrize(
     "existing", [False, True], ids=["new-output", "existing-output"]
 )

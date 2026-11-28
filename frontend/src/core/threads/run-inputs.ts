@@ -10,6 +10,9 @@ export const runInputSchema = z.object({
   target_run_id: z.string(),
   message_id: z.string(),
   text: z.string(),
+  files: z
+    .array(z.object({ filename: z.string(), size: z.number() }))
+    .optional(),
   mode: z.enum(["queue", "steer"]),
   status: z.enum([
     "pending",
@@ -60,6 +63,7 @@ export async function submitRunInput({
   text,
   mode,
   context,
+  files = [],
   signal,
 }: {
   threadId: string;
@@ -68,19 +72,32 @@ export async function submitRunInput({
   text: string;
   mode: RunInputMode;
   context?: Record<string, unknown>;
+  files?: File[];
   signal?: AbortSignal;
 }) {
+  const input = JSON.stringify({
+    request_id: requestId,
+    text,
+    mode,
+    context: context ?? {},
+  });
+  let body: BodyInit = input;
+  if (files.length) {
+    const form = new FormData();
+    form.set("input", input);
+    for (const file of files) {
+      form.append("files", file);
+    }
+    body = form;
+  }
   const response = await fetch(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/inputs`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        request_id: requestId,
-        text,
-        mode,
-        context: context ?? {},
-      }),
+      headers: files.length
+        ? undefined
+        : { "Content-Type": "application/json" },
+      body,
       signal,
     },
   );

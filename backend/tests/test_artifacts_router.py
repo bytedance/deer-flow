@@ -1269,6 +1269,25 @@ def test_get_skill_archive_inline_returns_sha256_etag(tmp_path, monkeypatch) -> 
     assert response.headers["x-content-type-options"] == "nosniff"
 
 
+def test_get_skill_archive_trailing_slash_returns_404(tmp_path, monkeypatch) -> None:
+    # skills/export.py writes an explicit directory entry for each folder, so
+    # a trailing ".skill/" used to fall through the archive lookup's fallback
+    # match and answer 200 with the directory's empty body (#8500).
+    skill_path = tmp_path / "sample.skill"
+    with zipfile.ZipFile(skill_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_ref:
+        zip_ref.writestr("skills/", b"")
+        zip_ref.writestr("skills/SKILL.md", b"# Sample\n")
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: skill_path)
+
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/artifacts/mnt/user-data/outputs/sample.skill/")
+
+    assert response.status_code == 404
+
+
 @pytest.mark.parametrize(("filename", "content"), ACTIVE_ARTIFACT_CASES)
 def test_get_artifact_forces_download_for_active_content(tmp_path, monkeypatch, filename: str, content: str) -> None:
     artifact_path = tmp_path / filename

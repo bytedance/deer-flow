@@ -36,6 +36,7 @@ from test_hitl_approval_api import (  # noqa: F401
     isolated_deer_flow_home,
 )
 
+from deerflow.agents.lead_agent.agent import _insert_hitl_approval_middleware
 from deerflow.approvals.middleware import ToolApprovalMiddleware
 from deerflow.approvals.policy import action_fingerprint, effective_outcome, resolve_mode, tool_descriptor
 from deerflow.approvals.reviewer import review_operation
@@ -49,6 +50,20 @@ from deerflow.runtime import RunManager, RunStatus
 from deerflow.runtime.runs.manager import PersistenceRetryPolicy
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.tools.sync import make_sync_tool_wrapper
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_agent_assembly_mounts_tool_approval_only_when_enabled(enabled, caplog):
+    app_config = AppConfig(
+        sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+        hitl_approval=HitlApprovalConfig(enabled=enabled),
+    )
+    for _ in range(2):
+        middlewares = []
+        _insert_hitl_approval_middleware(middlewares, [], app_config, supports_resume=True)
+        assert [type(middleware) for middleware in middlewares] == ([ToolApprovalMiddleware] if enabled else [])
+    assert "hitl_approval is not enabled" not in caplog.text
+
 
 # --- test_tool_approval_call_ids ---
 
@@ -613,6 +628,36 @@ async def test_child_in_an_isolated_loop_waits_for_parent_decision(cancel):
     assert calls == ([] if cancel else ["original"])
     assert (await store.get(row["request_id"], scope=scope))["status"] == ("cancelled" if cancel else "consumed")
     await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_unattended_child_cannot_open_an_approval_wait():
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    from deerflow.approvals.runtime import ApprovalRuntime
+    from deerflow.approvals.store import ApprovalStore
+
+    store = ApprovalStore()
+    scope = ("owner", "scheduled-thread", "incarnation")
+    bridge = ApprovalRuntime(
+        store,
+        scope=scope,
+        run_id="scheduled-run",
+        mode="ask",
+        timeout=5,
+        record=SimpleNamespace(ownership_lost=False, abort_event=threading.Event()),
+        interactive=False,
+    )
+    graph, config, calls = graph_fixture()
+    context = {"is_subagent": True, "__tool_approval_runtime": bridge.child(), "user_id": "owner", "thread_id": "scheduled-thread"}
+    try:
+        result = await asyncio.wait_for(graph.ainvoke({"messages": [("user", "delegated work")]}, config, context=context), timeout=2)
+        assert not calls and not result.get("__interrupt__")
+        assert not await store.list(scope=scope, status="pending")
+    finally:
+        await bridge.close()
 
 
 @pytest.mark.asyncio

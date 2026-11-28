@@ -10,6 +10,7 @@ import {
 import type { SubagentBatch } from "@/core/subagent-batches/types";
 import { threadHistoryQueryKey, useThreadRuns } from "@/core/threads/hooks";
 import { runInputsKey } from "@/core/threads/run-inputs";
+import { threadTokenUsageQueryKey } from "@/core/threads/token-usage";
 
 const api = rs.hoisted(() => ({
   batches: [] as SubagentBatch[],
@@ -79,4 +80,46 @@ test("a newly admitted follow-up is discovered before Run inputs open", async ()
     items: [],
     active_run_id: null,
   });
+});
+
+test("thread usage is refetched when batch items finish without a follow-up", async () => {
+  const counts = (succeeded: number, running: number) => ({
+    pending: 0,
+    queued: 0,
+    leased: 0,
+    running,
+    succeeded,
+    failed: 0,
+    cancelled: 0,
+  });
+  api.batches = [
+    { id: "batch", status: "running", counts: counts(0, 2) } as SubagentBatch,
+  ];
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  clients.push(client);
+  const invalidate = rs.spyOn(client, "invalidateQueries");
+  const { result, rerender } = renderHook(
+    () => useSubagentBatches("thread", { polling: false }),
+    {
+      wrapper: ({ children }: { children: ReactNode }) =>
+        createElement(QueryClientProvider, { client }, children),
+    },
+  );
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  const usageKey = { queryKey: threadTokenUsageQueryKey("thread") };
+  // The first load is what the usage query already reflects.
+  expect(invalidate).not.toHaveBeenCalledWith(usageKey);
+
+  api.batches = [
+    { id: "batch", status: "completed", counts: counts(2, 0) } as SubagentBatch,
+  ];
+  await act(async () => {
+    await client.invalidateQueries({ queryKey: subagentBatchesKey("thread") });
+  });
+  await waitFor(() => expect(invalidate).toHaveBeenCalledWith(usageKey));
+  const calls = invalidate.mock.calls.length;
+  rerender();
+  expect(invalidate.mock.calls).toHaveLength(calls);
 });

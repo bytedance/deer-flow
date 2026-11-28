@@ -260,6 +260,23 @@ def test_external_loop_cap_is_rejected(boundary):
     assert error.value.detail == "External loop_cap state is not allowed"
 
 
+@pytest.mark.parametrize("boundary", ["run", "state"])
+@pytest.mark.parametrize("value", ["share", None])
+def test_external_imported_history_channel_is_rejected(boundary, value):
+    """Only share import sets it; a caller could otherwise clear a copy's provenance or forge it."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input, strip_server_owned_state_metadata
+    from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL
+
+    transform = normalize_input if boundary == "run" else strip_server_owned_state_metadata
+    with pytest.raises(HTTPException) as error:
+        transform({IMPORTED_HISTORY_CHANNEL: value})
+
+    assert error.value.status_code == 400
+    assert error.value.detail == "External imported_history state is not allowed"
+
+
 @pytest.mark.parametrize("mode", ["full", "delta"])
 def test_external_run_goal_clears_the_previous_goal_outcome(mode):
     """A caller goal replaces the goal, so the record of the earlier met goal must go."""
@@ -4587,13 +4604,14 @@ async def test_start_run_peer_idempotent_reuse_does_not_reject_later_runs_after_
     assert follow_up.run_id != first.run_id
 
 
-def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):
+@pytest.mark.parametrize("options", [{}, {"subagent_enabled": False}, {"subagent_enabled": True}])
+def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config, options):
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import patch
 
     from app.gateway.routers.thread_runs import RunCreateRequest
-    from app.gateway.services import launch_scheduled_thread_run
+    from app.gateway.services import get_trusted_internal_owner_user_id, launch_scheduled_thread_run, merge_run_context_overrides
 
     async def _scenario():
         captured: dict[str, object] = {}
@@ -4602,6 +4620,10 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
             captured["body"] = body
             captured["thread_id"] = thread_id
             captured["context"] = body.context
+            captured["trusted_owner"] = get_trusted_internal_owner_user_id(request)
+            config: dict = {}
+            merge_run_context_overrides(config, body.context, internal=True)
+            captured["runtime_config"] = config
             captured["scheduled_task_runtime"] = scheduled_task_runtime
             captured["metadata"] = body.metadata
             captured["idempotency_key"] = idempotency_key
@@ -4620,6 +4642,7 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
                     "scheduled_task_id": "task-1",
                     "scheduled_task_run_id": "task-run-1",
                 },
+                **options,
             )
         return captured, result
 
@@ -4628,7 +4651,12 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
     assert captured["thread_id"] == "thread-scheduled"
     assert isinstance(captured["body"], RunCreateRequest)
     assert captured["body"].config == {"recursion_limit": 1000}
-    assert captured["context"] == {"non_interactive": True, "user_id": "user-1"}
+    expected_context = {"non_interactive": True, "user_id": "user-1"}
+    if options.get("subagent_enabled"):
+        expected_context["subagent_enabled"] = True
+    assert captured["context"] == expected_context
+    assert captured["trusted_owner"] == "user-1"
+    assert captured["runtime_config"]["context"] == expected_context
     assert captured["scheduled_task_runtime"] == {"task_id": "task-1", "occurrence_id": "task-run-1", "user_id": "user-1"}
     assert captured["metadata"] == {
         "scheduled_task_id": "task-1",
