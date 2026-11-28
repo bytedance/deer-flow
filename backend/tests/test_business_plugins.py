@@ -166,3 +166,31 @@ async def test_robot_missing_business_status_is_failure_and_network_exception_is
             with pytest.raises(ValueError) as error:
                 await BusinessClient("wecom", {"webhook_key": "super-secret"}, http).send_message("hello")
             assert "super-secret" not in str(error.value)
+
+
+def test_business_module_mcp_fastmcp_import_fallback(monkeypatch):
+    """Importing deerflow.capabilities.business must not fail when mcp.server.fastmcp raises ModuleNotFoundError (MCP 2.x)."""
+    import importlib
+    import sys
+
+    # Simulate MCP 2.x where importing mcp.server.fastmcp raises ModuleNotFoundError
+    class MockMCP2FastMCPModule:
+        def __getattr__(self, name):
+            raise ModuleNotFoundError("No module named 'mcp.server.fastmcp'. This is mcp 2.x...")
+
+    monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", MockMCP2FastMCPModule())
+
+    import deerflow.capabilities.business as business_mod
+
+    try:
+        # Reload the module under the simulated MCP 2.x environment
+        importlib.reload(business_mod)
+
+        # connection_config and is_bundled_connection remain fully functional
+        cfg = business_mod.connection_config("wecom", {"webhook_key": "my-key"})
+        assert cfg["type"] == "stdio"
+        assert business_mod.is_bundled_connection(cfg["command"], cfg["args"], cfg["env"]) is True
+    finally:
+        # Restore original module state so subsequent tests have real FastMCP
+        monkeypatch.undo()
+        importlib.reload(business_mod)
