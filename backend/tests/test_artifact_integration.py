@@ -480,7 +480,11 @@ async def test_sandbox_success_keeps_report_artifact_through_compaction(tmp_path
         def read_aio_report(*, file):
             return SimpleNamespace(data=SimpleNamespace(content=read_mounted_report(file)))
 
-        sdk = SimpleNamespace(shell=SimpleNamespace(exec_command=run), file=SimpleNamespace(read_file=read_aio_report))
+        def download_aio_report(*, path):
+            yield read_mounted_report(path).encode("utf-8")
+
+        files = SimpleNamespace(read_file=read_aio_report, download_file=download_aio_report)
+        sdk = SimpleNamespace(shell=SimpleNamespace(exec_command=run), file=files)
         monkeypatch.setattr(aio_sandbox, "AioSandboxClient", lambda **kwargs: sdk)
         sandbox = aio_sandbox.AioSandbox("aio:report", "http://localhost:8080", home_dir="/home/user")
     elif provider_name == "tenki":
