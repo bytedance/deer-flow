@@ -97,14 +97,12 @@ BETTER_AUTH_SECRET=your-secret-here-min-32-chars
 
 ### 数据持久化
 
-线程数据存储在 `backend/.deer-flow/threads/`。在 Docker 部署中，此目录会绑定挂载到 gateway 容器中。
+两套 Compose 配置都使用 `/app/backend/.deer-flow` 作为 Gateway 容器内的运行目录。宿主机上的路径取决于启动方式。
 
-为避免容器重建时数据丢失：
+- 开发 Compose（`make docker-start`）将仓库的 `backend/` 绑定挂载到 `/app/backend/`，因此运行文件位于宿主机的 `backend/.deer-flow/`。
+- 生产 Compose（`make up`）将 `DEER_FLOW_HOME` 指定的宿主机目录绑定挂载到 `/app/backend/.deer-flow`。启动脚本默认使用仓库的 `backend/.deer-flow/`。如需更改，请在 shell 中传入宿主机上可写的绝对路径，例如 `DEER_FLOW_HOME=/srv/deer-flow-data make up`。
 
-1. 将 `DEER_FLOW_ROOT` 设置为仓库根目录的绝对路径。
-2. 验证 `threads/` 和 `skills/` 目录挂载正确。
-
-对于生产环境，使用命名卷或持久化卷声明（PVC）代替主机绑定挂载。
+请保留并备份整个宿主机运行目录。按用户隔离的会话文件位于 `users/<user-id>/threads/`，旧版会话文件位于 `threads/`。
 
 ## 生产部署注意事项
 
