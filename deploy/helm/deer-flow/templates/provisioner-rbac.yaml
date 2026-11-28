@@ -18,14 +18,18 @@ metadata:
     {{- include "deer-flow.labels" . | nindent 4 }}
     app.kubernetes.io/component: provisioner
 rules:
-  # Verbs mirror docker/provisioner/app.py, which only calls get/create/delete
-  # on pods and get/list/create/delete on services. update/patch, pods/exec,
-  # and events were unused and dropped (least privilege). These verbs still
-  # apply to *all* Pods in the namespace - scoping to sandbox Pods is deferred
-  # (see README "Not yet enforced").
+  # Verbs mirror docker/provisioner/app.py: get/list/watch/create/delete on
+  # pods and services, plus patch on pods for the adoption mark a concurrent
+  # creator writes before a Pod it did not create is reported Running.
+  # pods/exec and events stay unused and dropped (least privilege). These verbs
+  # still apply to *all* Pods in the namespace - scoping to sandbox Pods is
+  # deferred (see README "Not yet enforced").
   - apiGroups: [""]
     resources: ["pods", "pods/log", "services"]
     verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

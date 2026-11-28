@@ -31,10 +31,11 @@ for HTTPS.
 Provisioner / sandbox notes:
 
   • The provisioner ServiceAccount has a namespaced Role (get, list, watch,
-    create, delete on Pods + Services incl. pods/log, in this namespace) and a
-    narrow ClusterRole (namespace get + create, cluster-wide). These verbs
-    apply to *all* Pods in the namespace, not just sandbox Pods - scoping to
-    sandbox Pods is deferred hardening (see README "Not yet enforced").
+    create, delete on Pods + Services incl. pods/log, and patch on Pods for
+    the adoption mark, in this namespace) and a narrow ClusterRole (namespace
+    get + create, cluster-wide). These verbs apply to *all* Pods in the
+    namespace, not just sandbox Pods - scoping to sandbox Pods is deferred
+    hardening (see README "Not yet enforced").
   • Sandbox Pods are created in namespace {{ include "deer-flow.namespace" . }}.
   • PVC mode is enabled: sandbox Pods mount the `{{ include "deer-flow.homePVC" . }}`
     PVC for per-thread user-data.
