@@ -35,7 +35,7 @@ Fields:
 - `prompt` (required): style, mood, and scene. Drives the musical character.
 - `lyrics` (optional): song lyrics. Use `\n` between lines and structure tags such as
   `[Intro]`, `[Verse]`, `[Pre Chorus]`, `[Chorus]`, `[Bridge]`, `[Outro]`.
-- `is_instrumental` (optional, bool): set `true` for a pure instrumental track (no lyrics needed).
+- `is_instrumental` (optional): use the JSON boolean `true` for a pure instrumental track. Omit the field or use `false` for vocals. Quoted values such as `"false"` are rejected before submission.
 
 Behavior:
 - `lyrics` provided → those lyrics are sung.

@@ -33,15 +33,17 @@ def generate_music(prompt_file: str, output_file: str) -> str:
     with open(prompt_file, "r", encoding="utf-8") as f:
         spec = json.load(f)
 
-    api_key = os.getenv("MINIMAX_API_KEY")
-    if not api_key:
-        return "MINIMAX_API_KEY is not set"
-
     prompt = (spec.get("prompt") or "").strip()
     if not prompt:
         raise ValueError("`prompt` is required in the music spec")
     lyrics = spec.get("lyrics") or None  # treat empty string the same as absent
-    is_instrumental = bool(spec.get("is_instrumental", False))
+    is_instrumental = spec.get("is_instrumental", False)
+    if not isinstance(is_instrumental, bool):
+        raise TypeError("`is_instrumental` must be a JSON boolean (true or false)")
+
+    api_key = os.getenv("MINIMAX_API_KEY")
+    if not api_key:
+        return "MINIMAX_API_KEY is not set"
 
     body = {
         "model": os.getenv("MINIMAX_MUSIC_MODEL", "music-2.6-free"),
@@ -102,5 +104,5 @@ if __name__ == "__main__":
 
     try:
         print(generate_music(args.prompt_file, args.output_file))
-    except Exception as e:
-        print(f"Error while generating music: {e}")
+    except Exception as exc:
+        parser.exit(1, f"Error while generating music: {exc}\n")
