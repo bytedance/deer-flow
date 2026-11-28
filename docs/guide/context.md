@@ -158,7 +158,8 @@ SDK clients that cannot add top-level request fields may send the same list as
 tool is enabled. When it is, the web composer shows a "Reference a conversation"
 button next to the attachment button: pick up to three of your recent
 conversations, and they are attached to the next message only, shown as chips
-in the composer and in the transcript. There is no automatic history search. See
+in the composer and in the transcript. Side chats are not listed, including
+while a side chat is replying. There is no automatic history search. See
 [configuration](../../backend/docs/CONFIGURATION.md#reading-referenced-conversations)
 and the [request contract](../../backend/docs/API.md#referencing-a-previous-conversation).
 

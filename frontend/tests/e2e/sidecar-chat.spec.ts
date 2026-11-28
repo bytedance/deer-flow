@@ -1,10 +1,15 @@
+import { createServer, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
+
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 import {
   mockLangGraphAPI,
+  MOCK_RUN_ID,
   MOCK_SIDECAR_THREAD_ID,
   MOCK_THREAD_ID,
   MOCK_THREAD_ID_2,
+  runStreamThreadId,
 } from "./utils/mock-api";
 
 function textFromContent(content: unknown) {
@@ -1551,5 +1556,132 @@ test.describe("Side chat", () => {
     await expect(page.getByTestId("sidecar-panel")).toBeHidden();
     // No thread was ever created, so closing must not issue a DELETE request.
     expect(deleteRequestFired).toBe(false);
+  });
+  test("keeps a running side chat out of the @ conversation picker", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      honorRequestedThreadId: true,
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Main conversation",
+          messages: [
+            { type: "human", id: "main-human", content: "Plan the feature." },
+            {
+              type: "ai",
+              id: "main-ai",
+              content: "Build it as a side conversation.",
+            },
+          ],
+        },
+        {
+          thread_id: MOCK_THREAD_ID_2,
+          title: "Second conversation",
+          messages: [{ type: "human", id: "second-human", content: "Hi." }],
+        },
+      ],
+    });
+    await page.route("**/api/features", (route) =>
+      route.fulfill({
+        json: {
+          agents_api: { enabled: true },
+          browser_control: { enabled: false },
+          mcp_tasks: { enabled: false },
+          knowledge_base: { scope_selection_enabled: false },
+          conversation_references: { enabled: true, max_references: 3 },
+        },
+      }),
+    );
+    // A Gateway-like run stream that stays open: the response names the run
+    // in `Content-Location`, which is what reports the created run.
+    let liveRun: ServerResponse | undefined;
+    let runThreadId = "";
+    const server = createServer((_request, response) => {
+      response.writeHead(200, {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Expose-Headers": "Content-Location",
+        "Cache-Control": "no-cache",
+        "Content-Location": `/threads/${runThreadId}/runs/${MOCK_RUN_ID}`,
+        "Content-Type": "text/event-stream",
+      });
+      response.write(
+        `event: metadata\ndata: ${JSON.stringify({
+          run_id: MOCK_RUN_ID,
+          thread_id: runThreadId,
+        })}\n\n`,
+      );
+      liveRun = response;
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", () => resolve()),
+    );
+    const { port } = server.address() as AddressInfo;
+    await page.route("**/runs/stream", (route) => {
+      runThreadId = runStreamThreadId(route);
+      return route.continue({ url: `http://127.0.0.1:${port}/runs/stream` });
+    });
+    // Once the run starts, list fetches stay pending, as on a slow network:
+    // the picker then shows what the cache holds.
+    let holdListFetches = false;
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        request.url().includes("/runs/stream")
+      ) {
+        holdListFetches = true;
+      }
+    });
+    await page.route("**/threads/search", async (route) => {
+      while (holdListFetches) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return route.fallback();
+    });
+
+    try {
+      await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+      await expect(
+        page.getByText("Build it as a side conversation."),
+      ).toBeVisible({ timeout: 15_000 });
+      const composer = page.getByRole("textbox", {
+        name: /how can i assist you/i,
+      });
+      // Load the picker's conversation list once.
+      await composer.fill("@");
+      await expect(
+        page.getByRole("option", { name: "Second conversation" }),
+      ).toBeVisible();
+      await composer.fill("");
+
+      await selectTextAndClickToolbarButton(
+        page,
+        "Build it as a side conversation.",
+        "Ask in side chat",
+      );
+      const sidecarComposer = page.getByPlaceholder(/deeper follow-up/i);
+      await sidecarComposer.fill("Tell me more.");
+      const runStarted = page.waitForRequest(
+        (request) =>
+          request.method() === "POST" && request.url().includes("/runs/stream"),
+      );
+      await sidecarComposer.press("Enter");
+      await runStarted;
+      await expect.poll(() => liveRun !== undefined).toBe(true);
+      expect(runThreadId).toBe(MOCK_SIDECAR_THREAD_ID);
+
+      await composer.fill("@");
+      await expect(
+        page.getByRole("option", { name: "Second conversation" }),
+      ).toBeVisible();
+      await expect(page.getByRole("option", { name: "New chat" })).toHaveCount(
+        0,
+      );
+    } finally {
+      holdListFetches = false;
+      liveRun?.end(`event: end\ndata: {}\n\n`);
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
