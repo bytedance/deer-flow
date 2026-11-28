@@ -1406,6 +1406,45 @@ async def capabilities():
     }
 
 
+def _rollback_created_pod(sandbox_id: str, pod_uid: str | None) -> None:
+    """Delete the Pod this request created, never a same-name replacement.
+
+    A failed `create_namespaced_service` is not proof the Service is absent: the
+    write can commit and the API still answer 503. Reconcile before cleanup. If
+    the Service is readable, the Pod is still its backend and dropping it would
+    leave a URL that resolves to no Pod, so keep the pair and let the next
+    request adopt it. Only a confirmed 404 Service authorizes the delete, and
+    the delete carries the UID from this request's own create so a Pod swapped
+    in under the same name by another controller survives.
+    """
+    try:
+        core_v1.read_namespaced_service(_svc_name(sandbox_id), K8S_NAMESPACE)
+    except ApiException as exc:
+        if exc.status != 404:
+            # Unreadable is not absent: leave the Pod for orphan reconciliation.
+            logger.warning(
+                "Kept Pod %s: Service state unreadable (status=%s, reason=%s)",
+                _pod_name(sandbox_id),
+                exc.status,
+                exc.reason,
+            )
+            return
+    else:
+        logger.warning(
+            "Kept Pod %s: Service write committed before the error; next request will adopt it",
+            _pod_name(sandbox_id),
+        )
+        return
+
+    options = k8s_client.V1DeleteOptions()
+    if pod_uid:
+        options.preconditions = k8s_client.V1Preconditions(uid=pod_uid)
+    try:
+        core_v1.delete_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE, body=options)
+    except ApiException:
+        pass
+
+
 @app.post("/api/sandboxes", response_model=SandboxResponse)
 def create_sandbox(req: CreateSandboxRequest):
     """Create a sandbox Pod + Service for *sandbox_id*.
@@ -1458,8 +1497,9 @@ def create_sandbox(req: CreateSandboxRequest):
     # A 409 here means a concurrent creator owns the Pod, not that this request
     # created one; only a Pod this request created may be rolled back below.
     pod_created_by_this_request = False
+    created_pod_uid: str | None = None
     try:
-        core_v1.create_namespaced_pod(
+        created_pod = core_v1.create_namespaced_pod(
             K8S_NAMESPACE,
             _build_pod(
                 sandbox_id,
@@ -1474,6 +1514,9 @@ def create_sandbox(req: CreateSandboxRequest):
                 environment=req.environment,
             ),
         )
+        # The UID, not the name, is what a rollback may delete: a replacement
+        # control can put a fresh Pod under the same name after this create.
+        created_pod_uid = getattr(getattr(created_pod, "metadata", None), "uid", None)
         pod_created_by_this_request = True
         logger.info(f"Created Pod {_pod_name(sandbox_id)}")
     except ApiException as exc:
@@ -1490,10 +1533,7 @@ def create_sandbox(req: CreateSandboxRequest):
             # race the Pod belongs to the concurrent creator and may already be
             # serving commands, so deleting it would tear down a live sandbox.
             if pod_created_by_this_request:
-                try:
-                    core_v1.delete_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
-                except ApiException:
-                    pass
+                _rollback_created_pod(sandbox_id, created_pod_uid)
             raise HTTPException(status_code=500, detail=f"Service creation failed: {exc.reason}")
 
     # ── Wait until the Service has a usable access URL ───────────────
