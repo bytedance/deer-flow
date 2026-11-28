@@ -804,6 +804,7 @@ def _get_memory_context(
     app_config: AppConfig | None = None,
     user_id: str | None = None,
     query: str | None = None,
+    injection_stats: dict[str, object] | None = None,
 ) -> str:
     """Get memory context for injection into system prompt.
 
@@ -817,12 +818,17 @@ def _get_memory_context(
             backend. Backends that enable query-aware ranking (DeerMem
             ``retrieval_relevance_enabled``) rank injected facts against it;
             others ignore it.
+        injection_stats: Optional per-call observation output. Unknown counts
+            remain null; a failed read is never reported as an empty snapshot.
 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
     """
     from deerflow.agents.memory import MemoryManagerError, MemoryReadError
 
+    if injection_stats is not None:
+        injection_stats.clear()
+        injection_stats.update({"schema_version": 1, "status": "unknown", "eligible_fact_count": None, "selected_fact_count": None})
     config = None
     try:
         from deerflow.agents.memory import get_memory_manager
@@ -837,14 +843,27 @@ def _get_memory_context(
             config = app_config.memory
 
         if not config.enabled or not config.injection_enabled:
+            if injection_stats is not None:
+                injection_stats.update(status="disabled", selected_fact_count=0)
             return ""
 
         manager = get_memory_manager()
-        memory_content = manager.get_context(
-            user_id=user_id or resolve_runtime_user_id(None),
-            agent_name=agent_name,
-            **context_query_kwargs(manager.get_context, query),
-        )
+        read_result = getattr(manager, "get_context_result", None)
+        if callable(read_result):
+            result = read_result(user_id=user_id or resolve_runtime_user_id(None), agent_name=agent_name, **context_query_kwargs(read_result, query))
+            memory_content = result.text
+            if not isinstance(memory_content, str):
+                raise TypeError("Memory context result must contain text")
+            eligible = result.eligible_fact_count
+            selected = result.selected_fact_count
+            if injection_stats is not None and type(eligible) is int and type(selected) is int and 0 <= selected <= eligible:
+                injection_stats.update(status="known", eligible_fact_count=eligible, selected_fact_count=selected)
+        else:
+            memory_content = manager.get_context(
+                user_id=user_id or resolve_runtime_user_id(None),
+                agent_name=agent_name,
+                **context_query_kwargs(manager.get_context, query),
+            )
 
         if not memory_content.strip():
             return ""

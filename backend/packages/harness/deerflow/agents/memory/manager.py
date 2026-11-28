@@ -25,6 +25,7 @@ import sys
 import threading
 from abc import abstractmethod
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any, ClassVar, Literal
@@ -53,7 +54,7 @@ _manager_lock = threading.Lock()
 _memory_judge_signature: str | None = None
 
 
-def context_query_kwargs(get_context: Callable[..., str], query: str | None) -> dict[str, str | None]:
+def context_query_kwargs(get_context: Callable[..., Any], query: str | None) -> dict[str, str | None]:
     """Pass the optional hint only when a backend accepts that keyword.
 
     Older plugins need no signature change. An uninspectable callable keeps
@@ -127,6 +128,20 @@ class MemoryConflictError(MemoryManagerError):
 
 class MemoryCorruptionError(MemoryManagerError):
     """Persisted memory cannot be read safely."""
+
+
+@dataclass(frozen=True)
+class MemoryContextResult:
+    """Injection text and optional counts from the same scoped snapshot.
+
+    Eligible facts are valid nonempty records before injection selection;
+    selected facts are represented in the returned text, including shortened
+    fact lines. Backends without this information leave both counts unknown.
+    """
+
+    text: str
+    eligible_fact_count: int | None = None
+    selected_fact_count: int | None = None
 
 
 class MemoryManager(BaseModel):
@@ -313,6 +328,24 @@ class MemoryManager(BaseModel):
         ``read_failures_are_fatal`` so caller-owned timeouts preserve the same
         policy before a backend call returns.
         """
+
+    def get_context_result(
+        self,
+        user_id: str | None,
+        *,
+        agent_name: str | None = None,
+        thread_id: str | None = None,
+        query: str | None = None,
+    ) -> MemoryContextResult:
+        """Return injection text with counts when the backend can supply them.
+
+        The default preserves the plain-text contract for existing backends;
+        arbitrary backend text cannot establish a fact count.
+        """
+        kwargs = context_query_kwargs(self.get_context, query)
+        if thread_id is not None:
+            kwargs["thread_id"] = thread_id
+        return MemoryContextResult(self.get_context(user_id=user_id, agent_name=agent_name, **kwargs))
 
     # ── Tier 2: management ops with defaults ────────────────────────────
     # A backend that does not support an operation inherits the default (raise

@@ -86,6 +86,7 @@ _INJECTION_QUERY_MAX_CHARS = 1000
 
 _DATE_RE = re.compile(r"<current_date>([^<]+)</current_date>")
 _DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
+MEMORY_INJECTION_STATS_KEY = "deerflow_memory_injection_stats"
 # Authoritative injected date, carried in additional_kwargs of the date
 # SystemMessage. Detection reads this instead of regex-parsing message content,
 # so it is never exposed to user-influenceable memory content.
@@ -407,6 +408,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         # is neither checkpoint-proven nor self-produced cannot forge the
         # run's recorded memory identity.
         self._injected_memory_message_id: str | None = None
+        self._injected_snapshot_message_ids: set[str] = set()
 
     def release_policy_parameters(self) -> dict[str, object]:
         """Declare memory/date behavior, the shelf index's rendering caps and client delivery.
@@ -434,8 +436,8 @@ class DynamicContextMiddleware(AgentMiddleware):
     def _pii_redaction_config(self) -> PiiRedactionConfig | None:
         return self._app_config.pii_redaction if self._app_config is not None else None
 
-    def _build_full_reminder(self, runtime: Runtime | None = None, *, query: str | None = None) -> tuple[str, str | None]:
-        """Return (date_reminder, memory_block | None).
+    def _build_full_reminder(self, runtime: Runtime | None = None, *, query: str | None = None) -> tuple[str, str | None, dict[str, object] | None]:
+        """Return date, memory text and its frozen selection observation.
 
         Framework-owned data (date) is separated from user-owned data (memory)
         so the downstream SystemMessage carries only framework authority and
@@ -448,13 +450,17 @@ class DynamicContextMiddleware(AgentMiddleware):
         """
         from deerflow.agents.lead_agent.prompt import _get_memory_context
 
-        injection_enabled = self._memory_enabled and (self._app_config.memory.injection_enabled if self._app_config else True)
+        injection_enabled = self._memory_enabled and (self._app_config.memory.enabled and self._app_config.memory.injection_enabled if self._app_config else True)
+        injection_stats: dict[str, object] = {}
+        if not injection_enabled:
+            injection_stats.update(schema_version=1, status="disabled", eligible_fact_count=None, selected_fact_count=0)
         memory_context = (
             _get_memory_context(
                 self._agent_name,
                 app_config=self._app_config,
                 user_id=resolve_runtime_user_id(runtime),
                 query=query,
+                injection_stats=injection_stats,
             )
             if injection_enabled
             else ""
@@ -464,7 +470,7 @@ class DynamicContextMiddleware(AgentMiddleware):
 
         memory_block = memory_context.strip() if memory_context else None
 
-        return date_reminder, memory_block
+        return date_reminder, memory_block, injection_stats or None
 
     def _build_date_update_reminder(self) -> str:
         return _format_current_date_reminder(_format_current_date())
@@ -509,6 +515,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         memory_content: str | None = None,
         *,
         reminder_date: str | None = None,
+        memory_injection_stats: dict[str, object] | None = None,
     ) -> list[SystemMessage | HumanMessage]:
         """Return messages using the ID-swap technique.
 
@@ -534,6 +541,8 @@ class DynamicContextMiddleware(AgentMiddleware):
         }
         if reminder_date is not None:
             reminder_kwargs[_REMINDER_DATE_KEY] = reminder_date
+        if memory_injection_stats is not None and not memory_content:
+            reminder_kwargs[MEMORY_INJECTION_STATS_KEY] = dict(memory_injection_stats)
         messages.append(
             SystemMessage(
                 content=reminder_content,
@@ -551,6 +560,7 @@ class DynamicContextMiddleware(AgentMiddleware):
                         "hide_from_ui": True,
                         _DYNAMIC_CONTEXT_REMINDER_KEY: True,
                         **provenance_kwargs(ContentKind.MEMORY, "dynamic_context_memory"),
+                        **({MEMORY_INJECTION_STATS_KEY: dict(memory_injection_stats)} if memory_injection_stats is not None else {}),
                     },
                 )
             )
@@ -595,13 +605,13 @@ class DynamicContextMiddleware(AgentMiddleware):
             target_idx = next((i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])), None)
             if target_idx is None:
                 return {"messages": memory_removals} if memory_removals else None
-            date_reminder, memory_block = self._build_full_reminder(runtime, query=_derive_injection_query(messages[target_idx]))
+            date_reminder, memory_block, injection_stats = self._build_full_reminder(runtime, query=_derive_injection_query(messages[target_idx]))
             logger.info(
                 "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into last HumanMessage id=%r",
                 memory_block is not None,
                 messages[target_idx].id,
             )
-            result_msgs = self._make_reminder_and_user_messages(messages[target_idx], date_reminder, memory_block, reminder_date=current_date)
+            result_msgs = self._make_reminder_and_user_messages(messages[target_idx], date_reminder, memory_block, reminder_date=current_date, memory_injection_stats=injection_stats)
             return {"messages": [*memory_removals, *result_msgs]}
 
         if last_date == current_date:
@@ -674,7 +684,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         return result
 
     def _track_injected_memory_message(self, update: dict | None) -> None:
-        """Remember the ``__memory`` message ID this run's injection produced.
+        """Remember memory and observation carriers produced by this run.
 
         The journal event is emitted at model-request assembly time, where the
         injection's update dict is no longer available; the ID is the proof
@@ -687,12 +697,21 @@ class DynamicContextMiddleware(AgentMiddleware):
         if not isinstance(update_messages, list):
             return
         for message in update_messages:
-            if not isinstance(message, HumanMessage):
+            if not isinstance(message, (HumanMessage, SystemMessage)) or not is_dynamic_context_reminder(message):
                 continue
             message_id = str(message.id or "")
-            if message_id.endswith("__memory") and is_dynamic_context_reminder(message):
+            if MEMORY_INJECTION_STATS_KEY in message.additional_kwargs:
+                self._injected_snapshot_message_ids.add(message_id)
+            if isinstance(message, HumanMessage) and message_id.endswith("__memory"):
                 self._injected_memory_message_id = message_id
-                return
+
+    def _is_trusted_context_message(self, message: HumanMessage | SystemMessage, runtime: Runtime | None) -> bool:
+        message_id = str(message.id or "")
+        if message_id == self._injected_memory_message_id or message_id in self._injected_snapshot_message_ids:
+            return True
+        context = getattr(runtime, "context", None)
+        pre_existing_ids = context.get(CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY) if isinstance(context, dict) else None
+        return isinstance(pre_existing_ids, (frozenset, set, list, tuple)) and message_id in pre_existing_ids
 
     def _effective_memory_message_for_request(self, messages: list, runtime: Runtime | None) -> HumanMessage | None:
         """Find server-created memory that is effective for this run.
@@ -708,18 +727,47 @@ class DynamicContextMiddleware(AgentMiddleware):
         """
         if not self._memory_enabled:
             return None
-        context = getattr(runtime, "context", None)
-        raw_pre_existing_ids = context.get(CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY) if isinstance(context, dict) else None
-        pre_existing_ids = {str(message_id) for message_id in raw_pre_existing_ids if message_id} if isinstance(raw_pre_existing_ids, (frozenset, set, list, tuple)) else set()
         for message in messages:
             if not isinstance(message, HumanMessage):
                 continue
             message_id = str(message.id or "")
             if not message_id.endswith("__memory") or not is_dynamic_context_reminder(message) or not isinstance(message.content, str):
                 continue
-            if message_id in pre_existing_ids or message_id == self._injected_memory_message_id:
+            if self._is_trusted_context_message(message, runtime):
                 return message
         return None
+
+    def _memory_injection_for_request(self, messages: list, runtime: Runtime | None, memory_message: HumanMessage | None) -> dict[str, object] | None:
+        if not self._memory_enabled:
+            return {"status": "disabled", "eligible": None, "selected": 0, "injected": 0, "withheld": None}
+        has_memory_content = memory_message is not None and bool(memory_message.content.strip())
+        carrier = memory_message
+        if carrier is None:
+            for message in messages:
+                if not isinstance(message, (SystemMessage, HumanMessage)) or not is_dynamic_context_reminder(message) or not self._is_trusted_context_message(message, runtime):
+                    continue
+                # Date SystemMessages inherit the user's ID; only HumanMessages use this suffix to identify memory.
+                if isinstance(message, HumanMessage) and (message.id or "").endswith("__memory"):
+                    continue
+                if MEMORY_INJECTION_STATS_KEY in message.additional_kwargs:
+                    carrier = message
+                    break
+                # A legacy date-only checkpoint has unknown counts. Prefer a stats-bearing snapshot over a date refresh.
+                if carrier is None and _last_injected_date([message]) is not None:
+                    carrier = message
+        if carrier is None:
+            return None
+        stats = carrier.additional_kwargs.get(MEMORY_INJECTION_STATS_KEY)
+        if isinstance(stats, dict) and type(stats.get("schema_version")) is int and stats["schema_version"] == 1:
+            eligible = stats.get("eligible_fact_count")
+            selected = stats.get("selected_fact_count")
+            if stats.get("status") == "known" and type(eligible) is int and type(selected) is int and 0 <= selected <= eligible and (has_memory_content or selected == 0):
+                fresh = str(carrier.id or "") in self._injected_snapshot_message_ids
+                status = ("fresh" if memory_message is not None else "empty") if fresh else "reused"
+                return {"status": status, "eligible": eligible, "selected": selected, "injected": selected, "withheld": eligible - selected}
+            if stats.get("status") == "disabled" and eligible is None and type(selected) is int and selected == 0 and memory_message is None:
+                return {"status": "disabled", "eligible": None, "selected": 0, "injected": 0, "withheld": None}
+        return {"status": "unknown", "eligible": None, "selected": None, "injected": None if has_memory_content else 0, "withheld": None}
 
     def _shelf_index_limits(self) -> tuple[int, int]:
         """Shelf index caps without I/O: the assembly config, else defaults."""
@@ -816,7 +864,9 @@ class DynamicContextMiddleware(AgentMiddleware):
         ``<project>`` / ``<documents>`` text (``None`` when no such block was
         delivered). All are audit fingerprints: never compared, never stored
         in additional_kwargs, and unable to reconstruct the underlying text.
-        Runs supplying no such context keep the historical no-event behavior.
+        The frozen selection counts are included when available; an explicit
+        empty, disabled, or legacy date-only observation also emits an event without a hash.
+        Runs supplying neither context nor an observation keep no-event behavior.
         """
         context = getattr(runtime, "context", None)
         journal = context.get("__run_journal") if isinstance(context, dict) else None
@@ -824,10 +874,11 @@ class DynamicContextMiddleware(AgentMiddleware):
             return
 
         message = self._effective_memory_message_for_request(messages, runtime)
+        memory_injection = self._memory_injection_for_request(messages, runtime, message)
         content_sha256 = hashlib.sha256(message.content.encode("utf-8")).hexdigest() if message is not None else None
         project_context_revision = hashlib.sha256(project_block.encode("utf-8")).hexdigest() if project_block is not None else None
         project_shelf_revision = hashlib.sha256(documents_block.encode("utf-8")).hexdigest() if documents_block is not None else None
-        if content_sha256 is None and project_context_revision is None and project_shelf_revision is None:
+        if content_sha256 is None and project_context_revision is None and project_shelf_revision is None and memory_injection is None:
             return
 
         try:
@@ -835,6 +886,7 @@ class DynamicContextMiddleware(AgentMiddleware):
                 content_sha256=content_sha256,
                 project_context_revision=project_context_revision,
                 project_shelf_revision=project_shelf_revision,
+                **({"memory_injection": memory_injection} if memory_injection is not None else {}),
             )
         except Exception:
             logger.debug("Failed to record effective memory context", exc_info=True)

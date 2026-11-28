@@ -477,6 +477,7 @@ def format_memory_for_injection(
     relevance_weight: float | None = None,
     diversity_weight: float | None = None,
     idf: dict[str, float] | None = None,
+    injection_stats: dict[str, int] | None = None,
 ) -> str:
     """Format memory data for injection into system prompt.
 
@@ -512,10 +513,14 @@ def format_memory_for_injection(
         idf: Optional scope-wide query-term weights, shared by both budget
             pools. DeerMem supplies the same corpus IDF as unfiltered search;
             direct callers that omit it retain uniform term weights.
+        injection_stats: Optional output for eligible and selected fact counts
+            from this formatting execution, without interpreting the text.
 
     Returns:
         Formatted memory string for system prompt injection.
     """
+    if injection_stats is not None:
+        injection_stats.update(eligible_fact_count=0, selected_fact_count=0)
     if not memory_data:
         return ""
 
@@ -609,6 +614,8 @@ def format_memory_for_injection(
         # path can pass the same list straight into the fallback without
         # redoing validation work on the hot prompt-injection path.
         valid_facts = [f for f in facts_data if isinstance(f, dict) and isinstance(f.get("content"), str) and f.get("content", "").strip()]
+        if injection_stats is not None:
+            injection_stats["eligible_fact_count"] = len(valid_facts)
 
         try:
             # Score once, then lazily diversify each budget pool. Do not run
@@ -756,6 +763,8 @@ def format_memory_for_injection(
                 else:
                     high = middle - 1
 
+    if injection_stats is not None:
+        injection_stats["selected_fact_count"] = len(all_fact_lines)
     return result
 
 

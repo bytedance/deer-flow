@@ -195,6 +195,7 @@ async def test_effective_memory_flows_from_injection_to_the_existing_debug_api()
         "content_sha256": hashlib.sha256(effective_content.encode("utf-8")).hexdigest(),
         "project_context_revision": None,
         "project_shelf_revision": None,
+        "memory_injection": {"status": "unknown", "eligible": None, "selected": None, "injected": None, "withheld": None},
     }
 
 

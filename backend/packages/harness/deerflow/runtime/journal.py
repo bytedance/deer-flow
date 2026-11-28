@@ -1668,8 +1668,9 @@ class RunJournal(BaseCallbackHandler):
         content_sha256: str | None,
         project_context_revision: str | None = None,
         project_shelf_revision: str | None = None,
+        memory_injection: dict[str, Any] | None = None,
     ) -> None:
-        """Record the effective hidden context fingerprints for this run.
+        """Record effective context fingerprints and optional fact counts.
 
         ``content_sha256`` is the SHA-256 identity of the selected persisted
         ``__memory`` message, or ``None`` when no such message exists (e.g. a
@@ -1678,22 +1679,25 @@ class RunJournal(BaseCallbackHandler):
         ``<project>`` / ``<documents>`` text actually supplied to the model,
         or ``None`` when no such block was delivered. The full blocks already
         live in checkpoint state or contain user data, so the event stores
-        only identities: a fingerprint can verify a candidate text but cannot
+        only identities and counts: a fingerprint can verify a candidate text but cannot
         reconstruct it. Operators consume them through the existing run-events
         debug API to compare the effective context used by different runs
         without copying that content. Readers accept older payloads that lack
-        the project fields.
+        the project fields or the optional ``memory_injection`` observation.
         """
         if self._memory_context_recorded:
             return
+        content: dict[str, Any] = {
+            "content_sha256": content_sha256,
+            "project_context_revision": project_context_revision,
+            "project_shelf_revision": project_shelf_revision,
+        }
+        if memory_injection is not None:
+            content["memory_injection"] = {key: memory_injection.get(key) for key in ("status", "eligible", "selected", "injected", "withheld")}
         self._put(
             event_type=MEMORY_CONTEXT_EVENT.event_type,
             category=MEMORY_CONTEXT_EVENT.category,
-            content={
-                "content_sha256": content_sha256,
-                "project_context_revision": project_context_revision,
-                "project_shelf_revision": project_shelf_revision,
-            },
+            content=content,
         )
         self._memory_context_recorded = True
 

@@ -189,3 +189,20 @@ PYTHONPATH=. python scripts/migrate_memory_markdown.py --storage-path /path/to/d
 The v1-to-v2 storage migration is one-way for a running application: pre-PR code does not read Markdown facts. Before upgrading a persistent deployment, stop DeerFlow and take a filesystem snapshot or full backup of the configured memory storage root. The migration also durably retains each destructive JSON source beside the original path as `{manifest_filename}.v1.bak` before writing v2 data; an existing mismatched backup or a backup-write failure stops migration without modifying the v1 source. This local backup preserves pre-migration data but is not a substitute for a full snapshot and does not contain facts created after the upgrade.
 
 `--user-id` may be repeated. `--all-users` discovers the existing directory-safe buckets below the selected storage root; standalone integrations that passed raw IDs containing characters such as `@` should use the original value with `--user-id`. A failed user's migration is reported without hiding the rest of the audit, and the command exits non-zero when any user fails. The automatic first-read path remains enabled, so running this CLI is not required for startup.
+
+
+## Inspecting per-run memory injection
+
+To inspect how many facts a run received, filter its events to `context:memory`
+using `GET /api/threads/{thread_id}/runs/{run_id}/events?event_types=context%3Amemory`.
+The optional `content.memory_injection` object reports eligible, selected,
+injected and withheld fact counts. Access follows the existing thread/run owner
+checks; the event does not copy memory text or fact IDs.
+
+DeerMem calculates these values from the same snapshot used for injection.
+Later runs can reuse frozen context, so their counts can remain unchanged even
+after stored memory changes. Unsupported backends and older checkpoints report
+unknown values rather than zero. A missing event also means unobserved, not zero.
+These counts do not measure answer quality or complete fact-text preservation.
+See [Memory injection statistics](../../backend/docs/RUN_EVENT_STREAM.md#memory-injection-statistics)
+for field definitions, empty/disabled behavior and the observation boundary.

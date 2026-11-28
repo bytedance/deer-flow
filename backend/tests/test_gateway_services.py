@@ -583,6 +583,36 @@ def test_normalize_input_strips_external_dynamic_context_metadata():
     }
 
 
+@pytest.mark.parametrize("boundary", ["run", "state"])
+@pytest.mark.parametrize("shape", ["dict", "message", "constructor"])
+def test_memory_injection_statistics_cannot_be_forged_at_message_boundaries(boundary, shape):
+    from langchain_core.messages import HumanMessage
+
+    from app.gateway.services import normalize_input, strip_server_owned_state_metadata
+
+    message = HumanMessage(
+        content="client data", id="known-checkpoint-id__memory", additional_kwargs={"deerflow_memory_injection_stats": {"schema_version": 1, "status": "known", "eligible_fact_count": 1000, "selected_fact_count": 1000}, "custom": "kept"}
+    )
+    if shape == "dict":
+        value = message.model_dump()
+    elif shape == "constructor":
+        value = {"lc": 1, "type": "constructor", "id": ["langchain", "schema", "messages", "HumanMessage"], "kwargs": message.model_dump()}
+    else:
+        value = message
+    transform = normalize_input if boundary == "run" else strip_server_owned_state_metadata
+    (clean,) = transform({"messages": [value]})["messages"]
+    assert clean.additional_kwargs == {"custom": "kept"}
+
+
+def test_memory_injection_statistics_are_stripped_from_auxiliary_state_channels():
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    entry = {"type": "human", "content": "client data", "additional_kwargs": {"deerflow_memory_injection_stats": {"schema_version": 1, "status": "known", "eligible_fact_count": 10, "selected_fact_count": 10}, "custom": "kept"}}
+    clean = strip_server_owned_state_metadata({"extra_messages": [entry], "extra_message": entry})
+    assert clean["extra_messages"][0]["additional_kwargs"] == {"custom": "kept"}
+    assert clean["extra_message"]["additional_kwargs"] == {"custom": "kept"}
+
+
 def test_normalize_input_strips_external_view_image_context_marker():
     from app.gateway.services import normalize_input
     from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY

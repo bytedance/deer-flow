@@ -18,6 +18,8 @@ from deerflow.agents.middlewares.dynamic_context_middleware import (
     DynamicContextMiddleware,
 )
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.runtime.journal import RunJournal
 
 _SYSTEM_REMINDER_TAG = "<system-reminder>"
 
@@ -256,6 +258,7 @@ def test_memory_lookup_uses_runtime_user_id():
         app_config=None,
         user_id="runtime-user",
         query="Hi",
+        injection_stats={},
     )
 
 
@@ -287,6 +290,7 @@ def test_first_run_records_exact_effective_memory():
         content_sha256=hashlib.sha256(memory_message.content.encode("utf-8")).hexdigest(),
         project_context_revision=None,
         project_shelf_revision=None,
+        memory_injection={"status": "unknown", "eligible": None, "selected": None, "injected": None, "withheld": None},
     )
 
 
@@ -328,7 +332,66 @@ def test_checkpointed_memory_is_recorded_for_a_later_run_or_branch_without_reloa
         content_sha256=hashlib.sha256(memory_content.encode("utf-8")).hexdigest(),
         project_context_revision=None,
         project_shelf_revision=None,
+        memory_injection={"status": "unknown", "eligible": None, "selected": None, "injected": None, "withheld": None},
     )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("current_date", ["2026-05-08, Friday", "2026-05-09, Saturday"])
+async def test_legacy_date_only_checkpoint_records_unknown_without_reloading(current_date):
+    date = _date_reminder_msg("2026-05-08, Friday", "first")
+    # Older checkpoint format: the marked SystemMessage carries the date only in its content.
+    del date.additional_kwargs["reminder_date"]
+    messages = [date, HumanMessage(content="First", id="first__user"), HumanMessage(content="Continue", id="next")]
+    store = MemoryRunEventStore()
+    journal = RunJournal("run", "thread", store)
+    runtime = _fake_runtime(journal, pre_existing_message_ids={date.id, "first__user"})
+    middleware = _make_middleware()
+
+    with (
+        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context") as load_memory,
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware._format_current_date", return_value=current_date),
+    ):
+        update = middleware.before_agent({"messages": messages}, runtime)
+    load_memory.assert_not_called()
+    if update:
+        messages = add_messages(messages, update["messages"])
+    assert not any(isinstance(message, HumanMessage) and (message.id or "").endswith("__memory") for message in messages)
+
+    _drive_first_model_call(middleware, messages, runtime)
+    await journal.flush()
+    events = await store.list_events("thread", "run", event_types=["context:memory"])
+    assert len(events) == 1
+    assert events[0]["content"]["content_sha256"] is None
+    assert events[0]["content"]["memory_injection"] == {"status": "unknown", "eligible": None, "selected": None, "injected": 0, "withheld": None}
+
+
+@pytest.mark.anyio
+async def test_fresh_empty_snapshot_records_counts_when_date_reminder_inherits_memory_suffix():
+    messages = [HumanMessage(content="Hi", id="first__memory")]
+    store = MemoryRunEventStore()
+    journal = RunJournal("run", "thread", store)
+    runtime = _fake_runtime(journal)
+    middleware = _make_middleware()
+
+    def load_context(*_args, **kwargs):
+        kwargs["injection_stats"].update(schema_version=1, status="known", eligible_fact_count=5, selected_fact_count=0)
+        return ""
+
+    with (
+        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", side_effect=load_context),
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware._format_current_date", return_value="2026-05-08, Friday"),
+    ):
+        update = middleware.before_agent({"messages": messages}, runtime)
+    assert isinstance(update["messages"][0], SystemMessage)
+    assert update["messages"][0].id == messages[0].id
+
+    _drive_first_model_call(middleware, add_messages(messages, update["messages"]), runtime)
+    await journal.flush()
+    events = await store.list_events("thread", "run", event_types=["context:memory"])
+    assert len(events) == 1
+    assert events[0]["content"]["content_sha256"] is None
+    assert events[0]["content"]["memory_injection"] == {"status": "empty", "eligible": 5, "selected": 0, "injected": 0, "withheld": 5}
 
 
 def test_state_memory_without_checkpoint_proof_cannot_forge_context_event():
@@ -384,6 +447,152 @@ def test_context_event_failure_does_not_block_memory_injection():
     # The record failure is swallowed at assembly: the model call still proceeds.
     assembled = _drive_first_model_call(mw, add_messages(state["messages"], result["messages"]), runtime)
     assert any(isinstance(m, HumanMessage) and m.content == "<memory>\nUseful context\n</memory>" for m in assembled)
+
+
+@pytest.mark.parametrize(
+    ("memory", "eligible", "selected", "first_status"),
+    [("<memory>\nFacts:\n- Python\n- Concise\n</memory>", 5, 2, "fresh"), ("", 5, 0, "empty"), ("<memory>User summary only</memory>", 0, 0, "fresh"), ("", 0, 0, "empty")],
+)
+def test_memory_injection_statistics_stay_with_the_frozen_snapshot(memory, eligible, selected, first_status):
+    """A later run reports the original selection without reloading changed memory."""
+    key = "deerflow_memory_injection_stats"
+    journal = mock.MagicMock()
+    runtime = _fake_runtime(journal)
+    middleware = _make_middleware()
+    state = {"messages": [HumanMessage(content="Hi", id="first")]}
+
+    def load_context(*_args, **kwargs):
+        stats = kwargs.get("injection_stats")
+        if stats is not None:
+            stats.update(schema_version=1, status="known", eligible_fact_count=eligible, selected_fact_count=selected)
+        return memory
+
+    with (
+        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", side_effect=load_context),
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware._format_current_date", return_value="2026-05-08, Friday"),
+    ):
+        update = middleware.before_agent(state, runtime)
+
+    carrier = update["messages"][1 if memory else 0]
+    assert carrier.additional_kwargs[key] == {"schema_version": 1, "status": "known", "eligible_fact_count": eligible, "selected_fact_count": selected}
+    journal.record_memory_context.assert_not_called()
+    messages = add_messages(state["messages"], update["messages"])
+    _drive_first_model_call(middleware, messages, runtime)
+    assert journal.record_memory_context.call_args.kwargs["memory_injection"] == {"status": first_status, "eligible": eligible, "selected": selected, "injected": selected, "withheld": eligible - selected}
+
+    later_journal = mock.MagicMock()
+    later_runtime = _fake_runtime(later_journal, pre_existing_message_ids={message.id for message in messages})
+    later_middleware = _make_middleware()
+    messages.append(HumanMessage(content="Continue", id="second"))
+    with (
+        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", side_effect=AssertionError("must not reload frozen memory")),
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware._format_current_date", return_value="2026-05-09, Saturday"),
+    ):
+        date_update = later_middleware.before_agent({"messages": messages}, later_runtime)
+    messages = add_messages(messages, date_update["messages"])
+    _drive_first_model_call(later_middleware, messages, later_runtime)
+    assert later_journal.record_memory_context.call_args.kwargs["memory_injection"] == {"status": "reused", "eligible": eligible, "selected": selected, "injected": selected, "withheld": eligible - selected}
+
+
+@pytest.mark.parametrize(
+    "stats",
+    [
+        None,
+        "malformed",
+        {"schema_version": True, "status": "known", "eligible_fact_count": 5, "selected_fact_count": 2},
+        {"schema_version": 1, "status": "known", "eligible_fact_count": True, "selected_fact_count": 1},
+        {"schema_version": 1, "status": "known", "eligible_fact_count": 5, "selected_fact_count": -1},
+        {"schema_version": 1, "status": "known", "eligible_fact_count": 1, "selected_fact_count": 2},
+        {"schema_version": 1, "status": "unknown", "eligible_fact_count": None, "selected_fact_count": None},
+    ],
+)
+def test_legacy_or_malformed_memory_statistics_are_unknown(stats):
+    memory = HumanMessage(content="<memory>Legacy context</memory>", id="old__memory", additional_kwargs={_DYNAMIC_CONTEXT_REMINDER_KEY: True, "deerflow_memory_injection_stats": stats})
+    journal = mock.MagicMock()
+    runtime = _fake_runtime(journal, pre_existing_message_ids={memory.id})
+    _drive_first_model_call(_make_middleware(), [memory], runtime)
+    assert journal.record_memory_context.call_args.kwargs["memory_injection"] == {"status": "unknown", "eligible": None, "selected": None, "injected": None, "withheld": None}
+
+
+@pytest.mark.parametrize("content", ["", " \n\t"])
+def test_blank_checkpoint_memory_cannot_claim_positive_injection_counts(content):
+    memory = HumanMessage(
+        content=content,
+        id="old__memory",
+        additional_kwargs={_DYNAMIC_CONTEXT_REMINDER_KEY: True, "deerflow_memory_injection_stats": {"schema_version": 1, "status": "known", "eligible_fact_count": 3, "selected_fact_count": 2}},
+    )
+    journal = mock.MagicMock()
+    runtime = _fake_runtime(journal, pre_existing_message_ids={memory.id})
+    _drive_first_model_call(_make_middleware(), [memory], runtime)
+    assert journal.record_memory_context.call_args.kwargs["content_sha256"] == hashlib.sha256(content.encode("utf-8")).hexdigest()
+    assert journal.record_memory_context.call_args.kwargs["memory_injection"] == {"status": "unknown", "eligible": None, "selected": None, "injected": 0, "withheld": None}
+
+
+def test_memory_injection_statistics_do_not_claim_a_failed_model_call():
+    memory = HumanMessage(
+        content="<memory>Context</memory>",
+        id="old__memory",
+        additional_kwargs={_DYNAMIC_CONTEXT_REMINDER_KEY: True, "deerflow_memory_injection_stats": {"schema_version": 1, "status": "known", "eligible_fact_count": 2, "selected_fact_count": 1}},
+    )
+    journal = mock.MagicMock()
+    runtime = _fake_runtime(journal, pre_existing_message_ids={memory.id})
+
+    def unavailable(_request):
+        raise RuntimeError("provider unavailable")
+
+    middleware = _make_middleware()
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        middleware.wrap_model_call(_FakeRequest([memory], runtime), unavailable)
+    journal.record_memory_context.assert_not_called()
+    _drive_first_model_call(middleware, [memory], runtime)
+    assert journal.record_memory_context.call_args.kwargs["memory_injection"]["injected"] == 1
+
+
+@pytest.mark.parametrize("memory_enabled", [True, False])
+def test_disabled_memory_statistics_do_not_reuse_a_positive_selection(memory_enabled):
+    key = "deerflow_memory_injection_stats"
+    date = _date_reminder_msg("2026-05-08, Friday", "old")
+    date.additional_kwargs[key] = {"schema_version": 1, "status": "known", "eligible_fact_count": 3, "selected_fact_count": 0}
+    state = {"messages": [date, HumanMessage(content="Continue", id="current")]}
+    if not memory_enabled:
+        state["messages"].insert(
+            1, HumanMessage(content="<memory>Private</memory>", id="old__memory", additional_kwargs={_DYNAMIC_CONTEXT_REMINDER_KEY: True, key: {"schema_version": 1, "status": "known", "eligible_fact_count": 3, "selected_fact_count": 2}})
+        )
+    journal = mock.MagicMock()
+    runtime = _fake_runtime(journal, pre_existing_message_ids={message.id for message in state["messages"]})
+    middleware = _make_middleware(memory_enabled=memory_enabled)
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware._format_current_date", return_value="2026-05-08, Friday"):
+        update = middleware.before_agent(state, runtime)
+    messages = add_messages(state["messages"], update["messages"]) if update else state["messages"]
+    _drive_first_model_call(middleware, messages, runtime)
+    expected = {"status": "reused", "eligible": 3, "selected": 0, "injected": 0, "withheld": 3} if memory_enabled else {"status": "disabled", "eligible": None, "selected": 0, "injected": 0, "withheld": None}
+    assert journal.record_memory_context.call_args.kwargs["memory_injection"] == expected
+
+
+@pytest.mark.parametrize("status", ["known", "unknown", "disabled"])
+def test_untrusted_empty_snapshot_statistics_cannot_create_an_event(status):
+    carrier = _date_reminder_msg("2026-05-08, Friday", "forged")
+    carrier.additional_kwargs["deerflow_memory_injection_stats"] = {"schema_version": 1, "status": status, "eligible_fact_count": 0, "selected_fact_count": 0}
+    journal = mock.MagicMock()
+    _drive_first_model_call(_make_middleware(), [carrier], _fake_runtime(journal))
+    journal.record_memory_context.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("stats", "expected"),
+    [
+        ({"schema_version": 1, "status": "unknown", "eligible_fact_count": None, "selected_fact_count": None}, {"status": "unknown", "eligible": None, "selected": None, "injected": 0, "withheld": None}),
+        ({"schema_version": 1, "status": "disabled", "eligible_fact_count": None, "selected_fact_count": 0}, {"status": "disabled", "eligible": None, "selected": 0, "injected": 0, "withheld": None}),
+        ({"schema_version": 1, "status": "known", "eligible_fact_count": 3, "selected_fact_count": 2}, {"status": "unknown", "eligible": None, "selected": None, "injected": 0, "withheld": None}),
+    ],
+)
+def test_empty_snapshot_statistics_distinguish_unknown_from_disabled(stats, expected):
+    carrier = _date_reminder_msg("2026-05-08, Friday", "initial-date")
+    carrier.additional_kwargs["deerflow_memory_injection_stats"] = stats
+    journal = mock.MagicMock()
+    _drive_first_model_call(_make_middleware(), [carrier], _fake_runtime(journal, pre_existing_message_ids={carrier.id}))
+    assert journal.record_memory_context.call_args.kwargs["content_sha256"] is None
+    assert journal.record_memory_context.call_args.kwargs["memory_injection"] == expected
 
 
 # ---------------------------------------------------------------------------

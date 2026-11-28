@@ -92,6 +92,9 @@ client or the real storage, because the payload shape is the contract.
 
 ## Injection
 
+- Snapshot statistics travel with the rendered context. Reusing a checkpoint
+  keeps its original counts; recounting current storage describes another
+  snapshot. Backends without fact metadata remain unknown rather than zero.
 - Gateway input handling removes forged dynamic-context markers. Only output of
   the current `DynamicContextMiddleware` establishes what memory a run saw.
 - `memory.injection_enabled: false` and the per-agent opt-out remove the injected

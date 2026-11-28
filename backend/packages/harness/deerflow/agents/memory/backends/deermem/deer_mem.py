@@ -29,7 +29,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import PrivateAttr
 
-from deerflow.agents.memory.manager import MemoryConflictError, MemoryCorruptionError, MemoryDuplicateFactIdError, MemoryManager
+from deerflow.agents.memory.manager import MemoryConflictError, MemoryContextResult, MemoryCorruptionError, MemoryDuplicateFactIdError, MemoryManager
 
 from .deermem.config import DeerMemConfig
 from .deermem.core.eviction import EVICTION_POLICY_HYBRID_V1
@@ -308,6 +308,30 @@ class DeerMem(MemoryManager):
         thread_id: str | None = None,
         query: str | None = None,
     ) -> str:
+        """Return plain injection text, retaining the existing backend contract."""
+        return self._get_context_result(user_id, agent_name=agent_name, thread_id=thread_id, query=query).text
+
+    def get_context_result(
+        self,
+        user_id: str | None,
+        *,
+        agent_name: str | None = None,
+        thread_id: str | None = None,
+        query: str | None = None,
+    ) -> MemoryContextResult:
+        """Keep legacy subclass restrictions authoritative over injection text."""
+        if type(self).get_context is not DeerMem.get_context:
+            return super().get_context_result(user_id, agent_name=agent_name, thread_id=thread_id, query=query)
+        return self._get_context_result(user_id, agent_name=agent_name, thread_id=thread_id, query=query)
+
+    def _get_context_result(
+        self,
+        user_id: str | None,
+        *,
+        agent_name: str | None = None,
+        thread_id: str | None = None,
+        query: str | None = None,
+    ) -> MemoryContextResult:
         """Load memory and format it for injection (plain text, no wrap).
 
         Middleware mode injects the selected agent's facts together with the
@@ -335,7 +359,8 @@ class DeerMem(MemoryManager):
             facts = memory_data.get("facts", [])
             if isinstance(facts, list) and facts:
                 corpus_idf = build_idf([tokenize(fact["content"]) for fact in facts if isinstance(fact, dict) and isinstance(fact.get("content"), str)])
-        return format_memory_for_injection(
+        injection_stats: dict[str, int] = {}
+        text = format_memory_for_injection(
             memory_data,
             max_tokens=self._config.max_injection_tokens,
             use_tiktoken=(self._config.token_counting == "tiktoken"),
@@ -345,6 +370,12 @@ class DeerMem(MemoryManager):
             relevance_weight=self._config.retrieval_relevance_weight if relevance_enabled else None,
             diversity_weight=self._config.retrieval_diversity_weight if relevance_enabled else None,
             idf=corpus_idf,
+            injection_stats=injection_stats,
+        )
+        return MemoryContextResult(
+            text=text,
+            eligible_fact_count=injection_stats["eligible_fact_count"],
+            selected_fact_count=injection_stats["selected_fact_count"],
         )
 
     def search(
