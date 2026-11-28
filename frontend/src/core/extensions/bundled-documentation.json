@@ -693,6 +693,57 @@
     },
     "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-skill-evolution#readme"
   },
+  "deerflow-extension-trajectory": {
+    "schema_version": 1,
+    "id": "community.trajectory",
+    "locales": {
+      "zh-CN": {
+        "title": "运行轨迹",
+        "description": "查看主 agent 与子 agent 已保存的执行步骤、实测耗时和失败与重试线索，并导出记录。",
+        "usage": [
+          {
+            "title": "安装并重启",
+            "description": "安装轨迹扩展，在 config.yaml 的 plugins 中启用后重启 Gateway。"
+          },
+          {
+            "title": "打开会话轨迹",
+            "description": "从会话菜单打开运行轨迹页，查看当前一轮或加载更早的记录。"
+          },
+          {
+            "title": "定位与导出",
+            "description": "定位耗时较长、失败或出现重试线索的步骤，展开证据，或导出 JSON 与 Markdown ZIP。"
+          }
+        ],
+        "requirements": [
+          "依赖宿主已保存的 checkpoint；跨重启读取需要持久化 checkpoint 数据库及数据目录。",
+          "查看普通 task 子 agent 的内部步骤，需使用 SQLite 文件数据库，并启用 subagent_runtime.checkpoint_enabled。"
+        ]
+      },
+      "en-US": {
+        "title": "Run trajectories",
+        "description": "Inspect saved main-agent and subagent steps, measured durations and failure or retry evidence, and export the records.",
+        "usage": [
+          {
+            "title": "Install and restart",
+            "description": "Install the trajectory extension, enable it under plugins in config.yaml, and restart Gateway."
+          },
+          {
+            "title": "Open a conversation trajectory",
+            "description": "Open the trajectory page from the conversation menu to inspect the latest turn or load earlier records."
+          },
+          {
+            "title": "Locate and export",
+            "description": "Locate long-running steps, failures or retry clues, expand their evidence, or export JSON and Markdown ZIP files."
+          }
+        ],
+        "requirements": [
+          "Reads checkpoints already saved by the host; inspection after restart requires a persistent checkpoint database and data directory.",
+          "Inspecting internal steps of ordinary task subagents requires a SQLite file database and subagent_runtime.checkpoint_enabled."
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-trajectory#readme"
+  },
   "deerflow-extension-weknora": {
     "schema_version": 1,
     "id": "catalog/weknora",

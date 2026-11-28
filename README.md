@@ -132,6 +132,7 @@ Each guide is the full reference for its topic. Open the one you need.
 | Terminal workbench | [Terminal Workbench (TUI)](docs/guide/tui.md) |
 | Personal access tokens, stream actions, embedded Python client | [API Access and Python Client](docs/guide/api-and-client.md) |
 | Trace correlation, LangSmith, Langfuse, Monocle | [Tracing and Observability](docs/guide/observability.md) |
+| Checkpoint trajectory browsing, compaction comparisons and JSON/Markdown exports | [Trajectory Extension](examples/deerflow-extension-trajectory/README.md) |
 | Deployment risks, admin model, security recommendations | [Security Notice](docs/guide/security.md) |
 
 ## Recommended Models
