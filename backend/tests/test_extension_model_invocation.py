@@ -15,9 +15,11 @@ from deerflow_extension_api import (
     ModelOutputValidationError,
 )
 from langchain_core.messages import AIMessage
+from pydantic import ValidationError
 
 from deerflow.extensions.gateway import start_services, stop_services
 from deerflow.extensions.loader import ExtensionSpec, load_extensions
+from deerflow.extensions.model_access import ModelInvocationGrant
 
 
 class Service:
@@ -588,3 +590,42 @@ async def test_cancelled_constructor_retains_slot_and_never_dispatches(host):
         await asyncio.gather(*invoker._budget.workers, return_exceptions=True)
         await stop_services(loaded)
     host.model.ainvoke.assert_not_called()
+
+
+GRANT_BOOLEAN_FIELDS = (
+    ("max_concurrency", "an integer"),
+    ("timeout_seconds", "a number"),
+    ("max_input_chars", "an integer"),
+    ("max_output_chars", "an integer"),
+)
+
+
+@pytest.mark.parametrize("value", [True, False])
+@pytest.mark.parametrize(("field", "kind"), GRANT_BOOLEAN_FIELDS)
+def test_grant_rejects_booleans(field: str, kind: str, value: bool) -> None:
+    """A boolean in an extension manifest must not collapse a grant limit to one.
+
+    `host_access.model_invocation` is read from the `extensions:` entries in config.yaml.
+    `max_input_chars: true` would otherwise load as `1` and make every granted model call
+    fail the input-length check, and `max_concurrency: true` would serialize the extension.
+    """
+    with pytest.raises(ValidationError, match=f"{field} must be {kind}, not a boolean"):
+        ModelInvocationGrant(roles={"summarizer": "gpt-4o"}, **{field: value})
+
+
+def test_grant_keeps_numeric_limits() -> None:
+    grant = ModelInvocationGrant(
+        roles={"summarizer": "gpt-4o"},
+        max_concurrency="4",
+        timeout_seconds="30",
+        max_input_chars=1024,
+        max_output_chars=512,
+    )
+    assert (grant.max_concurrency, grant.timeout_seconds) == (4, 30.0)
+    assert (grant.max_input_chars, grant.max_output_chars) == (1024, 512)
+
+
+def test_grant_keeps_its_defaults() -> None:
+    grant = ModelInvocationGrant(roles={"summarizer": "gpt-4o"})
+    assert (grant.max_concurrency, grant.timeout_seconds) == (2, 60.0)
+    assert (grant.max_input_chars, grant.max_output_chars) == (262144, 65536)
