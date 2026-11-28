@@ -9,7 +9,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -41,7 +41,7 @@ sys.modules["deerflow.subagents.executor"] = _executor_mock
 
 
 @pytest.fixture()
-def provisioner_module():
+def provisioner_module() -> ModuleType:
     """Load docker/provisioner/app.py as an importable test module.
 
     Shared by test_provisioner_kubeconfig and test_provisioner_pvc_volumes so
