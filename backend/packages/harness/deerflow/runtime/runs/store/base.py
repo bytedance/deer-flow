@@ -342,6 +342,7 @@ class RunStore(abc.ABC):
         message_count: int = 0,
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
+        model_failure_ledger: list[dict[str, Any]] | None = None,
         error: str | None = None,
         goal_verdict: dict[str, Any] | None = None,
     ) -> bool | None:
@@ -370,6 +371,7 @@ class RunStore(abc.ABC):
         message_count: int | None = None,
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
+        model_failure_ledger: list[dict[str, Any]] | None = None,
     ) -> None:
         """Persist a best-effort running snapshot without changing run status."""
         return None

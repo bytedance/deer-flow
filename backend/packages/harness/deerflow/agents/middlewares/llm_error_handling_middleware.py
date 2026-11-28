@@ -10,6 +10,7 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, override
 
 import httpx
@@ -374,11 +375,27 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         self.app_config = app_config
         self.model_name = model_name
         model_config = app_config.get_model_config(model_name) if model_name else None
+        if model_name is not None and model_config is None:
+            # The primary model itself must resolve: an unresolvable primary is a
+            # misconfiguration (the middleware has no model to run against), not
+            # a silent no-op. Fail closed with a clear message so an operator who
+            # passes a bad model name sees the problem at construction time.
+            raise ValueError(
+                f"Model '{model_name}' passed to LLMErrorHandlingMiddleware could not be resolved in the active model config "
+                "(no configured model with that name); the middleware has no model to run against. Verify the model name under "
+                "`models:` in the active config before constructing this middleware."
+            ) from None
         configured_fallbacks = getattr(model_config, "fallback_models", ())
         self.fallback_model_names = tuple(configured_fallbacks if fallback_model_names is None else fallback_model_names)
         self.thinking_enabled = thinking_enabled
         self.reasoning_effort = reasoning_effort
         self.model_overrides = dict(model_overrides or {})
+        # Fail closed on unresolvable configured fallbacks (see
+        # ``_resolve_configured_fallback_model_names``). Failover must not
+        # silently disable when a declared fallback cannot be resolved against
+        # the active model registry; an operator who declared a fallback then
+        # sees a clear error instead of a silent loss of resilience.
+        self.fallback_model_names = self._resolve_configured_fallback_model_names()
         self._fallback_models: dict[str, BaseChatModel] = {}
         self._fallback_models_lock = threading.Lock()
 
@@ -422,6 +439,61 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         self._circuit_probe_in_flight = False
         self._circuit_probe_token: object | None = None
 
+    def _resolve_configured_fallback_model_names(self) -> tuple[str, ...]:
+        """Resolve configured fallback model names against the runtime model registry.
+
+        Fail closed: if a configured fallback cannot be resolved, failover must
+        not silently disable. A clear error surfaces the misconfiguration instead
+        so an operator who declared a fallback sees the problem rather than a
+        silent loss of resilience. ``AppConfig`` already rejects unresolvable
+        fallback names at load time (``_build_name_indexes``); this check is
+        defense-in-depth for registry/snapshot mismatches (e.g. a stale model
+        registry after a config reload) and any construction path that bypasses
+        that validator. An empty configured list simply means no failover is
+        configured, which is the normal, non-failing case.
+        """
+        fallbacks = list(self.fallback_model_names)
+        unresolvable: list[str] = []
+        for name in fallbacks:
+            if self.app_config.get_model_config(name) is None:
+                unresolvable.append(name)
+        if unresolvable:
+            names = ", ".join(repr(name) for name in unresolvable)
+            message = (
+                f"Model '{self.model_name}' declares configured fallback model(s) {names}, which cannot be resolved in the active model registry; "
+                "model failover is disabled (fail closed). Ensure each fallback model is defined under `models:` in the active config and referenced correctly."
+            )
+            raise ValueError(message)
+        return tuple(fallbacks)
+
+    def _resolve_fallback_candidates(self, fallback_model_names: tuple[str, ...]) -> tuple[str, ...]:
+        """Resolve the declared fallback names against the active model registry at the failover trigger point.
+
+        Defense-in-depth for the config-reload case: if the middleware instance was
+        not rebuilt after a config reload, the constructor-time resolution check
+        did not run, so a declared fallback may now be unresolvable even though it
+        was resolvable when the middleware was built. Rather than silently disabling
+        failover, exclude the unresolvable names and log a warning, so failover
+        continues with whatever is resolvable and the operator sees a clear signal.
+
+        Failover disabled entirely by this filter (no resolvable fallback left) is
+        acceptable here: the constructor already fails closed for the rebuilt case,
+        and for the not-rebuilt case the warning plus the resolved-subset behavior
+        avoids the silent-disable the issue targets.
+        """
+        if not fallback_model_names:
+            return ()
+        resolved: list[str] = []
+        for name in fallback_model_names:
+            if self.app_config.get_model_config(name) is None:
+                logger.warning(
+                    "Model failover fallback %r is not resolvable in the active model registry; excluding it so failover does not silently disable. Check the `models:` section and `fallback_models` in the active config.",
+                    name,
+                )
+                continue
+            resolved.append(name)
+        return tuple(resolved)
+
     def release_policy_parameters(self) -> dict[str, object]:
         return {
             "empty_response_retry_limit": 1,
@@ -451,8 +523,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             candidates.append(reason_override)
         return min(candidates)
 
-    def _check_circuit(self, *, probe_token: object | None = None) -> bool:
+    def _check_circuit(self, *, probe_token: object | None = None, request: ModelRequest | None = None) -> bool:
         """Returns True if circuit is OPEN (fast fail), False otherwise."""
+        transitioned_to_half_open = False
+        result: bool
         with self._circuit_lock:
             now = self._circuit_clock()
 
@@ -463,19 +537,25 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 self._circuit_state = "half_open"
                 self._circuit_probe_in_flight = False
                 self._circuit_probe_token = None
+                transitioned_to_half_open = True
 
             if self._circuit_state == "half_open":
                 if self._circuit_probe_in_flight:
-                    return True
-                self._circuit_probe_in_flight = True
-                self._circuit_probe_token = probe_token
+                    result = True
+                else:
+                    self._circuit_probe_in_flight = True
+                    self._circuit_probe_token = probe_token
+                    if isinstance(probe_token, _CircuitAdmission):
+                        probe_token.generation = self._circuit_generation
+                    result = False
+            else:
                 if isinstance(probe_token, _CircuitAdmission):
                     probe_token.generation = self._circuit_generation
-                return False
+                result = False
 
-            if isinstance(probe_token, _CircuitAdmission):
-                probe_token.generation = self._circuit_generation
-            return False
+        if transitioned_to_half_open:
+            self._emit_circuit_event(request, "half_open")
+        return result
 
     def _owns_current_circuit_generation(self, admission: _CircuitAdmission | None) -> bool:
         if admission is None:
@@ -486,12 +566,14 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return self._circuit_probe_token is admission
         return self._circuit_state == "closed"
 
-    def _record_success(self, *, admission: _CircuitAdmission | None = None) -> None:
+    def _record_success(self, *, admission: _CircuitAdmission | None = None, request: ModelRequest | None = None) -> None:
+        transitioned = False
         with self._circuit_lock:
             if not self._owns_current_circuit_generation(admission):
                 return
             if self._circuit_state != "closed" or self._circuit_failure_count > 0:
                 logger.info("Circuit breaker reset (Closed). LLM service recovered.")
+                transitioned = True
             if self._circuit_state == "half_open":
                 self._circuit_generation += 1
             self._circuit_failure_count = 0
@@ -499,8 +581,11 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             self._circuit_state = "closed"
             self._circuit_probe_in_flight = False
             self._circuit_probe_token = None
+        if transitioned:
+            self._emit_circuit_event(request, "closed")
 
-    def _record_failure(self, *, admission: _CircuitAdmission | None = None) -> None:
+    def _record_failure(self, *, admission: _CircuitAdmission | None = None, request: ModelRequest | None = None) -> None:
+        transitioned = False
         with self._circuit_lock:
             if not self._owns_current_circuit_generation(admission):
                 return
@@ -514,21 +599,24 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     "Circuit breaker probe failed (Open). Will probe again after %ds.",
                     self.circuit_recovery_timeout_sec,
                 )
-                return
-
-            self._circuit_failure_count += 1
-            if self._circuit_failure_count >= self.circuit_failure_threshold:
-                self._circuit_open_until = self._circuit_clock() + self.circuit_recovery_timeout_sec
-                if self._circuit_state != "open":
-                    self._circuit_generation += 1
-                    self._circuit_state = "open"
-                    self._circuit_probe_in_flight = False
-                    self._circuit_probe_token = None
-                    logger.error(
-                        "Circuit breaker tripped (Open). Threshold reached (%d). Will probe after %ds.",
-                        self.circuit_failure_threshold,
-                        self.circuit_recovery_timeout_sec,
-                    )
+                transitioned = True
+            else:
+                self._circuit_failure_count += 1
+                if self._circuit_failure_count >= self.circuit_failure_threshold:
+                    self._circuit_open_until = self._circuit_clock() + self.circuit_recovery_timeout_sec
+                    if self._circuit_state != "open":
+                        self._circuit_generation += 1
+                        self._circuit_state = "open"
+                        self._circuit_probe_in_flight = False
+                        self._circuit_probe_token = None
+                        logger.error(
+                            "Circuit breaker tripped (Open). Threshold reached (%d). Will probe after %ds.",
+                            self.circuit_failure_threshold,
+                            self.circuit_recovery_timeout_sec,
+                        )
+                        transitioned = True
+        if transitioned:
+            self._emit_circuit_event(request, "open")
 
     def _release_half_open_probe(self, *, admission: _CircuitAdmission | None = None) -> None:
         """Release the in-flight half-open probe without recording a failure.
@@ -825,9 +913,16 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     ) -> tuple[ModelResponse | None, BaseException]:
         if not fallback_model_names or (not circuit_open and not _is_safe_for_model_failover(original_error)):
             return None, original_error
+        # Failover trigger point: resolve declared fallbacks against the active
+        # model registry (defense-in-depth for a config-reload case where the
+        # instance was not rebuilt). Exclude unresolvable names with a warning
+        # so failover cannot silently disable, then iterate the resolvable subset.
+        resolved_fallback_names = self._resolve_fallback_candidates(fallback_model_names)
+        if not resolved_fallback_names:
+            return None, original_error
 
         last_error = original_error
-        for fallback_name in fallback_model_names:
+        for fallback_name in resolved_fallback_names:
             try:
                 if not self._authorize_fallback_model(request, fallback_name):
                     continue
@@ -836,6 +931,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 response = self._bounded_model_call_sync(fallback_request, handler)
                 _raise_for_empty_response(response)
                 logger.warning("LLM model failover succeeded: %s -> %s", self.model_name, fallback_name)
+                self._emit_fallback_event(request, "success", fallback_name)
                 return response, last_error
             except GraphBubbleUp:
                 raise
@@ -848,6 +944,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     reason,
                     _extract_error_detail(exc),
                 )
+                self._emit_fallback_event(request, "failure", fallback_name, reason=reason)
                 if not retriable or not _is_safe_for_model_failover(exc):
                     break
         return None, last_error
@@ -863,9 +960,16 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     ) -> tuple[ModelResponse | None, BaseException]:
         if not fallback_model_names or (not circuit_open and not _is_safe_for_model_failover(original_error)):
             return None, original_error
+        # Failover trigger point: resolve declared fallbacks against the active
+        # model registry (defense-in-depth for a config-reload case where the
+        # instance was not rebuilt). Exclude unresolvable names with a warning
+        # so failover cannot silently disable, then iterate the resolvable subset.
+        resolved_fallback_names = self._resolve_fallback_candidates(fallback_model_names)
+        if not resolved_fallback_names:
+            return None, original_error
 
         last_error = original_error
-        for fallback_name in fallback_model_names:
+        for fallback_name in resolved_fallback_names:
             try:
                 if not await self._aauthorize_fallback_model(request, fallback_name):
                     continue
@@ -874,6 +978,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 response = await self._bounded_model_call(fallback_request, handler)
                 _raise_for_empty_response(response)
                 logger.warning("LLM model failover succeeded: %s -> %s", self.model_name, fallback_name)
+                await self._aemit_fallback_event(request, "success", fallback_name)
                 return response, last_error
             except GraphBubbleUp:
                 raise
@@ -888,9 +993,136 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     reason,
                     _extract_error_detail(exc),
                 )
+                await self._aemit_fallback_event(request, "failure", fallback_name, reason=reason)
                 if not retriable or not _is_safe_for_model_failover(exc):
                     break
         return None, last_error
+
+    # -- Structured model-failure ledger & stream events --
+    #
+    # Every retry / circuit transition / fallback outcome is emitted on the
+    # existing ``llm_*`` custom-event channel AND appended to a compact,
+    # run-scoped ledger so SRE can do provider health attribution from run
+    # metadata without touching logs. Entries are deliberately small and
+    # structured (no raw error bodies or provider payloads). Recording and
+    # emission are best-effort: a missing journal or an unavailable stream
+    # writer must never change the model-call outcome.
+
+    @staticmethod
+    def _model_failure_context(request: ModelRequest | None) -> Mapping:
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None)
+        return context if isinstance(context, Mapping) else {}
+
+    def _model_failure_scope(self, request: ModelRequest | None) -> dict[str, Any]:
+        context = self._model_failure_context(request)
+        journal = context.get("__run_journal")
+        is_subagent = bool(context.get("is_subagent"))
+        run_id = getattr(journal, "run_id", None)
+        if not isinstance(run_id, str) or not run_id:
+            candidate = context.get("run_id")
+            run_id = candidate if isinstance(candidate, str) and candidate else None
+        return {"journal": journal, "is_subagent": is_subagent, "run_id": run_id}
+
+    def _provider_name_for(self, model_name: str | None) -> str | None:
+        if not model_name:
+            return None
+        model_config = self.app_config.get_model_config(model_name)
+        if model_config is None:
+            return None
+        provider = getattr(model_config, "use", None)
+        return provider if isinstance(provider, str) and provider else None
+
+    def _model_failure_fields(
+        self,
+        request: ModelRequest | None,
+        model_name: str | None,
+        *,
+        status: str,
+        reason: str | None = None,
+        attempt: int | None = None,
+    ) -> dict[str, Any]:
+        fields: dict[str, Any] = {
+            "model": model_name,
+            "provider": self._provider_name_for(model_name),
+            "status": status,
+            "reason": reason,
+            "attempt": attempt,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+        run_id = self._model_failure_scope(request)["run_id"]
+        if run_id is not None:
+            fields["run_id"] = run_id
+        return fields
+
+    def _record_model_failure_ledger(self, request: ModelRequest | None, fields: Mapping[str, Any]) -> None:
+        scope = self._model_failure_scope(request)
+        if scope["is_subagent"]:
+            return
+        record = getattr(scope["journal"], "record_model_failure_ledger_entry", None)
+        if not callable(record):
+            return
+        try:
+            record(fields)
+        except Exception:
+            logger.debug("Failed to record model-failure ledger entry", exc_info=True)
+
+    def _emit_circuit_event(self, request: ModelRequest | None, state: str, *, reason: str | None = None) -> None:
+        fields = self._model_failure_fields(request, self.model_name, status=f"circuit_{state}", reason=reason)
+        self._record_model_failure_ledger(request, fields)
+        try:
+            from langgraph.config import get_stream_writer
+
+            writer = get_stream_writer()
+            emit_custom_event({"type": "llm_circuit", "state": state, **fields}, writer=writer)
+        except GraphBubbleUp:
+            raise
+        except Exception:
+            logger.debug("Failed to emit llm_circuit event", exc_info=True)
+
+    def _emit_fallback_event(
+        self,
+        request: ModelRequest,
+        outcome: str,
+        fallback_name: str,
+        *,
+        reason: str | None = None,
+        attempt: int | None = None,
+    ) -> None:
+        fields = self._model_failure_fields(request, fallback_name, status=f"fallback_{outcome}", reason=reason, attempt=attempt)
+        fields["from_model"] = self.model_name
+        self._record_model_failure_ledger(request, fields)
+        try:
+            from langgraph.config import get_stream_writer
+
+            writer = get_stream_writer()
+            emit_custom_event({"type": "llm_fallback", "outcome": outcome, **fields}, writer=writer)
+        except GraphBubbleUp:
+            raise
+        except Exception:
+            logger.debug("Failed to emit llm_fallback event", exc_info=True)
+
+    async def _aemit_fallback_event(
+        self,
+        request: ModelRequest,
+        outcome: str,
+        fallback_name: str,
+        *,
+        reason: str | None = None,
+        attempt: int | None = None,
+    ) -> None:
+        fields = self._model_failure_fields(request, fallback_name, status=f"fallback_{outcome}", reason=reason, attempt=attempt)
+        fields["from_model"] = self.model_name
+        self._record_model_failure_ledger(request, fields)
+        try:
+            from langgraph.config import get_stream_writer
+
+            writer = get_stream_writer()
+            await aemit_custom_event({"type": "llm_fallback", "outcome": outcome, **fields}, writer=writer)
+        except GraphBubbleUp:
+            raise
+        except Exception:
+            logger.debug("Failed to emit async llm_fallback event", exc_info=True)
 
     def _build_retry_event(
         self,
@@ -899,6 +1131,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         reason: str,
         *,
         max_attempts: int,
+        request: ModelRequest | None = None,
     ) -> dict[str, Any]:
         return {
             "type": "llm_retry",
@@ -910,6 +1143,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             "wait_ms": wait_ms,
             "reason": reason,
             "message": self._build_retry_message(attempt, wait_ms, reason, max_attempts=max_attempts),
+            **self._model_failure_fields(request, self.model_name, status="retrying", reason=reason, attempt=attempt),
         }
 
     def _emit_retry_event(
@@ -919,13 +1153,18 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         reason: str,
         *,
         max_attempts: int,
+        request: ModelRequest | None = None,
     ) -> None:
+        self._record_model_failure_ledger(
+            request,
+            self._model_failure_fields(request, self.model_name, status="retrying", reason=reason, attempt=attempt),
+        )
         try:
             from langgraph.config import get_stream_writer
 
             writer = get_stream_writer()
             emit_custom_event(
-                self._build_retry_event(attempt, wait_ms, reason, max_attempts=max_attempts),
+                self._build_retry_event(attempt, wait_ms, reason, max_attempts=max_attempts, request=request),
                 writer=writer,
             )
         except GraphBubbleUp:
@@ -940,13 +1179,18 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         reason: str,
         *,
         max_attempts: int,
+        request: ModelRequest | None = None,
     ) -> None:
+        self._record_model_failure_ledger(
+            request,
+            self._model_failure_fields(request, self.model_name, status="retrying", reason=reason, attempt=attempt),
+        )
         try:
             from langgraph.config import get_stream_writer
 
             writer = get_stream_writer()
             await aemit_custom_event(
-                self._build_retry_event(attempt, wait_ms, reason, max_attempts=max_attempts),
+                self._build_retry_event(attempt, wait_ms, reason, max_attempts=max_attempts, request=request),
                 writer=writer,
             )
         except GraphBubbleUp:
@@ -961,7 +1205,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
         admission = _CircuitAdmission()
-        if self._check_circuit(probe_token=admission):
+        if self._check_circuit(probe_token=admission, request=request):
             circuit_error = RuntimeError(self._build_circuit_breaker_message())
             if self.fallback_model_names:
                 response, last_error = self._try_model_fallback_sync(
@@ -990,7 +1234,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             try:
                 response = self._bounded_model_call_sync(request, handler)
                 _raise_for_empty_response(response)
-                self._record_success(admission=admission)
+                self._record_success(admission=admission, request=request)
                 return response
             except GraphBubbleUp:
                 # Preserve LangGraph control-flow signals (interrupt/pause/resume).
@@ -1022,7 +1266,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                         _extract_error_detail(exc),
                     )
                     try:
-                        self._emit_retry_event(attempt, wait_ms, reason, max_attempts=max_attempts)
+                        self._emit_retry_event(attempt, wait_ms, reason, max_attempts=max_attempts, request=request)
                     except GraphBubbleUp:
                         self._release_half_open_probe(admission=admission)
                         raise
@@ -1056,10 +1300,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                             # records the primary's failure so it can eventually
                             # spare the failing provider, while the call result
                             # stays the backup's success.
-                            self._record_failure(admission=admission)
+                            self._record_failure(admission=admission, request=request)
                         return response
                     if reason not in _NON_CIRCUIT_FAILURE_REASONS:
-                        self._record_failure(admission=admission)
+                        self._record_failure(admission=admission, request=request)
                     else:
                         self._release_half_open_probe(admission=admission)
                     exc = last_error
@@ -1076,7 +1320,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
         admission = _CircuitAdmission()
-        if self._check_circuit(probe_token=admission):
+        if self._check_circuit(probe_token=admission, request=request):
             circuit_error = RuntimeError(self._build_circuit_breaker_message())
             if self.fallback_model_names:
                 response, last_error = await self._try_model_fallback(
@@ -1106,7 +1350,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 try:
                     response = await self._bounded_model_call(request, handler)
                     _raise_for_empty_response(response)
-                    self._record_success(admission=admission)
+                    self._record_success(admission=admission, request=request)
                     return response
                 except GraphBubbleUp:
                     # Preserve LangGraph control-flow signals (interrupt/pause/resume).
@@ -1137,7 +1381,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                             _extract_error_detail(exc),
                         )
                         try:
-                            await self._aemit_retry_event(attempt, wait_ms, reason, max_attempts=max_attempts)
+                            await self._aemit_retry_event(attempt, wait_ms, reason, max_attempts=max_attempts, request=request)
                         except GraphBubbleUp:
                             self._release_half_open_probe(admission=admission)
                             raise
@@ -1171,10 +1415,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                                 # records the primary's failure so it can eventually
                                 # spare the failing provider, while the call result
                                 # stays the backup's success.
-                                self._record_failure(admission=admission)
+                                self._record_failure(admission=admission, request=request)
                             return response
                         if reason not in _NON_CIRCUIT_FAILURE_REASONS:
-                            self._record_failure(admission=admission)
+                            self._record_failure(admission=admission, request=request)
                         else:
                             self._release_half_open_probe(admission=admission)
                         exc = last_error

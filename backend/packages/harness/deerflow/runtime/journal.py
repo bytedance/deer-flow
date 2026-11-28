@@ -63,6 +63,10 @@ _LEGACY_SUMMARY_MESSAGE_NAME = "summary"
 _WRITE_SETTLE_TIMEOUT_SECONDS = 5.0
 _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification", "sandbox_network"})
 _MAX_RUN_SKILL_SNAPSHOTS = 64
+# Compact per-run model-failure ledger for SRE postmortem. Entries are small,
+# structured records (no raw error bodies) so the bound is generous; it exists
+# only to stop a runaway provider outage from bloating run metadata.
+_MAX_RUN_MODEL_FAILURE_LEDGER_ENTRIES = 256
 
 
 def _content_chars(content: Any) -> int:
@@ -408,6 +412,11 @@ class RunJournal(BaseCallbackHandler):
         # display snapshots separate from tool/secret authorization state.
         self._skill_usage_lock = threading.Lock()
         self._skill_usages: dict[str, dict[str, Any]] = {}
+        # Run-scoped, bounded, structured model-failure ledger. Written by the
+        # error-handling middleware via runtime.context and surfaced read-only
+        # in run metadata for provider health attribution.
+        self._model_failure_ledger_lock = threading.Lock()
+        self._model_failure_ledger: list[dict[str, Any]] = []
 
         # Convenience fields
         self._last_ai_msg: str | None = None
@@ -872,6 +881,23 @@ class RunJournal(BaseCallbackHandler):
                 snapshot["content"] = content[:MAX_SKILL_SNAPSHOT_CHARS]
                 snapshot["partial"] = True
             self._skill_usages[path] = snapshot
+
+    def record_model_failure_ledger_entry(self, entry: Mapping[str, Any]) -> None:
+        """Append one compact model-failure ledger entry for this run.
+
+        Entries come from the LLM error-handling middleware (retries, circuit
+        transitions, model fallback outcomes) and are deliberately small and
+        structured — no raw error bodies or provider payloads — so SRE can do
+        provider health attribution from run metadata without touching logs.
+        The list is bounded and cleared on detach, keeping the ledger strictly
+        run-scoped and independent of any metrics pipeline.
+        """
+        with self._model_failure_ledger_lock:
+            if self._closed:
+                return
+            if len(self._model_failure_ledger) >= _MAX_RUN_MODEL_FAILURE_LEDGER_ENTRIES:
+                return
+            self._model_failure_ledger.append(dict(entry))
 
     @staticmethod
     def _message_identity(message: BaseMessage) -> str | None:
@@ -1884,6 +1910,8 @@ class RunJournal(BaseCallbackHandler):
         self._accepting_evidence = False
         with self._skill_usage_lock:
             self._skill_usages.clear()
+        with self._model_failure_ledger_lock:
+            self._model_failure_ledger.clear()
         self._store = None
         self._progress_reporter = None
         self._buffer.clear()
@@ -2035,6 +2063,7 @@ class RunJournal(BaseCallbackHandler):
             "message_count": self._msg_count,
             "last_ai_message": self._last_ai_msg,
             "first_human_message": self._first_human_msg,
+            "model_failure_ledger": list(self._model_failure_ledger),
         }
 
     @property

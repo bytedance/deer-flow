@@ -609,6 +609,55 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_update_run_completion_persists_model_failure_ledger(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", status="running")
+        ledger = [
+            {
+                "run_id": "r1",
+                "model": "gpt-4o",
+                "provider": "openai",
+                "status": "retry",
+                "reason": "rate_limited",
+                "attempt": 1,
+                "timestamp": "2026-01-01T00:00:00Z",
+            }
+        ]
+        updated = await repo.update_run_completion(
+            "r1",
+            status="success",
+            total_tokens=1,
+            model_failure_ledger=ledger,
+        )
+        row = await repo.get("r1")
+        assert updated is True
+        assert row["model_failure_ledger"] == ledger
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_run_progress_persists_model_failure_ledger(self, tmp_path):
+        """Progress snapshots carry the ledger so a crashing run still leaves an SRE trail."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", status="running")
+        ledger = [
+            {
+                "run_id": "r1",
+                "model": "gpt-4o",
+                "provider": "openai",
+                "status": "fallback_success",
+                "reason": "provider_unavailable",
+                "attempt": 0,
+                "from_model": "gpt-4o",
+                "timestamp": "2026-01-01T00:00:00Z",
+            }
+        ]
+        await repo.update_run_progress("r1", total_tokens=1, model_failure_ledger=ledger)
+        row = await repo.get("r1")
+        assert row["status"] == "running"
+        assert row["model_failure_ledger"] == ledger
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_aggregate_tokens_by_thread_counts_completed_runs_only(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("success-run", thread_id="t1", status="running")

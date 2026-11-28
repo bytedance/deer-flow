@@ -3923,3 +3923,263 @@ async def test_failover_stays_disabled_after_an_earlier_primary_stream_error(mon
     assert all(mode != "messages" or data[0].text != "backup answer" for mode, data in events)
     final_state = [data for mode, data in events if mode == "values"][-1]
     assert final_state["messages"][-1].additional_kwargs["deerflow_error_fallback"] is True
+
+
+# ---------- Structured model-failure ledger & stream events ----------
+
+
+class _LedgerJournal:
+    """Minimal stand-in for the run journal's ledger recording surface."""
+
+    def __init__(self, run_id: str = "run-ledger") -> None:
+        self.run_id = run_id
+        self.entries: list[dict[str, Any]] = []
+
+    def record_model_failure_ledger_entry(self, entry: dict[str, Any]) -> None:
+        self.entries.append(dict(entry))
+
+
+class _LedgerRequest:
+    def __init__(self, model: object, journal: _LedgerJournal | None) -> None:
+        self.model = model
+        self.runtime = SimpleNamespace(context={"__run_journal": journal} if journal is not None else {})
+
+    def override(self, **kwargs: object) -> _LedgerRequest:
+        journal = self.runtime.context.get("__run_journal")
+        return _LedgerRequest(kwargs["model"], journal)
+
+
+def _make_ledger_app_config(**llm_call: int) -> AppConfig:
+    return AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        llm_call=LlmCallConfig(**llm_call),
+        models=[ModelConfig(name="primary", use="test:Model", model="primary")],
+    )
+
+
+def _make_ledger_fallback_app_config() -> AppConfig:
+    return AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        llm_call=LlmCallConfig(retry_max_attempts=2),
+        models=[
+            ModelConfig(name="primary", use="test:Primary", model="primary", fallback_models=["backup"]),
+            ModelConfig(name="backup", use="test:Backup", model="backup"),
+        ],
+    )
+
+
+def test_retry_records_structured_ledger_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_ledger_app_config(retry_max_attempts=3), model_name="primary")
+    journal = _LedgerJournal()
+    request = _LedgerRequest("primary", journal)
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    def handler(_request) -> AIMessage:
+        raise FakeError("Service unavailable", status_code=503)
+
+    result = middleware.wrap_model_call(request, handler)
+
+    assert result.additional_kwargs["error_reason"] == "transient"
+    retries = [entry for entry in journal.entries if entry["status"] == "retrying"]
+    assert [entry["attempt"] for entry in retries] == [1, 2]
+    for entry in retries:
+        assert entry["model"] == "primary"
+        assert entry["provider"] == "test:Model"
+        assert entry["reason"] == "transient"
+        assert entry["run_id"] == "run-ledger"
+        assert entry["timestamp"]
+
+
+def test_retry_event_carries_structured_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = _capture_retry_events(monkeypatch)
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_ledger_app_config(retry_max_attempts=2), model_name="primary")
+    journal = _LedgerJournal()
+
+    def handler(_request) -> AIMessage:
+        raise FakeError("Service unavailable", status_code=503)
+
+    middleware.wrap_model_call(_LedgerRequest("primary", journal), handler)
+
+    assert len(events) == 1
+    event = events[0]
+    assert event["type"] == "llm_retry"
+    assert event["model"] == "primary"
+    assert event["provider"] == "test:Model"
+    assert event["status"] == "retrying"
+    assert event["reason"] == "transient"
+    assert event["attempt"] == 1
+    assert event["run_id"] == "run-ledger"
+    assert event["timestamp"]
+
+
+def test_circuit_transitions_record_structured_ledger_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_ledger_app_config(retry_max_attempts=1), model_name="primary")
+    middleware.circuit_failure_threshold = 1
+    middleware.circuit_recovery_timeout_sec = 0
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+    journal = _LedgerJournal()
+
+    def fail(_request) -> AIMessage:
+        raise FakeError("Service unavailable", status_code=503)
+
+    def healthy(_request) -> AIMessage:
+        return AIMessage(content="healthy")
+
+    # Trip the breaker: closed -> open.
+    middleware.wrap_model_call(_LedgerRequest("primary", journal), fail)
+    assert middleware._circuit_state == "open"
+
+    # Recover: open -> half_open -> closed.
+    result = middleware.wrap_model_call(_LedgerRequest("primary", journal), healthy)
+    assert result.content == "healthy"
+    assert middleware._circuit_state == "closed"
+
+    assert [entry["status"] for entry in journal.entries] == ["circuit_open", "circuit_half_open", "circuit_closed"]
+    for entry in journal.entries:
+        assert entry["model"] == "primary"
+        assert entry["provider"] == "test:Model"
+        assert entry["run_id"] == "run-ledger"
+        assert entry["timestamp"]
+
+
+def test_fallback_success_records_structured_ledger_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_ledger_fallback_app_config(), model_name="primary")
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda _name: "backup-model")
+    journal = _LedgerJournal(run_id="run-fallback-success")
+    request = _LedgerRequest("primary", journal)
+
+    def handler(_request) -> AIMessage:
+        if _request.model == "primary":
+            raise FakeError("provider unavailable", status_code=503)
+        return AIMessage(content="fallback response")
+
+    result = middleware.wrap_model_call(request, handler)
+
+    assert result.content == "fallback response"
+    success = [entry for entry in journal.entries if entry["status"] == "fallback_success"]
+    assert len(success) == 1
+    assert success[0]["model"] == "backup"
+    assert success[0]["provider"] == "test:Backup"
+    assert success[0]["from_model"] == "primary"
+    assert success[0]["run_id"] == "run-fallback-success"
+    assert success[0]["timestamp"]
+
+
+def test_fallback_failure_records_structured_ledger_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_ledger_fallback_app_config(), model_name="primary")
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda _name: "backup-model")
+    journal = _LedgerJournal(run_id="run-fallback-failure")
+    request = _LedgerRequest("primary", journal)
+
+    def handler(_request) -> AIMessage:
+        raise FakeError("provider unavailable", status_code=503)
+
+    result = middleware.wrap_model_call(request, handler)
+
+    assert result.additional_kwargs["error_reason"] == "transient"
+    failure = [entry for entry in journal.entries if entry["status"] == "fallback_failure"]
+    assert len(failure) == 1
+    assert failure[0]["model"] == "backup"
+    assert failure[0]["provider"] == "test:Backup"
+    assert failure[0]["from_model"] == "primary"
+    assert failure[0]["reason"] == "transient"
+    assert failure[0]["run_id"] == "run-fallback-failure"
+    assert failure[0]["timestamp"]
+
+
+def test_subagent_skips_ledger_recording() -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_ledger_app_config(retry_max_attempts=1), model_name="primary")
+    journal = _LedgerJournal()
+    request = SimpleNamespace(runtime=SimpleNamespace(context={"__run_journal": journal, "is_subagent": True}))
+
+    def handler(_request) -> AIMessage:
+        raise FakeError("Service unavailable", status_code=503)
+
+    middleware.wrap_model_call(request, handler)
+
+    assert journal.entries == []
+
+
+class _AppConfigLike:
+    """Minimal AppConfig stand-in that delegates unknown attributes to a real config.
+
+    Subclasses override only the methods they fake (e.g. ``get_model_config``);
+    every other attribute the middleware reads (``circuit_breaker``, ``llm_call``,
+    ...) falls through to the wrapped config so middleware construction stays valid.
+    """
+
+    def __init__(self, config: AppConfig) -> None:
+        self._config = config
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._config, name)
+
+
+class _RegistryWithoutFallback:
+    """AppConfig stand-in that resolves the primary but not the configured fallback,
+    to exercise the fail-closed path without mutating the real config."""
+
+    def __init__(self, config: AppConfig) -> None:
+        self._config = config
+
+    def get_model_config(self, name: str) -> ModelConfig | None:
+        if name == "backup":
+            return None
+        return self._config.get_model_config(name)
+
+
+def test_failover_resolves_configured_fallbacks_when_resolvable() -> None:
+    """Configured fallbacks that resolve are kept as failover candidates."""
+    config = _make_fallback_app_config()
+    middleware = LLMErrorHandlingMiddleware(app_config=config, model_name="primary")
+    assert middleware.fallback_model_names == ("backup",)
+
+
+def test_middleware_without_configured_fallbacks_does_not_require_resolution() -> None:
+    """Primary resolvable but no fallback configured: no failover, no error."""
+    config = _make_app_config()
+    config = AppConfig(
+        sandbox=SandboxConfig(use="test"),
+        models=[
+            ModelConfig(name="primary", use="test:Model", model="primary"),
+        ],
+    )
+    middleware = LLMErrorHandlingMiddleware(app_config=config, model_name="primary")
+    assert middleware.fallback_model_names == ()
+
+
+def test_middleware_fails_closed_when_primary_model_cannot_be_resolved() -> None:
+    """An unresolvable primary model is a config error, not a silent no-op."""
+    with pytest.raises(ValueError, match="could not be resolved"):
+        LLMErrorHandlingMiddleware(app_config=_make_app_config(), model_name="primary")
+
+
+def test_failover_list_all_unresolvable_fallback_names() -> None:
+    """Partial unresolvable fallbacks: the error reports every unresolvable name,
+    not just the first one."""
+    config = _make_fallback_app_config()
+    middleware = LLMErrorHandlingMiddleware(app_config=config, model_name="primary")
+    # Simulate a partially unresolvable candidate list (AppConfig rejects unknown
+    # fallback names at load time, so exercise the resolver directly).
+    middleware.fallback_model_names = ("backup", "not-configured-a", "not-configured-b")
+    with pytest.raises(ValueError, match="not-configured-a.*not-configured-b"):
+        middleware._resolve_configured_fallback_model_names()
+
+
+def test_failover_call_time_excludes_unresolvable_fallbacks_with_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """At the failover trigger point, unresolvable fallbacks are excluded with a
+    warning rather than silently dropping failover (config-reload defense-in-depth)."""
+    config = _make_fallback_app_config()
+    middleware = LLMErrorHandlingMiddleware(app_config=config, model_name="primary")
+    middleware.fallback_model_names = ("backup", "missing-name")
+    resolved = middleware._resolve_fallback_candidates(middleware.fallback_model_names)
+    assert resolved == ("backup",)
+    assert "missing-name" in caplog.text
+
+
+def test_failover_fails_closed_when_configured_fallback_cannot_be_resolved() -> None:
+    """An unresolvable configured fallback must not silently disable failover."""
+    config = _make_fallback_app_config()
+    with pytest.raises(ValueError, match="cannot be resolved"):
+        LLMErrorHandlingMiddleware(app_config=_RegistryWithoutFallback(config), model_name="primary")

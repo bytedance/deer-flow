@@ -96,6 +96,16 @@ This section accumulates work toward the **2.3.0** milestone
   `Digest` credential is replaced through the end of the line, so text that
   follows it on the same line is removed as well. ([#8250])
 
+- **models:** Model failover now resolves configured fallback models (and the
+  primary model it runs against) against the active model registry before it
+  runs, and fails closed with a clear error instead of silently disabling
+  failover when a configured fallback or the primary cannot be resolved. The
+  error reports every unresolvable fallback name plus the action needed to fix
+  it. At the failover trigger point the same check runs as defense-in-depth so a
+  config-reload case (middleware not rebuilt after a config reload) cannot
+  silently drop failover. An empty fallback list (no failover configured) is
+  unchanged.
+
 - **frontend:** Cron presets in the task form now require minute 0-59, hour
   0-23 and day of month 1-31, so an out-of-range expression such as
   `0 24 * * *` stays a custom schedule and keeps its original text. Previously,

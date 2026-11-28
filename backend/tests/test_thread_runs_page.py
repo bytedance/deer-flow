@@ -53,6 +53,35 @@ def test_list_runs_returns_bare_array():
     assert "before_run_id" not in kwargs
 
 
+def test_run_detail_projects_model_failure_ledger_read_only():
+    """The persisted model-failure ledger is surfaced read-only on the run detail projection."""
+    ledger = [
+        {
+            "run_id": "r1",
+            "model": "gpt-4o",
+            "provider": "openai",
+            "status": "fallback_success",
+            "reason": "provider_unavailable",
+            "attempt": 0,
+            "from_model": "gpt-4o",
+            "timestamp": "2026-01-01T00:00:00+00:00",
+        }
+    ]
+    record = _record("r1", "2026-01-01T00:00:00+00:00")
+    record.model_failure_ledger = ledger
+    app, run_manager = _make_app([record])
+    run_manager.get = AsyncMock(return_value=record)
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/runs/r1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model_failure_ledger"] == ledger
+    # Structured projection only: no raw error body or provider payload leaks.
+    assert "raw_error" not in response.text
+
+
 @pytest.mark.parametrize("endpoint", ["/runs", "/runs/page", "/runs/legacy-client-run"])
 def test_run_reads_omit_historical_client_context_without_mutating_record(endpoint):
     client_context = {"name": "old-client", "preferences": {"note": "synthetic-private-value"}}
