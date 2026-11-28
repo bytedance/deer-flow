@@ -1667,7 +1667,18 @@ test.describe("Side chat", () => {
       );
       await sidecarComposer.press("Enter");
       await runStarted;
-      await expect.poll(() => liveRun !== undefined).toBe(true);
+      // Wait until the browser has accepted the run, not just until the server
+      // answered. The SDK stores the run for reconnecting and then calls
+      // `onCreated` in the same task, so the stored run means any run-created
+      // cache write has happened.
+      await expect
+        .poll(() =>
+          page.evaluate(
+            (key) => window.sessionStorage.getItem(key),
+            `lg:stream:${MOCK_SIDECAR_THREAD_ID}`,
+          ),
+        )
+        .toBe(MOCK_RUN_ID);
       expect(runThreadId).toBe(MOCK_SIDECAR_THREAD_ID);
 
       await composer.fill("@");
