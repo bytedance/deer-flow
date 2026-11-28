@@ -198,6 +198,26 @@ PG_VOLUME_ROOT = "/var/lib/postgresql/data"
 requires_postgres_docker = pytest.mark.skipif(os.getenv("DEERFLOW_TEST_HELM_POSTGRES") != "1", reason="set DEERFLOW_TEST_HELM_POSTGRES=1 to run the Docker-backed Helm tests")
 
 
+@pytest.mark.parametrize(
+    ("settings", "chart_managed"),
+    [
+        pytest.param(("postgresql.image.repository=mirror.example.com/library/postgres",), True, id="canonical-mirror"),
+        pytest.param(("postgresql.image.repository=mirror.example.com/team/postgres",), False, id="custom-repository"),
+        pytest.param(("postgresql.image.tag=16-trixie", "postgresql.image.useChartDataDirectory=true"), True, id="explicit-opt-in"),
+        pytest.param(("postgresql.image.useChartDataDirectory=false",), False, id="explicit-opt-out"),
+    ],
+)
+def test_postgres_image_data_directory_settings(settings: tuple[str, ...], chart_managed: bool) -> None:
+    postgres = _container(_render_chart(*settings), "postgres")
+    if chart_managed:
+        default = _container(_render_chart(), "postgres")
+        assert postgres["command"] == default["command"]
+        assert _env(postgres)["PGDATA"] == _env(default)["PGDATA"]
+    else:
+        assert "command" not in postgres
+        assert "PGDATA" not in _env(postgres)
+
+
 def _docker(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(["docker", *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
     if check:
