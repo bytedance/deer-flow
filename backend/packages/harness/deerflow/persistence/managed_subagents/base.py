@@ -37,6 +37,7 @@ class ManagedSubagentDefinition(BaseModel):
     tools: list[str] | None = None
     disallowed_tools: list[str] = Field(default_factory=lambda: sorted(REQUIRED_DISALLOWED_TOOLS))
     skills: list[str] | None = None
+    mcp_plugins: list[str] | None = None
     model: str = "inherit"
     thinking_enabled: bool | None = None
     reasoning_effort: str | None = None

@@ -2249,6 +2249,7 @@ subagent_runtime:
 #       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
 #       # thinking_enabled: true  # Enable thinking/reasoning for this subagent (default: false)
 #       # reasoning_effort: medium # Use an effort value or alias supported by this model
+#       # mcp_plugins: []       # Override MCP selection; null or omitted keeps the definition
 #       # skills:               # Skill discovery/activation allowlist (default: all enabled)
 #       #   - web-search
 #       #   - data-analysis
@@ -2268,7 +2269,9 @@ subagent_runtime:
 #   #       - Processing and analyzing datasets
 #   #       - Generating visualizations
 #   #       - Providing statistical insights
-#   #     tools:                  # Tool whitelist (null = inherit all)
+#   #     mcp_plugins:           # null = inherit parent, [] = none, list = selected installations
+#   #       - example-installation-id
+#   #     tools:                  # Exact tool-name allowlist applied after MCP selection
 #   #       - bash
 #   #       - read_file
 #   #       - write_file

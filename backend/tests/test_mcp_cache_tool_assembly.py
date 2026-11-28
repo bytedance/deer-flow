@@ -109,3 +109,47 @@ def test_tool_assembly_logs_diagnostics_for_non_config_failures(monkeypatch, cap
 
     assert "retired pool close failed: pipe still open" in caplog.text
     assert any(record.exc_info is not None for record in caplog.records)
+
+
+def test_browser_oauth_discovery_requires_lead_owner(monkeypatch):
+    from langchain_core.tools import StructuredTool
+
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.tools.mcp_metadata import tag_mcp_tool
+
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "deployment-service": {
+                    "type": "http",
+                    "url": "https://tools.example.com/mcp",
+                    "capability": {"id": "installation-id"},
+                    "user_oauth": {
+                        "issuer": "https://auth.example.com",
+                        "client_id": "deerflow",
+                        "redirect_uri": "https://app.example.com/api/mcp/user-oauth/callback",
+                    },
+                },
+            }
+        }
+    )
+    monkeypatch.setattr(ExtensionsConfig, "from_file", lambda: config)
+    monkeypatch.setattr("deerflow.mcp.cache.refresh_mcp_cache_if_active", lambda: False)
+    monkeypatch.setattr("deerflow.mcp.user_tools.get_user_mcp_tools", lambda: ([], ExtensionsConfig()))
+    browser_tool = tag_mcp_tool(
+        StructuredTool.from_function(lambda: "result", name="browser_tool", description="Fixture tool"),
+        server_name="deployment-service",
+        transport="http",
+    )
+    calls = []
+
+    async def discover(config_arg, owner, selection):
+        calls.append((config_arg, owner, selection))
+        return [browser_tool]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_browser_mcp_tools", discover)
+    options = {"app_config": _make_config(), "groups": ["mcp"], "mcp_plugins": ["installation-id"], "subagent_enabled": False}
+    assert browser_tool not in get_available_tools(**options)
+    assert calls == []
+    assert browser_tool in get_available_tools(mcp_browser_user="owner", **options)
+    assert calls == [(config, "owner", {"deployment-service"})]

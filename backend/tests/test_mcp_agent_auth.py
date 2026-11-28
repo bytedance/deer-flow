@@ -530,16 +530,19 @@ def test_gateway_admits_owner_and_assembles_the_verified_snapshot(agent_auth_env
 @pytest.mark.asyncio
 @pytest.mark.parametrize("delegation", ["task", "batch_task"])
 @pytest.mark.parametrize("revoked", [False, True])
-async def test_delegation_inherits_parent_identity_including_durable_recovery(agent_auth_env, agent_mcp_transport, real_subagents, tmp_path, monkeypatch, delegation, revoked):
+@pytest.mark.parametrize("independent_binding", [False, True], ids=["inherited", "independent"])
+async def test_delegation_inherits_parent_identity_including_durable_recovery(agent_auth_env, agent_mcp_transport, real_subagents, tmp_path, monkeypatch, delegation, revoked, independent_binding):
     from _agent_e2e_helpers import FakeToolCallingModel, build_single_tool_call_model
     from langchain_core.messages import AIMessage
     from langgraph.graph import END, START, StateGraph
     from langgraph.prebuilt import ToolNode
 
     from deerflow.agents.thread_state import ThreadState
+    from deerflow.capabilities.runtime import installation_id
     from deerflow.config.database_config import DatabaseConfig
     from deerflow.config.extensions_config import reset_extensions_config
     from deerflow.config.model_config import ModelConfig
+    from deerflow.config.subagents_config import SubagentOverrideConfig
     from deerflow.mcp.agent_auth import AGENT_AUTH_CONTEXT_KEY, capture_agent_authority
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
     from deerflow.persistence.subagent_batches import SubagentBatchRepository, SubagentBatchRow
@@ -555,6 +558,9 @@ async def test_delegation_inherits_parent_identity_including_durable_recovery(ag
     env.config.summarization.enabled = False
     env.config.title.enabled = False
     env.config.subagent_batches.enabled = True
+    selection = [installation_id("tickets", {})] if independent_binding else None
+    if independent_binding:
+        env.config.subagents.agents["general-purpose"] = SubagentOverrideConfig(mcp_plugins=selection)
     # A child with its own admin binding must still use its caller's identity.
     child_binding = env.config.mcp_agent_auth["research-tickets"].model_copy(deep=True)
     child_binding.agent = "general-purpose"
@@ -562,7 +568,7 @@ async def test_delegation_inherits_parent_identity_including_durable_recovery(ag
     env.config.mcp_agent_auth["child-tickets"] = child_binding
     authority = capture_agent_authority(env.config, user_id="alice", agent_config=env.agent)
     config_path = tmp_path / "extensions_config.json"
-    config_path.write_text(env.config.extensions.model_dump_json(by_alias=True), encoding="utf-8")
+    config_path.write_text(env.config.extensions.model_dump_json(by_alias=True), encoding="utf-8", newline="\n")
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
     reset_extensions_config()
     observed = []
@@ -596,8 +602,8 @@ async def test_delegation_inherits_parent_identity_including_durable_recovery(ag
         result = await asyncio.wait_for(
             graph.compile().ainvoke(
                 {"messages": [AIMessage(content="", tool_calls=[{"name": delegation, "args": args, "id": "delegate-1", "type": "tool_call"}])]},
-                config={"metadata": {"model_name": "offline", "tool_groups": ["mcp"], "available_skills": []}},
-                context={"user_id": "alice", "thread_id": "t-delegate", "run_id": "r-delegate", AGENT_AUTH_CONTEXT_KEY: authority},
+                config={"metadata": {"model_name": "offline", "tool_groups": ["mcp"], "available_skills": [], "mcp_plugins": [] if independent_binding else None}},
+                context={"user_id": "alice", "thread_id": "t-delegate", "run_id": "r-delegate", "app_config": env.config, AGENT_AUTH_CONTEXT_KEY: authority},
             ),
             timeout=30,
         )
@@ -606,6 +612,7 @@ async def test_delegation_inherits_parent_identity_including_durable_recovery(ag
             batch_id = message.additional_kwargs["subagent_batch_id"]
             async with get_session_factory()() as session:
                 saved_spec = (await session.get(SubagentBatchRow, batch_id)).execution_spec
+            assert saved_spec["mcp_plugins"] == selection
             references = saved_spec["mcp_agent_auth"]
             assert references[0]["binding"] == "research-tickets"
             assert "private-client-secret" not in json.dumps(saved_spec)

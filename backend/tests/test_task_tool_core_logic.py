@@ -1220,10 +1220,45 @@ def test_task_tool_context_mode_schema_rejects_unknown_mode():
         schema.model_validate({"runtime": None, "prompt": "Task", "subagent_type": "general-purpose", "tool_call_id": "tc", "context_mode": "shared"})
 
 
-@pytest.mark.parametrize("mcp_plugins", [None, [], ["stable-plugin"]])
-def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch, mcp_plugins):
-    """Verify tool_groups from parent metadata are passed to get_available_tools(groups=...)."""
+@pytest.mark.parametrize(
+    ("mcp_plugins", "child_plugins", "expected"),
+    [
+        (None, None, {"lead_echo", "child_echo"}),
+        (None, [], set()),
+        (None, ["child-id"], {"child_echo"}),
+        ([], None, set()),
+        ([], [], set()),
+        ([], ["child-id"], {"child_echo"}),
+        (["lead-id"], None, {"lead_echo"}),
+        (["lead-id"], [], set()),
+        (["lead-id"], ["child-id"], {"child_echo"}),
+    ],
+)
+def test_task_tool_assembles_independent_mcp_tools(monkeypatch, mcp_plugins, child_plugins, expected):
+    from langchain_core.tools import StructuredTool
+
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.tools import get_available_tools
+    from deerflow.tools.mcp_metadata import is_mcp_tool, tag_mcp_tool
+
     config = _make_subagent_config()
+    config.mcp_plugins = child_plugins
+    app_config = AppConfig(sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
+    extensions = ExtensionsConfig.model_validate({"mcpServers": {name: {"enabled": True, "command": "fixture", "capability": {"id": f"{name}-id"}} for name in ("lead", "child")}})
+
+    def echo(text: str) -> str:
+        return text
+
+    discovered = [tag_mcp_tool(StructuredTool.from_function(echo, name=f"{server}_echo", description="Echo the input"), server_name=server) for server in ("lead", "child")]
+    monkeypatch.setattr(ExtensionsConfig, "from_file", lambda: extensions)
+    monkeypatch.setattr("deerflow.mcp.cache.get_cached_mcp_tools", lambda: discovered)
+    monkeypatch.setattr("deerflow.mcp.user_tools.get_user_mcp_tools", lambda: ([], ExtensionsConfig()))
+    monkeypatch.setattr("deerflow.tools.tools.get_app_config", lambda: app_config)
+    lead_before = get_available_tools(app_config=app_config, mcp_plugins=mcp_plugins)
+    assemble = MagicMock(wraps=get_available_tools)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", assemble)
     parent_tool_groups = ["file:read", "file:write", "bash"]
     runtime = SimpleNamespace(
         state={
@@ -1238,7 +1273,6 @@ def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch, mcp_plugins):
     )
     events = []
     captured = {}
-    get_available_tools = MagicMock(return_value=["tool-a"])
 
     class DummyExecutor:
         def __init__(self, **kwargs):
@@ -1257,7 +1291,6 @@ def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch, mcp_plugins):
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
-    monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
 
     output = _run_task_tool(
         runtime=runtime,
@@ -1269,8 +1302,14 @@ def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch, mcp_plugins):
 
     assert _task_tool_message(output).content == "Task Succeeded. Result: done"
     assert captured["uploaded_files"] == []
-    # The key assertion: groups should be propagated from parent metadata
-    get_available_tools.assert_called_once_with(model_name="ark-model", groups=parent_tool_groups, subagent_enabled=False, include_upload_tool=True, **({"mcp_plugins": mcp_plugins} if mcp_plugins is not None else {}))
+    assert assemble.call_args.kwargs["groups"] == parent_tool_groups
+    selected = {tool.name: tool for tool in captured["tools"] if is_mcp_tool(tool)}
+    assert selected.keys() == expected
+    for tool in selected.values():
+        assert tool.invoke({"text": "delegated"}) == "delegated"
+    lead_after = get_available_tools(app_config=app_config, mcp_plugins=mcp_plugins)
+    assert [tool.name for tool in lead_after if is_mcp_tool(tool)] == [tool.name for tool in lead_before if is_mcp_tool(tool)]
+    assert [tool.name for tool in discovered] == ["lead_echo", "child_echo"]
 
 
 def test_task_tool_uses_subagent_model_override_for_tool_loading(monkeypatch):

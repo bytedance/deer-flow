@@ -262,3 +262,25 @@ async def test_task_tool_sandbox_policy_resolves_off_loop(monkeypatch, tmp_path)
     assert "Task Succeeded" in messages[0].content
     assert observed_threads, "the sandbox-policy read must be invoked"
     assert all(thread is not threading.main_thread() for thread in observed_threads)
+
+
+async def test_managed_subagent_mcp_installation_validation_reads_off_loop(monkeypatch, tmp_path):
+    from app.gateway.routers import subagents
+    from deerflow.capabilities.runtime import installation_id
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text('{"mcpServers":{"fixture":{"enabled":false,"command":"fixture"}}}', encoding="utf-8", newline="\n")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
+    app_config = AppConfig(sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
+    monkeypatch.setattr(subagents, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(subagents, "get_managed_subagent_store", lambda _: SimpleNamespace(create=lambda definition: definition))
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    selected = [installation_id("fixture", {})]
+
+    response = await subagents.create_managed_subagent(
+        request,
+        subagents.ManagedSubagentCreateRequest(name="reviewer", description="Reviews.", system_prompt="Review.", mcp_plugins=selected),
+    )
+    assert response.mcp_plugins == selected

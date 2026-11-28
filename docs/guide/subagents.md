@@ -418,3 +418,22 @@ Discovery exemptions apply only to the actual framework-generated helper
 instances; an ordinary tool with the same name still follows the name policy.
 
 Middleware tool declarations follow LangChain's `Sequence` contract, including lists and tuples. Restricted subagents reject non-sequence containers such as sets and generators before consuming them; the default `disallowed_tools=["task"]` also counts as a restriction. Global authorization retains its existing list/tuple declaration requirement. Extensions remain trusted operator code; tool configuration is not an isolation boundary for extension code.
+
+## MCP tool selection
+
+In a custom or managed subagent definition, omit `mcp_plugins` or set it to
+`null` to inherit the lead agent's selection. An empty list selects no MCP
+tools. A nonempty list selects those installation IDs independently of the lead
+agent. Use the installation IDs from Capability Center. Browser OAuth tools
+are available only to the lead agent. Omit those installation IDs from YAML
+subagent bindings and overrides. Managed subagent writes reject them.
+
+Under `subagents.agents.<name>` in `config.yaml`, a list takes precedence over
+the built-in, custom, or managed definition, including an empty list. Omitting
+the override or setting it to `null` keeps the definition's selection.
+
+Both `task` and `batch_task` use the effective selection. A durable batch saves
+it at submission and uses it again on retry. An existing `tools` allowlist
+still matches exact tool names, including selected MCP tools, and
+`disallowed_tools` takes precedence. The parent tool groups, tool permissions,
+MCP credential authority, user scope, and approval policies still apply.

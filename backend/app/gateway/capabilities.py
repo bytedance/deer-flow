@@ -14,6 +14,7 @@ from deerflow.capabilities.business import connection_config
 from deerflow.capabilities.catalog import PluginManifest
 from deerflow.capabilities.runtime import ambiguous_installation_ids, installation_id
 from deerflow.config.app_config import AppConfig
+from deerflow.config.extensions_config import ExtensionsConfig, McpUserOAuthConfig
 from deerflow.integrations.lark_cli import get_lark_integration_status
 from deerflow.runtime.user_context import get_effective_user_id
 
@@ -25,6 +26,7 @@ class CapabilityInstallation(BaseModel):
     name: str
     description: str = ""
     selectable: bool = True
+    subagent_unsupported_reason: str | None = Field(default=None, exclude=True)
     installed: bool = True
     enabled: bool | None = None
     version: str | None = None
@@ -116,10 +118,20 @@ class MCPAdapter:
             # Public discovery projects explicit safe fields, never connection
             # URLs, commands, env, OAuth configuration, or another user's IDs.
             identity = installation_id(name, raw)
+            subagent_unsupported_reason = None
+            if raw.get("user_oauth") is not None:
+                try:
+                    oauth = McpUserOAuthConfig.model_validate(ExtensionsConfig.resolve_env_variables(raw["user_oauth"]))
+                except ValidationError:
+                    subagent_unsupported_reason = "invalid browser OAuth configuration"
+                else:
+                    if oauth.enabled:
+                        subagent_unsupported_reason = "browser OAuth is available only to the lead agent"
             result.append(
                 CapabilityInstallation(
                     id=f"ambiguous:{installation_id(name, {})}" if identity in ambiguous else identity,
                     selectable=identity not in ambiguous,
+                    subagent_unsupported_reason=subagent_unsupported_reason,
                     health="ambiguous" if identity in ambiguous else "unknown",
                     plugin_id=metadata.get("plugin_id") if isinstance(metadata.get("plugin_id"), str) else None,
                     adapter="mcp",

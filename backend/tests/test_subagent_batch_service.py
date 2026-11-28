@@ -1325,3 +1325,105 @@ def test_usage_keeps_each_models_tokens_and_cache_hits() -> None:
         },
     }
     assert service_module._usage([], "model-a") is None
+
+
+@pytest.mark.asyncio
+async def test_recovered_batch_assembles_and_invokes_snapshotted_mcp_tools(monkeypatch, tmp_path):
+    import sys
+    from datetime import UTC, datetime, timedelta
+
+    from deerflow.capabilities.runtime import installation_id
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.database_config import DatabaseConfig
+    from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.config.subagents_config import SubagentOverrideConfig, SubagentsAppConfig
+    from deerflow.mcp.session_pool import MCPSessionPool
+    from deerflow.mcp.tools import get_mcp_tools
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
+    from deerflow.persistence.subagent_batches import SubagentBatchRepository
+    from deerflow.tools.builtins.batch_task_tool import BatchTaskItem, bind_batch_tools
+    from deerflow.tools.mcp_metadata import is_mcp_tool
+
+    server = tmp_path / "echo.py"
+    server.write_text(
+        'from mcp.server.fastmcp import FastMCP\nmcp = FastMCP("fixture")\n@mcp.tool()\ndef echo(text: str) -> str:\n    return text\nmcp.run()\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+    extensions = ExtensionsConfig.model_validate({"mcpServers": {"fixture": {"enabled": True, "command": sys.executable, "args": [str(server)]}}})
+    monkeypatch.setattr(ExtensionsConfig, "from_file", lambda: extensions)
+    pool = MCPSessionPool()
+    discovered = await get_mcp_tools(session_pool=pool)
+    (echo,) = discovered
+    monkeypatch.setattr("deerflow.mcp.cache.get_cached_mcp_tools", lambda: discovered)
+    monkeypatch.setattr("deerflow.mcp.user_tools.get_user_mcp_tools", lambda: ([], ExtensionsConfig()))
+
+    captured = {}
+
+    class Executor:
+        def __init__(self, *, tools, **_kwargs):
+            self.tools = [tool for tool in tools if is_mcp_tool(tool)]
+
+        def execute_async(self, _prompt, task_id=None):
+            captured[task_id] = self.tools
+            return task_id
+
+    monkeypatch.setattr(service_module, "SubagentExecutor", Executor)
+    monkeypatch.setattr(service_module, "SubagentStatus", FakeStatus)
+    monkeypatch.setattr(service_module, "cleanup_background_task", lambda _execution_id: None)
+    monkeypatch.setattr(
+        service_module,
+        "get_background_task_result",
+        lambda _execution_id: SimpleNamespace(status=FakeStatus.COMPLETED, result="done", error=None, stop_reason=None, token_usage_records=[]),
+    )
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        repository = SubagentBatchRepository(get_session_factory())
+        app_config = AppConfig(
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            subagents=SubagentsAppConfig(agents={"general-purpose": SubagentOverrideConfig(mcp_plugins=[])}),
+        )
+        service = SubagentBatchService(repository=repository, config=SubagentBatchesConfig(), runtime_config=SubagentRuntimeConfig(max_running=3), app_config=app_config)
+        chosen = [installation_id("fixture", {})]
+        batch_tool, *_ = bind_batch_tools(service, app_config=app_config)
+        runtime = SimpleNamespace(
+            context={"user_id": "user-1", "thread_id": "thread-1", "run_id": "run-1"},
+            config={"metadata": {"mcp_plugins": [], "model_name": "model-a"}},
+        )
+        legacy = await service.submit(_request())
+        expected_by_batch = {legacy["id"]: [echo]}
+        for i, (child, expected) in enumerate(((chosen, [echo]), ([], []))):
+            app_config.subagents.agents["general-purpose"] = SubagentOverrideConfig(mcp_plugins=child)
+            command = await batch_tool.coroutine(
+                runtime=runtime,
+                title="Echo batch",
+                items=[BatchTaskItem(key="echo", prompt="Echo the input.")],
+                subagent_type="general-purpose",
+                tool_call_id=f"mcp-call-{i}",
+            )
+            (message,) = command.update["messages"]
+            assert message.status == "success", message.content
+            expected_by_batch[message.additional_kwargs["subagent_batch_id"]] = expected
+
+        # Registry state now differs from both persisted selections.
+        app_config.subagents.agents["general-purpose"] = SubagentOverrideConfig(mcp_plugins=["removed-id"])
+        claim_time = datetime.now(UTC)
+        claimed = await repository.claim_items(now=claim_time, lease_owner="lost-worker", lease_seconds=1, limit=3)
+        assert len(claimed) == 3
+        await service.run_once(now=claim_time + timedelta(seconds=2))
+        await asyncio.wait_for(asyncio.gather(*service._executions.values()), timeout=20)
+        assert captured == {item["id"]: expected_by_batch[item["batch"]["id"]] for item in claimed}
+
+        for batch_id in expected_by_batch:
+            (item,) = await repository.list_items(batch_id, user_id="user-1", offset=0, limit=1)
+            assert item["status"] == "succeeded"
+            assert item["attempt"] == 2
+        (tool,) = next(tools for tools in captured.values() if tools)
+        assert "restored" in str(await tool.ainvoke({"text": "restored"}))
+    finally:
+        await pool.close_all()
+        await close_engine()

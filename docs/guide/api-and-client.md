@@ -65,10 +65,12 @@ of an already encoded frame.
 first state snapshot, emitting only the suffix after the streamed text.
 
 For `DeerFlowClient(agent_name="researcher")`, the named agent's `mcp_plugins`
-selection applies to both the lead agent and its `task` / `batch_task`
-delegations: `null` inherits all enabled MCP plugins, `[]` selects none, and
-installation IDs select only those plugins. Call `client.reset_agent()` after
-editing the saved agent configuration to refresh the selection.
+selection applies to the lead agent. `null` uses all enabled MCP plugins, `[]`
+selects none, and a list selects installation IDs. The `task` and `batch_task`
+delegations inherit that selection by default. A subagent can define its own
+selection under [Subagents](subagents.md#mcp-tool-selection). Durable batches
+retain their effective selection from submission. Call `client.reset_agent()`
+after editing the saved lead agent configuration to refresh its selection.
 
 The named agent's `tool_groups` also selects configured and extension tools for
 the embedded lead agent and its delegations. `null` inherits all groups, `[]`

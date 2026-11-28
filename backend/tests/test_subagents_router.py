@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from types import SimpleNamespace
 
+import httpx
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException, Request
 
 from app.gateway.routers import subagents as router
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
@@ -342,3 +344,93 @@ async def test_delete_managed_subagent_allows_windows_reserved_names(name: str):
     with pytest.raises(HTTPException) as excinfo:
         await router.delete_managed_subagent(name, _request("admin"))
     assert excinfo.value.status_code == 404
+
+
+async def test_managed_mcp_binding_http_transitions_and_validation(tmp_path, monkeypatch):
+    from deerflow.capabilities.runtime import installation_id
+    from deerflow.config.subagents_config import SubagentOverrideConfig
+
+    path = tmp_path / "extensions_config.json"
+    servers = {
+        "legacy": {"enabled": True, "command": "fixture"},
+        "disabled": {"enabled": False, "command": "fixture", "capability": {"id": "disabled-id", "plugin_id": "manifest-id"}},
+        "first": {"enabled": True, "command": "fixture", "capability": {"id": "ambiguous-id"}},
+        "second": {"enabled": False, "command": "fixture", "capability": {"id": "ambiguous-id"}},
+        "browser": {
+            "type": "http",
+            "url": "https://tools.example.com/mcp",
+            "capability": {"id": "browser-id"},
+            "user_oauth": {
+                "issuer": "https://auth.example.com",
+                "client_id": "deerflow",
+                "redirect_uri": "https://app.example.com/api/mcp/user-oauth/callback",
+            },
+        },
+    }
+    servers["browser-off"] = {
+        **servers["browser"],
+        "capability": {"id": "browser-off-id"},
+        "user_oauth": {**servers["browser"]["user_oauth"], "enabled": "$TEST_BROWSER_OAUTH_ENABLED"},
+    }
+    monkeypatch.setenv("TEST_BROWSER_OAUTH_ENABLED", "false")
+    path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8", newline="\n")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(path))
+    set_app_config(
+        AppConfig(
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            subagents=SubagentsAppConfig(agents={"planner": SubagentOverrideConfig(mcp_plugins=[])}),
+        )
+    )
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def provide_test_identity(request: Request, call_next):
+        request.state.user = SimpleNamespace(system_role=request.headers.get("x-test-role", "admin"))
+        return await call_next(request)
+
+    app.include_router(router.router)
+    root = "/api/subagents"
+    body = {"name": "planner", "description": "Planner", "system_prompt": "Plan."}
+    stable_id = installation_id("legacy", {})
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        for invalid in ("manifest-id", "legacy", "ambiguous-id", "unknown"):
+            response = await client.post(root, json={**body, "mcp_plugins": [invalid]})
+            assert response.status_code == 422
+        for selection in (["browser-id"], [stable_id, "browser-id"]):
+            response = await client.post(root, json={**body, "mcp_plugins": selection})
+            assert response.status_code == 422, response.text
+            assert "lead agent" in response.json()["detail"]
+        assert all(item["name"] != "planner" for item in (await client.get(root)).json()["subagents"])
+
+        for fields, selection in (
+            ({}, None),
+            ({"mcp_plugins": None}, None),
+            ({"mcp_plugins": []}, []),
+            ({"mcp_plugins": [stable_id, stable_id]}, [stable_id, stable_id]),
+            ({"mcp_plugins": [stable_id, "disabled-id"]}, [stable_id, "disabled-id"]),
+        ):
+            response = await client.post(root, json={**body, **fields})
+            assert response.status_code == 201, response.text
+            assert response.json()["mcp_plugins"] == selection
+            if selection != [stable_id, "disabled-id"]:
+                assert (await client.delete(f"{root}/planner")).status_code == 204
+
+        for selection in (["unknown"], ["browser-id"], [stable_id, "browser-id"]):
+            response = await client.put(f"{root}/planner", json={"mcp_plugins": selection})
+            assert response.status_code == 422, response.text
+        item = next(item for item in (await client.get(root)).json()["subagents"] if item["name"] == "planner")
+        assert item["mcp_plugins"] == [stable_id, "disabled-id"]
+        assert item["config_overrides"]["mcp_plugins"] == []
+        assert (await client.put(f"{root}/planner", json={"mcp_plugins": []}, headers={"x-test-role": "member"})).status_code == 403
+
+        del servers["legacy"]
+        path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8", newline="\n")
+        for changes, expected in (
+            ({"description": "Renamed"}, [stable_id, "disabled-id"]),
+            ({"mcp_plugins": None}, None),
+            ({"mcp_plugins": ["disabled-id", "browser-off-id"]}, ["disabled-id", "browser-off-id"]),
+            ({"mcp_plugins": []}, []),
+        ):
+            response = await client.put(f"{root}/planner", json=changes)
+            assert response.status_code == 200, response.text
+            assert response.json()["mcp_plugins"] == expected
