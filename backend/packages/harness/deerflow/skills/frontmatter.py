@@ -33,6 +33,8 @@ ALLOWED_FRONTMATTER_PROPERTIES = {
 # indentation or accept a closing line that merely starts with three hyphens.
 _FRONTMATTER_RE = re.compile(r"^\ufeff?---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", re.DOTALL)
 _YAML_MERGE_TAG = "tag:yaml.org,2002:merge"
+_YAML_VALUE_TAG = "tag:yaml.org,2002:value"
+_YAML_STRING_TAG = "tag:yaml.org,2002:str"
 _YAML_MERGE_KEY = object()
 _EXPLICIT_MAPPING_VALUE = "_deerflow_explicit_value"
 
@@ -58,6 +60,8 @@ def _assert_unique_explicit_keys(
         if key_node.tag == _YAML_MERGE_TAG:
             key = _YAML_MERGE_KEY
         else:
+            if key_node.tag == _YAML_VALUE_TAG:
+                key_node.tag = _YAML_STRING_TAG
             key = loader.construct_object(key_node, deep=deep)
         try:
             duplicate = key in seen

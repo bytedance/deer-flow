@@ -354,6 +354,15 @@ class TestSplitSkillMarkdownDuplicateKeys:
         assert parts is None
         assert "found duplicate key 'owner'" in error
 
+    def test_unquoted_equals_key_keeps_safeloader_semantics(self):
+        parts, error = split_skill_markdown(
+            "---\nname: my-skill\ndescription: A valid skill\nmetadata:\n  =: first\n---\n",
+        )
+
+        assert error is None
+        assert parts is not None
+        assert parts.metadata["metadata"] == {"=": "first"}
+
     def test_yaml_merge_keys_remain_supported(self):
         parts, error = split_skill_markdown(
             "---\nname: my-skill\ndescription: A valid skill\nmetadata:\n  defaults: &defaults\n    owner: team\n    tier: basic\n  override:\n    <<: *defaults\n    owner: local\n---\n",
