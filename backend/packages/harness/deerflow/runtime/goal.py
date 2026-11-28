@@ -14,7 +14,7 @@ import inspect
 import json
 import logging
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from typing import Any, Literal, NamedTuple
 from uuid import uuid4
@@ -808,20 +808,32 @@ def _next_channel_version(checkpointer: Any, current_version: Any) -> Any:
     return 1
 
 
-async def ensure_thread_checkpoint(checkpointer: Any, thread_id: str) -> None:
+async def ensure_thread_checkpoint(checkpointer: Any, thread_id: str, *, initial_metadata: dict[str, Any] | None = None, created_at: str | None = None) -> None:
     """Create an empty root checkpoint for *thread_id* when none exists."""
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     checkpoint_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", config)
-    if checkpoint_tuple is not None:
-        return
+    if checkpoint_tuple is None:
+        await write_initial_thread_checkpoint(checkpointer, config, initial_metadata=initial_metadata, created_at=created_at)
+
+
+async def write_initial_thread_checkpoint(checkpointer: Any, config: dict[str, Any], *, initial_metadata: dict[str, Any] | None = None, created_at: str | None = None, validate: Callable[[], Awaitable[None]] | None = None) -> None:
+    """Write the seed after the caller has confirmed the root checkpoint is missing."""
     metadata = {
+        **(initial_metadata or {}),
         "step": -1,
         "source": "input",
         "writes": None,
         "parents": {},
-        "created_at": now_iso(),
+        "created_at": created_at or now_iso(),
     }
-    await _call_checkpointer_method(checkpointer, "aput", "put", config, empty_checkpoint(), metadata, {})
+    checkpoint = empty_checkpoint()
+    if validate is not None:
+        from deerflow.runtime.checkpointer.seed import put_sql_seed
+
+        await validate()
+        if await put_sql_seed(checkpointer, config, checkpoint, metadata, validate):
+            return
+    await _call_checkpointer_method(checkpointer, "aput", "put", config, checkpoint, metadata, {})
 
 
 def _checkpoint_id_from_tuple(checkpoint_tuple: Any) -> str | None:

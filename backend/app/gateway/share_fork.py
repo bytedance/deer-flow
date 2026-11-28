@@ -24,6 +24,7 @@ from deerflow.config.paths import get_paths
 from deerflow.persistence.thread_meta import ThreadMetaStore
 from deerflow.persistence.thread_shares.sql import ThreadShareRepository
 from deerflow.runtime import ConflictError, ThreadOperationKind
+from deerflow.runtime.checkpointer.seed import delete_thread_checkpoints
 from deerflow.runtime.context_keys import checkpoint_agent_binding_metadata
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.goal import goal_thread_lock
@@ -154,7 +155,7 @@ async def fork_share(request: Request, repo: ThreadShareRepository, token: str, 
                 if created:
                     # Keep admission until rollback finishes, so a failed import
                     # cannot be continued while its files/checkpoints are removed.
-                    await get_checkpointer(request).adelete_thread(thread_id)
+                    await delete_thread_checkpoints(get_checkpointer(request), thread_id)
                     await get_run_event_store(request).delete_by_thread(thread_id, user_id=owner)
                     await run_drained_write("Remove failed share import", get_paths().delete_thread_dir, (), thread_id, user_id=owner)
                     await threads.delete(thread_id, user_id=owner)

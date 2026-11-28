@@ -1,8 +1,11 @@
 """Concurrent HTTP creates preserve the first admitted thread and checkpoint."""
 
 import asyncio
+import os
+import sqlite3
 from contextlib import asynccontextmanager
-from uuid import UUID
+from datetime import UTC, datetime
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -10,13 +13,21 @@ from _router_auth_helpers import make_authed_test_app
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.store.memory import InMemoryStore
 
 from app.gateway.auth.models import User
 from app.gateway.routers import threads
+from deerflow.config.app_config import AppConfig
+from deerflow.config.run_ownership_config import RunOwnershipConfig
+from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+from deerflow.persistence.run import RunRepository
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta import ThreadMetaRepository
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
-from deerflow.runtime import goal
+from deerflow.runtime import RunManager, ThreadOperationKind, goal
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 USER = User(id=UUID("00000000-0000-0000-0000-000000000001"), email="create@example.com", password_hash="x", system_role="admin")
 
@@ -26,8 +37,6 @@ async def thread_store(request, tmp_path):
     if request.param == "memory":
         yield MemoryThreadMetaStore(InMemoryStore())
         return
-    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
-
     try:
         await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'threads.db'}", sqlite_dir=str(tmp_path))
         yield ThreadMetaRepository(get_session_factory())
@@ -41,6 +50,8 @@ def app_for(store, checkpointer):
     app = make_authed_test_app(user_factory=lambda: USER, bind_current_user=True)
     app.state.thread_store = store
     app.state.checkpointer = checkpointer
+    app.state.run_manager = RunManager()
+    app.state.run_event_store = MemoryRunEventStore()
     app.include_router(threads.router)
     return app
 
@@ -219,7 +230,8 @@ async def test_cancelled_holder_allows_create_retry(thread_store, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_checkpoint_failure_releases_creation_lock(thread_store, monkeypatch):
+async def test_retry_repairs_failed_initial_checkpoint(thread_store, monkeypatch):
+    monkeypatch.setattr("app.gateway.deps.get_config", lambda: AppConfig.model_validate({"sandbox": {"use": "test"}}))
     saver = InMemorySaver()
     original_put = saver.aput
 
@@ -231,11 +243,235 @@ async def test_checkpoint_failure_releases_creation_lock(thread_store, monkeypat
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         failed = await client.post("/api/threads", json={"thread_id": "failed-seed", "metadata": {"keep": True}})
         assert failed.status_code == 500
+        assert await saver.aget_tuple({"configurable": {"thread_id": "failed-seed"}}) is None
         assert not goal._goal_locks._entries_by_loop
         monkeypatch.setattr(saver, "aput", original_put)
-        # Preserve existing retry semantics for a metadata row whose initial
-        # seed failed; this fix does not add transactional seed recovery.
-        retry = await asyncio.wait_for(client.post("/api/threads", json={"thread_id": "failed-seed"}), 5)
+        retry = await asyncio.wait_for(client.post("/api/threads", json={"thread_id": "failed-seed", "metadata": {"keep": False}}), 5)
         assert retry.status_code == 200
         assert retry.json()["metadata"] == {"keep": True}
+        state = await client.get("/api/threads/failed-seed/state")
+        assert state.status_code == 200, state.text
+        assert state.json()["checkpoint_id"]
+        checkpoint = await saver.aget_tuple({"configurable": {"thread_id": "failed-seed", "checkpoint_ns": ""}})
+        assert checkpoint.metadata["keep"] is True
+        assert checkpoint.metadata["created_at"] == retry.json()["created_at"]
     assert not goal._goal_locks._entries_by_loop
+
+
+@pytest.mark.anyio
+async def test_seed_repair_respects_other_workers(thread_store):
+    thread_id = "busy-seed"
+    owner = str(USER.id)
+    await thread_store.create(thread_id, user_id=owner)
+    store = MemoryRunStore()
+    writer = RunManager(store=store, worker_id="writer")
+    saver = InMemorySaver()
+    app = app_for(thread_store, saver)
+    app.state.run_manager = RunManager(store=store, worker_id="retry")
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        async with writer.reserve_thread_operation(thread_id, kind=ThreadOperationKind.checkpoint_write, user_id=owner):
+            busy = await client.post("/api/threads", json={"thread_id": thread_id})
+            assert busy.status_code == 409
+            assert await saver.aget_tuple(config) is None
+            head = await saver.aput(config, empty_checkpoint(), {"source": "update", "step": 7}, {})
+            complete = await client.post("/api/threads", json={"thread_id": thread_id})
+            assert complete.status_code == 200
+        assert (await saver.aget_tuple(config)).config == head
+
+
+@pytest.mark.anyio
+async def test_retry_preserves_checkpoint_published_before_reservation(thread_store, monkeypatch):
+    thread_id = "concurrent-seed"
+    await thread_store.create(thread_id, user_id=str(USER.id))
+    saver = InMemorySaver()
+    app = app_for(thread_store, saver)
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    progress = empty_checkpoint()
+    reserve = app.state.run_manager.reserve_thread_operation
+
+    @asynccontextmanager
+    async def publish_then_reserve(*args, **kwargs):
+        # Another worker publishes its checkpoint after the optimistic read
+        # sees no head, but before this worker acquires the writer reservation.
+        await saver.aput(config, progress, {"source": "update", "step": 7}, {})
+        async with reserve(*args, **kwargs) as reservation:
+            yield reservation
+
+    monkeypatch.setattr(app.state.run_manager, "reserve_thread_operation", publish_then_reserve)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/threads", json={"thread_id": thread_id})
+    assert response.status_code == 200
+    assert [row.checkpoint["id"] async for row in saver.alist(config)] == [progress["id"]]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("thread_store", ["sqlite"], indirect=True)
+@pytest.mark.parametrize(
+    ("pause_at", "heartbeat"),
+    [("read", True), ("read", False), ("seed", True), ("seed", False)],
+    ids=["heartbeat-cancels-read", "before-next-heartbeat", "heartbeat-before-seed-starts", "seed-before-next-heartbeat"],
+)
+async def test_create_losing_lease_preserves_peer_checkpoint(thread_store, pause_at, heartbeat, monkeypatch, tmp_path):
+    thread_id = "expired-seed"
+    sessions = get_session_factory()
+    runs = RunRepository(sessions)
+    ownership = RunOwnershipConfig(heartbeat_enabled=True)
+    owner = RunManager(store=runs, worker_id="creator", run_ownership_config=ownership)
+    peer = RunManager(store=runs, worker_id="peer", run_ownership_config=ownership)
+    paused, resume, read_cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "checkpoints.db")) as saver:
+        if pause_at == "read":
+            get_tuple = saver.aget_tuple
+
+            async def pause_reserved_read(config):
+                head = await get_tuple(config)
+                if await runs.list_inflight():
+                    paused.set()
+                    try:
+                        await resume.wait()
+                    except asyncio.CancelledError:
+                        read_cancelled.set()
+                        raise
+                return head
+
+            monkeypatch.setattr(saver, "aget_tuple", pause_reserved_read)
+        else:
+            drain = threads.await_drained
+
+            async def defer_seed(seed):
+                async def queued_seed():
+                    # Let the peer take over after admission but before the seed coroutine runs.
+                    paused.set()
+                    await resume.wait()
+                    await seed
+
+                await drain(queued_seed())
+
+            monkeypatch.setattr(threads, "await_drained", defer_seed)
+        app = app_for(thread_store, saver)
+        app.state.run_manager = owner
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            post = asyncio.create_task(client.post("/api/threads", json={"thread_id": thread_id}))
+            try:
+                await asyncio.wait_for(paused.wait(), 5)
+                [operation] = await runs.list_inflight()
+                async with sessions.begin() as session:
+                    row = await session.get(RunRow, operation["run_id"])
+                    row.lease_expires_at = datetime(2000, 1, 1, tzinfo=UTC)
+                await peer.reconcile_orphaned_inflight_runs(error="expired")
+                async with peer.reserve_thread_operation(thread_id, kind=ThreadOperationKind.checkpoint_write, user_id=str(USER.id)):
+                    progress = empty_checkpoint()
+                    progress["channel_values"] = {"messages": [HumanMessage(content="Saved by the new writer")]}
+                    progress["channel_versions"] = {"messages": 1}
+                    await saver.aput(config, progress, {"source": "update", "step": 7}, progress["channel_versions"])
+                    if heartbeat:
+                        await owner._renew_leases()
+                    resume.set()
+                    response = await asyncio.wait_for(post, 5)
+                assert response.status_code == 409
+                assert [row.checkpoint["id"] async for row in saver.alist(config)] == [progress["id"]]
+                assert read_cancelled.is_set() == (pause_at == "read" and heartbeat)
+            finally:
+                resume.set()
+                post.cancel()
+                await asyncio.gather(post, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_create_drains_seed_already_in_progress_on_lease_loss(thread_store, monkeypatch):
+    runs = MemoryRunStore()
+    manager = RunManager(store=runs)
+    saver = InMemorySaver()
+    put = saver.aput
+
+    async def lose_lease_during_put(*args):
+        [row] = await runs.list_inflight()
+        reservation = await manager.get(row["run_id"])
+        # Fence from a separate task, as a heartbeat would while the saver is writing.
+        await asyncio.create_task(manager._mark_ownership_lost(reservation, reason="test lease loss"))
+        assert await runs.list_inflight()
+        return await put(*args)
+
+    monkeypatch.setattr(saver, "aput", lose_lease_during_put)
+    app = app_for(thread_store, saver)
+    app.state.run_manager = manager
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/threads", json={"thread_id": "started-seed"})
+    assert response.status_code == 409
+    assert await saver.aget_tuple({"configurable": {"thread_id": "started-seed"}}) is not None
+    assert await runs.list_inflight() == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("database", ["sqlite", "postgres"])
+@pytest.mark.parametrize("changed", ["lease", "incarnation"])
+async def test_sql_seed_is_fenced_until_commit(database, changed, monkeypatch, tmp_path):
+    thread_id = str(uuid4())
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    if database == "sqlite":
+        open_saver = AsyncSqliteSaver.from_conn_string
+        dsn = str(tmp_path / "checkpoints.db")
+        probe = "SELECT 1 FROM checkpoints WHERE thread_id = ?"
+        lock_timeout, lock_error = "PRAGMA busy_timeout=50", sqlite3.OperationalError
+    else:
+        dsn = os.getenv("TEST_POSTGRES_URI")
+        if not dsn:
+            pytest.skip("requires TEST_POSTGRES_URI")
+        open_saver = pytest.importorskip("langgraph.checkpoint.postgres.aio").AsyncPostgresSaver.from_conn_string
+        from psycopg.errors import LockNotAvailable
+
+        probe = "SELECT 1 FROM checkpoints WHERE thread_id = %s"
+        lock_timeout, lock_error = "SET lock_timeout='50ms'", LockNotAvailable
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("app.gateway.deps.get_config", lambda: AppConfig.model_validate({"sandbox": {"use": "test"}}))
+    async with open_saver(dsn) as writer, open_saver(dsn) as peer:
+        await writer.setup()
+        await peer.setup()
+        await peer.conn.execute(lock_timeout)
+        store = MemoryThreadMetaStore(InMemoryStore())
+        app = app_for(store, writer)
+        runs = MemoryRunStore()
+        app.state.run_manager = RunManager(store=runs)
+        get_thread = store.get
+        saw_staged_seed = False
+
+        async def change_at_commit(thread_id, **kwargs):
+            nonlocal saw_staged_seed
+            async with await writer.conn.execute(probe, (thread_id,)) as cursor:
+                if await cursor.fetchone() is None:
+                    return await get_thread(thread_id, **kwargs)
+            saw_staged_seed = True
+            assert await peer.aget_tuple(config) is None
+            # An independent connection may read, but deletion must wait for
+            # the pending publication even when it sees no checkpoint rows.
+            with pytest.raises(lock_error, match="lock"):
+                await threads.delete_thread_checkpoints(peer, thread_id)
+            if changed == "lease":
+                [reservation] = await runs.list_inflight()
+                await runs.update_status(reservation["run_id"], status="error", error="lease lost")
+            else:
+                await store.delete(thread_id, **kwargs)
+                await store.create(thread_id, **kwargs)
+            return await get_thread(thread_id, **kwargs)
+
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                monkeypatch.setattr(store, "get", change_at_commit)
+                failed = await client.post("/api/threads", json={"thread_id": thread_id, "metadata": {"generation": "old"}})
+                assert saw_staged_seed
+                assert failed.status_code == 409, failed.text
+                assert await peer.aget_tuple(config) is None
+                monkeypatch.setattr(store, "get", get_thread)
+                deleted = await client.delete(f"/api/threads/{thread_id}")
+                assert deleted.status_code == 200, deleted.text
+                created = await client.post("/api/threads", json={"thread_id": thread_id, "metadata": {"generation": "new"}})
+                assert created.status_code == 200, created.text
+                state = await client.get(f"/api/threads/{thread_id}/state")
+                assert state.status_code == 200, state.text
+                assert state.json()["metadata"]["generation"] == created.json()["metadata"]["generation"] == "new"
+                assert [row.checkpoint["id"] async for row in peer.alist(config)] == [state.json()["checkpoint_id"]]
+        finally:
+            await writer.adelete_thread(thread_id)

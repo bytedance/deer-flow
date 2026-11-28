@@ -3049,7 +3049,7 @@ class RunManager:
         return self._store if getattr(self._store, "supports_run_inputs", False) is True else None
 
     async def owns_active_admission(self, record: RunRecord) -> bool:
-        """Confirm the existing run slot without holding a SQL writer transaction."""
+        """Confirm a run or thread operation still owns its slot without holding a SQL writer transaction."""
         async with self._run_registry_lock(record.run_id):
             if self._runs.get(record.run_id) is not record or record.ownership_lost:
                 return False

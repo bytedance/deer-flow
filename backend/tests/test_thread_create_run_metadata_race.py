@@ -17,6 +17,7 @@ from app.gateway import services
 from app.gateway.routers import threads
 from deerflow.runtime import RunManager, goal
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
@@ -203,6 +204,11 @@ async def test_start_run_detached_writer_cannot_replace_http_thread(thread_store
             release.set()
             await asyncio.wait_for(asyncio.shield(record.task), 5)
             response = await asyncio.wait_for(http_task, 5)
+            # The admitted run has not published a checkpoint. The competing
+            # create can only report success once it can safely seed the state.
+            assert response.status_code == 409
+            await app.state.run_manager.set_status(record.run_id, RunStatus.success)
+            response = await client.post("/api/threads", json={"thread_id": "native-admission", "metadata": {"source": "http"}})
             assert response.status_code == 200
             row = await original_get("native-admission", user_id=str(USER.id))
             assert len(creations) == 1
@@ -257,7 +263,6 @@ async def test_cancelled_metadata_waiter_releases_its_lock_entry(thread_store, m
 async def test_metadata_setup_budget_includes_create_admission(thread_store, monkeypatch, _stub_app_config, caplog, strict):
     from app.gateway.routers.thread_runs import RunCreateRequest
     from deerflow.runtime.runs.manager import RunStartOutcome
-    from deerflow.runtime.runs.schemas import RunStatus
 
     thread_id = "metadata-admission-budget"
     waiting = asyncio.Event()
