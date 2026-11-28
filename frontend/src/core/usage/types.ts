@@ -5,6 +5,8 @@ export interface UsageDay {
   input_tokens: number;
   output_tokens: number;
   runs: number;
+  /** Subagent batch items with usage this day; their tokens are in the totals. */
+  batch_items?: number;
 }
 
 export interface ModelUsage {
@@ -19,6 +21,8 @@ export interface UsageSummary {
   by_model: Record<string, ModelUsage>;
   total_tokens: number;
   total_runs: number;
+  /** Subagent batch items in the window: not runs, but their tokens count. */
+  total_batch_items?: number;
 }
 
 export interface UsageRun {
