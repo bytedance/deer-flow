@@ -5,7 +5,7 @@ surrounding quotes intact (e.g. ``name: "my-skill"`` → ``'"my-skill"'``).
 This caused a mismatch with ``_validate_skill_frontmatter`` (which uses
 ``yaml.safe_load``) and broke skill lookup after installation.
 
-The parser now uses ``yaml.safe_load`` consistently with ``validation.py``.
+The parser now uses the same safe frontmatter loader as validation and review.
 """
 
 from __future__ import annotations
@@ -250,6 +250,21 @@ def test_parse_invalid_yaml_returns_none(tmp_path):
     skill_file = _write_skill(tmp_path, "name: [unclosed")
     skill = parse_skill_file(skill_file, category="custom")
     assert skill is None
+
+
+def test_parse_duplicate_frontmatter_key_returns_none(tmp_path, caplog):
+    """The runtime loader must reject the same ambiguous YAML as validation."""
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nrequired-secrets:\n  - TOKEN_A\nrequired-secrets:\n  - TOKEN_B",
+    )
+
+    with caplog.at_level(logging.ERROR, logger="deerflow.skills.parser"):
+        skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is None
+    combined = "\n".join(record.getMessage() for record in caplog.records)
+    assert "found duplicate key 'required-secrets'" in combined
 
 
 def test_parse_category_stored(tmp_path):

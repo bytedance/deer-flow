@@ -336,6 +336,63 @@ class TestSplitSkillMarkdownBom:
         assert parts.frontmatter_text == "name: my-skill\ndescription: A valid skill"
         assert parts.body == "Body\n"
 
+
+class TestSplitSkillMarkdownDuplicateKeys:
+    def test_duplicate_top_level_key_is_rejected(self):
+        parts, error = split_skill_markdown(
+            "---\nname: my-skill\ndescription: A valid skill\nrequired-secrets:\n  - TOKEN_A\nrequired-secrets:\n  - TOKEN_B\n---\n",
+        )
+
+        assert parts is None
+        assert "found duplicate key 'required-secrets'" in error
+
+    def test_duplicate_nested_key_is_rejected(self):
+        parts, error = split_skill_markdown(
+            "---\nname: my-skill\ndescription: A valid skill\nmetadata:\n  owner: first\n  owner: second\n---\n",
+        )
+
+        assert parts is None
+        assert "found duplicate key 'owner'" in error
+
+    def test_unquoted_equals_key_keeps_safeloader_semantics(self):
+        parts, error = split_skill_markdown(
+            "---\nname: my-skill\ndescription: A valid skill\nmetadata:\n  =: first\n---\n",
+        )
+
+        assert error is None
+        assert parts is not None
+        assert parts.metadata["metadata"] == {"=": "first"}
+
+    def test_yaml_merge_keys_remain_supported(self):
+        parts, error = split_skill_markdown(
+            "---\nname: my-skill\ndescription: A valid skill\nmetadata:\n  defaults: &defaults\n    owner: team\n    tier: basic\n  override:\n    <<: *defaults\n    owner: local\n---\n",
+        )
+
+        assert error is None
+        assert parts is not None
+        assert parts.metadata["metadata"]["override"] == {
+            "owner": "local",
+            "tier": "basic",
+        }
+
+    def test_reused_merged_profile_preserves_explicit_override(self):
+        parts, error = split_skill_markdown(
+            "---\nname: my-skill\ndescription: A valid skill\nmetadata:\n  base: &base\n    owner: team\n  inherited:\n    <<: &profile\n      <<: *base\n      owner: local\n  reuse: *profile\n---\n",
+        )
+
+        assert error is None
+        assert parts is not None
+        assert parts.metadata["metadata"]["inherited"] == {"owner": "local"}
+        assert parts.metadata["metadata"]["reuse"] == {"owner": "local"}
+
+    def test_duplicate_yaml_merge_keys_are_rejected(self):
+        parts, error = split_skill_markdown(
+            "---\nname: my-skill\ndescription: A valid skill\nmetadata:\n  first: &first\n    owner: team\n  second: &second\n    tier: basic\n  merged:\n    <<: *first\n    <<: *second\n---\n",
+        )
+
+        assert parts is None
+        assert "found duplicate key '<<'" in error
+
     def test_control_document_without_bom_is_parsed_identically(self):
         parts, error = split_skill_markdown("---\nname: my-skill\ndescription: A valid skill\n---\nBody\n")
 
