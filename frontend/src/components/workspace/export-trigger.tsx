@@ -20,7 +20,17 @@ import type { AgentThread } from "@/core/threads/types";
 import { useThread } from "./messages/context";
 import { Tooltip } from "./tooltip";
 
-export function ExportTrigger({ threadId }: { threadId: string }) {
+export function ExportTrigger({
+  threadId,
+  createdAt,
+  createdAtLoading = false,
+}: {
+  threadId: string;
+  /** The thread's ``created_at``, written into the export header. */
+  createdAt?: string;
+  /** Hold the export until ``createdAt`` has loaded, so it is not left out. */
+  createdAtLoading?: boolean;
+}) {
   const { t } = useI18n();
   const { thread, isMock } = useThread();
   const [exporting, setExporting] = useState(false);
@@ -45,6 +55,7 @@ export function ExportTrigger({ threadId }: { threadId: string }) {
         }
         const agentThread = {
           thread_id: threadId,
+          created_at: createdAt,
           updated_at: new Date().toISOString(),
           values: thread.values,
         } as AgentThread;
@@ -58,7 +69,7 @@ export function ExportTrigger({ threadId }: { threadId: string }) {
         setExporting(false);
       }
     },
-    [messages, thread.values, threadId, isMock, t],
+    [messages, thread.values, threadId, createdAt, isMock, t],
   );
 
   if (messages.length === 0) {
@@ -71,7 +82,7 @@ export function ExportTrigger({ threadId }: { threadId: string }) {
         <DropdownMenuTrigger asChild>
           <Button
             aria-label={t.common.export}
-            disabled={exporting || thread.isLoading}
+            disabled={exporting || thread.isLoading || createdAtLoading}
             className="text-muted-foreground hover:text-foreground"
             variant="ghost"
           >
