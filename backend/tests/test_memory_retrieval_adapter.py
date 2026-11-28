@@ -13,6 +13,8 @@ from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
 from deerflow.agents.memory.backends.deermem.deermem.core.retrieval import (
     FTS5Retrieval,
     FTS5RetrievalAdapter,
+    _carries_unindexable_cjk_run,
+    _has_bare_negation,
     _is_advanced_query,
     _jieba_available,
     create_fts5_retrieval,
@@ -82,6 +84,117 @@ def test_chinese_fact_is_recallable_without_memory_zh_extra(tmp_path: Path, monk
         # start matching everything in the index.
         absent = adapter.search("蟹", scopes=[scope], top_k=5, mode="fts5", filters=None)
         assert absent == []
+    finally:
+        adapter.close()
+
+
+def test_unindexable_cjk_run_detection_follows_the_index_tokenizer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The retry gate asks ``_tokenize``, not a hard-coded character count.
+
+    Without jieba the indexed unit is the bigram, so a two-character run is
+    expressible and must not trigger the retry, while a longer run never is.
+    Reading the same function the indexer used is what keeps this correct when
+    jieba is installed and the unit becomes the word.
+    """
+    monkeypatch.setattr("deerflow.agents.memory.backends.deermem.deermem.core.retrieval._jieba_available", False)
+    assert _carries_unindexable_cjk_run("记忆检索*")
+    assert _carries_unindexable_cjk_run("记忆检索 AND 思考")
+    assert not _carries_unindexable_cjk_run("思考 AND 无关")
+    assert not _carries_unindexable_cjk_run("postgres AND pipeline")
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "记忆检索 AND 思考",
+        '"记忆检索"',
+        "记忆检索*",
+        "(记忆检索)",
+    ],
+)
+def test_advanced_cjk_query_is_retried_through_the_aligned_tokenizer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, query: str) -> None:
+    """Advanced syntax must not turn an unindexable CJK run into a silent zero.
+
+    ``search`` hands advanced FTS5 syntax to ``MATCH`` verbatim, so FTS5's own
+    ``unicode61`` tokenizer keeps ``记忆检索`` as one token while the index holds
+    the separated bigrams ``记忆 忆检 检索``. The verbatim term therefore cannot
+    match, and the empty result is indistinguishable from a real miss -- the same
+    silent-zero failure #8022 fixed on the plain-query path, still reachable
+    here through a quoted phrase, a prefix, a group, or an explicit operator.
+    Each form below carries that four-character run, so each must reach the fact
+    through the tokenized query instead of trusting the verbatim match.
+    """
+    monkeypatch.setattr("deerflow.agents.memory.backends.deermem.deermem.core.retrieval._jieba_available", False)
+    adapter = FTS5RetrievalAdapter(tmp_path / "facts.sqlite3")
+    scope = {"userId": "alice", "agentName": "agent-a"}
+    try:
+        adapter.upsert(_fact("zh-advanced", "我习惯用中文记忆检索来思考问题"), scope=scope, path="")
+        results = adapter.search(query, scopes=[scope], top_k=5, mode="fts5", filters=None)
+        assert [item["fact"]["id"] for item in results] == ["zh-advanced"], (
+            f"advanced query {query!r} returned nothing: the raw CJK run can never match a bigram index, so a zero-hit advanced query with an unindexable run must fall back to the tokenized query instead of reporting a miss"
+        )
+    finally:
+        adapter.close()
+
+
+def test_advanced_cjk_query_keeps_an_and_that_is_actually_expressible(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A genuine miss under ``AND`` must stay a miss, in either language.
+
+    ``思考`` is exactly one indexed bigram, so ``思考 AND 无关`` is expressible and
+    its empty result is real evidence of absence: retrying it as ``思考 OR 无关``
+    would answer a question the user did not ask. Gating the retry on the index
+    tokenizer rather than on "the query contains CJK" is what preserves that.
+    """
+    monkeypatch.setattr("deerflow.agents.memory.backends.deermem.deermem.core.retrieval._jieba_available", False)
+    adapter = FTS5RetrievalAdapter(tmp_path / "facts.sqlite3")
+    scope = {"userId": "alice", "agentName": "agent-a"}
+    try:
+        adapter.upsert(_fact("zh-and", "我习惯用中文记忆检索来思考问题"), scope=scope, path="")
+        assert adapter.search("思考", scopes=[scope], top_k=5, mode="fts5", filters=None), "the expressible bigram on its own must still match"
+        assert adapter.search("思考 AND 无关", scopes=[scope], top_k=5, mode="fts5", filters=None) == [], "an AND whose terms are both expressible must not be relaxed to OR just because the result is empty"
+        assert adapter.search("postgres AND mysql", scopes=[scope], top_k=5, mode="fts5", filters=None) == []
+    finally:
+        adapter.close()
+
+
+def test_bare_negation_detection_matches_only_the_uppercase_operator() -> None:
+    """FTS5 spells the binary operator ``NOT``; every other shape is a term.
+
+    Only the uppercase keyword excludes a query from the tokenized retry. A
+    quoted ``"NOT"`` is a phrase holding the word, and lowercase ``not`` is an
+    ordinary term (verified against FTS5 directly), so neither is treated as a
+    negation -- widening this would drop legitimate English searches from the
+    aligned path.
+    """
+    assert _has_bare_negation("记忆检索 NOT 思考")
+    assert not _has_bare_negation("记忆检索 AND 思考")
+    assert not _has_bare_negation('"NOT final" 记忆检索')
+    assert not _has_bare_negation("记忆检索 not 思考")
+
+
+def test_advanced_cjk_query_with_a_negation_keeps_the_genuine_miss(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A negated query must never be retried as an OR.
+
+    ``_build_fallback_query`` OR-joins its tokens, so retrying
+    ``记忆检索 NOT 思考`` returned the fact holding ``思考`` -- the term the user
+    asked to exclude -- and the surviving literal ``"NOT"`` token matched an
+    English ``not`` under unicode61 case folding, pulling in an unrelated fact
+    as well. An OR cannot express a negation, so the empty result the verbatim
+    query already produced is the honest answer. A negated query whose positive
+    side is expressible never reaches the retry and keeps its current result.
+    """
+    monkeypatch.setattr("deerflow.agents.memory.backends.deermem.deermem.core.retrieval._jieba_available", False)
+    adapter = FTS5RetrievalAdapter(tmp_path / "facts.sqlite3")
+    scope = {"userId": "alice", "agentName": "agent-a"}
+    try:
+        adapter.upsert(_fact("zh-neg", "我习惯用中文记忆检索来思考问题"), scope=scope, path="")
+        adapter.upsert(_fact("en-neg", "the launch plan is not finalized yet"), scope=scope, path="")
+        assert adapter.search("记忆检索 NOT 思考", scopes=[scope], top_k=5, mode="fts5", filters=None) == [], (
+            "a negated query must not be retried as an OR: that returns the fact containing the excluded term, and the literal NOT token matches an English 'not'"
+        )
+        assert [item["fact"]["id"] for item in adapter.search("思考 NOT 记忆检索", scopes=[scope], top_k=5, mode="fts5", filters=None)] == ["zh-neg"], (
+            "a negation whose positive side is expressible answers through the verbatim MATCH and must keep its result"
+        )
     finally:
         adapter.close()
 
