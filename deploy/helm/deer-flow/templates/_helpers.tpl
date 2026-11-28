@@ -21,6 +21,24 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{/* StatefulSet claim templates are immutable, including their labels. Keep
+     the installed data template's labels across upgrades. New templates use
+     only labels that stay stable across chart versions. */}}
+{{- define "deer-flow.dataClaimLabels" -}}
+{{- $labels := dict
+      "app.kubernetes.io/managed-by" .root.Release.Service
+      "app.kubernetes.io/instance" .root.Release.Name
+      "app.kubernetes.io/component" .component -}}
+{{- with lookup "apps/v1" "StatefulSet" (include "deer-flow.namespace" .root) .name -}}
+  {{- range .spec.volumeClaimTemplates -}}
+    {{- if eq .metadata.name "data" -}}
+      {{- $labels = .metadata.labels -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+{{- toYaml $labels -}}
+{{- end -}}
+
 {{- define "deer-flow.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "deer-flow.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}

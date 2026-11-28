@@ -44,8 +44,8 @@ CACHE_DIR = os.path.join(tempfile.gettempdir(), ".data-analysis-cache")
 
 def compute_files_hash(files: list[str]) -> str:
     """Hash the ordered names and contents that determine the loaded table map."""
-    # A new namespace also prevents reuse of maps built by the old allocator.
-    hasher = hashlib.sha256(b"data-analysis-inputs-v2\0")
+    # Older generations could silently omit a requested input.
+    hasher = hashlib.sha256(b"data-analysis-inputs-v3\0")
     for file_path in files:
         name = os.fsencode(os.path.basename(file_path))
         hasher.update(len(name).to_bytes(8, "big"))
@@ -251,8 +251,7 @@ def load_files(con: duckdb.DuckDBPyConnection, files: list[str]) -> dict[str, st
 
     for file_path in files:
         if not os.path.exists(file_path):
-            logger.error(f"File not found: {file_path}")
-            continue
+            raise ValueError(f"File not found: {file_path}")
 
         ext = os.path.splitext(file_path)[1].lower()
 
@@ -261,7 +260,7 @@ def load_files(con: duckdb.DuckDBPyConnection, files: list[str]) -> dict[str, st
         elif ext == ".csv":
             _load_csv(con, file_path, table_map)
         else:
-            logger.warning(f"Unsupported file format: {ext} ({file_path})")
+            raise ValueError(f"Unsupported file format: {ext} ({file_path})")
 
     return table_map
 
@@ -407,8 +406,9 @@ def _load_csv(
         logger.info(
             f"  Loaded CSV '{base_name}' -> table '{table_name}' ({row_count} rows)"
         )
-    except Exception as e:
-        logger.warning(f"  Failed to load CSV '{base_name}': {e}")
+    except (duckdb.Error, OSError) as e:
+        reason = str(e).strip().split("\n", 1)[0]
+        raise ValueError(f"Failed to load CSV '{file_path}': {reason}") from e
 
 
 def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) -> str:
@@ -778,7 +778,8 @@ def main():
             elif args.action == "summary":
                 action_summary(con, args.table, table_map)
     except ValueError as exc:
-        sys.exit(f"Error: {exc}")
+        logger.error("Error: %s", exc)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

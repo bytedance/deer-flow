@@ -11,6 +11,7 @@ from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _compiled_mask_patterns,
+    _drop_disabled_skill_paths,
     _extract_skill_name_from_skills_path,
     _get_custom_mount_for_path,
     _get_custom_mounts,
@@ -663,6 +664,29 @@ def test_extract_skill_name_from_integration_skill_path() -> None:
     with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
         assert _extract_skill_name_from_skills_path("/mnt/skills/integrations/lark-cli/lark-doc/SKILL.md") == "lark-doc"
         assert _extract_skill_name_from_skills_path("/mnt/skills/integrations/lark-cli") is None
+
+
+def test_drop_disabled_skill_paths_keys_equivalent_spellings_by_normalized_category() -> None:
+    """Equivalent spellings of the same skills tree must not fold a public and a
+    custom skill with the same name into one cached verdict."""
+    looked_up: list[str] = []
+
+    def is_disabled(path: str, *, user_id: str | None = None) -> bool:
+        looked_up.append(path)
+        return "/custom/" in path
+
+    public = "/mnt//skills/public/dup/SKILL.md"
+    custom = "/mnt//skills/custom/dup/SKILL.md"
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._is_disabled_skill_path", side_effect=is_disabled),
+    ):
+        kept = _drop_disabled_skill_paths([public, custom])
+
+    assert kept == [public]
+    # Both categories were looked up: sharing the verdict would leave the
+    # disabled custom skill's file in the result.
+    assert len(looked_up) == 2
 
 
 def test_resolve_skills_path_resolves_global_integration_skills(tmp_path: Path) -> None:

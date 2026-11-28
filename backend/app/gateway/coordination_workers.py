@@ -9,6 +9,7 @@ from uuid import uuid4
 from deerflow_extension_api.agent_runs import AgentRunError
 from fastapi import HTTPException
 
+from app.channels.connection_identity import feishu_private_binding
 from app.gateway.deps import get_agent_runs
 from deerflow.persistence.coordination.model import TaskStatus
 from deerflow.persistence.coordination.sql import TaskConflict, TaskNotFound
@@ -57,16 +58,18 @@ class CoordinationWorkers:
             "expires_at": time() + GRANT_LIFETIME,
         }
 
-    async def dispatch(self, runs, owner, task_id, assistant_id, *, channel=None):
+    async def dispatch(self, runs, owner, task_id, assistant_id, *, channel=None, background=False):
         grant = self._new_grant(runs.capture_authority(), channel=channel)
         turn = await self.repo.prepare(owner, task_id, assistant_id, initial_grant=grant)
-        if turn is not None:
+        if turn is not None and background:
+            self._recovery_wakeup.set()
+        elif turn is not None:
             authorized, grant_id = await self.authority(owner, task_id)
             await self._admit(authorized, owner, task_id, turn, grant_id)
             self.watch(authorized, owner, task_id, grant_id)
         return await self.view(owner, task_id)
 
-    async def dispatch_bound_channel(self, message, *, request_id, objective, assistant_id="lead_agent"):
+    async def dispatch_bound_channel(self, message, *, request_id, objective, assistant_id="lead_agent", notify_completion=False):
         """Entry point for a Gateway-side adapter after provider authentication."""
         from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
         from app.gateway.authz import resolve_route_permissions
@@ -81,17 +84,22 @@ class CoordinationWorkers:
         owner = message.owner_user_id
         if connection is None or connection["id"] != message.connection_id or connection["owner_user_id"] != owner:
             raise AgentRunError(403, "The messaging identity is no longer bound")
+        origin = None
+        if notify_completion:
+            origin = feishu_private_binding(connection)
+            if origin is None or message.metadata.get("chat_type") != "p2p" or origin["chat_id"] != message.chat_id:
+                raise AgentRunError(403, "Tasks require a connected Feishu private chat")
         user = await self._host.load_user(owner)
         if user is None or user.disabled or user.needs_setup:
             raise AgentRunError(403, "The task owner is unavailable")
         permissions = WORKER_PERMISSIONS.intersection(await resolve_route_permissions(user, is_internal=False))
-        if "runs:create" not in permissions:
-            raise AgentRunError(403, "Permission denied: runs:create")
+        if not WORKER_RUN_PERMISSIONS.issubset(permissions):
+            raise AgentRunError(403, "Permission denied to run a managed task")
         snapshot = {"token_version": user.token_version, "source": AUTH_SOURCE_SESSION, "permissions": sorted(permissions)}
         runs = await self._host.restore_delegated_authority(user_id=owner, grant=snapshot)
         request_key = sha256(f"{connection['id']}:{request_id}".encode()).hexdigest()
-        task = await self.repo.create(owner, request_id=f"im:{request_key}", objective=objective)
-        return await self.dispatch(runs, owner, task["id"], assistant_id, channel={"id": connection["id"], "updated_at": connection["updated_at"]})
+        task = await self.repo.create(owner, request_id=f"im:{request_key}", objective=objective, coordinator=notify_completion, channel_origin=origin)
+        return await self.dispatch(runs, owner, task["id"], assistant_id, channel={"id": connection["id"], "updated_at": connection["updated_at"]}, background=notify_completion)
 
     async def authority(self, owner, task_id, *, cancelling=False):
         grant = await self.repo.grant(owner, task_id)

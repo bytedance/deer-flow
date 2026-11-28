@@ -272,6 +272,16 @@ models:
     temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
     supports_vision: true
 
+  - name: minimax-m3.1-flash
+    display_name: MiniMax M3.1 Flash
+    use: langchain_openai:ChatOpenAI
+    model: MiniMax-M3.1-Flash
+    api_key: $MINIMAX_API_KEY
+    base_url: https://api.minimax.io/v1
+    max_tokens: 4096
+    temperature: 1.0  # MiniMax requires temperature in (0.0, 1.0]
+    supports_vision: true  # Thinking is always on (like M2.7); thinking.type=disabled is rejected
+
   - name: minimax-m2.7
     display_name: MiniMax M2.7
     use: langchain_openai:ChatOpenAI
@@ -297,6 +307,14 @@ models:
     model: google/gemini-2.5-flash-preview
     api_key: $OPENAI_API_KEY
     base_url: https://openrouter.ai/api/v1
+
+  - name: nvidia-nemotron-3.5-super-vl
+    display_name: Nemotron 3.5 Super VL 120B (NVIDIA NIM)
+    use: langchain_openai:ChatOpenAI
+    model: nvidia/nemotron-3.5-super-vl-120b-a12b
+    api_key: $NVIDIA_API_KEY
+    base_url: https://integrate.api.nvidia.com/v1
+    supports_vision: true
 ```
 
 If your OpenRouter key lives in a different environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
@@ -2188,9 +2206,9 @@ If you rebuild the runtime from scratch instead of extending the published image
 - `file.read_file(...)`
 - `file.write_file(...)`, including base64 writes for binary content
 - streamed `file.download_file(...)`
-- `file.find_files(...)`
+- `file.glob_files(...)`
+- `file.grep_files(...)`
 - `file.list_path(...)`
-- `file.search_in_file(...)`
 
 Custom images must also keep these compatibility constraints:
 
@@ -2353,6 +2371,7 @@ models:
 - `MIMO_API_KEY` - Xiaomi MiMo API key
 - `NOVITA_API_KEY` - Novita API key (OpenAI-compatible endpoint)
 - `OPPER_API_KEY` - Opper API key (OpenAI-compatible endpoint)
+- `NVIDIA_API_KEY` - NVIDIA API key for hosted or self-hosted NIM endpoints
 - `TAVILY_API_KEY` - Tavily search API key
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`

@@ -2,6 +2,17 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
+    "postgresql": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "object",
+          "properties": {
+            "useChartDataDirectory": { "type": "boolean" }
+          }
+        }
+      }
+    },
     "provisioner": {
       "type": "object",
       "properties": {

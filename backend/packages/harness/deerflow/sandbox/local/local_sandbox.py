@@ -25,16 +25,10 @@ from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.path_patterns import PATH_START_BOUNDARY, replace_output_path_matches
 from deerflow.sandbox.sandbox import CommandOutput, Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches, path_matches
+from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches, is_user_data_path, path_matches
 from deerflow.utils.atomic_write import publish_bytes_atomically
 
 logger = logging.getLogger(__name__)
-
-
-def _is_user_data_container(container_path: str) -> bool:
-    """Whether a mount's container path belongs to the user-data tree."""
-    normalized = container_path.rstrip("/")
-    return normalized == VIRTUAL_PATH_PREFIX or normalized.startswith(VIRTUAL_PATH_PREFIX + "/")
 
 
 # Default wall-clock timeout (seconds) for a single host bash command. A
@@ -603,12 +597,12 @@ class LocalSandbox(Sandbox):
         """
         mapping = self._find_path_mapping(path)
         if mapping is not None:
-            return _is_user_data_container(mapping[0].container_path)
+            return is_user_data_path(mapping[0].container_path)
         resolved = os.path.realpath(path)
         for candidate in self._mappings_by_local_specificity:
             root = self._resolved_local_paths[candidate]
             if resolved == root or resolved.startswith(root + os.sep):
-                return _is_user_data_container(candidate.container_path)
+                return is_user_data_path(candidate.container_path)
         return False
 
     def _find_path_mapping(self, path: str) -> tuple[PathMapping, str] | None:

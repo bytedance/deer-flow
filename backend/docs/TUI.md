@@ -166,17 +166,20 @@ have no Textual dependency and are unit-tested directly with synthetic `StreamEv
 
 ## Web UI visibility (shared persistence)
 
-The Web UI lists conversations from the `threads_meta` SQL table (filtered by
-`user_id`), **not** from the checkpointer. An embedded run only writes the
-checkpointer, so a TUI thread would otherwise be invisible in the sidebar.
+With SQLite or PostgreSQL, the Web UI lists conversations from `threads_meta`,
+filtered by user. The TUI writes a row for the local `default` user on the first
+turn and syncs the generated title afterward. The write is best effort and can
+happen while the Gateway is stopped. The sidebar shows the thread when the
+Gateway reads the same database for the `default` user. With the `memory`
+backend, the TUI still works and skips this metadata write.
 
-`persistence.py` closes that gap: on the first turn of a thread it writes a
-`threads_meta` row — owned by the local default user (`"default"`) — into the
-**same** database the Gateway reads, and syncs the generated title afterward.
-This requires only the shared `threads_meta` store (built via
-`deerflow.persistence.engine.init_engine_from_config`), **not** the Gateway
-process. When the database backend is `memory` (no SQL store) the writer
-degrades to a silent no-op and the TUI still works.
+With PostgreSQL, the TUI and Gateway must also use the same schema
+(`database.postgres_schema`).
+
+SQLite resolves a relative `database.sqlite_dir` from each process's working
+directory. `make dev` starts the Gateway from `backend/`, so launch the TUI from
+`backend/` as well to use the same relative path. You can also configure an
+absolute `database.sqlite_dir` that both processes can access.
 
 All DB work runs on one long-lived background event loop, because a SQLAlchemy
 async engine is bound to the loop that created it.

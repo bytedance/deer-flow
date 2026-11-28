@@ -35,7 +35,7 @@ from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
+from deerflow.sandbox.search import GrepMatch, is_user_data_path, path_matches, should_ignore_path_under_root, truncate_line
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -251,6 +251,15 @@ class TenkiSandbox(Sandbox):
             return f"{VIRTUAL_PATH_PREFIX}/{resolved[len(self._home_dir) :].lstrip('/')}"
         return resolved
 
+    def resolve_access_control_path(self, path: str) -> str:
+        """Map a reported virtual path back under ``home_dir`` for access checks.
+
+        ``skills.container_path`` is the sandbox-internal spelling (for example
+        ``/home/tenki/skills``), so the disabled-skill filter must see those
+        paths in that form rather than under ``VIRTUAL_PATH_PREFIX``.
+        """
+        return self._resolve_path(path)
+
     # ── command execution ───────────────────────────────────────────────
 
     def execute_command(
@@ -387,12 +396,15 @@ class TenkiSandbox(Sandbox):
             raise OSError(f"cannot read '{path}' from sandbox: {e}") from e
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
+        # Label before the rewrite: home_dir can also hold non-user-data trees.
+        user_data = is_user_data_path(path)
         resolved = self._resolve_path(path)
-        r = self._sh(remote_list_dir_command(resolved, max_depth))
+        r = self._sh(remote_list_dir_command(resolved, max_depth, user_data=user_data))
         entries = parse_remote_list_dir_output(
             r.stdout_text or "",
             resolved,
             pipeline_exit_code=getattr(r, "exit_code", None),
+            user_data=user_data,
         )
         return [self._virtual_path(line) for line in entries]
 
@@ -404,6 +416,8 @@ class TenkiSandbox(Sandbox):
         include_dirs: bool = False,
         max_results: int = 200,
     ) -> tuple[list[str], bool]:
+        # Label before the rewrite: home_dir can also hold non-user-data trees.
+        user_data = is_user_data_path(path)
         resolved = self._resolve_path(path)
         types = ("f", "d") if include_dirs else ("f",)
         type_expr = " -o ".join(f"-type {t}" for t in types)
@@ -422,7 +436,7 @@ class TenkiSandbox(Sandbox):
             # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)):
                 continue
-            if should_ignore_path_under_root(entry, root):
+            if should_ignore_path_under_root(entry, root, glob=pattern, user_data=user_data):
                 continue
             rel_path = entry[len(root) :].lstrip("/")
             if not rel_path:
@@ -453,6 +467,8 @@ class TenkiSandbox(Sandbox):
         if not literal:
             re.compile(pattern, 0 if case_sensitive else re.IGNORECASE)
 
+        # Label before the rewrite: home_dir can also hold non-user-data trees.
+        user_data = is_user_data_path(path)
         resolved = self._resolve_path(path)
         # busybox+GNU-portable flags: -r recursive, -H always print the filename
         # (without it, grep -r on a path that resolves to a single file prints
@@ -484,7 +500,7 @@ class TenkiSandbox(Sandbox):
                 line_number = int(line_no_str)
             except ValueError:
                 continue
-            if should_ignore_path_under_root(file_path, root):
+            if should_ignore_path_under_root(file_path, root, glob=glob, user_data=user_data):
                 continue
             if glob is not None:
                 # Match the caller's real directory scope: a pattern like

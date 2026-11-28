@@ -33,8 +33,38 @@ function isWrappedServerMap(value: Record<string, unknown>): value is Record<
   if (!Object.hasOwn(value, "mcpServers") || !isPlainObject(value.mcpServers)) {
     return false;
   }
-  const candidates = Object.values(value.mcpServers);
-  return candidates.length === 0 || candidates.every(isPlainObject);
+  const config = value.mcpServers;
+  // A bare server named mcpServers identifies its transport. Otherwise this
+  // is a wrapper whose entries must be validated individually, even if one
+  // or all of them are malformed.
+  const nonempty = (value: unknown) =>
+    typeof value === "string" && value.trim().length > 0;
+  // A configured sibling is evidence of a wrapped map, even when a mistyped
+  // sibling happens to be named command, url or type. Credential maps and
+  // presentation metadata are data, rather than sibling server definitions.
+  const hasServerSibling = Object.entries(config).some(
+    ([key, value]) =>
+      !(
+        (key === "env" || key === "headers") &&
+        isPlainObject(value) &&
+        Object.values(value).every((entry) => typeof entry === "string")
+      ) &&
+      key !== "presentation" &&
+      !(key === "oauth" && isPlainObject(value) && nonempty(value.token_url)) &&
+      isPlainObject(value) &&
+      (nonempty(value.command) || nonempty(value.url)),
+  );
+  // Match the Gateway alias promotion and runtime default for empty types.
+  const explicitType = config.type === "" ? undefined : config.type;
+  const alias = config.transport === "" ? undefined : config.transport;
+  const transport = explicitType ?? alias ?? "stdio";
+  const coherent =
+    transport === "stdio"
+      ? nonempty(config.command)
+      : typeof transport === "string" &&
+        ["http", "sse", "streamable_http"].includes(transport) &&
+        nonempty(config.url);
+  return hasServerSibling || !coherent;
 }
 
 /** Serialize one existing server into the same copy-paste format the parser accepts. */
@@ -76,7 +106,7 @@ export function parseMCPServerDefinition(
   }
 
   // A bare server is allowed to be named `mcpServers`. Treat that key as the
-  // wrapper only when its value itself looks like a name-to-config map.
+  // wrapper unless its value identifies a server transport.
   const servers = isWrappedServerMap(parsed) ? parsed.mcpServers : parsed;
 
   const entries = Object.entries(servers);

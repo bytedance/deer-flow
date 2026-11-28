@@ -60,25 +60,76 @@ _ITEM_PUBLIC_FIELDS = (
 _ITEM_TIMESTAMP_FIELDS = ("started_at", "completed_at", "created_at", "updated_at")
 
 
-def _accumulate_token_usage(stored: dict[str, Any] | None, attempt: dict[str, Any] | None) -> dict[str, Any] | None:
+_USAGE_COUNTERS = ("input_tokens", "output_tokens", "total_tokens", "cache_read_tokens")
+
+
+def _usage_count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _accumulate_token_usage(
+    stored: dict[str, Any] | None,
+    attempt: dict[str, Any] | None,
+    *,
+    at: datetime | None = None,
+    model_name: str | None = None,
+) -> dict[str, Any] | None:
     """Add one attempt's token counts to the item's stored total.
 
     An item can run several attempts (automatic retries, a manual retry), and
     each one spends tokens. Replacing the stored value would keep only the last
     attempt; an attempt without usage (e.g. the exception path) keeps it as is.
+
+    The top-level counters stay the item's running total. Each attempt is also
+    kept under ``attempts`` with the time its usage was written and its tokens
+    per model (``by_model``; counters without one belong to ``model_name``), so
+    the usage views can price every model at its own rate and date the tokens
+    by the attempt that spent them, not by later item activity.
     """
     if not attempt:
         return stored
-    if not stored:
-        return dict(attempt)
-    total = dict(stored)
+    attempt = dict(attempt)
+    by_model = attempt.pop("by_model", None)
+    if not isinstance(by_model, dict) or not by_model:
+        by_model = {model_name or "unknown": {key: attempt[key] for key in _USAGE_COUNTERS if key in attempt}}
+    total = dict(stored) if stored else {}
     for key, value in attempt.items():
         if isinstance(value, int) and not isinstance(value, bool):
             previous = total.get(key)
             total[key] = (previous if isinstance(previous, int) and not isinstance(previous, bool) else 0) + value
         else:
             total[key] = value
+    if at is not None:
+        attempts = total.get("attempts")
+        total["attempts"] = [*(attempts if isinstance(attempts, list) else []), {"at": coerce_iso(at), "by_model": by_model}]
     return total
+
+
+def _item_usage_entries(model_name: str | None, token_usage: dict[str, Any], fallback_at: datetime | None) -> list[dict[str, Any]]:
+    """Split one item's stored usage into (time, model) entries for the usage views.
+
+    Attempts recorded with their time and models come first. Whatever the
+    top-level totals hold beyond them (usage stored before attempts were
+    recorded) is one entry at the item's model and ``fallback_at``.
+    """
+    entries: list[dict[str, Any]] = []
+    attempts = token_usage.get("attempts")
+    for attempt in attempts if isinstance(attempts, list) else []:
+        if not isinstance(attempt, dict) or not isinstance(attempt.get("by_model"), dict):
+            continue
+        try:
+            at = datetime.fromisoformat(str(attempt.get("at")))
+        except ValueError:
+            at = fallback_at
+        if at is not None and at.tzinfo is None:
+            at = at.replace(tzinfo=UTC)
+        for model, usage in attempt["by_model"].items():
+            if isinstance(usage, dict):
+                entries.append({"model_name": model or model_name, "at": at, **{key: _usage_count(usage.get(key)) for key in _USAGE_COUNTERS}})
+    rest = {key: _usage_count(token_usage.get(key)) - sum(entry[key] for entry in entries) for key in _USAGE_COUNTERS}
+    if any(rest[key] > 0 for key in ("input_tokens", "output_tokens", "total_tokens")):
+        entries.append({"model_name": model_name, "at": fallback_at, **{key: max(value, 0) for key, value in rest.items()}})
+    return entries
 
 
 class SubagentBatchRepository:
@@ -274,6 +325,59 @@ class SubagentBatchRepository:
                     value["prompt"] = row.prompt
                 values.append(value)
             return values
+
+    async def list_item_token_usage(
+        self,
+        *,
+        user_id: str | None,
+        thread_id: str | None = None,
+        updated_since: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Token usage stored on batch items, for the usage views.
+
+        Batch items are not runs, so the run-based usage views miss them. Each
+        entry is one model's tokens of one item attempt: ``item_id``, the model,
+        ``at`` (when that attempt's usage was written) and its input, output,
+        total and cache-read tokens. Usage stored before attempts were recorded
+        is one entry at the item's model, dated ``completed_at`` else
+        ``updated_at``. ``updated_since`` keeps entries written at or after it.
+        ``user_id=None`` means no owner filter (the caller decides who may see
+        all users).
+        """
+        stmt = (
+            select(
+                SubagentBatchItemRow.id,
+                SubagentBatchItemRow.model_name,
+                SubagentBatchItemRow.token_usage,
+                SubagentBatchItemRow.completed_at,
+                SubagentBatchItemRow.updated_at,
+            )
+            .join(SubagentBatchRow, SubagentBatchRow.id == SubagentBatchItemRow.batch_id)
+            .where(SubagentBatchItemRow.token_usage.is_not(None))
+        )
+        if user_id is not None:
+            stmt = stmt.where(SubagentBatchRow.user_id == user_id)
+        if thread_id is not None:
+            stmt = stmt.where(SubagentBatchRow.thread_id == thread_id)
+        if updated_since is not None:
+            # Every usage write also sets updated_at, so this keeps all candidates;
+            # the entries are filtered by their own time below.
+            stmt = stmt.where(SubagentBatchItemRow.updated_at >= updated_since)
+        async with self._sf() as session:
+            rows = (await session.execute(stmt)).all()
+        since = updated_since.replace(tzinfo=UTC) if updated_since is not None and updated_since.tzinfo is None else updated_since
+        usage = []
+        for item_id, model_name, token_usage, completed_at, updated_at in rows:
+            if not isinstance(token_usage, dict):
+                continue
+            fallback_at = completed_at or updated_at
+            if fallback_at is not None and fallback_at.tzinfo is None:
+                fallback_at = fallback_at.replace(tzinfo=UTC)
+            for entry in _item_usage_entries(model_name, token_usage, fallback_at):
+                if since is not None and (entry["at"] is None or entry["at"] < since):
+                    continue
+                usage.append({"item_id": item_id, **entry})
+        return usage
 
     @staticmethod
     def _dependencies_ready():
@@ -696,7 +800,7 @@ class SubagentBatchRepository:
                 "lease_expires_at": None,
                 "model_name": model_name,
                 "stop_reason": stop_reason,
-                "token_usage": _accumulate_token_usage(item.token_usage, token_usage),
+                "token_usage": _accumulate_token_usage(item.token_usage, token_usage, at=completed_at, model_name=model_name),
                 "updated_at": completed_at,
                 "acceptance_verdict": None,
                 "result_artifact": None,

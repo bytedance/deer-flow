@@ -78,9 +78,21 @@ export function useNotification(): UseNotificationReturn {
         console.warn("Notification sent too soon");
         return;
       }
-      lastNotificationTime.current = now;
 
-      const notification = new Notification(title, options);
+      let notification: Notification;
+      try {
+        notification = new Notification(title, options);
+      } catch (error) {
+        // Chrome for Android exposes the API and grants permission, but only
+        // a service worker can create a notification there, so the
+        // constructor throws. The chat pages call this from a run's
+        // completion callback, where a throw turns the finished run into a
+        // stream error.
+        console.warn("Notification could not be created:", error);
+        return;
+      }
+      // Only a notification that was created starts the rate limit.
+      lastNotificationTime.current = now;
 
       // Optional: Add event listeners
       notification.onclick = () => {

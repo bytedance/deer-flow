@@ -32,7 +32,22 @@ Explicit `glob` patterns and `grep` file filters can name data directories such
 as `logs/*.txt`, `**/logs/*.txt` or `.cache/*.txt`, even outside the user-data
 mounts. Generic searches keep ignoring those directories outside user data.
 Repository metadata, dependency directories and in-flight `.upload-*.part`
-files remain filtered.
+files remain filtered. These rules apply on every sandbox provider, local and
+remote alike: an uploaded `app.log` under `/mnt/user-data/uploads` is listed by
+`ls` and found by `glob` on AIO, E2B, BoxLite, Tenki, OpenSandbox and Boxd, and
+by `grep` on E2B, BoxLite, Tenki, OpenSandbox and Boxd, while the same name
+inside a code checkout stays hidden unless a pattern names it. AIO's `grep`
+needs an image that serves the file grep endpoint: 1.11.0 returns the uploaded
+log, while the frozen `latest` tag used by default answers 404 for that
+endpoint. On E2B and Tenki the label follows the path you address: a search
+rooted at `/mnt/user-data` treats its whole backing home directory as user
+data, including a skills root configured inside that home; addressing the home
+path directly keeps the repository filter. Both providers report paths under
+the backing home as virtual paths, even when the search addressed the home path
+directly, so a path from `ls` can be searched again directly; that follow-up
+search then carries the user-data label. Disabled-skill access checks still
+apply to results under a configured skills root, whatever spelling the search
+used.
 
 Sandbox references in conversation state are server-owned. External run and
 thread-state APIs reject caller-supplied `sandbox` values; when restoring a

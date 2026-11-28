@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from io import BytesIO
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
@@ -209,3 +209,25 @@ async def test_cancelled_receive_file_holds_sandbox_lease_until_remote_sync_fini
                 await receive_task
         await manager.release_async("active-run")
         discard_sandbox_lease_manager(provider)
+
+
+async def test_feishu_task_attachment_upload_runs_off_event_loop():
+    from types import SimpleNamespace
+
+    from lark_oapi.api.im.v1 import CreateFileRequest, CreateFileRequestBody
+
+    channel = _channel_with_file()
+    channel._thread = Mock()
+    channel._running = True
+    channel._CreateFileRequest = CreateFileRequest
+    channel._CreateFileRequestBody = CreateFileRequestBody
+    loop_thread = threading.get_ident()
+
+    def upload(request):
+        assert threading.get_ident() != loop_thread
+        assert request.request_body.file_name == "report.txt"
+        assert request.request_body.file.read() == b"content"
+        return SimpleNamespace(success=lambda: True, data=SimpleNamespace(file_key="file-key"))
+
+    channel._api_client.im.v1.file.create.side_effect = upload
+    assert await channel.upload_task_attachment(path="/mnt/user-data/outputs/report.txt", content=b"content") == "file-key"

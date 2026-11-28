@@ -128,6 +128,92 @@ describe("parseMCPServerDefinition", () => {
     expect(Object.keys(parsed).sort()).toEqual(["a", "b"]);
   });
 
+  it.each(["type", "command", "url"])(
+    "rejects a malformed wrapped entry named %s",
+    (name) => {
+      expect(() =>
+        parseMCPServerDefinition(
+          JSON.stringify({
+            mcpServers: {
+              good: { command: "npx" },
+              [name]: "mistyped",
+            },
+          }),
+        ),
+      ).toThrow(
+        expect.objectContaining({
+          code: "serverConfigNotObject",
+          serverName: name,
+        }),
+      );
+    },
+  );
+
+  it.each([
+    { type: "", transport: "http", url: "https://example.test/mcp" },
+    { type: "", command: "npx" },
+    {
+      type: "http",
+      url: "https://example.test/mcp",
+      oauth: {
+        token_url: "https://auth.example.test/token",
+        url: "https://auth.example.test",
+      },
+    },
+    { command: "npx", type: "stdio" },
+    { type: "sse", url: "https://example.test/mcp" },
+    { transport: "http", url: "https://example.test/mcp" },
+    { command: "npx", env: { command: "value" }, headers: { url: "value" } },
+    {
+      type: "http",
+      url: "https://example.test/mcp",
+      presentation: { url: "https://docs.example.test" },
+    },
+    {
+      command: "npx",
+      presentation: {
+        command: "display-label",
+        url: "https://docs.example.test",
+      },
+    },
+  ])("keeps a coherent bare transport configuration (%j)", (config) => {
+    const parsed = parseMCPServerDefinition(
+      JSON.stringify({ mcpServers: config }),
+    );
+    expect(Object.keys(parsed)).toEqual(["mcpServers"]);
+    expect(parsed.mcpServers).toMatchObject(config);
+  });
+
+  it.each(["env", "headers", "oauth"])(
+    "detects a configured sibling named %s with non-credential values",
+    (name) => {
+      for (const server of [
+        { command: "npx", env: { KEY: "value" } },
+        {
+          type: "http",
+          url: "https://example.test/mcp",
+          headers: { Authorization: "value" },
+        },
+      ]) {
+        expect(() =>
+          parseMCPServerDefinition(
+            JSON.stringify({
+              mcpServers: {
+                [name]: server,
+                command: "mistyped",
+              },
+            }),
+          ),
+        ).toThrow(
+          expect.objectContaining({
+            code: "serverConfigNotObject",
+            serverName: "command",
+          }),
+        );
+      }
+    },
+  );
+
   it("rejects blank input", () => {
     expectDefinitionError("   ", "emptyDefinition");
   });
@@ -146,6 +232,34 @@ describe("parseMCPServerDefinition", () => {
 
   it("rejects a server entry that is not an object", () => {
     expectDefinitionError(`{"a": "npx"}`, "serverConfigNotObject");
+  });
+
+  it.each([null, [], "npx", 1, false].map((bad) => ({ bad })))(
+    "rejects malformed wrapped entries ($bad)",
+    ({ bad }) => {
+      for (const servers of [{ good: { command: "npx" }, bad }, { bad }]) {
+        expect(() =>
+          parseMCPServerDefinition(JSON.stringify({ mcpServers: servers })),
+        ).toThrow(
+          expect.objectContaining({
+            code: "serverConfigNotObject",
+            serverName: "bad",
+          }),
+        );
+      }
+    },
+  );
+
+  it("keeps a remote bare server named mcpServers", () => {
+    expect(
+      parseMCPServerDefinition(
+        '{"mcpServers":{"type":"http","url":"https://example.test/mcp","headers":{"X-Test":"yes"}}}',
+      ).mcpServers,
+    ).toMatchObject({
+      type: "http",
+      url: "https://example.test/mcp",
+      headers: { "X-Test": "yes" },
+    });
   });
 
   it("rejects a non-object mcpServers value", () => {
