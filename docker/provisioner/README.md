@@ -457,26 +457,42 @@ chart's `provisioner.replicas`; compose runs a single container):
   Gateway as `409`). Several Gateway Pods already run this race against a
   single provisioner. When a Service create fails for another reason, the
   handler rolls back only a Pod it created itself, and only once the Service
-  is confirmed absent. A create that serves a Pod it did not create marks the
-  Pod before reporting it Running, and the fast path that returns an existing
-  sandbox marks it too; the fast path also rejects a Pod that started
-  terminating or was replaced while the response was attested. The rollback
-  checks that mark and deletes conditionally on the UID its own create
-  returned and the resourceVersion it read, so a Pod behind a Running create
-  response is never torn down. This coordination only holds once every
-  replica runs this version: during a rolling upgrade, a replica on the
-  previous image does not read the adoption mark and can still delete a Pod
-  that another replica adopted.
+  is confirmed absent. A create that serves a Pod it did not create, a create
+  whose own Pod was replaced by the time it reads the response, and the fast
+  path that returns an existing sandbox all mark the Pod before reporting it
+  Running. The mark is a strategic merge patch that carries the UID the create
+  attested (before the access-URL wait, the UID it just read) in the Pod's
+  immutable `metadata.uid`, so the API server rejects it when the name now
+  addresses a same-name replacement; a stale create cannot mark a replacement
+  behind a peer's Running response, and a matching UID merges only the adoption
+  annotation. Every path that marks the Pod then rejects a Pod that is
+  terminating, or whose UID no longer matches the one it attested, after the
+  mark lands, reporting `409` instead of Running. A create that lost the Pod
+  race marks the Pod once before the access-URL wait and again after the final
+  attestation, so a rollback that runs during the wait keeps the Pod; when a
+  rollback commits before the pre-adoption mark, that create reports `409` or
+  `500` to the retrying Gateway, unless another create has meanwhile placed a
+  new Pod under the name, which the final attestation marks before Running. The
+  rollback checks the mark and deletes
+  conditionally on the UID its own create returned and the resourceVersion it
+  read, so a Pod behind a Running create response is never torn down. This
+  coordination only holds once every replica runs this version: during a
+  rolling upgrade, a replica on the previous image does not read the adoption
+  mark and can still delete a Pod that another replica adopted.
 - A Pod whose create committed while its Service write failed can be left
   with no Service and would stay invisible to `GET /api/sandboxes`, which
   enumerates Services. A sweep at startup, and inline on creates that reach
   the creation path, deletes those leftovers once they are older than a
   ten-minute grace period, so a caller that never retries does not leak them
   past the next provisioner restart or such a create; each candidate is
-  re-read and deleted only while its listed UID still matches, and a Pod
-  carrying a live adoption mark (the current Pod's UID, or the legacy
-  `true`) is never swept (if `destroy_sandbox` deletes the Service but fails
-  to delete such a Pod, it needs manual cleanup).
+  re-read and deleted only while its listed UID still matches, and the Service
+  is read again before that Pod re-read and conditional delete, so a Service
+  created or restored after the list keeps the Pod. A Service created between
+  that recheck and the delete can still lose the race: the concurrent create
+  then reports `409` while the Pod is terminating, or `500` once it is gone,
+  never Running. A Pod carrying a live adoption mark (the current Pod's UID, or the
+  legacy `true`) is never swept (if `destroy_sandbox` deletes the Service but
+  fails to delete such a Pod, it needs manual cleanup).
 - `DELETE /api/sandboxes/{sandbox_id}` tolerates `404`, so two replicas
   deleting the same sandbox both return success.
 - NodePorts are allocated by the API server when the Service is created; the

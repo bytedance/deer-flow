@@ -368,15 +368,149 @@ def test_pod_race_adoption_marks_the_pod_before_reporting_running(monkeypatch, p
     monkeypatch.setattr(provisioner_module, "_sandbox_response", recording_response)
     response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
     assert response.status == "Running"
+    # One best-effort mark before the URL wait and one after the final
+    # attestation; both name the same Pod.
+    assert core.patched_pods == ["sandbox-existing", "sandbox-existing"]
+    assert core.pod_annotations["sandbox-existing"] == {"deer-flow/adopted": "pod-sandbox-existing-0"}
+    patch_events = [index for index, event in enumerate(core.events) if event == ("patch", "sandbox-existing")]
+    response_index = core.events.index(("response", "sandbox-existing"))
+    assert patch_events[0] < response_index
+    assert response_index < patch_events[1]
+
+
+def test_pod_race_pre_adoption_keeps_the_pod_when_a_rollback_runs_during_the_url_wait(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(core, "create_namespaced_pod", MagicMock(side_effect=ApiException(status=409)))
+    access_url_calls = 0
+    marks_seen_during_wait = []
+
+    def access_url(*_args, **_kwargs):
+        nonlocal access_url_calls
+        access_url_calls += 1
+        if access_url_calls == 1:
+            return None
+        # A concurrent creator's rollback runs during the access-URL wait. The
+        # pre-adoption mark written before the wait carries the attested UID, so
+        # the rollback keeps the Pod.
+        marks_seen_during_wait.append(dict(core.pod_annotations.get("sandbox-existing", {})))
+        provisioner_module._delete_pod_unless_adopted("sandbox-existing", expected_uid="pod-sandbox-existing-0")
+        return "http://sandbox"
+
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", access_url)
+    response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
+    assert response.status == "Running"
+    assert core.deleted_pods == []
+    # The mark present during the wait is the Pod UID, not a bare "true": a
+    # later replacement under the same name must not inherit it.
+    assert marks_seen_during_wait == [{"deer-flow/adopted": "pod-sandbox-existing-0"}]
+
+
+def test_pod_race_pre_adoption_failure_does_not_block_the_final_adoption(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    reads = iter([None, "http://sandbox"])
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: next(reads))
+    monkeypatch.setattr(core, "create_namespaced_pod", MagicMock(side_effect=ApiException(status=409)))
+    original_patch = core.patch_namespaced_pod
+    patch_calls = 0
+
+    def fail_first_patch(name, namespace, body):
+        nonlocal patch_calls
+        patch_calls += 1
+        if patch_calls == 1:
+            raise ApiException(status=500)
+        return original_patch(name, namespace, body)
+
+    monkeypatch.setattr(core, "patch_namespaced_pod", MagicMock(side_effect=fail_first_patch))
+    response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
+    # The best-effort pre-adoption failed, but the final attestation still
+    # marks the Pod and reports it Running.
+    assert response.status == "Running"
     assert core.patched_pods == ["sandbox-existing"]
-    assert core.pod_annotations["sandbox-existing"] == {"deer-flow/adopted": "true"}
-    assert core.events.index(("patch", "sandbox-existing")) < core.events.index(("response", "sandbox-existing"))
+    assert core.pod_annotations["sandbox-existing"] == {"deer-flow/adopted": "pod-sandbox-existing-0"}
+
+
+def test_pod_race_pre_adoption_read_failure_does_not_block_the_final_adoption(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    reads = iter([None, "http://sandbox"])
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: next(reads))
+    monkeypatch.setattr(core, "create_namespaced_pod", MagicMock(side_effect=ApiException(status=409)))
+    original_read = core.read_namespaced_pod
+    read_calls = 0
+
+    def fail_first_read(name, namespace):
+        nonlocal read_calls
+        read_calls += 1
+        if read_calls == 1:
+            raise ApiException(status=500)
+        return original_read(name, namespace)
+
+    monkeypatch.setattr(core, "read_namespaced_pod", MagicMock(side_effect=fail_first_read))
+    response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
+    # The pre-adoption read failed, but the final attestation still reads the
+    # Pod, marks it, and reports it Running.
+    assert response.status == "Running"
+    assert core.patched_pods == ["sandbox-existing"]
+    assert core.pod_annotations["sandbox-existing"] == {"deer-flow/adopted": "pod-sandbox-existing-0"}
+
+
+def test_pod_race_pre_adoption_read_transport_error_does_not_block_the_final_adoption(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    reads = iter([None, "http://sandbox"])
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: next(reads))
+    monkeypatch.setattr(core, "create_namespaced_pod", MagicMock(side_effect=ApiException(status=409)))
+    original_read = core.read_namespaced_pod
+    read_calls = 0
+
+    def transport_first_read(name, namespace):
+        nonlocal read_calls
+        read_calls += 1
+        if read_calls == 1:
+            raise urllib3.exceptions.MaxRetryError(None, name, "read timed out")
+        return original_read(name, namespace)
+
+    monkeypatch.setattr(core, "read_namespaced_pod", MagicMock(side_effect=transport_first_read))
+    response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
+    # A transport error while pre-adopting is best-effort; the final attestation
+    # still marks the Pod and reports it Running.
+    assert response.status == "Running"
+    assert core.patched_pods == ["sandbox-existing"]
+    assert core.pod_annotations["sandbox-existing"] == {"deer-flow/adopted": "pod-sandbox-existing-0"}
+
+
+def test_pod_race_pre_adoption_patch_transport_error_does_not_block_the_final_adoption(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    reads = iter([None, "http://sandbox"])
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: next(reads))
+    monkeypatch.setattr(core, "create_namespaced_pod", MagicMock(side_effect=ApiException(status=409)))
+    original_patch = core.patch_namespaced_pod
+    patch_calls = 0
+
+    def transport_first_patch(name, namespace, body):
+        nonlocal patch_calls
+        patch_calls += 1
+        if patch_calls == 1:
+            raise urllib3.exceptions.MaxRetryError(None, name, "patch timed out")
+        return original_patch(name, namespace, body)
+
+    monkeypatch.setattr(core, "patch_namespaced_pod", MagicMock(side_effect=transport_first_patch))
+    response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
+    # A transport error while pre-adopting is best-effort; the final attestation
+    # still marks the Pod and reports it Running.
+    assert response.status == "Running"
+    assert core.patched_pods == ["sandbox-existing"]
+    assert core.pod_annotations["sandbox-existing"] == {"deer-flow/adopted": "pod-sandbox-existing-0"}
 
 
 def test_adoption_mark_failure_reports_instead_of_running(monkeypatch, provisioner_module):
     core = _RecordingCoreV1(event_loop_thread_id=-1)
     monkeypatch.setattr(provisioner_module, "core_v1", core)
-    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: None)
+    reads = iter([None, "http://sandbox"])
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: next(reads))
     monkeypatch.setattr(core, "create_namespaced_pod", MagicMock(side_effect=ApiException(status=409)))
     monkeypatch.setattr(core, "patch_namespaced_pod", MagicMock(side_effect=ApiException(status=404, reason="gone")))
     with pytest.raises(provisioner_module.HTTPException) as error:
@@ -393,6 +527,31 @@ def test_fast_path_marks_the_existing_pod_before_reporting_running(monkeypatch, 
     assert core.patched_pods == ["sandbox-existing"]
     assert core.pod_annotations["sandbox-existing"] == {"deer-flow/adopted": "pod-sandbox-existing-0"}
     assert core.created_pods == []
+
+
+def test_fast_path_does_not_report_a_terminating_pod_without_requirements(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    core.terminating_pods.add("sandbox-existing")
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
+    assert error.value.status_code == 409
+    assert "terminating" in error.value.detail
+    # The status check rejects before writing a mark to a Pod that is going away.
+    assert core.patched_pods == []
+
+
+def test_fast_path_does_not_report_a_terminating_pod_with_capacity_requirements(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    core.terminating_pods.add("sandbox-existing")
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing", max_shell_sessions=10))
+    # With requirements, _sandbox_response itself rejects the terminating Pod
+    # before the create-level check runs; either way the result is 409.
+    assert error.value.status_code == 409
+    assert "terminating" in error.value.detail
+    assert core.patched_pods == []
 
 
 def test_fast_path_does_not_report_running_when_the_pod_started_terminating(monkeypatch, provisioner_module):
@@ -416,16 +575,17 @@ def test_fast_path_does_not_report_running_when_the_pod_started_terminating(monk
     assert "terminating" in error.value.detail
 
 
-def test_fast_path_does_not_report_running_when_the_pod_was_replaced(monkeypatch, provisioner_module):
+def test_fast_path_does_not_report_running_or_overwrite_a_peers_mark_when_the_pod_was_replaced(monkeypatch, provisioner_module):
     core = _RecordingCoreV1(event_loop_thread_id=-1)
     monkeypatch.setattr(provisioner_module, "core_v1", core)
     original_response = provisioner_module._sandbox_response
 
     def replace_after_attestation(*args, **kwargs):
         # The attested Pod is gone and another create owns the same name by
-        # the time the mark lands.
+        # the time the adoption patch would land.
         response = original_response(*args, **kwargs)
         core.pod_uids["sandbox-existing"] = "pod-sandbox-existing-replacement"
+        core.pod_annotations["sandbox-existing"] = {"deer-flow/adopted": "pod-sandbox-existing-replacement"}
         return response
 
     monkeypatch.setattr(provisioner_module, "_sandbox_response", replace_after_attestation)
@@ -433,11 +593,125 @@ def test_fast_path_does_not_report_running_when_the_pod_was_replaced(monkeypatch
         provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
     assert error.value.status_code == 409
     assert "replaced" in error.value.detail
-    # The mark landed on the replacement but records the attested UID, so the
-    # fence ignores it and the replacement's creator can still roll it back.
-    assert core.pod_annotations["sandbox-existing"] == {"deer-flow/adopted": "pod-sandbox-existing-0"}
-    assert provisioner_module._delete_pod_unless_adopted("sandbox-existing", expected_uid="pod-sandbox-existing-replacement") is True
-    assert core.deleted_pods == ["sandbox-existing"]
+    # The name now addresses the replacement, which carries the replacement
+    # creator's mark. The patch carries the attested UID in metadata.uid, so
+    # the API server rejects it and the replacement's mark must survive.
+    assert core.patched_pods == []
+    assert core.pod_annotations["sandbox-existing"] == {"deer-flow/adopted": "pod-sandbox-existing-replacement"}
+
+
+def test_fast_path_mark_preserves_other_annotations(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    core.pod_annotations["sandbox-existing"] = {"peer/note": "keep"}
+    response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
+    assert response.status == "Running"
+    # Strategic merge adds the adoption key; it does not replace the map.
+    assert core.pod_annotations["sandbox-existing"] == {
+        "peer/note": "keep",
+        "deer-flow/adopted": "pod-sandbox-existing-0",
+    }
+
+
+def test_pod_race_adoption_does_not_report_a_terminating_pod_without_requirements(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    reads = iter([None, "http://sandbox"])
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: next(reads))
+    monkeypatch.setattr(core, "create_namespaced_pod", MagicMock(side_effect=ApiException(status=409)))
+    # No capacity requirement is sent, so _sandbox_response returns the phase
+    # as data instead of raising. A create still must not report it as ready.
+    core.terminating_pods.add("sandbox-existing")
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
+    assert error.value.status_code == 409
+    assert "terminating" in error.value.detail
+    assert core.patched_pods == []
+
+
+def test_pod_race_adoption_does_not_report_running_when_the_pod_started_terminating(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    reads = iter([None, "http://sandbox"])
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: next(reads))
+    monkeypatch.setattr(core, "create_namespaced_pod", MagicMock(side_effect=ApiException(status=409)))
+    original_response = provisioner_module._sandbox_response
+
+    def terminate_after_attestation(*args, **kwargs):
+        response = original_response(*args, **kwargs)
+        core.terminating_pods.add("sandbox-existing")
+        return response
+
+    monkeypatch.setattr(provisioner_module, "_sandbox_response", terminate_after_attestation)
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
+    assert error.value.status_code == 409
+    assert "terminating" in error.value.detail
+
+
+def test_pod_race_adoption_does_not_report_running_when_the_pod_was_replaced(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    reads = iter([None, "http://sandbox"])
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: next(reads))
+    monkeypatch.setattr(core, "create_namespaced_pod", MagicMock(side_effect=ApiException(status=409)))
+    original_response = provisioner_module._sandbox_response
+
+    def replace_after_attestation(*args, **kwargs):
+        response = original_response(*args, **kwargs)
+        core.pod_uids["sandbox-existing"] = "pod-sandbox-existing-replacement"
+        core.pod_annotations.pop("sandbox-existing", None)
+        return response
+
+    monkeypatch.setattr(provisioner_module, "_sandbox_response", replace_after_attestation)
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing"))
+    assert error.value.status_code == 409
+    assert "replaced" in error.value.detail
+    # Only the pre-adoption mark of the Pod that was attested; the final mark
+    # must not land on the replacement under the same name.
+    assert core.patched_pods == ["sandbox-existing"]
+    assert "sandbox-existing" not in core.pod_annotations
+
+
+def test_create_does_not_report_running_for_a_self_created_pod_that_was_already_terminating(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    core.terminating_pods.add("sandbox-new")
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-new"))
+    assert error.value.status_code == 409
+    assert "terminating" in error.value.detail
+    assert core.created_pods == ["sandbox-new"]
+
+
+def test_create_marks_a_replacement_of_the_pod_it_created_before_reporting_running(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    original_response = provisioner_module._sandbox_response
+
+    def replace_created_pod(*args, **kwargs):
+        # The Pod this request created is gone by the time it reads the
+        # response; another create owns the name. The response is still valid,
+        # but the replacement must carry the adoption mark.
+        core.pod_uids["sandbox-new"] = "pod-sandbox-new-replacement"
+        return original_response(*args, **kwargs)
+
+    monkeypatch.setattr(provisioner_module, "_sandbox_response", replace_created_pod)
+    response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-new"))
+    assert response.status == "Running"
+    assert response.container_id == "pod-sandbox-new-replacement"
+    assert core.patched_pods == ["sandbox-new"]
+    assert core.pod_annotations["sandbox-new"] == {"deer-flow/adopted": "pod-sandbox-new-replacement"}
+
+
+def test_create_a_new_pod_does_not_patch_it(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-new"))
+    assert response.status == "Running"
+    # A create that keeps the Pod it created needs no adoption mark.
+    assert core.patched_pods == []
 
 
 def test_fast_path_adoption_mark_failure_reports_instead_of_running(monkeypatch, provisioner_module):
@@ -566,6 +840,55 @@ def test_create_sweep_keeps_a_replaced_pod(monkeypatch, provisioner_module):
     response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-sweep"))
     assert response.status == "Running"
     assert core.deleted_pods == []
+
+
+def test_create_sweep_rechecks_the_service_after_listing(monkeypatch, provisioner_module):
+    core = _RecordingCoreV1(event_loop_thread_id=-1, ready_after_service_reads={"sandbox-sweep": 1})
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    old = datetime.now(UTC) - timedelta(seconds=provisioner_module._ORPHAN_POD_GRACE_SECONDS + 60)
+    core.pod_shell_capacities["sandbox-old"] = 10
+    core.pod_uids["sandbox-old"] = "pod-sandbox-old-listed"
+    core.listed_pods = [
+        SimpleNamespace(metadata=SimpleNamespace(name="sandbox-sandbox-old", uid="pod-sandbox-old-listed", labels={"sandbox-id": "sandbox-old"}, creation_timestamp=old)),
+    ]
+    original_read = core.read_namespaced_service
+
+    def read_service_with_late_restore(name, namespace):
+        # The Service list predates a Service that was created or restored
+        # after it. Deleting from the stale list would tear down the sandbox
+        # that Service now addresses.
+        if _sandbox_id_from_service_name(name) == "sandbox-old":
+            return _node_port_service("sandbox-old")
+        return original_read(name, namespace)
+
+    monkeypatch.setattr(core, "read_namespaced_service", MagicMock(side_effect=read_service_with_late_restore))
+    response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-sweep"))
+    assert response.status == "Running"
+    assert core.deleted_pods == []
+
+
+def test_create_sweep_keeps_pod_when_the_service_recheck_transports(monkeypatch, provisioner_module, caplog):
+    core = _RecordingCoreV1(event_loop_thread_id=-1, ready_after_service_reads={"sandbox-sweep": 1})
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    old = datetime.now(UTC) - timedelta(seconds=provisioner_module._ORPHAN_POD_GRACE_SECONDS + 60)
+    core.pod_shell_capacities["sandbox-old"] = 10
+    core.pod_uids["sandbox-old"] = "pod-sandbox-old-listed"
+    core.listed_pods = [
+        SimpleNamespace(metadata=SimpleNamespace(name="sandbox-sandbox-old", uid="pod-sandbox-old-listed", labels={"sandbox-id": "sandbox-old"}, creation_timestamp=old)),
+    ]
+    original_read = core.read_namespaced_service
+
+    def read_service_transport(name, namespace):
+        if _sandbox_id_from_service_name(name) == "sandbox-old":
+            raise urllib3.exceptions.MaxRetryError(None, name, "read timed out")
+        return original_read(name, namespace)
+
+    monkeypatch.setattr(core, "read_namespaced_service", MagicMock(side_effect=read_service_transport))
+    with caplog.at_level(logging.WARNING):
+        response = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-sweep"))
+    assert response.status == "Running"
+    assert core.deleted_pods == []
+    assert any("absence" in record.message for record in caplog.records)
 
 
 def test_create_sweep_skips_the_requested_sandbox(monkeypatch, provisioner_module):
@@ -983,7 +1306,9 @@ class _RecordingCoreV1:
         self.listed_pods: list = []
 
     def _pod_uid(self, sandbox_id: str) -> str:
-        return self.pod_uids.get(sandbox_id) or f"pod-{sandbox_id}-{len(self.created_pods)}"
+        if sandbox_id not in self.pod_uids:
+            self.pod_uids[sandbox_id] = f"pod-{sandbox_id}-{len(self.created_pods)}"
+        return self.pod_uids[sandbox_id]
 
     def _record_k8s_call(self) -> None:
         thread_id = threading.get_ident()
@@ -1048,10 +1373,17 @@ class _RecordingCoreV1:
     def patch_namespaced_pod(self, name: str, _namespace: str, body):
         self._record_k8s_call()
         sandbox_id = name[len("sandbox-") :]
+        metadata = (body or {}).get("metadata") or {}
+        expected_uid = metadata.get("uid")
+        if expected_uid is not None and expected_uid != self._pod_uid(sandbox_id):
+            # The strategic merge patch carries the immutable UID. The API
+            # server rejects a patch that addresses a same-name replacement
+            # before applying any field in it.
+            raise ApiException(status=422)
+        annotations = metadata.get("annotations") or {}
+        self.pod_annotations.setdefault(sandbox_id, {}).update(annotations)
         self.patched_pods.append(sandbox_id)
         self.events.append(("patch", sandbox_id))
-        annotations = ((body or {}).get("metadata") or {}).get("annotations") or {}
-        self.pod_annotations.setdefault(sandbox_id, {}).update(annotations)
         self.pod_resource_versions[sandbox_id] = self.pod_resource_versions.get(sandbox_id, 0) + 1
         # Kubernetes accepts metadata patches on a Pod that is already
         # terminating; model the returned object rather than hiding it.

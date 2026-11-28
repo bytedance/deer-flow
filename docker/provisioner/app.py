@@ -1321,27 +1321,85 @@ def _service_confirmed_absent(sandbox_id: str) -> bool:
     return False
 
 
-def _mark_pod_adopted(sandbox_id: str, *, expected_uid: str | None = None) -> k8s_client.V1Pod:
+def _mark_pod_adopted(sandbox_id: str, *, expected_uid: str) -> k8s_client.V1Pod:
     """Mark the Pod this create is about to serve so a rollback cannot remove it.
 
     Every create that serves a Pod it did not create records this mark before
-    returning Running: a create that lost the Pod race, and an existing
-    sandbox served by the fast path. The patch bumps the Pod's
-    resourceVersion, so a rollback that already read the Pod fails its
-    conditional delete, and a rollback that reads it afterwards sees the mark
-    and keeps the Pod. When the caller knows the attested UID it records it as
-    the value, so a mark that lands on a same-name replacement is not mistaken
-    for an adoption of that replacement. Returns the patched Pod so the caller
-    can reject a Pod that started terminating between its read and the patch.
+    returning Running: a create that lost the Pod race, a create whose own Pod
+    was replaced, and an existing sandbox served by the fast path. The
+    strategic merge patch carries the UID the caller attested (before the
+    access-URL wait, the UID it just read) in ``metadata.uid``; that field is
+    immutable, so the API server rejects the patch when the name now addresses
+    a same-name replacement and the mark never lands on it. With a matching
+    UID the patch merges only the adoption key, leaving any other annotations
+    intact. A
+    successful patch bumps the Pod's resourceVersion, so a rollback that
+    already read the Pod fails its conditional delete, and a rollback that
+    reads it afterwards sees the mark and keeps the Pod. Returns the patched
+    Pod so the caller can reject a Pod that started terminating after the
+    response was attested.
     """
+    target = _pod_name(sandbox_id)
+    if not expected_uid:
+        raise HTTPException(status_code=500, detail=f"Could not adopt Pod {target}: no attested UID")
     try:
         return core_v1.patch_namespaced_pod(
-            _pod_name(sandbox_id),
+            target,
             K8S_NAMESPACE,
-            {"metadata": {"annotations": {"deer-flow/adopted": expected_uid or "true"}}},
+            {"metadata": {"uid": expected_uid, "annotations": {"deer-flow/adopted": expected_uid}}},
         )
+    except ApiException as exc:
+        if exc.status in {409, 422}:
+            raise HTTPException(status_code=409, detail="Existing sandbox was replaced while this request attested it") from exc
+        raise HTTPException(status_code=500, detail=f"Could not adopt Pod {target}: {exc}") from exc
+    except urllib3.exceptions.HTTPError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not adopt Pod {target}: {exc}") from exc
+
+
+def _adopt_attested_pod(sandbox_id: str, response) -> None:
+    """Mark the attested Pod and verify it is still the one the response names.
+
+    A metadata patch can succeed on a Pod that started terminating after the
+    response was built, and the name can address a replacement by the time the
+    mark lands. A create must not report either as ready.
+    """
+    adopted_pod = _mark_pod_adopted(sandbox_id, expected_uid=response.container_id)
+    metadata = getattr(adopted_pod, "metadata", None)
+    if metadata is None:
+        raise HTTPException(status_code=500, detail=f"Could not verify Pod {_pod_name(sandbox_id)} after adopting it")
+    if getattr(metadata, "deletion_timestamp", None):
+        raise HTTPException(status_code=409, detail="Existing sandbox is still terminating")
+    adopted_uid = getattr(metadata, "uid", None)
+    if adopted_uid is not None and response.container_id is not None and adopted_uid != response.container_id:
+        raise HTTPException(status_code=409, detail="Existing sandbox was replaced while this request attested it")
+
+
+def _pre_adopt_racing_pod(sandbox_id: str) -> None:
+    """Best-effort adoption mark before the access-URL wait.
+
+    A create that lost the Pod race creates the Service and then waits for an
+    access URL. During that wait a concurrent creator's rollback can still
+    delete the Pod: the rollback knows only the UID it created and has already
+    seen the Service absent. Marking before the wait bumps the Pod's
+    resourceVersion and records the adoption, so that rollback keeps it. The
+    mark must carry the Pod UID, which the 409 response does not return, so
+    read it once. The final response read still attests the Pod and marks it
+    again; a failure here only leaves that shorter window.
+    """
+    target = _pod_name(sandbox_id)
+    try:
+        pod = core_v1.read_namespaced_pod(target, K8S_NAMESPACE)
     except (ApiException, urllib3.exceptions.HTTPError) as exc:
-        raise HTTPException(status_code=500, detail=f"Could not adopt Pod {_pod_name(sandbox_id)}: {exc}") from exc
+        logger.info("Could not pre-adopt Pod %s: %s", target, exc)
+        return
+    metadata = getattr(pod, "metadata", None)
+    uid = getattr(metadata, "uid", None) if metadata is not None else None
+    if not uid or getattr(metadata, "deletion_timestamp", None):
+        return
+    try:
+        _mark_pod_adopted(sandbox_id, expected_uid=uid)
+    except HTTPException as exc:
+        logger.warning("Could not pre-adopt Pod %s: %s", target, exc.detail)
 
 
 def _delete_pod_unless_adopted(sandbox_id: str, *, expected_uid: str | None = None, pod_name: str | None = None) -> bool:
@@ -1406,7 +1464,9 @@ def _sweep_orphaned_pods(*, exclude_sandbox_id: str) -> None:
     Sweeping on create and at startup reaps those leftovers; the grace period
     keeps a freshly created Pod from being considered. Each candidate is
     re-read and deleted only while its listed UID still matches, so a same-name
-    replacement and a Pod with a live adoption mark are left alone.
+    replacement and a Pod with a live adoption mark are left alone. The Service
+    is read again immediately before the delete: the list can predate a Service
+    created or restored after it was taken.
     """
     try:
         services = core_v1.list_namespaced_service(K8S_NAMESPACE, label_selector="app=deer-flow-sandbox").items or []
@@ -1426,6 +1486,9 @@ def _sweep_orphaned_pods(*, exclude_sandbox_id: str) -> None:
         expected_uid = getattr(pod.metadata, "uid", None)
         if not expected_uid:
             logger.warning("Skipped orphan sweep for Pod %s: no UID in the list response", pod.metadata.name)
+            continue
+        if not _service_confirmed_absent(sandbox_id):
+            logger.info("Kept orphaned Pod %s: a Service is present or its state is unknown", pod.metadata.name)
             continue
         if _delete_pod_unless_adopted(sandbox_id, expected_uid=expected_uid, pod_name=pod.metadata.name):
             logger.info("Swept orphaned Pod %s: no Service after %s s", pod.metadata.name, _ORPHAN_POD_GRACE_SECONDS)
@@ -1595,21 +1658,12 @@ def create_sandbox(req: CreateSandboxRequest):
             # Report Running only after the mark lands: a concurrent creator's
             # rollback checks the mark, or fails its resourceVersion
             # precondition, instead of deleting a Pod this caller was told is
-            # ready. The patch can still succeed on a Pod that entered
-            # Terminating after the response was built, so verify the Pod the
-            # mark returned is the attested one and is not going away. The
-            # capacity check inside _sandbox_response only rejects a
+            # ready. The capacity check inside _sandbox_response only rejects a
             # terminating Pod when requirements are sent; a create must never
             # report Running for one, with or without requirements.
-            adopted_pod = _mark_pod_adopted(sandbox_id, expected_uid=response.container_id)
-            adopted_metadata = getattr(adopted_pod, "metadata", None)
-            if adopted_metadata is None:
-                raise HTTPException(status_code=500, detail=f"Could not verify Pod {_pod_name(sandbox_id)} after adopting it")
-            if getattr(adopted_metadata, "deletion_timestamp", None):
+            if response.status == "Terminating":
                 raise HTTPException(status_code=409, detail="Existing sandbox is still terminating")
-            adopted_uid = getattr(adopted_metadata, "uid", None)
-            if adopted_uid is not None and response.container_id is not None and adopted_uid != response.container_id:
-                raise HTTPException(status_code=409, detail="Existing sandbox was replaced while this request attested it")
+            _adopt_attested_pod(sandbox_id, response)
             return response
 
     # ── Sweep leftovers from earlier failed creates ─────────────────
@@ -1657,9 +1711,10 @@ def create_sandbox(req: CreateSandboxRequest):
             raise HTTPException(status_code=500, detail=f"Service creation failed: {exc.reason}")
 
     if not pod_created:
-        # This request serves the concurrent creator's Pod; mark it so that
-        # creator's rollback cannot delete it under us.
-        _mark_pod_adopted(sandbox_id)
+        # Pre-adopt before the URL wait so a concurrent creator's rollback
+        # cannot delete the Pod during it; the final response read still
+        # attests and marks the Pod.
+        _pre_adopt_racing_pod(sandbox_id)
 
     # ── Wait until the Service has a usable access URL ───────────────
     sandbox_url: str | None = None
@@ -1675,7 +1730,7 @@ def create_sandbox(req: CreateSandboxRequest):
     # A concurrent creator can win the 409 race with a lower-capacity Pod.
     # Never claim that the requested value was applied without reading it back.
     try:
-        return _sandbox_response(
+        response = _sandbox_response(
             sandbox_id,
             sandbox_url,
             required_capacity=max_shell_sessions,
@@ -1684,6 +1739,14 @@ def create_sandbox(req: CreateSandboxRequest):
         )
     except (ApiException, RuntimeError) as exc:
         raise HTTPException(status_code=500, detail=f"Could not verify created sandbox shell capacity: {exc}") from exc
+
+    if response.status == "Terminating":
+        raise HTTPException(status_code=409, detail="Existing sandbox is still terminating")
+    if not pod_created or response.container_id != created_pod_uid:
+        # A Pod this request did not create (it lost the 409 race, or its own
+        # Pod was replaced) is marked before reporting Running.
+        _adopt_attested_pod(sandbox_id, response)
+    return response
 
 
 @app.delete("/api/sandboxes/{sandbox_id}")
