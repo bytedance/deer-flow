@@ -8,10 +8,9 @@ import hashlib
 import logging
 import posixpath
 
-import yaml
-
-from deerflow.agents.middlewares.skill_context import _FRONT_MATTER_RE, build_skill_entry_metadata_from_read
+from deerflow.agents.middlewares.skill_context import build_skill_entry_metadata_from_read
 from deerflow.sandbox.read_file_contract import READ_FILE_NO_CONTENT_RESULTS, READ_FILE_TRUNCATION_PREFIX
+from deerflow.skills.frontmatter import split_skill_markdown
 
 SKILL_USAGE_KEY = "skill_usage"
 SKILL_USAGES_KEY = "skill_usages"
@@ -49,12 +48,8 @@ def build_skill_usage(
     normalized_path = entry["path"]
     relative = posixpath.relpath(normalized_path, posixpath.normpath(skills_root))
     if name is None:
-        match = _FRONT_MATTER_RE.match(content)
-        try:
-            metadata = yaml.safe_load(match.group(1)) if match else None
-        except yaml.YAMLError:
-            metadata = None
-        value = metadata.get("name") if isinstance(metadata, dict) else None
+        parts, _error = split_skill_markdown(content)
+        value = parts.metadata.get("name") if parts is not None else None
         name = value if isinstance(value, str) and value.strip() else posixpath.basename(posixpath.dirname(normalized_path))
     return {
         "name": name[:256],
