@@ -464,6 +464,94 @@ def test_aio_sandbox_glob_drops_directories_before_the_cap(monkeypatch) -> None:
     assert truncated is False
 
 
+def test_aio_sandbox_glob_walks_a_basename_pattern_recursively(monkeypatch) -> None:
+    """A basename-only pattern matches at any depth in DeerFlow's contract, but
+    the endpoint anchors its pattern at the requested root, so the request must
+    ask for ``**/`` while the client keeps filtering with the caller's pattern."""
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    seen: dict = {}
+
+    def glob_files(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(
+            data=SimpleNamespace(
+                files=[
+                    SimpleNamespace(path="/mnt/user-data/uploads/notes.txt", is_directory=False),
+                    SimpleNamespace(path="/mnt/user-data/uploads/sub/notes.txt", is_directory=False),
+                    SimpleNamespace(path="/mnt/user-data/uploads/sub/worker.log", is_directory=False),
+                ],
+                truncated=False,
+            )
+        )
+
+    monkeypatch.setattr(sandbox._client.file, "glob_files", glob_files)
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", "*.txt")
+
+    assert seen["pattern"] == "**/*.txt"
+    assert matches == [
+        "/mnt/user-data/uploads/notes.txt",
+        "/mnt/user-data/uploads/sub/notes.txt",
+    ]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_keeps_an_anchored_pattern_as_written(monkeypatch) -> None:
+    """A pattern that already carries a directory component is not prefixed."""
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    seen: dict = {}
+
+    def glob_files(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(
+            data=SimpleNamespace(
+                files=[SimpleNamespace(path="/mnt/user-data/uploads/logs/worker.txt", is_directory=False)],
+                truncated=False,
+            )
+        )
+
+    monkeypatch.setattr(sandbox._client.file, "glob_files", glob_files)
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", "logs/*.txt")
+
+    assert seen["pattern"] == "logs/*.txt"
+    assert matches == ["/mnt/user-data/uploads/logs/worker.txt"]
+    assert truncated is False
+
+
+def test_aio_sandbox_glob_translates_a_bare_double_star(monkeypatch) -> None:
+    """``**`` matches every file at any depth locally, but the endpoint returns
+    nothing for that spelling; the request asks for ``**/*`` instead."""
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    seen: dict = {}
+
+    def glob_files(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(
+            data=SimpleNamespace(
+                files=[
+                    SimpleNamespace(path="/mnt/user-data/uploads/notes.txt", is_directory=False),
+                    SimpleNamespace(path="/mnt/user-data/uploads/sub/deep.txt", is_directory=False),
+                ],
+                truncated=False,
+            )
+        )
+
+    monkeypatch.setattr(sandbox._client.file, "glob_files", glob_files)
+
+    matches, truncated = sandbox.glob("/mnt/user-data/uploads", "**")
+
+    assert seen["pattern"] == "**/*"
+    assert matches == [
+        "/mnt/user-data/uploads/notes.txt",
+        "/mnt/user-data/uploads/sub/deep.txt",
+    ]
+    assert truncated is False
+
+
 def test_aio_sandbox_glob_matches_a_non_canonical_root(monkeypatch) -> None:
     """The caller may spell the root with ``//``; the server returns canonical
     entry paths, so the scope check must normalize the root instead of

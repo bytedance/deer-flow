@@ -345,7 +345,7 @@ def _drop_disabled_skill_paths(paths: list[str], *, user_id: str | None = None, 
     skill state) on every call, so the verdict is memoized per skill — a 100-match
     grep must not become 100 config reads.
     """
-    skills_prefix = _get_skills_container_path()
+    skills_prefix = normalize_sandbox_path(_get_skills_container_path())
     verdicts: dict[tuple[str, str], bool] = {}
     kept: list[str] = []
     for path in paths:
@@ -363,7 +363,12 @@ def _drop_disabled_skill_paths(paths: list[str], *, user_id: str | None = None, 
         # Leading segment (the category, or the skill itself in the direct
         # layout) plus the name identifies the skill the same way
         # _is_disabled_skill_path does, so paths sharing a key share a verdict.
-        category = skill_path[len(skills_prefix) :].lstrip("/").split("/")[0]
+        # Both sides of the slice must be normalized, as the enabled-state check
+        # normalizes: an un-normalized spelling (``/mnt//skills/...``) would
+        # otherwise yield a bogus category and share a cached verdict between a
+        # public and a custom skill with the same name.
+        relative = normalize_sandbox_path(skill_path)[len(skills_prefix) :].lstrip("/")
+        category = relative.split("/")[0]
         key = (category, skill_name)
         if key not in verdicts:
             verdicts[key] = _is_disabled_skill_path(skill_path, user_id=user_id)

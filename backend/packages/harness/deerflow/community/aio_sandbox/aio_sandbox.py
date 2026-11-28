@@ -1451,9 +1451,22 @@ class AioSandbox(Sandbox):
             return self._glob_via_find(path, root_path=root_path, pattern=pattern, user_data=user_data, include_dirs=True, max_results=max_results)
 
         try:
+            # A pattern without "/" matches the basename at any depth
+            # (``path_matches``), but the endpoint anchors its pattern at the
+            # requested root, so ``*.txt`` would only return direct children.
+            # Prefixing ``**/`` makes the server walk recursively; the client
+            # still filters with the caller's original pattern. A bare ``**``
+            # is the same recursive form spelled without a name matcher: the
+            # endpoint returns nothing for it, so ask for ``**/*`` instead.
+            if "/" in pattern:
+                server_pattern = pattern
+            elif pattern == "**":
+                server_pattern = "**/*"
+            else:
+                server_pattern = f"**/{pattern}"
             result = self._client.file.glob_files(
                 path=path,
-                pattern=pattern,
+                pattern=server_pattern,
                 files_only=True,
                 include_hidden=True,
                 include_metadata=False,
