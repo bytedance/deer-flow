@@ -31,6 +31,7 @@ from deerflow.community.fastcrw import tools as fastcrw_tools
 from deerflow.community.firecrawl import tools as firecrawl_tools
 from deerflow.community.image_search import tools as image_search_tools
 from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
+from deerflow.community.searxng import tools as searxng_tools
 from deerflow.community.serper import tools as serper_tools
 from deerflow.community.serply import tools as serply_tools
 from deerflow.community.specstream import tools as specstream_tools
@@ -51,11 +52,11 @@ SHARED_OWNER_PROVIDERS = {
     "firecrawl": ("Firecrawl", firecrawl_tools),
     "youcom": ("You.com", youcom_tools),
     "specstream": ("SpecStream", specstream_tools),
+    "searxng": ("SearXNG", searxng_tools),
 }
 
-# Providers that still normalize locally, including Exa's generic helper and
-# SearXNG's inline validation. Their differing bounds or rejection profiles mean
-# folding them is a behaviour change
+# Providers that still normalize locally, including Exa's generic helper. Their
+# differing bounds or rejection profiles mean folding them is a behaviour change
 # that #5865's follow-up has to settle first. The equality assertion in
 # test_deferral_list_matches_the_providers_that_still_copy is what forces this
 # list to shrink as they land -- see PRs #5866 / #5867.
@@ -63,7 +64,6 @@ DEFERRED_PROVIDERS = {
     "brave",
     "exa",
     "groundroute",
-    "searxng",
     "sofya",
     "tencent_wsa",
 }
@@ -193,7 +193,7 @@ def test_deferral_list_matches_the_providers_that_still_copy():
     assert found == DEFERRED_PROVIDERS, f"providers hand-rolling max_results coercion drifted; newly copied: {sorted(found - DEFERRED_PROVIDERS)}, folded but still declared: {sorted(DEFERRED_PROVIDERS - found)}"
 
 
-@pytest.mark.parametrize("provider", ["exa", "searxng"])
+@pytest.mark.parametrize("provider", ["exa"])
 def test_census_includes_generic_and_inline_provider_coercion(provider):
     assert _local_coercer_names(_module_ast(provider)), f"{provider}'s existing max_results normalization escaped the census"
 
