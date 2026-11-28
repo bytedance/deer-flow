@@ -33,6 +33,9 @@ user. For a local `make dev` Gateway with a relative SQLite path, launch the TUI
 from `backend/` so both processes find the same database. See
 [Web UI visibility](../../backend/docs/TUI.md#web-ui-visibility-shared-persistence).
 
+With PostgreSQL, the TUI and Gateway must also use the same schema
+(`database.postgres_schema`).
+
 TUI slash commands accept Unicode whitespace before their arguments, including
 spaces, tabs, line breaks, and nonbreaking spaces. A separator closes the slash
 palette so Enter submits the composed text. Pasted skill tasks can start on the

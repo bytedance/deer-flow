@@ -173,6 +173,9 @@ happen while the Gateway is stopped. The sidebar shows the thread when the
 Gateway reads the same database for the `default` user. With the `memory`
 backend, the TUI still works and skips this metadata write.
 
+With PostgreSQL, the TUI and Gateway must also use the same schema
+(`database.postgres_schema`).
+
 SQLite resolves a relative `database.sqlite_dir` from each process's working
 directory. `make dev` starts the Gateway from `backend/`, so launch the TUI from
 `backend/` as well to use the same relative path. You can also configure an
