@@ -506,7 +506,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Generate videos using Gemini, MiniMax, or BytePlus Agent Plan (Seedance 2.5) API")
-    parser.add_argument("--prompt-file", required=True, help="Absolute path to JSON prompt file")
+    parser.add_argument("--prompt-file", required=True, help="Absolute path to prompt file (JSON or plain text)")
     parser.add_argument("--reference-images", nargs="*", default=[], help="Absolute paths to reference images (space-separated)")
     parser.add_argument("--output-file", required=True, help="Output path for generated video")
     parser.add_argument("--aspect-ratio", required=False, default="16:9", help="Aspect ratio of the generated video (Gemini and BytePlus Agent Plan)")

@@ -1,19 +1,20 @@
 ---
 name: video-generation
-description: Use this skill when the user requests to generate, create, or imagine videos. Supports structured prompts and reference image for guided generation.
+description: Use this skill when the user requests to generate videos, product ads, Reels/Shorts, or multi-shot short films. Supports structured prompts, reference images, preflight checks, and clip stitching.
 ---
 
 # Video Generation Skill
 
 ## Overview
 
-This skill generates high-quality videos using structured prompts and a Python script. The workflow includes creating JSON-formatted prompts and executing video generation with optional reference image.
+This skill generates high-quality videos using structured prompts and Python/shell helpers (`scripts/generate.py`, `scripts/preflight.py`, and `scripts/stitch.sh`). The workflow supports single-clip JSON prompts as well as beat-synced commercial short ads and multi-shot video assembly with optional reference images.
 
 ## Core Capabilities
 
-- Create structured JSON prompts for AIGC video generation
-- Support reference image as guidance or the first/last frame of the video
-- Generate videos through automated Python script execution
+- Create structured JSON prompts or beat-synced plain-text commercial ad prompts for AIGC video generation
+- Validate commercial beat-synced prompts deterministically with `scripts/preflight.py` before rendering
+- Support reference images as guidance or first/last frame anchors
+- Generate single clips via `scripts/generate.py` and assemble multi-shot deliverables via `scripts/stitch.sh`
 
 ## Workflow
 
@@ -50,10 +51,16 @@ python /mnt/skills/public/video-generation/scripts/generate.py \
 
 Parameters:
 
-- `--prompt-file`: Absolute path to JSON prompt file (required)
+- `--prompt-file`: Absolute path to prompt file (JSON or plain text, required)
 - `--reference-images`: Absolute paths to reference images (optional). Images used by the provider must have a recognized filename extension: `.png`, `.jpg`, `.jpeg`, `.webp`, or `.gif` (case-insensitive). Missing or other extensions are rejected before submission. Filenames must match their contents: the script neither validates image contents nor converts bytes. Recognizing an extension does not guarantee that the selected provider accepts that format.
-- `--output-file`: Absolute path to output image file (required)
+- `--output-file`: Absolute path to output video file (required)
 - `--aspect-ratio`: Aspect ratio of the generated video for Gemini and BytePlus Agent Plan (optional, defaults to `16:9`; BytePlus Agent Plan supports `16:9`, `9:16`, `1:1`, `4:3`, `3:4`, `21:9`, `adaptive`).
+
+## Specific Templates
+
+Read the following template file only when matching the user request:
+
+- [Commercial Short-Form Ad & Multi-Shot Workflow](templates/commercial-short-ad.md) — Use for 15–30s product ads, vertical Reels/Shorts/TikTok clips, report-to-video explainers, or multi-shot short films requiring `scripts/preflight.py` validation and `scripts/stitch.sh` clip stitching.
 
 [!NOTE]
 Do NOT read the python file, instead just call it with the parameters.
@@ -150,8 +157,11 @@ VIDEO_GENERATION_PROVIDER=byteplus_agentplan BYTEPLUS_AGENTPLAN_VIDEO_RESOLUTION
 ## Output Handling
 
 The generation command exits with status 1 and writes errors to stderr when
-generation fails, including missing provider credentials. Only present the video
-after the command succeeds; a file left by an earlier run is not a new result.
+generation fails, including missing provider credentials. Likewise,
+`scripts/preflight.py` exits with status 1 in `block` mode on prompt errors, and
+`scripts/stitch.sh` exits with status 1 (preserving any existing output file) if
+inputs are invalid or `ffmpeg` fails. Only present a video after the command
+succeeds; a file left by an earlier run is not a new result.
 
 After generation:
 
