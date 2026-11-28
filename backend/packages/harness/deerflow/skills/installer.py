@@ -8,7 +8,6 @@ import asyncio
 import codecs
 import concurrent.futures
 import logging
-import lzma
 import os
 import posixpath
 import shutil
@@ -167,10 +166,18 @@ def _load_archive_extract_errors() -> tuple[type[BaseException], ...]:
         zipfile.BadZipFile,
         zipfile.LargeZipFile,
         zlib.error,
-        lzma.LZMAError,
         EOFError,
         RuntimeError,
     ]
+    # LZMA support is an optional extension on CPython builds. Import it
+    # lazily so a build without _lzma can still load the skills module and
+    # install archives that use the codecs that are available.
+    try:
+        import lzma
+    except ImportError:
+        pass
+    else:
+        errors.append(lzma.LZMAError)
     try:
         from compression.zstd import ZstdError
     except ImportError:

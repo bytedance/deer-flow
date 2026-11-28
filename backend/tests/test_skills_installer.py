@@ -1350,6 +1350,18 @@ def test_safe_extract_preserves_host_os_errors(tmp_path):
     assert excinfo.value.errno == errno.EIO
 
 
+def test_archive_extract_errors_tolerates_missing_lzma(monkeypatch):
+    import sys
+
+    from deerflow.skills import installer
+
+    monkeypatch.setitem(sys.modules, "lzma", None)
+
+    errors = installer._load_archive_extract_errors()
+
+    assert zipfile.BadZipFile in errors
+
+
 def test_safe_extract_translates_optional_zstd_error(monkeypatch, tmp_path):
     import sys
     import types
