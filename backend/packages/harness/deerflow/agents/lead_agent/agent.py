@@ -557,7 +557,7 @@ def build_middlewares(
         runtime_middleware_kwargs["available_skills"] = available_skills
     if not owns_agent_skill_projection:
         runtime_middleware_kwargs["owns_agent_skill_projection"] = False
-    elif cfg.get("subagent_enabled", False):
+    elif available_skills is not None and cfg.get("subagent_enabled", False):
         runtime_middleware_kwargs["subagent_enabled"] = True
         runtime_middleware_kwargs["authz_context"] = cfg
         if allowed_subagents is not None:
