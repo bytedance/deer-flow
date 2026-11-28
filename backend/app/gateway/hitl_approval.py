@@ -14,6 +14,7 @@ from fastapi import HTTPException
 
 from app.gateway.checkpoint_lineage import hitl_approval_payloads
 from deerflow.approvals.protocol import combine_approval_payloads
+from deerflow.runtime.approval_identity import ApprovalIdentity, invalid_approval_identity
 from deerflow.runtime.checkpoint_history import recent_checkpoint_history
 
 logger = logging.getLogger(__name__)
@@ -93,7 +94,7 @@ async def has_waiting_for_input_run(request: Any, thread_id: str) -> bool:
     return any(run.get("status") == "waiting_for_input" for run in runs)
 
 
-async def mark_approval_answered(request: Any, thread_id: str, *, expected_request_ids: dict[str, str] | None = None) -> ApprovalAnswerHandle | None:
+async def mark_approval_answered(request: Any, thread_id: str, *, expected_request_ids: ApprovalIdentity | None = None) -> ApprovalAnswerHandle | None:
     """Mark the validated paused run as answered and return its recovery handle."""
     from app.gateway.deps import get_run_manager, get_run_store
 
@@ -239,14 +240,17 @@ async def current_approval_request_ids(
     *,
     accessor: Any,
     read_config: dict[str, Any],
-) -> dict[str, str] | None:
+) -> ApprovalIdentity | None:
     """Read the current live pause's identity for checkpoint-only recovery."""
     pending = await find_pending_interrupts(request, thread_id, accessor=accessor, read_config=read_config)
     payloads = hitl_approval_payloads(pending)
-    return _approval_request_ids(combine_approval_payloads(payloads)) if payloads else None
+    if not payloads:
+        return None
+    recovery = invalid_approval_identity(payloads[0]) if len(payloads) == 1 else None
+    return recovery if recovery is not None else _approval_request_ids(combine_approval_payloads(payloads))
 
 
-async def validate_resume_request(*, request: Any, thread_id: str, accessor: Any, read_config: dict[str, Any], enabled: bool, body: Any) -> dict[str, str] | None:
+async def validate_resume_request(*, request: Any, thread_id: str, accessor: Any, read_config: dict[str, Any], enabled: bool, body: Any) -> ApprovalIdentity | None:
     """Validate a command.resume against the current pause, or raise 409/422.
 
     Static breakpoints (next non-empty, no approval payload) pass through
@@ -270,6 +274,12 @@ async def validate_resume_request(*, request: Any, thread_id: str, accessor: Any
 
     if responses is None:
         raise _error(422, "invalid_approval_response", "resume must carry a 'responses' list for hitl_approval")
+    recovery = invalid_approval_identity(payloads[0]) if len(payloads) == 1 else None
+    if recovery is not None and all_reject:
+        actions = payloads[0]["actions"]
+        if len(responses) != len(actions) or any("tool_call_id" not in response or response["tool_call_id"] != action["tool_call_id"] or response.get("request_id") != action["request_id"] for response, action in zip(responses, actions)):
+            raise _error(422, "invalid_approval_response", "rejection must match the current unaddressable approval")
+        return recovery
     expected_request_ids = ApprovalRequestIds(_approval_request_ids(combine_approval_payloads(payloads)))
     action_by_request = {action["request_id"]: action for payload in payloads for action in payload["actions"]}
     expected_ids = list(expected_request_ids)
