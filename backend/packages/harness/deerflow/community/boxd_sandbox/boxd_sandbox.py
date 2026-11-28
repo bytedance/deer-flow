@@ -357,6 +357,15 @@ class BoxdSandbox(Sandbox):
             resolved = self._guard_path(path)
             content = self._read_bytes(resolved, _MAX_READ_FILE_SIZE).decode("utf-8", errors="replace")
         except Exception as e:
+            if isinstance(e, OSError) and e.errno == errno.EFBIG:
+                # Raise instead of returning an error string: str_replace
+                # would replace text inside the string and write it over the
+                # file whenever old_str happens to occur in it.
+                raise OSError(
+                    errno.EFBIG,
+                    f"File is larger than {_MAX_READ_FILE_SIZE // (1024 * 1024)} MB; read part of it with bash (head, tail or sed -n)",
+                    path,
+                ) from None
             logger.error("read_file %s failed: %s", path, e)
             return f"Error: {e}"
         if start_line is None and end_line is None:
