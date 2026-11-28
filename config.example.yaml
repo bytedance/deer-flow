@@ -179,6 +179,53 @@ models:
   #       thinking:
   #         type: disabled
 
+  # Example: BytePlus Agent Plan (Personal & Enterprise — one key for LLM + Seedream images/slides + Seedance 2.5 video)
+  # Endpoint: https://ark.ap-southeast.bytepluses.com/api/plan/v3
+  # Subscribe or manage seats/shared packages at:
+  #   https://console.byteplus.com/ark/region:ap-southeast-1/subscription/agent-plan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow
+  # Also forward BYTEPLUS_AGENTPLAN_API_KEY in sandbox.environment below so
+  # image-generation (Seedream), ppt-generation, and video-generation (Seedance 2.5, Large/Max/Shared) work with the same key.
+  #
+  # - name: dola-seed-2.1-turbo-ap
+  #   display_name: Dola-Seed-2.1-Turbo (BytePlus Agent Plan)
+  #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+  #   model: dola-seed-2.1-turbo
+  #   api_base: https://ark.ap-southeast.bytepluses.com/api/plan/v3
+  #   api_key: $BYTEPLUS_AGENTPLAN_API_KEY
+  #   timeout: 600.0
+  #   max_retries: 2
+  #   supports_thinking: true
+  #   supports_vision: true
+  #   supports_reasoning_effort: true
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
+  #
+  # - name: deepseek-v4-pro-ap
+  #   display_name: DeepSeek-V4-Pro (BytePlus Agent Plan)
+  #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+  #   model: deepseek-v4-pro
+  #   api_base: https://ark.ap-southeast.bytepluses.com/api/plan/v3
+  #   api_key: $BYTEPLUS_AGENTPLAN_API_KEY
+  #   timeout: 600.0
+  #   max_retries: 2
+  #   supports_thinking: true
+  #   supports_vision: false
+  #   supports_reasoning_effort: true
+  #   when_thinking_enabled:
+  #     extra_body:
+  #       thinking:
+  #         type: enabled
+  #   when_thinking_disabled:
+  #     extra_body:
+  #       thinking:
+  #         type: disabled
+
   # Example: Volcengine Coding Plan (one key, multi-vendor gateway)
   # The Coding Plan endpoint (/api/coding/v3) lets you access models from
   # Doubao, GLM, DeepSeek, Kimi, and MiniMax with a single API key.
@@ -770,6 +817,21 @@ models:
   #   max_retries: 2
   #   max_tokens: 8192
   #   temperature: 0.7
+
+  # Example: NVIDIA NIM (OpenAI-compatible)
+  # NVIDIA's hosted endpoint is https://integrate.api.nvidia.com/v1. Replace
+  # base_url with your own NIM endpoint when using a self-hosted deployment.
+  # - name: nvidia-nemotron-3.5-super-vl
+  #   display_name: Nemotron 3.5 Super VL 120B (NVIDIA NIM)
+  #   use: langchain_openai:ChatOpenAI
+  #   model: nvidia/nemotron-3.5-super-vl-120b-a12b
+  #   api_key: $NVIDIA_API_KEY
+  #   base_url: https://integrate.api.nvidia.com/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #   temperature: 0.7
+  #   supports_vision: true
 
   # Example: vLLM 0.19.0 (OpenAI-compatible, with reasoning toggle)
   # DeerFlow's vLLM provider preserves vLLM reasoning across tool-call turns and
@@ -1914,6 +1976,12 @@ sandbox:
 #   #   IMAGE_GENERATION_BASE_URL: $IMAGE_GENERATION_BASE_URL
 #   #   IMAGE_GENERATION_MODEL: $IMAGE_GENERATION_MODEL
 #   #   IMAGE_GENERATION_SIZE: $IMAGE_GENERATION_SIZE  # Optional fixed-size override
+#   #   # BytePlus Agent Plan multimodal skills (Seedream images/slides + Seedance 2.5 video):
+#   #   BYTEPLUS_AGENTPLAN_API_KEY: $BYTEPLUS_AGENTPLAN_API_KEY
+#   #   # BYTEPLUS_AGENTPLAN_IMAGE_MODEL: dola-seedream-5.0-pro
+#   #   # BYTEPLUS_AGENTPLAN_VIDEO_MODEL: dreamina-seedance-2.5
+#   #   # BYTEPLUS_AGENTPLAN_VIDEO_RESOLUTION: 720p
+#   #   # BYTEPLUS_AGENTPLAN_VIDEO_DURATION: "6"
 #
 #   # Optional: Cross-instance container ownership (issue #4206).
 #   #
@@ -2004,7 +2072,9 @@ sandbox:
 #   provisioner_url: http://provisioner:8002
 #   # API key for provisioner authentication. Must match PROVISIONER_API_KEY
 #   # set on the provisioner container. Both sides must have the same value set;
-#   # the provisioner rejects all /api/* requests when PROVISIONER_API_KEY is unset.
+#   # surrounding whitespace is stripped on each side before comparing (a
+#   # Secret-mounted key with a trailing newline still authenticates).
+#   # The provisioner rejects all /api/* requests when PROVISIONER_API_KEY is unset.
 #   # Generate a strong key: openssl rand -hex 32
 #   # provisioner_api_key: $PROVISIONER_API_KEY
 #   # Note: provisioner-created Pods use the provisioner's SANDBOX_IMAGE
@@ -2702,7 +2772,7 @@ memory:
     eviction_access_half_life_days: 30
     eviction_correction_reserved_fraction: 0.10
     eviction_correction_reserved_max: 10
-    eviction_reserved_categories: [correction] # hybrid-v1 only: categories eligible for the reserved slots above (default: ["correction"])
+    eviction_reserved_categories: [correction] # hybrid-v1 only: tail-reserve categories; align with staleness_protected_categories & guaranteed_categories for end-to-end protection (default: ["correction"])
     eviction_decay_exempt_categories: [] # hybrid-v1 only: categories exempt from confirmation freshness time-decay (default: [])
     eviction_audit_max_entries: 200 # metadata-only events per user/agent scope; 0 disables
     max_injection_tokens: 2000 # Maximum tokens for memory injection

@@ -63,7 +63,7 @@ from app.gateway.conversation_reader import (
 from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.pagination import trim_run_message_page
-from app.gateway.run_inputs import RunInputRequest, change_run_input, list_thread_inputs, submit_run_input
+from app.gateway.run_inputs import RunInputRequest, change_run_input, list_thread_inputs, submit_http_run_input
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import (
     abuild_checkpoint_state_accessor,
@@ -114,10 +114,30 @@ async def revoke_tool_approval_grants(thread_id: ThreadId, request: Request):
     return await revoke_approval_grants(thread_id, request)
 
 
-@router.post("/{thread_id}/runs/{run_id}/inputs")
+@router.post(
+    "/{thread_id}/runs/{run_id}/inputs",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {"schema": RunInputRequest.model_json_schema()},
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["input", "files"],
+                        "properties": {
+                            "input": {"type": "string", "description": "JSON input with mode set to queue"},
+                            "files": {"type": "array", "items": {"type": "string", "format": "binary"}},
+                        },
+                    },
+                },
+            },
+        },
+    },
+)
 @require_permission("runs", "create", owner_check=True, require_existing=True)
-async def create_run_input(thread_id: ThreadId, run_id: str, body: RunInputRequest, request: Request):
-    return await submit_run_input(thread_id, run_id, body, request)
+async def create_run_input(thread_id: ThreadId, run_id: str, request: Request):
+    return await submit_http_run_input(thread_id, run_id, request)
 
 
 @router.get("/{thread_id}/inputs")
@@ -390,6 +410,10 @@ class ThreadTokenUsageResponse(BaseModel):
     total_input_tokens: int = 0
     total_output_tokens: int = 0
     total_runs: int = 0
+    total_batch_items: int = Field(
+        default=0,
+        description="Subagent batch items whose stored token usage is included in the totals, by_model and by_caller.subagent (they are not runs).",
+    )
     by_model: dict[str, ThreadTokenUsageModelBreakdown] = Field(default_factory=dict)
     by_caller: ThreadTokenUsageCallerBreakdown = Field(default_factory=ThreadTokenUsageCallerBreakdown)
     context_usage: ThreadContextUsage | None = None
@@ -2028,6 +2052,30 @@ async def get_run_workspace_changes(
     )
 
 
+async def _add_batch_item_usage(request: Request, agg: dict[str, Any], thread_id: str, user_id: str | None) -> dict[str, Any]:
+    """Add the thread's subagent batch items to a run-based token aggregate.
+
+    Batch items run outside any run, so the run store never sees their tokens.
+    They count as subagent work; ``runs`` per model stays a count of runs.
+    """
+    repo = getattr(request.app.state, "subagent_batch_repo", None)
+    if repo is None:
+        return agg
+    items = await repo.list_item_token_usage(user_id=user_id, thread_id=thread_id)
+    if not items:
+        return agg
+    agg = {**agg, "by_model": {model: dict(entry) for model, entry in agg.get("by_model", {}).items()}, "by_caller": dict(agg.get("by_caller", {}))}
+    for item in items:
+        agg["total_tokens"] = agg.get("total_tokens", 0) + item["total_tokens"]
+        agg["total_input_tokens"] = agg.get("total_input_tokens", 0) + item["input_tokens"]
+        agg["total_output_tokens"] = agg.get("total_output_tokens", 0) + item["output_tokens"]
+        agg["by_caller"]["subagent"] = agg["by_caller"].get("subagent", 0) + item["total_tokens"]
+        entry = agg["by_model"].setdefault(item["model_name"] or "unknown", {"tokens": 0, "runs": 0})
+        entry["tokens"] = entry.get("tokens", 0) + item["total_tokens"]
+    agg["total_batch_items"] = len({item["item_id"] for item in items})
+    return agg
+
+
 @router.get("/{thread_id}/token-usage", response_model=ThreadTokenUsageResponse)
 @require_permission("threads", "read", owner_check=True)
 async def thread_token_usage(
@@ -2042,5 +2090,6 @@ async def thread_token_usage(
         agg = await run_store.aggregate_tokens_by_thread(thread_id, include_active=True, user_id=scope_user_id)
     else:
         agg = await run_store.aggregate_tokens_by_thread(thread_id, user_id=scope_user_id)
+    agg = await _add_batch_item_usage(request, agg, thread_id, scope_user_id)
     context_usage = await build_context_usage(request, thread_id, run_store, user_id=scope_user_id)
     return ThreadTokenUsageResponse(thread_id=thread_id, context_usage=context_usage, **agg)

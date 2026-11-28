@@ -984,6 +984,74 @@ def test_download_is_bounded_and_confined(installed) -> None:
         box.download_file("/mnt/user-data/outputs/missing.bin")
 
 
+def test_read_file_raises_efbig_on_oversized_file(installed, monkeypatch: pytest.MonkeyPatch) -> None:
+    import deerflow.community.boxd_sandbox.boxd_sandbox as boxd_module
+
+    _, fake = installed
+    box = _box(fake)
+    monkeypatch.setattr(boxd_module, "_MAX_READ_FILE_SIZE", 1024 * 1024)
+    path = "/mnt/user-data/workspace/huge.log"
+    files = fake.files.setdefault(box.machine_id, {})
+    files[path] = b"x" * (1024 * 1024)
+    assert box.read_file(path, start_line=1, end_line=1) == "x" * (1024 * 1024)
+
+    files[path] = b"x" * (1024 * 1024 + 1)
+    with pytest.raises(OSError, match="larger than 1 MB; read part of it with bash") as raised:
+        box.read_file(path, start_line=1, end_line=10)
+    assert raised.value.errno == errno.EFBIG
+    assert not box.is_closed
+
+
+@pytest.mark.parametrize(
+    ("name", "args"),
+    [
+        pytest.param("write_file", {"path": "/mnt/user-data/workspace/huge.log", "content": "replaced"}, id="write_file"),
+        pytest.param("write_file", {"path": "/mnt/user-data/workspace/huge.log", "content": "more", "append": True}, id="append"),
+        pytest.param("str_replace", {"path": "/mnt/user-data/workspace/huge.log", "old_str": "File", "new_str": "x"}, id="str_replace"),
+    ],
+)
+def test_oversized_file_blocks_write_gate_and_preserves_file_on_str_replace(installed, monkeypatch: pytest.MonkeyPatch, name: str, args: dict[str, Any]) -> None:
+    from langchain_core.messages import ToolMessage
+    from langgraph.prebuilt.tool_node import ToolCallRequest
+
+    import deerflow.community.boxd_sandbox.boxd_sandbox as boxd_module
+    from deerflow.agents.middlewares.read_before_write_middleware import WRITE_BLOCK_KEY, ReadBeforeWriteMiddleware
+    from deerflow.sandbox.tools import str_replace_tool, write_file_tool
+
+    _, fake = installed
+    box = _box(fake)
+    monkeypatch.setattr(boxd_module, "_MAX_READ_FILE_SIZE", 1024)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda _rt: box)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda _rt: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda _rt: False)
+
+    huge_path = "/mnt/user-data/workspace/huge.log"
+    original = b"File line\n" * 200
+    fake.files.setdefault(box.machine_id, {})[huge_path] = original
+    runtime = types.SimpleNamespace(state={"sandbox": {"sandbox_id": box.id}}, context={"thread_id": "t1"})
+    middleware = ReadBeforeWriteMiddleware()
+
+    def _call_gated(call_name: str, call_args: dict[str, Any]):
+        target_tool = {"write_file": write_file_tool, "str_replace": str_replace_tool}[call_name]
+        request = ToolCallRequest(tool_call={"name": call_name, "args": call_args, "id": "call-1"}, tool=None, state={"messages": []}, runtime=runtime)
+        return middleware.wrap_tool_call(request, lambda req: ToolMessage(content=target_tool.func(runtime=runtime, **req.tool_call["args"]), tool_call_id="call-1", name=call_name))
+
+    blocked = _call_gated(name, args)
+    assert blocked.status == "error"
+    assert blocked.additional_kwargs[WRITE_BLOCK_KEY]["tool"] == name
+    assert "too large to read" in blocked.content
+    assert fake.files[box.machine_id][huge_path] == original
+
+    # Un-gated str_replace must refuse rather than replacing "File" inside an error string.
+    assert str_replace_tool.func(runtime=runtime, description="d", path=huge_path, old_str="File", new_str="x").startswith("Error: ")
+    assert fake.files[box.machine_id][huge_path] == original
+
+    # New-file creation still works through ReadBeforeWriteMiddleware.
+    created = _call_gated("write_file", {"path": "/mnt/user-data/workspace/new.txt", "content": "fresh\n"})
+    assert created.status != "error"
+    assert fake.files[box.machine_id]["/mnt/user-data/workspace/new.txt"] == b"fresh\n"
+
+
 @posix_only
 def test_grep_glob_and_list_dir_through_the_shell(installed, tmp_path: Path) -> None:
     _, fake = installed

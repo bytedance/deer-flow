@@ -109,6 +109,35 @@ describe("collectRenderedSubtasks", () => {
     expect(rendered.updates).toHaveLength(1);
   });
 
+  // Persisted or mid-stream task calls can arrive without an args object.
+  it.each([undefined, null])(
+    "renders a task call whose args are %s with the subtask label",
+    (args) => {
+      const groups = [
+        subagentGroup([
+          {
+            type: "ai",
+            tool_calls: [{ id: "task-1", name: "task", args }],
+            content: "",
+          } as unknown as Message,
+        ]),
+      ];
+
+      const rendered = collectRenderedSubtasks(
+        groups,
+        () => true,
+        "Subtask failed",
+        "Subtask",
+      );
+
+      expect(rendered.tasks.get("task-1")).toMatchObject({
+        id: "task-1",
+        status: "in_progress",
+        description: "Subtask",
+      });
+    },
+  );
+
   it("marks a task as failed once its turn ended without a tool result", () => {
     const groups = [
       subagentGroup([

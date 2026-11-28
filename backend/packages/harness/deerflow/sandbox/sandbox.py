@@ -179,6 +179,18 @@ class Sandbox(ABC):
         """Forget completed execution ownership without stopping background services."""
         self._command_scopes.release(scope_id)
 
+    def resolve_access_control_path(self, path: str) -> str:
+        """Return the spelling tool-layer access checks should apply to ``path``.
+
+        Providers that back ``VIRTUAL_PATH_PREFIX`` with another directory
+        report results virtually, while the disabled-skill filter compares
+        paths against ``skills.container_path`` in the provider-internal
+        spelling. Such providers map the path back here so a result cannot
+        dodge the check by using the virtual alias. Providers that keep
+        DeerFlow's virtual paths inherit this identity mapping.
+        """
+        return path
+
     @abstractmethod
     def read_file(
         self,

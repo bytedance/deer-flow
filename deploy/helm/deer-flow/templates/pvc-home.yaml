@@ -4,6 +4,8 @@ kind: PersistentVolumeClaim
 metadata:
   name: {{ include "deer-flow.homePVC" . }}
   namespace: {{ include "deer-flow.namespace" . }}
+  annotations:
+    helm.sh/resource-policy: keep
   labels:
     {{- include "deer-flow.labels" . | nindent 4 }}
 spec:

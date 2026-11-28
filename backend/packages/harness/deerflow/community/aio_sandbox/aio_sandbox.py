@@ -1,4 +1,5 @@
 import base64
+import errno
 import json
 import logging
 import math
@@ -11,15 +12,22 @@ from dataclasses import dataclass, field
 import httpx
 from agent_sandbox import Sandbox as AioSandboxClient
 from agent_sandbox.core.api_error import ApiError
-from pydantic import ValidationError
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.command_scope import COMMAND_OWNER_ENV, CommandScopeCancelled, command_lock, current_command_scope
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
 from deerflow.sandbox.download import download_limit, read_download_stream
-from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
+from deerflow.sandbox.read_file_contract import slice_file_lines
+from deerflow.sandbox.remote_list_dir import parse_remote_find_output, parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import CommandOutput, Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
+from deerflow.sandbox.search import (
+    GrepMatch,
+    is_user_data_path,
+    normalize_sandbox_path,
+    path_matches,
+    should_ignore_path_under_root,
+    truncate_line,
+)
 
 from .backend import sandbox_http_trust_env
 from .command_cleanup import cleanup_command
@@ -40,6 +48,19 @@ _BASH_EXEC_UNSUPPORTED_ERROR = (
     "sandbox image to all-in-one-sandbox >= 1.9.3 (set `sandbox.image` in config.yaml, "
     "e.g. pin the tag `1.11.0`) and recreate the sandbox container, then try again."
 )
+
+
+def _pattern_name_glob(pattern: str) -> str:
+    """Return the basename of a glob pattern for a server-side ``find -name``.
+
+    ``find -name`` tests only the basename, so it is always a superset of the
+    anchored :func:`path_matches` semantics — it never drops a path the local
+    walk would keep. Brace alternation (``*.{log,txt}``) is NOT expanded by
+    ``find`` nor by ``path_matches``, so both agree. The client re-applies
+    ``path_matches`` on every returned entry, so this coarse filter only decides
+    what transfers, never what matches.
+    """
+    return pattern.rstrip("/").rsplit("/", 1)[-1] or pattern
 
 
 @dataclass
@@ -1210,33 +1231,62 @@ class AioSandbox(Sandbox):
     ) -> str:
         """Read the content of a file in the sandbox.
 
+        A full read returns line endings as stored. A ranged read ends lines
+        only at ``"\\n"``, drops the ``"\\r"`` characters that end a line and
+        joins the selected lines with ``"\\n"``, as ``LocalSandbox.read_file``
+        does.
+
         Args:
             path: The absolute path of the file to read.
+            start_line: Optional starting line number (1-indexed, inclusive).
+            end_line: Optional ending line number (1-indexed, inclusive).
 
         Returns:
-            The content of the file.
+            The content of the file, or an ``Error: ...`` string.
+
+        Raises:
+            OSError: If the file is larger than the download limit.
         """
+        unreadable = f"Error: file not found or unreadable: {path}"
         try:
-            kwargs = {}
-            if start_line is not None:
-                kwargs["start_line"] = max(start_line - 1, 0)
-            if end_line is not None:
-                kwargs["end_line"] = max(end_line, 0)
-            result = self._client.file.read_file(file=path, **kwargs)
-            return result.data.content if result.data else ""
-        except ValidationError as e:
-            # The server reports read failures (e.g. ENOENT) as an error
-            # envelope with ``data: {}``, which cannot satisfy the required
-            # ``content``/``file`` fields of the SDK's FileReadResult model,
-            # so the SDK raises a ValidationError. A missing file is an
-            # expected outcome (ReadBeforeWrite probes every new-file write),
-            # so log quietly and return an explicit, model-actionable result
-            # instead of leaking the pydantic error text.
-            logger.debug("Sandbox read_file validation failure for %r: %s", path, e)
-            return f"Error: file not found or unreadable: {path}"
+            # /v1/file/read turns every line ending into "\n", so str_replace
+            # wrote a CRLF file back as LF, and its line ranges also end at a
+            # bare "\r", \f and Unicode separators. The download route returns
+            # the stored bytes. No self._lock: it would make a read wait for a
+            # running shell command, and a read cut off by close() still ends
+            # in an error result below.
+            content = read_download_stream(self._client.file.download_file(path=path), _MAX_DOWNLOAD_SIZE, path).decode("utf-8")
+        except ApiError as e:
+            if e.status_code in (400, 404):
+                # 404 is a missing file, an expected outcome because
+                # ReadBeforeWrite probes every new-file write; 400 is a
+                # directory. Log quietly and return a model-actionable result.
+                logger.debug("Sandbox read_file of %r returned HTTP %s", path, e.status_code)
+                return unreadable
+            logger.error("Failed to read file %r in sandbox: HTTP %s", path, e.status_code)
+            return f"Error: failed to read {path} (HTTP {e.status_code})"
+        except httpx.RemoteProtocolError as e:
+            # The server sends the response headers before it opens the file,
+            # so a file it may not read (e.g. root-owned) ends the body early.
+            logger.warning("Sandbox read_file of %r ended early: %s", path, e)
+            return unreadable
+        except UnicodeDecodeError:
+            logger.debug("Sandbox read_file of %r is not UTF-8 text", path)
+            return unreadable
+        except OSError as e:
+            if e.errno == errno.EFBIG:
+                # Raise instead of returning an error string: str_replace
+                # would replace text inside the string and write it over the
+                # file whenever old_str happens to occur in it.
+                raise OSError(errno.EFBIG, f"File is larger than {_MAX_DOWNLOAD_SIZE // (1024 * 1024)} MB; read part of it with bash (head, tail or sed -n)", path) from None
+            logger.error(f"Failed to read file in sandbox: {e}")
+            return f"Error: {e}"
         except Exception as e:
             logger.error(f"Failed to read file in sandbox: {e}")
             return f"Error: {e}"
+        if start_line is None and end_line is None:
+            return content
+        return slice_file_lines(content, start_line, end_line)
 
     def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
         """Download file bytes from the sandbox.
@@ -1287,6 +1337,7 @@ class AioSandbox(Sandbox):
             The contents of the directory.
         """
         resolved = path
+        user_data = is_user_data_path(resolved)
         timeout = self._LIST_DIR_TIMEOUT_SECONDS
         with self._lock:
             client = self._client
@@ -1295,7 +1346,7 @@ class AioSandbox(Sandbox):
                 session_id = self._ensure_default_shell_session_id(client)
 
                 kwargs = {
-                    "command": remote_list_dir_command(resolved, max_depth),
+                    "command": remote_list_dir_command(resolved, max_depth, user_data=user_data),
                     "no_change_timeout": self._effective_no_change_timeout(timeout),
                     "hard_timeout": timeout,
                     "request_options": self._command_request_options(timeout),
@@ -1363,6 +1414,7 @@ class AioSandbox(Sandbox):
                 data.output or "",
                 resolved,
                 pipeline_exit_code=getattr(data, "exit_code", None),
+                user_data=user_data,
             )
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
@@ -1384,33 +1436,210 @@ class AioSandbox(Sandbox):
                 raise
 
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
-        root_path = path.rstrip("/") or "/"
-        if not include_dirs:
-            result = self._client.file.find_files(path=path, glob=pattern)
-            files = result.data.files if result.data and result.data.files else []
-            filtered = [file_path for file_path in files if not should_ignore_path_under_root(file_path, root_path)]
-            truncated = len(filtered) > max_results
-            return filtered[:max_results], truncated
+        # The server returns canonical entry paths even when the caller spelled
+        # the root with ``//`` or ``./``, so scope comparisons use the canonical
+        # spelling; the request keeps the caller's path.
+        root_path = normalize_sandbox_path(path) if path else "/"
+        # AIO keeps DeerFlow's virtual paths, so the root itself carries the label.
+        user_data = is_user_data_path(root_path)
+        hard_limit = max(max_results * 4, max_results + 50)
+        if include_dirs:
+            # ``/v1/file/list`` has no pattern parameter and silently truncates
+            # at 10,000 entries BEFORE DeerFlow's ignore rules run, so a search
+            # whose match sits behind a large ignored tree (node_modules) came
+            # back empty with truncated=false. The in-sandbox ``find`` applies
+            # the basename coarse filter and the ignore prune during the walk,
+            # so the cap only ever counts real candidates.
+            return self._glob_via_find(path, root_path=root_path, pattern=pattern, user_data=user_data, include_dirs=True, max_results=max_results)
 
-        result = self._client.file.list_path(path=path, recursive=True, show_hidden=False)
+        try:
+            # A pattern without "/" matches the basename at any depth
+            # (``path_matches``), but the endpoint anchors its pattern at the
+            # requested root, so ``*.txt`` would only return direct children.
+            # Prefixing ``**/`` makes the server walk recursively; the client
+            # still filters with the caller's original pattern. A bare ``**``
+            # is the same recursive form spelled without a name matcher: the
+            # endpoint returns nothing for it, so ask for ``**/*`` instead.
+            if "/" in pattern:
+                server_pattern = pattern
+            elif pattern == "**":
+                server_pattern = "**/*"
+            else:
+                server_pattern = f"**/{pattern}"
+            result = self._client.file.glob_files(
+                path=path,
+                pattern=server_pattern,
+                files_only=True,
+                include_hidden=True,
+                include_metadata=False,
+                max_results=hard_limit,
+            )
+        except ApiError as error:
+            if error.status_code != 404:
+                raise
+            # Images that predate /v1/file/glob still serve the typed listing
+            # endpoint, but that listing has the same silent 10,000-entry cap
+            # and no pattern parameter, so it cannot be trusted for a search.
+            # Run the search inside the sandbox instead: ``find`` walks with
+            # the basename coarse filter and the ignore prune, transfers only
+            # candidate files, and reports truncation honestly via head+SIGPIPE.
+            return self._glob_via_find(path, root_path=root_path, pattern=pattern, user_data=user_data, include_dirs=False, max_results=max_results)
+
         entries = result.data.files if result.data and result.data.files else []
+        matches, truncated = self._glob_matches(
+            entries,
+            root_path=root_path,
+            pattern=pattern,
+            user_data=user_data,
+            include_dirs=False,
+            max_results=max_results,
+        )
+        # The server cap can truncate before the ignore filter runs, so its flag
+        # is conservative evidence of an incomplete result on its own.
+        return matches, truncated or bool(result.data and result.data.truncated)
+
+    def _glob_via_find(
+        self,
+        path: str,
+        *,
+        root_path: str,
+        pattern: str,
+        user_data: bool,
+        include_dirs: bool,
+        max_results: int,
+    ) -> tuple[list[str], bool]:
+        """Search inside the sandbox with ``find`` and filter client-side.
+
+        Used for the ``include_dirs`` listing and for images whose
+        ``/v1/file/glob`` is absent (404). ``find`` applies the basename coarse
+        filter and the ignore prune during the walk, so unrelated files and
+        whole ignored trees never reach the client and never consume the cap.
+        The client still re-applies :func:`path_matches` and the ignore rules,
+        so the result matches the local walk exactly. Truncation is detected by
+        asking ``head`` for one line past the candidate budget, never silently
+        dropped.
+
+        Newline-in-filename limitation: ``find -print`` is newline-delimited, so
+        a file whose name contains ``\\n`` is split into fragments the client
+        matcher rejects, and every fragment consumes a line of the candidate
+        budget — a tree dense with such names can therefore push ordinary
+        matches past the budget and report the search truncated. This is the
+        same line-delimited channel that ``list_dir`` and the remote ``grep``
+        use; the transport cannot carry NUL on this path (the HTTP shell strips
+        it), so the limitation is shared and documented rather than patched with
+        an encoding layer whose own quoting would be a new failure mode. Results
+        are never silently wrong: an affected search reports ``truncated=True``.
+        """
+        timeout = self._LIST_DIR_TIMEOUT_SECONDS
+        # The candidate budget absorbs the entries the client will reject after
+        # the basename coarse filter (directories on the way to a match, names
+        # the anchored pattern excludes), matching the server-side glob_files
+        # hard_limit. ``head`` asks for one line past it so the parser can tell
+        # an exact fit from a truncated search without relying on SIGPIPE.
+        candidate_budget = max(max_results * 4, max_results + 50)
+        head_lines = candidate_budget + 1
+        with self._lock:
+            client = self._client
+            session_id: str | None = None
+            try:
+                session_id = self._ensure_default_shell_session_id(client)
+                command = remote_list_dir_command(
+                    path,
+                    None,
+                    limit=head_lines,
+                    user_data=user_data,
+                    name_glob=_pattern_name_glob(pattern),
+                    files_only=not include_dirs,
+                    glob=pattern,
+                )
+                kwargs = {
+                    "command": command,
+                    "no_change_timeout": self._effective_no_change_timeout(timeout),
+                    "hard_timeout": timeout,
+                    "request_options": self._command_request_options(timeout),
+                }
+                if session_id is not None:
+                    kwargs["id"] = session_id
+                result = client.shell.exec_command(**kwargs)
+            except httpx.TransportError as exc:
+                self._default_shell_corrupted = True
+                if session_id is not None:
+                    self._recovery_session_id = None
+                    self._cleanup_session_best_effort(client, session_id, context="glob after transport failure", request_options=self._bounded_cleanup_request_options())
+                logger.error(f"Failed to glob in sandbox: {exc}")
+                reason = "request timed out" if isinstance(exc, httpx.TimeoutException) else "transport failed"
+                raise OSError(f"Failed to glob '{path}': {reason}; result is unknown") from exc
+            except ApiError as exc:
+                if self._is_missing_shell_session_error(exc):
+                    self._default_shell_corrupted = True
+                    self._recovery_session_id = None
+                logger.error(f"Failed to glob in sandbox: {exc}")
+                raise OSError(f"Failed to glob '{path}' in sandbox: {exc}") from exc
+            except Exception as e:
+                logger.error(f"Failed to glob in sandbox: {e}")
+                raise OSError(f"Failed to glob '{path}' in sandbox: {e}") from e
+
+            data = result.data if result else None
+            if data is None:
+                raise OSError(f"Failed to glob '{path}' in sandbox: empty response")
+            status = getattr(data, "status", None)
+            if status == "hard_timeout":
+                raise TimeoutError(f"Failed to glob '{path}': find timed out after {timeout:g} seconds; result may be incomplete")
+            if self._is_session_invalidating_shell_status(status):
+                self._default_shell_corrupted = True
+                if session_id is not None:
+                    self._recovery_session_id = None
+                    self._cleanup_session_best_effort(client, session_id, context=f"glob after ambiguous status {status}", request_options=self._bounded_cleanup_request_options())
+                raise OSError(f"Failed to glob '{path}' in sandbox: command status '{status}'; result is unknown")
+
+            entries, find_truncated = parse_remote_find_output(
+                data.output or "",
+                path,
+                limit=head_lines,
+                pipeline_exit_code=getattr(data, "exit_code", None),
+            )
+        matches, match_truncated = self._glob_matches(
+            entries,
+            root_path=root_path,
+            pattern=pattern,
+            user_data=user_data,
+            include_dirs=include_dirs,
+            max_results=max_results,
+        )
+        return matches, find_truncated or match_truncated
+
+    def _glob_matches(
+        self,
+        entries: list,
+        *,
+        root_path: str,
+        pattern: str,
+        user_data: bool,
+        include_dirs: bool,
+        max_results: int,
+    ) -> tuple[list[str], bool]:
         matches: list[str] = []
         root_prefix = root_path if root_path == "/" else f"{root_path}/"
         for entry in entries:
-            if entry.path != root_path and not entry.path.startswith(root_prefix):
+            entry_path = entry if isinstance(entry, str) else entry.path
+            if not include_dirs and getattr(entry, "is_directory", False):
                 continue
-            if should_ignore_path_under_root(entry.path, root_path):
+            entry_key = normalize_sandbox_path(entry_path)
+            if entry_key != root_path and not entry_key.startswith(root_prefix):
                 continue
-            rel_path = entry.path[len(root_path) :].lstrip("/")
+            if should_ignore_path_under_root(entry_key, root_path, glob=pattern, user_data=user_data):
+                continue
+            rel_path = entry_key[len(root_path) :].lstrip("/")
+            if not rel_path:
+                continue
             if path_matches(pattern, rel_path):
-                matches.append(entry.path)
+                matches.append(entry_path)
                 # Look one match past the cap before deciding. Returning on
                 # the max-th match cannot tell a listing that held exactly
                 # ``max_results`` from one that held more, so an exhausted
                 # listing was reported as truncated; it also returned a match
-                # for ``max_results=0``. The ``include_dirs=False`` branch
-                # below and the shared ``parse_remote_search_output`` path
-                # decide the same way.
+                # for ``max_results=0``. The grep path and the shared
+                # ``parse_remote_search_output`` path decide the same way.
                 if len(matches) > max_results:
                     return matches[:max_results], True
         return matches, False
@@ -1433,30 +1662,42 @@ class AioSandbox(Sandbox):
         # generic remote API error.
         _re.compile(regex_source, 0 if case_sensitive else _re.IGNORECASE)
         total_cap = max(max_results * 4, max_results + 50)
-        result = self._client.file.grep_files(
-            path=path,
-            pattern=pattern,
-            case_insensitive=not case_sensitive,
-            fixed_strings=literal,
-            max_results=total_cap,
-            max_file_size="1M",
-            recursive=True,
-        )
+        grep_kwargs = {
+            "path": path,
+            "pattern": pattern,
+            "case_insensitive": not case_sensitive,
+            "fixed_strings": literal,
+            "max_results": total_cap,
+            "max_file_size": "1M",
+            "recursive": True,
+        }
+        if glob is not None:
+            # The server applies its own repository filter and never reports a
+            # match it skipped, so the caller's explicit glob must reach it.
+            # ``include`` matches basenames (the SDK documents the parameter
+            # with ``*.py``-style examples), so pass the basename portion as a
+            # coarse pre-filter; ``path_matches`` below enforces the directory
+            # scope, the same split E2B uses.
+            include_pattern = glob.rstrip("/").rsplit("/", 1)[-1] or glob
+            grep_kwargs["include"] = [include_pattern]
+        result = self._client.file.grep_files(**grep_kwargs)
         data = result.data
         provider_matches = data.matches if data and data.matches else []
-        root = path.rstrip("/") or "/"
+        root = normalize_sandbox_path(path) if path else "/"
         root_prefix = root if root == "/" else f"{root}/"
+        user_data = is_user_data_path(root)
 
         matches: list[GrepMatch] = []
         truncated = bool(data and data.truncated)
         for match in provider_matches:
             file_path = match.file
-            if should_ignore_path_under_root(file_path, root):
+            file_key = normalize_sandbox_path(file_path)
+            if should_ignore_path_under_root(file_key, root, glob=glob, user_data=user_data):
                 continue
-            if file_path == root:
-                rel_path = file_path.rsplit("/", 1)[-1]
-            elif file_path.startswith(root_prefix):
-                rel_path = file_path[len(root_prefix) :]
+            if file_key == root:
+                rel_path = file_key.rsplit("/", 1)[-1]
+            elif file_key.startswith(root_prefix):
+                rel_path = file_key[len(root_prefix) :]
             else:
                 continue
             if glob is not None and not path_matches(glob, rel_path):

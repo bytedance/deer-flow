@@ -28,7 +28,9 @@ def parse_skill_md(skill_path: Path) -> tuple[str, str, str]:
     # Stripping quotes manually changes escaped strings, comments and block scalars.
     try:
         frontmatter = yaml.safe_load("\n".join(lines[1:end_idx]))
-    except yaml.YAMLError as exc:
+    except (yaml.YAMLError, ValueError, AttributeError) as exc:
+        # PyYAML's timestamp constructor raises ValueError/AttributeError for
+        # an explicit date-like value it cannot build, not a YAMLError.
         raise ValueError(f"Invalid YAML in SKILL.md frontmatter: {exc}") from exc
     if not isinstance(frontmatter, dict):
         raise ValueError("SKILL.md frontmatter must be a YAML dictionary")

@@ -371,7 +371,7 @@ class _BoundAgentRuns:
 
         async with self._request("runs:create") as request:
             try:
-                worker, frozen, project_id, saved_settings = await request.app.state.coordination_workers.repo.admission(self._user_id, task_id, execution_id)
+                worker, frozen, project_id, saved_settings, channel_origin = await request.app.state.coordination_workers.repo.admission(self._user_id, task_id, execution_id)
             except TaskNotFound as exc:
                 raise AgentRunError(404, "Worker task unavailable") from exc
             except TaskConflict as exc:
@@ -395,6 +395,8 @@ class _BoundAgentRuns:
                 context=context,
                 on_disconnect="continue",
             )
+            if channel_origin is not None:
+                request.state.run_origin = make_origin("im_channel", provider=channel_origin["provider"])
             request.state.coordination_execution_id = execution_id
             request.state.coordination_grant_id = grant_id
             coordinator_factory = None
@@ -546,13 +548,12 @@ class _BoundAgentRuns:
             return (await get_thread_state(thread_id, request)).model_dump(mode="json")
 
     async def send_input(self, *, thread_id, run_id, text, mode, request_id, context=None):
-        from app.gateway.routers.thread_runs import create_run_input
-        from app.gateway.run_inputs import RunInputRequest
+        from app.gateway.run_inputs import RunInputRequest, submit_run_input
 
         async with self._request("runs:create", thread_id) as request:
             body = RunInputRequest(request_id=request_id, text=text, mode=mode, context=_json_object(context) or {})
             body = body.model_copy(update={"request_id": hashlib.sha256(f"{self._plugin_namespace or 'host'}:{body.request_id}".encode()).hexdigest()})
-            return await create_run_input(thread_id, run_id, body, request)
+            return await submit_run_input(thread_id, run_id, body, request)
 
     async def dispatch_input(self, *, thread_id, run_id, input_id):
         from app.gateway.run_inputs import dispatch_one_input

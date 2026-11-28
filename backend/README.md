@@ -555,7 +555,8 @@ the only execution path, which keeps operational mistakes off the table. See
 ### Testing
 
 ```bash
-# Default offline backend suite (four parallel shards; excludes live and blocking-I/O tests)
+# Default offline backend suite (six parallel shards matching CI; excludes live,
+# blocking-I/O, bundled-extension and benchmark tests)
 make test
 
 # Run the same shards sequentially

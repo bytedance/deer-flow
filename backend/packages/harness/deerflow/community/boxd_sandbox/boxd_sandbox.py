@@ -34,7 +34,7 @@ from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import CommandOutput, Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
+from deerflow.sandbox.search import GrepMatch, is_user_data_path, path_matches, should_ignore_path_under_root, truncate_line
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -358,6 +358,15 @@ class BoxdSandbox(Sandbox):
             resolved = self._guard_path(path)
             content = self._read_bytes(resolved, _MAX_READ_FILE_SIZE).decode("utf-8", errors="replace")
         except Exception as e:
+            if isinstance(e, OSError) and e.errno == errno.EFBIG:
+                # Raise instead of returning an error string: str_replace
+                # would replace text inside the string and write it over the
+                # file whenever old_str happens to occur in it.
+                raise OSError(
+                    errno.EFBIG,
+                    f"File is larger than {_MAX_READ_FILE_SIZE // (1024 * 1024)} MB; read part of it with bash (head, tail or sed -n)",
+                    path,
+                ) from None
             logger.error("read_file %s failed: %s", path, e)
             return f"Error: {e}"
         if start_line is None and end_line is None:
@@ -410,8 +419,9 @@ class BoxdSandbox(Sandbox):
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         resolved = self._guard_path(path)
-        result = self.run_shell(remote_list_dir_command(resolved, max_depth))
-        return parse_remote_list_dir_output(_text(result.stdout), resolved, pipeline_exit_code=result.exit_code)
+        user_data = is_user_data_path(resolved)
+        result = self.run_shell(remote_list_dir_command(resolved, max_depth, user_data=user_data))
+        return parse_remote_list_dir_output(_text(result.stdout), resolved, pipeline_exit_code=result.exit_code, user_data=user_data)
 
     def glob(
         self,
@@ -434,12 +444,13 @@ class BoxdSandbox(Sandbox):
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
+        user_data = is_user_data_path(root)
         # Records are LF-delimited; other splitlines() boundaries can be path characters.
         for entry in output.text.split("\n"):
             # Do not strip: trailing whitespace can be part of a file name.
             if not entry or (entry != root and not entry.startswith(root_prefix)):
                 continue
-            if should_ignore_path_under_root(entry, root):
+            if should_ignore_path_under_root(entry, root, glob=pattern, user_data=user_data):
                 continue
             rel_path = entry[len(root) :].lstrip("/")
             if not rel_path:
@@ -489,6 +500,7 @@ class BoxdSandbox(Sandbox):
 
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
+        user_data = is_user_data_path(root)
         matches: list[GrepMatch] = []
         for raw in output.text.split("\n"):
             try:
@@ -497,7 +509,7 @@ class BoxdSandbox(Sandbox):
                 line_number = int(line_no_str)
             except ValueError:
                 continue
-            if should_ignore_path_under_root(file_path, root):
+            if should_ignore_path_under_root(file_path, root, glob=glob, user_data=user_data):
                 continue
             if glob is not None:
                 if file_path != root and not file_path.startswith(root_prefix):

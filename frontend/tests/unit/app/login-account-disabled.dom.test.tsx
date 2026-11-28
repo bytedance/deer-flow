@@ -22,9 +22,11 @@ rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: rs.fn(),
 }));
 rs.mock("@/core/i18n/hooks", () => ({ useI18n: () => ({ t: enUS }) }));
+const navigationState = rs.hoisted(() => ({ search: "" }));
+
 rs.mock("next/navigation", () => ({
   useRouter: () => ({ push: rs.fn() }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(navigationState.search),
 }));
 rs.mock("next-themes", () => ({
   useTheme: () => ({ theme: "light", resolvedTheme: "light" }),
@@ -57,6 +59,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   rs.clearAllMocks();
+  navigationState.search = "";
 });
 
 function fillAndSubmit() {
@@ -155,4 +158,27 @@ test("sign-up keeps the backend message so a disabled account cannot be probed",
 
   expect(await screen.findByText("Account disabled")).toBeTruthy();
   expect(screen.queryByText(enUS.login.errors.account_disabled)).toBeNull();
+});
+
+test("a known ?error= code shows its localized message", () => {
+  navigationState.search = "?error=sso_failed";
+  render(<LoginPage />);
+
+  expect(screen.getByText(enUS.login.errors.sso_failed)).toBeTruthy();
+});
+
+// The code comes from the URL. An inherited key names no message: `__proto__`
+// resolves to an object and the others to functions that `useState` would
+// call, so each one crashed the page or showed a junk string.
+test.each([
+  "__proto__",
+  "constructor",
+  "valueOf",
+  "hasOwnProperty",
+  "toString",
+])("an inherited ?error=%s shows the generic failure", (code) => {
+  navigationState.search = `?error=${code}`;
+  render(<LoginPage />);
+
+  expect(screen.getByText(enUS.login.authFailed)).toBeTruthy();
 });

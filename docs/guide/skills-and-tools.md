@@ -56,6 +56,11 @@ and leading-zero identifiers while importing cell values into DuckDB. See the
 [data-analysis setup instructions](../../skills/public/data-analysis/SKILL.md)
 for the additional dependencies. Legacy `.xls` and CSV input do not require
 DuckDB extensions and can be analyzed offline with an empty extension cache.
+CSV paths passed to `--files` select individual files. For example, quote
+`'orders[1].csv'` in the shell to import that file even beside `orders1.csv`.
+A missing input, unsupported file format, or CSV import failure stops the
+analysis without exporting partial results or caching that import. Older cache
+entries are rebuilt on demand.
 The `.xlsx` reader continues to use the spatial extension. Legacy workbooks that
 cannot be opened are reported and skipped while other input files continue;
 analysis fails if no tables can be loaded.
@@ -161,6 +166,20 @@ Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
 
+For BytePlus Agent Plan, the [video-generation skill](../../skills/public/video-generation/SKILL.md)
+accepts `BYTEPLUS_AGENTPLAN_API_KEY` (auto-selected when neither Gemini nor
+MiniMax keys are set, or forced with `VIDEO_GENERATION_PROVIDER=byteplus_agentplan`)
+and submits Seedance 2.5 tasks to `https://ark.ap-southeast.bytepluses.com/api/plan/v3/contents/generations/tasks`
+(default model `dreamina-seedance-2.5`; override with `BYTEPLUS_AGENTPLAN_VIDEO_MODEL`,
+`BYTEPLUS_AGENTPLAN_VIDEO_RESOLUTION`, `BYTEPLUS_AGENTPLAN_VIDEO_DURATION` in
+`4..30` or `-1`, and `BYTEPLUS_AGENTPLAN_GENERATE_AUDIO`). All `--reference-images`
+are forwarded as `role: "reference_image"` data URLs. Video downloads trust
+BytePlus Ark TOS storage endpoints by default (`tos-ap-southeast-1.volces.com`,
+`tos-ap-southeast-1.bytepluses.com`, `tos-cn-beijing.volces.com`) and honor
+exact extra hostnames listed in `BYTEPLUS_AGENTPLAN_VIDEO_DOWNLOAD_HOSTS`.
+Seedance 2.5 video generation requires BytePlus Agent Plan Large, Max, or
+Enterprise Shared Package; HTTP 403 tier rejections surface an upgrade hint.
+
 For MiniMax, the [video-generation skill](../../skills/public/video-generation/SKILL.md)
 accepts `MINIMAX_VIDEO_RESOLUTION` and `MINIMAX_VIDEO_DURATION` (integer seconds).
 Unset overrides use the provider defaults. Invalid duration strings fail before
@@ -188,9 +207,12 @@ validated or converted, and provider-specific format restrictions still apply.
 
 The [image-generation skill](../../skills/public/image-generation/SKILL.md#output-handling)
 decodes Gemini base64 image data before opening the output file,
-preserving an existing image when decoding fails. With the legacy MiniMax
-`/v1/image_generation` endpoint, a decode failure can still erase an existing
-output image. Use a fresh `--output-file` path to keep the previous image.
+preserving an existing image when decoding fails. For OpenAI-compatible providers,
+the CLI rejects an empty download or empty data URL before creating the output
+directory or opening the file. If a MiniMax prompt exceeds 1500 characters, the CLI
+reports the limit on stderr and exits with status 1 before contacting the provider.
+With the legacy MiniMax `/v1/image_generation` endpoint, a decode failure can still
+erase an existing output image. Use a fresh `--output-file` path to keep the previous image.
 
 The [music-generation skill](../../skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
 
@@ -301,14 +323,20 @@ Skill projection manifest saves preserve the original error or interruption even
 └── lark-cli/lark-doc/SKILL.md      ← managed, read-only
 ```
 
-The built-in `image-generation` skill supports Gemini, MiniMax, and
-OpenAI-compatible Images APIs. Select the latter with
-`IMAGE_GENERATION_PROVIDER=openai`, then configure
+The built-in `image-generation` skill supports Gemini, MiniMax,
+OpenAI-compatible Images APIs, and BytePlus Agent Plan (Seedream). Select
+OpenAI-compatible with `IMAGE_GENERATION_PROVIDER=openai`, then configure
 `IMAGE_GENERATION_API_KEY`, `IMAGE_GENERATION_BASE_URL`, and
-`IMAGE_GENERATION_MODEL`. Run the skill's script in an isolated sandbox such as
-Docker/AIO, the Kubernetes provisioner, or E2B, and pass the variables through
-`sandbox.environment`. Sandbox commands do not inherit API keys from the Gateway
-process.
+`IMAGE_GENERATION_MODEL`. For BytePlus Agent Plan, set
+`BYTEPLUS_AGENTPLAN_API_KEY` (and optionally `IMAGE_GENERATION_PROVIDER=byteplus_agentplan`,
+`BYTEPLUS_AGENTPLAN_IMAGE_MODEL` defaulting to `dola-seedream-5.0-pro`, and
+`BYTEPLUS_AGENTPLAN_IMAGE_SIZE`) — the same key also powers `ppt-generation`
+slide rendering. If the explicitly selected provider's API key is missing,
+the CLI reports the missing key on stderr and exits with status 1.
+Run the skill's script in an isolated sandbox such as
+Docker/AIO, the Kubernetes provisioner, E2B, or veFaaS, and pass the variables
+through `sandbox.environment`. Sandbox commands do not inherit API keys from
+the Gateway process.
 
 The local provider applies the skill view through its workspace file tools.
 Script-based skills require an isolated sandbox provider on Windows as well.
@@ -451,6 +479,8 @@ cd backend
 uv run python -m deerflow.skills.review.cli ../skills/public/data-analysis --format text --fail-on error --fail-on-incomplete
 ```
 
+Invalid YAML dates or timestamps in frontmatter produce a `structure.invalid-frontmatter` blocker in the review report. Quote a date-like metadata value if it is intended as literal text.
+
 Public-skill CI waivers are exact, expiring exceptions in `.github/skill-review-waivers.v1.json`. Because only the trusted base manifest can suppress a finding, a file-changing pull request can be preauthorized safely by first merging a manifest-only change that lists the reviewed future full-file SHA-256 in `preapproved_file_sha256s`; the file change can then land in a later pull request.
 
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. The bundled DDG, Brave, Tavily, SearXNG, and Serper search providers accept an optional `time_range` of `day`, `week`, `month`, or `year`; omitting it preserves existing search behavior. For DDG recency searches, DeerFlow excludes DDGS backends that ignore time limits. Swap anything. Add anything.
@@ -510,8 +540,8 @@ repeatedly starting a missing toolchain. A non-zero extraction exit falls back
 only for that document, because malformed or oversized input can fail while
 the toolchain remains healthy. The fallback keeps resolved article links in
 the returned Markdown.
-When extraction returns a whole document, the fallback uses the source HTML
-body consistently with or without a source URL. Calls without a source URL
+When extraction returns a whole document, the fallback parses the source HTML
+and uses its body with or without a source URL. Calls without a source URL
 retain relative link destinations and do not repeat the document title.
 Only explicit document-level wrappers trigger that fallback. An inline SVG
 chart's title or a document-tag example in a comment or script leaves the

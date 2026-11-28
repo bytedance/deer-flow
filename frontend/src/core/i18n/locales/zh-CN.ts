@@ -762,8 +762,8 @@ export const zhCN: Translations = {
     queueModeHelp: "当前任务结束后再执行",
     steerModeHelp: "在下一处可处理的位置调整当前任务",
     runInputSend: "发送补充消息",
-    runInputTextOnly:
-      "运行中请发送纯文字，附件和斜杠命令请等当前任务结束后发送。",
+    runInputTextOnly: "调整当前任务时请发送纯文字。发送附件请选择排队执行。",
+    runInputUnsupported: "请等当前任务结束后再发送引用和斜杠命令。",
     runInputUnavailable:
       "尚未确认消息是否送达，请检查任务状态后重试，输入内容已保留。",
     stopRun: "停止当前任务",
@@ -1619,6 +1619,7 @@ export const zhCN: Translations = {
     branchCreated: "已创建分叉对话",
     branchFailed: "创建分叉对话失败。",
     streamReplayGap: "部分实时更新已过期，已从持久化状态恢复对话。",
+    sandboxBusy: "沙箱暂时不可用，请稍后重试。",
     streamServerError: (status) =>
       `服务暂时不可用（HTTP ${status}），请稍后重试。`,
     outlineLabel: "对话章节",

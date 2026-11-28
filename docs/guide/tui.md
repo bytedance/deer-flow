@@ -25,7 +25,16 @@ deerflow --recursion-limit 250 --print "task" # override the headless agent-loop
 
 Headless `--print` and `--json` exit with status `1` when the run fails, including provider errors returned as fallback messages. `--print` still writes the fallback text to stdout; `--json` appends a terminal error record.
 
-A keyboard-driven chat surface with a streaming transcript (Markdown-rendered answers), compact tool-activity cards, a `/` slash-command palette, display-only `/clear`, `/goal` goal management, `/model` and `/threads` pickers, input history, PageUp/PageDown transcript navigation, and `Esc` / `Ctrl+C` interrupt. The composer preserves line breaks and indentation in pasted code, stack traces, and multi-paragraph prompts; `Enter` sends the complete document. Transcript refreshes preserve your reading position after you scroll upward and resume following new output when you return to the bottom. `/clear` removes rows from the current terminal display without deleting the thread or its persisted conversation; `/new` and `/clear` ask you to wait during an active run instead of resetting in-flight display state. Sessions opened in the TUI also appear in the Web UI sidebar — it writes the shared thread store under the local default user, so terminal and web stay in sync **without running the Gateway**.
+A keyboard-driven chat surface with a streaming transcript (Markdown-rendered answers), compact tool-activity cards, a `/` slash-command palette, display-only `/clear`, `/goal` goal management, `/model` and `/threads` pickers, input history, PageUp/PageDown transcript navigation, and `Esc` / `Ctrl+C` interrupt. The composer preserves line breaks and indentation in pasted code, stack traces, and multi-paragraph prompts; `Enter` sends the complete document. Transcript refreshes preserve your reading position after you scroll upward and resume following new output when you return to the bottom. `/clear` removes rows from the current terminal display without deleting the thread or its persisted conversation; `/new` and `/clear` ask you to wait during an active run instead of resetting in-flight display state.
+
+TUI conversations can appear in the Web UI sidebar when the Gateway uses the
+same SQLite or PostgreSQL database and the Web UI is using the local `default`
+user. For a local `make dev` Gateway with a relative SQLite path, launch the TUI
+from `backend/` so both processes find the same database. See
+[Web UI visibility](../../backend/docs/TUI.md#web-ui-visibility-shared-persistence).
+
+With PostgreSQL, the TUI and Gateway must also use the same schema
+(`database.postgres_schema`).
 
 TUI slash commands accept Unicode whitespace before their arguments, including
 spaces, tabs, line breaks, and nonbreaking spaces. A separator closes the slash

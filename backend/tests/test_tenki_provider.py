@@ -627,6 +627,39 @@ def test_search_results_use_virtual_paths() -> None:
     assert box.read_file(found[0]).startswith("def foo()")
 
 
+def test_access_control_path_maps_virtual_results_back_to_the_home() -> None:
+    """The disabled-skill filter compares against skills.container_path, which
+    uses the sandbox-internal home spelling, not the virtual prefix."""
+    box = TenkiSandbox("sb", _FakeSandbox())
+    home = box.artifact_root
+
+    assert box.resolve_access_control_path("/mnt/user-data/skills/public/demo/SKILL.md") == f"{home}/skills/public/demo/SKILL.md"
+    assert box.resolve_access_control_path(f"{home}/skills/public/demo/SKILL.md") == f"{home}/skills/public/demo/SKILL.md"
+    assert box.resolve_access_control_path("/mnt/skills/public/demo/SKILL.md") == "/mnt/skills/public/demo/SKILL.md"
+
+
+def test_disabled_skill_filter_resolves_the_tenki_virtual_alias(monkeypatch) -> None:
+    """The provider mapping and the tools filter must agree on the spelling:
+    a result reported under the virtual prefix is checked against the backing
+    home path the configured skills root uses."""
+    from deerflow.sandbox import tools as sandbox_tools
+
+    box = TenkiSandbox("sb", _FakeSandbox())
+    home = box.artifact_root
+    monkeypatch.setattr(sandbox_tools, "_get_skills_container_path", lambda: f"{home}/skills")
+    monkeypatch.setattr(sandbox_tools, "_is_disabled_skill_path", lambda path, user_id=None: "secret-skill" in path)
+
+    kept = sandbox_tools._drop_disabled_skill_paths(
+        [
+            "/mnt/user-data/skills/public/secret-skill/SKILL.md",
+            "/mnt/user-data/skills/public/open-skill/SKILL.md",
+        ],
+        sandbox=box,
+    )
+
+    assert kept == ["/mnt/user-data/skills/public/open-skill/SKILL.md"]
+
+
 def test_grep_glob_keeps_its_directory_prefix() -> None:
     box = TenkiSandbox("sb", _FakeSandbox())
     box.write_file("/mnt/user-data/workspace/src/a.js", "const x = 1;\n")

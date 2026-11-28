@@ -34,3 +34,7 @@ cd backend && python -m pytest tests -q -k "boxd"
   Sandbox IDs include the machine generation so stale releases cannot consume
   a replacement's claims. Serialize lifecycle work and find warm machines by
   the stable scope token.
+- **`read_file` raises `EFBIG` above the 100 MB limit.** Other read failures
+  still return `Error: ...`, so missing files let the read-before-write gate
+  create new files while oversized files stay protected from `write_file` and
+  `str_replace`.

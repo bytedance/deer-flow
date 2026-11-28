@@ -223,6 +223,7 @@ class MessageBus:
         if isinstance(inbound_queue_maxsize, bool) or not isinstance(inbound_queue_maxsize, int) or inbound_queue_maxsize <= 0:
             raise ValueError("inbound_queue_maxsize must be a positive integer")
 
+        self.coordination_tasks_enabled: bool = False
         self._inbound_queue: asyncio.Queue[InboundMessage] = asyncio.Queue(maxsize=inbound_queue_maxsize)
         # Provider callbacks may reserve capacity from SDK-owned threads before
         # scheduling async identity/ack preparation on the Gateway loop.

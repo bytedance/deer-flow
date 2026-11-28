@@ -99,6 +99,19 @@ export function SandboxSection({ className }: { className?: string }) {
               that combines Browser, Shell, File, MCP and VSCode Server in a
               single Docker container.
             </p>
+            <p>
+              For serverless cloud deployments without managing Docker or
+              Kubernetes, run the same AIO Sandbox on{" "}
+              <a
+                href="https://www.byteplus.com/en/product/vefaas?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow"
+                className="underline"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                BytePlus veFaaS Cloud Sandbox
+              </a>{" "}
+              with prewarm, pause/resume, and thread snapshots.
+            </p>
           </div>
 
           {/* Feature Tags */}

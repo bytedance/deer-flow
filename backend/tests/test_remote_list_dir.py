@@ -10,7 +10,7 @@ import subprocess
 
 import pytest
 
-from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
+from deerflow.sandbox.remote_list_dir import parse_remote_find_output, parse_remote_list_dir_output, remote_list_dir_command
 
 _POSIX_SH = pytest.mark.skipif(
     os.name == "nt" or shutil.which("sh") is None or shutil.which("head") is None,
@@ -391,3 +391,241 @@ def test_pruning_uses_the_parsers_case_policy(tmp_path, monkeypatch) -> None:
     assert "BUILD" not in proc.stdout
     entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
     assert entries == [str(root), str(root / "report.txt")]
+
+
+def test_command_prunes_data_names_only_outside_user_data() -> None:
+    default = remote_list_dir_command("/mnt/user-data/uploads", 2)
+    assert "-name '*.log'" in default or "-iname '*.log'" in default
+    user_data = remote_list_dir_command("/mnt/user-data/uploads", 2, user_data=True)
+    assert "*.log" not in user_data
+    # shlex.quote leaves bare words unquoted, so check the prune term itself.
+    assert "-name logs" not in user_data and "-iname logs" not in user_data
+    # Repository machinery and in-flight uploads stay pruned in both root types.
+    for command in (default, user_data):
+        assert "node_modules" in command
+        assert ".upload-*.part" in command
+
+
+def test_parse_user_data_keeps_logs_and_hides_machinery() -> None:
+    stdout = (
+        "/mnt/user-data/uploads\n/mnt/user-data/uploads/app.log\n/mnt/user-data/uploads/logs\n"
+        "/mnt/user-data/uploads/logs/worker.log\n/mnt/user-data/uploads/notes.txt\n"
+        "/mnt/user-data/uploads/node_modules/dep.log\n/mnt/user-data/uploads/.upload-active.part\n\n__DF_FIND_STATUS__:0\n"
+    )
+    assert parse_remote_list_dir_output(stdout, "/mnt/user-data/uploads", pipeline_exit_code=0, user_data=True) == [
+        "/mnt/user-data/uploads",
+        "/mnt/user-data/uploads/app.log",
+        "/mnt/user-data/uploads/logs",
+        "/mnt/user-data/uploads/logs/worker.log",
+        "/mnt/user-data/uploads/notes.txt",
+    ]
+    # Without the label the same listing keeps the repository filter.
+    assert parse_remote_list_dir_output(stdout, "/mnt/user-data/uploads", pipeline_exit_code=0) == [
+        "/mnt/user-data/uploads",
+        "/mnt/user-data/uploads/notes.txt",
+    ]
+
+
+@_POSIX_SH
+@pytest.mark.skipif(shutil.which("find") is None, reason="system find required")
+def test_list_dir_command_user_data_keeps_uploaded_logs(tmp_path) -> None:
+    root = tmp_path / "uploads"
+    (root / "logs").mkdir(parents=True)
+    (root / "app.log").write_text("FATAL app\n", encoding="utf-8")
+    (root / "logs" / "worker.log").write_text("FATAL worker\n", encoding="utf-8")
+    (root / "notes.txt").write_text("FATAL notes\n", encoding="utf-8")
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / "dep.log").write_text("FATAL dep\n", encoding="utf-8")
+    (root / ".upload-active.part").write_text("partial", encoding="utf-8")
+
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), 3, user_data=True))
+    entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode, user_data=True)
+    assert str(root / "app.log") in entries
+    assert str(root / "logs" / "worker.log") in entries
+    assert not any("node_modules" in entry or ".upload-active.part" in entry for entry in entries)
+
+    # The default prune still hides the data-looking names in the same tree.
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), 3))
+    entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
+    assert entries == [str(root), str(root / "notes.txt")]
+
+
+# --- glob mode: in-sandbox find with a basename coarse filter -----------------
+
+
+def test_glob_command_prunes_before_the_basename_filter() -> None:
+    # Prune runs during the walk, so a large ignored tree never reaches the
+    # -name filter or the head cap. The -name coarse filter must also appear.
+    command = remote_list_dir_command("/work", None, limit=10, name_glob="*.md", files_only=True, glob="*.md")
+    assert "node_modules" in command
+    assert "-prune" in command
+    assert "-name '*.md'" in command
+    assert "-type f" in command
+    assert r"\( -type f -o -type d \)" not in command  # files-only walk
+    assert "-maxdepth" not in command  # unbounded glob walk
+    assert command.index("-prune") < command.index("-name '*.md'")
+
+
+def test_glob_command_include_dirs_keeps_directories() -> None:
+    command = remote_list_dir_command("/work", None, limit=10, name_glob="*", files_only=False, glob="*")
+    assert r"\( -type f -o -type d \)" in command
+
+
+def test_glob_command_does_not_preprint_the_root() -> None:
+    # The root's rel_path is empty, so it must not consume a head budget line.
+    command = remote_list_dir_command("/work", None, limit=10, name_glob="*.md", files_only=True, glob="*.md")
+    assert "printf '%s\n' /work;" not in command
+
+
+def test_glob_command_data_naming_glob_keeps_logs_in_a_checkout() -> None:
+    # Asking for *.log makes logs content, so the walk must NOT prune them,
+    # even outside a user-data root. Otherwise find would drop what the caller
+    # asked for before the client matcher ever sees it.
+    command = remote_list_dir_command("/work", None, limit=10, name_glob="*.log", files_only=True, glob="*.log")
+    assert "-name '*.log'" in command  # the coarse filter
+    # The prune list must not contain a '*.log' prune term (would hide matches).
+    assert "-prune -o" in command
+    prune_section = command[: command.index("-prune")]
+    assert "'*.log'" not in prune_section.replace("-name '*.log'", "")
+
+
+def test_glob_command_default_glob_prunes_logs_in_a_checkout() -> None:
+    # A non-data glob keeps the repository prune, which hides *.log as noise.
+    command = remote_list_dir_command("/work", None, limit=10, name_glob="*.py", files_only=True, glob="*.py")
+    prune_section = command[: command.index("-prune")]
+    assert "'*.log'" in prune_section
+
+
+@_POSIX_SH
+@pytest.mark.skipif(shutil.which("find") is None, reason="system find required")
+def test_glob_find_finds_a_match_behind_a_large_ignored_tree(tmp_path) -> None:
+    # Reproduce the maintainer's scenario: a README beside a node_modules tree
+    # that overflows the listing cap. find prunes node_modules, so the README
+    # is the only candidate and the search is complete.
+    root = tmp_path / "work"
+    (root / "node_modules").mkdir(parents=True)
+    (root / "README.md").write_text("# readme\n", encoding="utf-8")
+    for i in range(50):
+        (root / "node_modules" / f"f{i}.js").write_text("x\n", encoding="utf-8")
+
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), None, limit=10, name_glob="*.md", files_only=True, glob="*.md"))
+    entries, truncated = parse_remote_find_output(proc.stdout, str(root), limit=10, pipeline_exit_code=proc.returncode)
+    assert entries == [str(root / "README.md")]
+    assert truncated is False
+
+
+@_POSIX_SH
+@pytest.mark.skipif(shutil.which("find") is None, reason="system find required")
+def test_glob_find_reports_truncation_when_candidates_exceed_the_cap(tmp_path) -> None:
+    root = tmp_path / "many"
+    root.mkdir()
+    for i in range(20):
+        (root / f"note{i}.txt").write_text("x\n", encoding="utf-8")
+
+    # head -n 5 cuts the 20-candidate listing; SIGPIPE marks it truncated.
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), None, limit=5, name_glob="*.txt", files_only=True, glob="*.txt"))
+    entries, truncated = parse_remote_find_output(proc.stdout, str(root), limit=5, pipeline_exit_code=proc.returncode)
+    assert truncated is True
+    assert len(entries) <= 4
+
+
+@_POSIX_SH
+@pytest.mark.skipif(shutil.which("find") is None, reason="system find required")
+def test_glob_find_exact_fit_is_not_truncated(tmp_path) -> None:
+    root = tmp_path / "exact"
+    root.mkdir()
+    for i in range(3):
+        (root / f"e{i}.txt").write_text("x\n", encoding="utf-8")
+
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), None, limit=5, name_glob="*.txt", files_only=True, glob="*.txt"))
+    entries, truncated = parse_remote_find_output(proc.stdout, str(root), limit=5, pipeline_exit_code=proc.returncode)
+    assert truncated is False
+    assert len(entries) == 3
+
+
+@_POSIX_SH
+@pytest.mark.skipif(shutil.which("find") is None, reason="system find required")
+def test_glob_find_keeps_a_dot_only_name(tmp_path) -> None:
+    # A file named exactly ``.csv`` is a candidate for ``*.csv``: POSIX find's
+    # ``*`` matches a leading dot, so the walk returns it.
+    root = tmp_path / "dots"
+    root.mkdir()
+    (root / ".csv").write_text("x\n", encoding="utf-8")
+    (root / "report.csv").write_text("x\n", encoding="utf-8")
+
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), None, limit=10, name_glob="*.csv", files_only=True, glob="*.csv"))
+    entries, truncated = parse_remote_find_output(proc.stdout, str(root), limit=10, pipeline_exit_code=proc.returncode)
+    assert str(root / ".csv") in entries
+    assert str(root / "report.csv") in entries
+    assert truncated is False
+
+
+def test_parse_remote_find_output_empty_is_no_matches_not_missing() -> None:
+    # An empty result is a valid "no matches", not FileNotFoundError.
+    entries, truncated = parse_remote_find_output("\n__DF_FIND_STATUS__:0\n", "/work", limit=5, pipeline_exit_code=0)
+    assert entries == []
+    assert truncated is False
+
+
+def test_parse_remote_find_output_missing_root_raises() -> None:
+    with pytest.raises(FileNotFoundError):
+        parse_remote_find_output("__DF_FIND_STATUS__:missing\n", "/work", limit=5, pipeline_exit_code=1)
+
+
+def test_parse_remote_find_output_exact_fit_is_complete() -> None:
+    # head asked for 5 lines (budget 4 + 1). find had exactly 4 candidates, so
+    # head returned 4 (< 5): complete, all four kept, no false truncation.
+    out = "".join(f"/work/f{i}.md\n" for i in range(4)) + "\n__DF_FIND_STATUS__:0\n"
+    entries, truncated = parse_remote_find_output(out, "/work", limit=5, pipeline_exit_code=0)
+    assert entries == [f"/work/f{i}.md" for i in range(4)]
+    assert truncated is False
+
+
+def test_parse_remote_find_output_one_past_budget_is_truncated() -> None:
+    # find had 5 candidates, head filled all 5 requested lines: truncated, and
+    # the probe line is dropped so the client sees a clean 4-candidate budget.
+    out = "".join(f"/work/f{i}.md\n" for i in range(5)) + "\n__DF_FIND_STATUS__:0\n"
+    entries, truncated = parse_remote_find_output(out, "/work", limit=5, pipeline_exit_code=0)
+    assert entries == [f"/work/f{i}.md" for i in range(4)]
+    assert truncated is True
+
+
+def test_parse_remote_find_output_sigpipe_is_not_the_truncation_signal() -> None:
+    # A small find result fits the pipe buffer, so find exits 0 even when head
+    # cut it off. The raw line count, not SIGPIPE, decides truncation. Here the
+    # status is 141 but head still returned fewer than the requested lines.
+    out = "/work/a.md\n/work/b.md\n\n__DF_FIND_STATUS__:141\n"
+    entries, truncated = parse_remote_find_output(out, "/work", limit=5, pipeline_exit_code=141)
+    assert entries == ["/work/a.md", "/work/b.md"]
+    assert truncated is False
+
+
+def test_parse_remote_find_output_file_root_raises_not_a_directory() -> None:
+    with pytest.raises(NotADirectoryError):
+        parse_remote_find_output("__DF_FIND_STATUS__:notadir\n", "/work/README.md", limit=5, pipeline_exit_code=1)
+
+
+def test_glob_command_file_root_marks_not_a_directory() -> None:
+    # A glob whose root is a file must surface NotADirectoryError, not "no matches".
+    command = remote_list_dir_command("/work/README.md", None, limit=10, name_glob="*.md", files_only=True, glob="*.md")
+    assert "[ ! -d /work/README.md ]" in command
+    assert "__DF_FIND_STATUS__:notadir" in command
+    # list_dir (bounded depth) keeps its own behavior: no not-a-dir guard.
+    list_cmd = remote_list_dir_command("/work", 2)
+    assert "notadir" not in list_cmd
+
+
+def test_parse_remote_find_output_truncation_equals_total_over_budget() -> None:
+    """Pin the protocol: ``limit`` is the head request (budget + 1), so the
+    parser sees ``min(total, limit)`` lines. That is enough to decide the only
+    question that matters -- whether find had more than the budget -- without
+    distinguishing "exactly budget+1" from "more": both are total > budget.
+    """
+    for budget in range(0, 6):
+        head = budget + 1
+        for total in range(0, 10):
+            lines = min(total, head)
+            out = "".join(f"/w/f{i}.md\n" for i in range(lines)) + "\n__DF_FIND_STATUS__:0\n"
+            entries, truncated = parse_remote_find_output(out, "/w", limit=head, pipeline_exit_code=0)
+            assert truncated is (total > budget), (budget, total)
+            assert entries == [f"/w/f{i}.md" for i in range(min(total, budget))], (budget, total)

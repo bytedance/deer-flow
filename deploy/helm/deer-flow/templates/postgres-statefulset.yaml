@@ -1,14 +1,21 @@
 {{- if .Values.postgresql.enabled -}}
+{{- $name := include "deer-flow.postgresFullname" . -}}
+{{- $repository := .Values.postgresql.image.repository -}}
+{{- $image := printf "%s:%v" $repository .Values.postgresql.image.tag -}}
+{{- $tag := first (splitList "@" (toString .Values.postgresql.image.tag)) -}}
+{{- $hubPostgres := has $repository (list "postgres" "docker.io/postgres" "index.docker.io/postgres") -}}
+{{- $libraryPostgres := regexMatch `^((localhost|[^/]*[.:][^/]*)/)?library/postgres$` $repository -}}
+{{- $autoDataDirectory := and (or $hubPostgres $libraryPostgres) (regexMatch `^16(\.[0-9]+)?$` $tag) -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ include "deer-flow.postgresFullname" . }}
+  name: {{ $name }}
   namespace: {{ include "deer-flow.namespace" . }}
   labels:
     {{- include "deer-flow.labels" . | nindent 4 }}
     app.kubernetes.io/component: postgres
 spec:
-  serviceName: {{ include "deer-flow.postgresFullname" . }}
+  serviceName: {{ $name }}
   replicas: 1
   selector:
     matchLabels:
@@ -33,7 +40,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: postgres
-          image: "{{ .Values.postgresql.image.repository }}:{{ .Values.postgresql.image.tag }}"
+          image: {{ $image | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -52,6 +59,37 @@ spec:
                 secretKeyRef:
                   name: {{ include "deer-flow.databaseUrlSecret" . }}
                   key: postgres-password
+            {{- if dig "useChartDataDirectory" $autoDataDirectory .Values.postgresql.image }}
+            - name: PGDATA
+              value: /var/run/postgresql/deerflow-pgdata
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              root=/var/lib/postgresql/data
+              target="$root/pgdata"
+              if [ -e "$root/PG_VERSION" ] || [ -d "$root/base" ] || [ -d "$root/global" ] || [ -d "$root/pg_wal" ]; then
+                if [ ! -s "$root/PG_VERSION" ] || [ -s "$target/PG_VERSION" ]; then
+                  echo "Cannot select a PostgreSQL database. Inspect $root and $target before restarting." >&2
+                  exit 1
+                fi
+                target=$root
+              elif [ -L "$target" ]; then
+                echo "Expected a database directory at $target, found a symbolic link." >&2
+                exit 1
+              elif [ ! -s "$target/PG_VERSION" ]; then
+                existing=$(find "$root" -mindepth 1 -maxdepth 1 ! -name pgdata ! -name lost+found \
+                  ! \( -type d -name .snapshot \) -print -quit)
+                if [ -n "$existing" ]; then
+                  echo "Refusing to initialize a new database on a nonempty volume (found $existing)." >&2
+                  exit 1
+                fi
+                mkdir -p "$target"
+              fi
+              # Keep the server and tools launched through kubectl exec on the same database.
+              ln -sfnT "$target" "$PGDATA"
+              exec docker-entrypoint.sh postgres
+            {{- end }}
           readinessProbe:
             exec:
               command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
@@ -80,8 +118,7 @@ spec:
     - metadata:
         name: data
         labels:
-          {{- include "deer-flow.labels" . | nindent 10 }}
-          app.kubernetes.io/component: postgres
+          {{- include "deer-flow.dataClaimLabels" (dict "root" . "name" $name "component" "postgres") | nindent 10 }}
       spec:
         accessModes:
           - {{ .Values.postgresql.primary.persistence.accessMode | quote }}

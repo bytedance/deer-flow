@@ -19,7 +19,7 @@ from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import CommandOutput, Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
+from deerflow.sandbox.search import GrepMatch, is_user_data_path, path_matches, should_ignore_path_under_root, truncate_line
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -383,7 +383,8 @@ class OpenSandboxSandbox(Sandbox):
         if depth < 0:
             raise ValueError("max_depth must be non-negative")
         resolved = self._resolve_path(path)
-        execution = self._run(remote_list_dir_command(resolved, depth))
+        user_data = is_user_data_path(resolved)
+        execution = self._run(remote_list_dir_command(resolved, depth, user_data=user_data))
         error = getattr(execution, "error", None)
         if error is not None:
             detail = f"{getattr(error, 'name', type(error).__name__)}: {getattr(error, 'value', error)}"
@@ -392,6 +393,7 @@ class OpenSandboxSandbox(Sandbox):
             execution_stdout(execution),
             resolved,
             pipeline_exit_code=getattr(execution, "exit_code", None),
+            user_data=user_data,
         )
 
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
@@ -410,10 +412,11 @@ class OpenSandboxSandbox(Sandbox):
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
+        user_data = is_user_data_path(root)
         # Records are LF-delimited; other splitlines() boundaries can be path characters.
         for entry in output.text.split("\n"):
             # Do NOT strip: trailing whitespace can be part of the filename.
-            if not entry or (entry != root and not entry.startswith(root_prefix)) or should_ignore_path_under_root(entry, root):
+            if not entry or (entry != root and not entry.startswith(root_prefix)) or should_ignore_path_under_root(entry, root, glob=pattern, user_data=user_data):
                 continue
             relative = entry[len(root) :].lstrip("/")
             if relative and path_matches(pattern, relative):
@@ -464,6 +467,7 @@ class OpenSandboxSandbox(Sandbox):
 
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
+        user_data = is_user_data_path(root)
         matches: list[GrepMatch] = []
         seen_positions: set[tuple[str, int]] = set()
         # Keep non-LF separators inside filenames and matched text intact.
@@ -473,7 +477,7 @@ class OpenSandboxSandbox(Sandbox):
                 line_number = int(line_number_text)
             except ValueError:
                 continue
-            if should_ignore_path_under_root(file_path, root):
+            if should_ignore_path_under_root(file_path, root, glob=glob, user_data=user_data):
                 continue
             if glob is not None:
                 if file_path != root and not file_path.startswith(root_prefix):

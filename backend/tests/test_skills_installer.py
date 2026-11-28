@@ -875,6 +875,32 @@ class TestInstallSkillFromArchive:
 
         assert not (skills_root / "custom" / "test-skill").exists()
 
+    @pytest.mark.parametrize(
+        "members",
+        [
+            {"test-skill/SKILL.md/": None},
+            {"test-skill/SKILL.md/notes.md": "# Notes\n"},
+            {"SKILL.md/": None, "notes.md": "# Notes\n"},
+        ],
+        ids=["directory-entry", "implied-directory", "archive-root"],
+    )
+    @pytest.mark.parametrize("skill_scan_enabled", [True, False], ids=["scan", "no-scan"])
+    def test_skill_markdown_directory_is_an_invalid_skill(self, tmp_path, members, skill_scan_enabled):
+        zip_path = tmp_path / "test-skill.skill"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            for name, content in members.items():
+                if content is None:
+                    zf.writestr(zipfile.ZipInfo(name), "")
+                else:
+                    zf.writestr(name, content)
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+
+        with pytest.raises(ValueError, match=r"^Invalid skill: SKILL\.md must be a file$"):
+            _make_storage(skills_root, skill_scan_enabled=skill_scan_enabled).install_skill_from_archive(zip_path)
+
+        assert not any((skills_root / "custom").iterdir())
+
     def test_script_warn_prevents_install(self, tmp_path, monkeypatch):
         zip_path = tmp_path / "test-skill.skill"
         with zipfile.ZipFile(zip_path, "w") as zf:
