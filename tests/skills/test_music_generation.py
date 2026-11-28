@@ -1,3 +1,6 @@
+import os
+import runpy
+import subprocess
 import sys
 from pathlib import Path
 
@@ -7,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from skill_loader import FakeResp, load  # noqa: E402
 
 mus = load("music-generation")
+SCRIPT = Path(mus.__file__)
 
 # Synthetic payloads exercise signatures, not complete audio decoding.
 _ID3_AUDIO = b"ID3\x04\x00\x00\x00\x00\x00\x00\xff\xfb\x90\x64synthetic MP3 bytes"
@@ -103,11 +107,13 @@ def test_raises_on_base_resp_error(monkeypatch, tmp_path):
     assert "1008" in str(e.value)
 
 
-def test_missing_api_key_returns_message(monkeypatch, tmp_path):
+def test_missing_api_key_raises(monkeypatch, tmp_path):
     spec = tmp_path / "s.json"
     spec.write_text('{"prompt":"x"}', encoding="utf-8")
-    msg = mus.generate_music(str(spec), str(tmp_path / "o.mp3"))
-    assert "MINIMAX_API_KEY" in msg
+    output = tmp_path / "o.mp3"
+    with pytest.raises(ValueError, match="MINIMAX_API_KEY"):
+        mus.generate_music(str(spec), str(output))
+    assert not output.exists()
 
 
 def test_raises_on_missing_audio_data(monkeypatch, tmp_path):
@@ -240,3 +246,131 @@ def test_decoded_empty_audio_has_distinct_diagnostic(monkeypatch, tmp_path):
     spec.write_text('{"prompt":"jazz"}', encoding="utf-8")
     with pytest.raises(ValueError, match="^MiniMax audio decoded to empty bytes$"):
         mus.generate_music(str(spec), str(tmp_path / "song.mp3"))
+
+
+def _run_cli(*args):
+    """Run the documented CLI in a child process with the inherited environment."""
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("content", "api_key", "diagnostic"),
+    [
+        ('{"prompt":"jazz"}', None, "MINIMAX_API_KEY is not set"),
+        ("{", None, "Expecting property name"),
+        (None, None, "No such file or directory"),
+        ('{"prompt":"  "}', "synthetic-key", "`prompt` is required"),
+    ],
+    ids=["missing-key", "invalid-json", "missing-file", "empty-prompt"],
+)
+def test_cli_input_failure_reports_status_one(
+    monkeypatch, tmp_path, content, api_key, diagnostic
+):
+    if api_key:
+        monkeypatch.setenv("MINIMAX_API_KEY", api_key)
+    spec = tmp_path / "spec.json"
+    if content is not None:
+        spec.write_text(content, encoding="utf-8")
+    output = tmp_path / "song.mp3"
+    output.write_bytes(b"previous song")
+
+    result = _run_cli("--prompt-file", str(spec), "--output-file", str(output))
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "Error while generating music:" in result.stderr
+    assert diagnostic in result.stderr
+    assert output.read_bytes() == b"previous song"
+
+
+@pytest.mark.parametrize(
+    ("outcome", "diagnostic"),
+    [
+        ("http-error", "403"),
+        ("connection-error", "provider unavailable"),
+        ("provider-error", "1008"),
+        ("empty-audio", "no audio data"),
+        ("invalid-audio", "MP3 header"),
+    ],
+)
+def test_cli_provider_failure_reports_status_one(
+    monkeypatch, tmp_path, capsys, outcome, diagnostic
+):
+    monkeypatch.setenv("MINIMAX_API_KEY", "synthetic-key")
+    spec = tmp_path / "spec.json"
+    spec.write_text('{"prompt":"jazz"}', encoding="utf-8")
+    output = tmp_path / "song.mp3"
+    output.write_bytes(b"previous song")
+
+    def fake_post(*args, **kwargs):
+        if outcome == "connection-error":
+            raise mus.requests.ConnectionError("provider unavailable")
+        if outcome == "http-error":
+            return FakeResp({}, status_code=403)
+        if outcome == "provider-error":
+            return FakeResp(
+                {"base_resp": {"status_code": 1008, "status_msg": "no balance"}}
+            )
+        if outcome == "empty-audio":
+            return FakeResp({"base_resp": {"status_code": 0}, "data": {"audio": ""}})
+        return FakeResp(
+            {"base_resp": {"status_code": 0}, "data": {"audio": b"not an mp3".hex()}}
+        )
+
+    # Only the HTTP transport is replaced; the real __main__ handler runs.
+    monkeypatch.setattr(mus.requests, "post", fake_post)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(SCRIPT), "--prompt-file", str(spec), "--output-file", str(output)],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        runpy.run_path(str(SCRIPT), run_name="__main__")
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "Error while generating music:" in captured.err
+    assert diagnostic in captured.err
+    assert output.read_bytes() == b"previous song"
+
+
+def test_cli_success_reports_status_zero(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("MINIMAX_API_KEY", "synthetic-key")
+    spec = tmp_path / "spec.json"
+    spec.write_text('{"prompt":"jazz"}', encoding="utf-8")
+    output = tmp_path / "song.mp3"
+    output.write_bytes(b"previous song")
+    monkeypatch.setattr(
+        mus.requests,
+        "post",
+        lambda *args, **kwargs: FakeResp(
+            {"base_resp": {"status_code": 0}, "data": {"audio": _ID3_AUDIO.hex()}}
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(SCRIPT), "--prompt-file", str(spec), "--output-file", str(output)],
+    )
+
+    runpy.run_path(str(SCRIPT), run_name="__main__")
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert f"Successfully generated music to {output}" in captured.out
+    assert output.read_bytes() == _ID3_AUDIO
+
+
+def test_cli_argument_error_remains_status_two():
+    result = _run_cli()
+    assert result.returncode == 2
+    assert "--prompt-file" in result.stderr
