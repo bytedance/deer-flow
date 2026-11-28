@@ -595,6 +595,7 @@ def test_make_lead_agent_keeps_lead_prompt_lean_while_forwarding_subagent_projec
     from unittest.mock import MagicMock
 
     from deerflow.agents.lead_agent import agent as lead_agent_module
+    from deerflow.config.app_config import LlmCallConfig
     from deerflow.sandbox.middleware import SandboxMiddleware
 
     monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda x=None, **kwargs: "default-model")
@@ -612,6 +613,7 @@ def test_make_lead_agent_keeps_lead_prompt_lean_while_forwarding_subagent_projec
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [NamedTool("task"), NamedTool("bash")])
 
     mock_app_config = MagicMock()
+    mock_app_config.llm_call = LlmCallConfig()
     mock_app_config.database.checkpoint_delta.snapshot_frequency = 10
     mock_app_config.database.checkpoint_channel_mode = "full"
     mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
