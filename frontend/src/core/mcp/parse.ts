@@ -44,13 +44,20 @@ function isWrappedServerMap(value: Record<string, unknown>): value is Record<
   // presentation metadata are data, rather than sibling server definitions.
   const hasServerSibling = Object.entries(config).some(
     ([key, value]) =>
-      key !== "env" &&
-      key !== "headers" &&
+      !(
+        (key === "env" || key === "headers") &&
+        isPlainObject(value) &&
+        Object.values(value).every((entry) => typeof entry === "string")
+      ) &&
       key !== "presentation" &&
+      !(key === "oauth" && isPlainObject(value) && nonempty(value.token_url)) &&
       isPlainObject(value) &&
       (nonempty(value.command) || nonempty(value.url)),
   );
-  const transport = config.type ?? config.transport ?? "stdio";
+  // Match the Gateway alias promotion and runtime default for empty types.
+  const explicitType = config.type === "" ? undefined : config.type;
+  const alias = config.transport === "" ? undefined : config.transport;
+  const transport = explicitType ?? alias ?? "stdio";
   const coherent =
     transport === "stdio"
       ? nonempty(config.command)

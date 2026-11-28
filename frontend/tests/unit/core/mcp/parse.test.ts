@@ -150,6 +150,16 @@ describe("parseMCPServerDefinition", () => {
   );
 
   it.each([
+    { type: "", transport: "http", url: "https://example.test/mcp" },
+    { type: "", command: "npx" },
+    {
+      type: "http",
+      url: "https://example.test/mcp",
+      oauth: {
+        token_url: "https://auth.example.test/token",
+        url: "https://auth.example.test",
+      },
+    },
     { command: "npx", type: "stdio" },
     { type: "sse", url: "https://example.test/mcp" },
     { transport: "http", url: "https://example.test/mcp" },
@@ -173,6 +183,36 @@ describe("parseMCPServerDefinition", () => {
     expect(Object.keys(parsed)).toEqual(["mcpServers"]);
     expect(parsed.mcpServers).toMatchObject(config);
   });
+
+  it.each(["env", "headers", "oauth"])(
+    "detects a configured sibling named %s with non-credential values",
+    (name) => {
+      for (const server of [
+        { command: "npx", env: { KEY: "value" } },
+        {
+          type: "http",
+          url: "https://example.test/mcp",
+          headers: { Authorization: "value" },
+        },
+      ]) {
+        expect(() =>
+          parseMCPServerDefinition(
+            JSON.stringify({
+              mcpServers: {
+                [name]: server,
+                command: "mistyped",
+              },
+            }),
+          ),
+        ).toThrow(
+          expect.objectContaining({
+            code: "serverConfigNotObject",
+            serverName: "command",
+          }),
+        );
+      }
+    },
+  );
 
   it("rejects blank input", () => {
     expectDefinitionError("   ", "emptyDefinition");

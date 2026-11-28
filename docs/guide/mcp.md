@@ -8,6 +8,10 @@ URL. Configured sibling servers keep the definition in the wrapped-map error
 path even when an invalid entry is named `command`, `url`, or `type`.
 Display-only `presentation` metadata is preserved and does not participate in
 that decision, even when it contains a URL or a command-like display field.
+Recognized `oauth` settings are also preserved as configuration. Empty `type`
+values fall back to `transport`, then to stdio, as in the Gateway. `env` and
+`headers` are treated as credential maps only when all their values are strings;
+a nested server definition under either name still participates in map validation.
 
 Tool steps mark explicit execution failures. Scheduled-task steps show completed
 operations only after a valid response, rather than when the request is issued.
