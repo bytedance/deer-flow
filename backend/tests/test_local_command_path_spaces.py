@@ -165,11 +165,47 @@ def test_powershell_executes_mapped_metacharacters(powershell, tmp_path, directo
     assert "Exit Code:" not in output, output
 
 
+_NATIVE_HOSTS = {"sh": "posix", "cmd.exe": "nt"}
+
+
+def _is_native_shell(shell_name: str) -> bool:
+    """Whether ``shell_name`` runs natively on this host.
+
+    WSL interop puts Windows executables such as ``cmd.exe`` on PATH, but CMD
+    rejects a Linux working directory given as a UNC path, so this execution
+    case runs only on a native Windows host. A POSIX ``sh`` is likewise native
+    only outside Windows; Git Bash's ``sh.exe`` is not this case's host. An
+    unknown name raises ``KeyError`` instead of being assumed POSIX-native.
+    """
+    return os.name == _NATIVE_HOSTS[shell_name]
+
+
+def test_unknown_shell_name_is_not_assumed_native():
+    with pytest.raises(KeyError):
+        _is_native_shell("pwsh")
+
+
+@pytest.mark.parametrize(
+    "host,shell_name,native",
+    [
+        ("nt", "cmd.exe", True),
+        ("nt", "sh", False),
+        ("posix", "sh", True),
+        ("posix", "cmd.exe", False),
+    ],
+)
+def test_native_shell_selection_matches_the_host(monkeypatch, host, shell_name, native):
+    monkeypatch.setattr(os, "name", host)
+    assert _is_native_shell(shell_name) is native
+
+
 @pytest.mark.parametrize("shell_name", ["sh", "cmd.exe"])
 def test_quoted_paths_still_execute_in_other_shells(mounted, monkeypatch, shell_name):
+    if not _is_native_shell(shell_name):
+        pytest.skip(f"{shell_name} is not native to this host")
     shell = shutil.which(shell_name)
-    if shell is None or (os.name == "nt" and shell_name == "sh"):
-        pytest.skip(f"native {shell_name} is unavailable")
+    if shell is None:
+        pytest.skip(f"{shell_name} is not installed")
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: shell))
     sandbox, _ = mounted
     command = 'echo "/mnt/data/marker.txt"' if shell_name == "cmd.exe" else 'cat "/mnt/data/marker.txt"'
