@@ -124,7 +124,7 @@ tools:
 
 ### 网络搜索
 
-<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
+<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "WebRouter", "You.com"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -247,6 +247,20 @@ tools:
 tools:
   - name: web_search
     group: web
+    use: deerflow.community.webrouter.tools:web_search_tool
+    max_results: 5
+    # provider: auto # 或指定单个后端，例如 nimble, tavily, exa, brave
+```
+[WebRouter](https://github.com/Nimbleway/webrouter) 为多个搜索后端提供统一接口，并在后端之间自动回退。无需 API Key：未配置 Key 时，查询会发送到免密钥额度（Nimble、Tavily、You.com、Exa、Parallel、Keenable）。WebRouter 还会使用进程环境中的所有后端 Key（`TAVILY_API_KEY`、`EXA_API_KEY`、`BRAVE_SEARCH_API_KEY`、`NIMBLE_API_KEY` 等），包括为其他工具配置的 Key；这些后端会被优先使用，费用由各自账户承担。将 `provider` 设为某个后端即可只使用该后端。同时支持 `web_fetch`。
+
+安装：`cd backend && uv sync --extra webrouter`（Docker：`UV_EXTRAS=webrouter`）
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_search
+    group: web
     use: deerflow.community.youcom.tools:web_search_tool
     # api_key: $YDC_API_KEY # 可选；不填则使用免密钥的免费额度
 ```
@@ -261,7 +275,7 @@ API Key 可选，可在 [You.com](https://you.com/platform) 获取。
 
 ### 网页内容抓取
 
-<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Unbrowse"]}>
+<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Unbrowse", "WebRouter"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -348,6 +362,19 @@ tools:
     # render: auto # auto | never（仅普通 HTTP）| always（云端浏览器）
 ```
 以 Markdown 形式返回页面内容：普通 HTTP 足够时直接抓取，需要 JavaScript 的页面则在托管浏览器中渲染。需要 [Unbrowse](https://unbrowse.ai) API Key。
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_fetch
+    group: web
+    use: deerflow.community.webrouter.tools:web_fetch_tool
+    # provider: auto # 或指定单个后端，例如 nimble, tavily, jina, firecrawl
+```
+通过托管读取服务以 Markdown 形式返回页面内容（Exa 等后端则返回纯文本），并在后端之间自动回退。无需 API Key：未配置 Key 时，页面由免密钥额度读取（Nimble、Tavily、Jina、Firecrawl、Keenable）。环境中的后端 Key 与 `web_search` 一样会被使用。`provider: max` 会把每个页面同时发送给所有已配置的后端并采用最先返回的结果，因此一次读取会访问多个服务，每个配置了 Key 的后端都会对该次读取计费。
+
+安装：`cd backend && uv sync --extra webrouter`（Docker：`UV_EXTRAS=webrouter`）
+
   </Tabs.Tab>
 </Tabs>
 

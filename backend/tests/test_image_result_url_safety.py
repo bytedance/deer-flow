@@ -93,6 +93,13 @@ def _stub_specstream(module, url):
     return [patch.object(module, "_get_api_key", return_value="k"), patch.object(module, "_specstream_request", return_value=(data, None))], _sync(module.web_search_tool)
 
 
+def _stub_webrouter(module, url):
+    router = MagicMock()
+    router.search = AsyncMock(return_value=SimpleNamespace(provider="p", answer=None, results=[SimpleNamespace(title="t", url=url, description="c")]))
+    router.aclose = AsyncMock()
+    return [patch.object(module, "_build_router", return_value=router)], _async(module.web_search_tool)
+
+
 def _stub_serply(module, url):
     data = {"results": [{"title": "t", "link": url, "description": "c"}]}
     return [patch.object(module, "_get_api_key", return_value="k"), patch.object(module, "_serply_get", return_value=(data, None))], _sync(module.web_search_tool)
@@ -175,6 +182,7 @@ _TEXT_SEARCH_STUBS = {
     "groundroute": _stub_groundroute,
     "sofya": _stub_sofya,
     "specstream": _stub_specstream,
+    "webrouter": _stub_webrouter,
     "ddg_search": _stub_ddg_search,
     "fastcrw": _stub_fastcrw,
     "firecrawl": _stub_firecrawl,

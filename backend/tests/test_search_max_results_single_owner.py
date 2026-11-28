@@ -34,6 +34,7 @@ from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_ma
 from deerflow.community.serper import tools as serper_tools
 from deerflow.community.serply import tools as serply_tools
 from deerflow.community.specstream import tools as specstream_tools
+from deerflow.community.webrouter import tools as webrouter_tools
 from deerflow.community.youcom import tools as youcom_tools
 
 COMMUNITY_ROOT = Path(ddg_search_tools.__file__).resolve().parent.parent
@@ -51,6 +52,7 @@ SHARED_OWNER_PROVIDERS = {
     "firecrawl": ("Firecrawl", firecrawl_tools),
     "youcom": ("You.com", youcom_tools),
     "specstream": ("SpecStream", specstream_tools),
+    "webrouter": ("WebRouter", webrouter_tools),
 }
 
 # Providers that still normalize locally, including Exa's generic helper and

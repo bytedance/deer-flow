@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 from importlib import import_module
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Literal
 
@@ -652,6 +653,35 @@ def check_llm_auth(config_path: Path) -> list[CheckResult]:
     return results
 
 
+def _webrouter_route(tool: dict, tool_name: str) -> tuple[str, str]:
+    """Return what a WebRouter tool's ``provider`` names and how it routes: auto, invalid, unconfigured, parallel or pinned.
+
+    ``provider: auto`` (the default) falls back across keyless backends. ``max``
+    (fetch only) sends each page to every configured backend at once. Any other
+    id pins one backend, with no fallback, and needs its own key. WebRouter's own
+    class lookup checks the whole id (case, ``[search|extract:]backend[:mode]``);
+    for an invalid id the first item is WebRouter's error message.
+    """
+    provider = tool.get("provider")
+    provider = provider.strip() if isinstance(provider, str) else ""
+    if provider.lower() in ("", "auto"):
+        return "auto", "auto"
+    import web_router
+    from web_router import registry
+
+    lookup = registry.get_extract_provider_class if tool_name == "web_fetch" else registry.get_provider_class
+    try:
+        lookup(provider)
+    except (web_router.InvalidParameterError, web_router.ProviderNotFoundError) as e:
+        return str(e), "invalid"
+    parts = provider.lower().split(":")
+    backend = parts[1] if len(parts) > 1 and parts[0] in ("search", "extract") else parts[0]
+    configured = web_router.configured_extract_providers() if tool_name == "web_fetch" else web_router.configured_providers()
+    if backend not in configured:
+        return backend, "unconfigured"
+    return backend, "parallel" if backend == "max" else "pinned"
+
+
 def check_web_search(config_path: Path) -> CheckResult:
     return check_web_tool(config_path, tool_name="web_search", label="web search configured")
 
@@ -683,8 +713,9 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             "web_search": {
                 "ddg_search": "DuckDuckGo (no key needed)",
                 "youcom": "You.com (works with no key; YDC_API_KEY enables the full Search API)",
+                "webrouter": "WebRouter (no key needed; backend keys in the environment add more backends)",
             },
-            "web_fetch": {"jina_ai": "Jina AI Reader (no key needed)", "crawl4ai": "Crawl4AI (self-hosted, no key needed)"},
+            "web_fetch": {"jina_ai": "Jina AI Reader (no key needed)", "crawl4ai": "Crawl4AI (self-hosted, no key needed)", "webrouter": "WebRouter (no key needed; backend keys in the environment add more backends)"},
             "image_search": {"deerflow.community.image_search.tools": "DuckDuckGo Images (no key needed)"},
         }
         key_providers = {
@@ -851,6 +882,18 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             use = tool.get("use", "")
             for provider, detail in free_providers.get(tool_name, {}).items():
                 if provider in use:
+                    if provider == "webrouter":
+                        if find_spec("web_router") is None:
+                            return CheckResult(label, "warn", "WebRouter is configured but the webrouter extra is not installed", fix="cd backend && uv sync --extra webrouter")
+                        backend, route = _webrouter_route(tool, tool_name)
+                        if route == "invalid":
+                            return CheckResult(label, "warn", f"WebRouter provider '{tool.get('provider')}' is not valid: {backend}", fix="Fix 'provider' to a WebRouter id such as 'exa' or 'exa:exa-instant', or remove it to route automatically")
+                        if route == "unconfigured":
+                            return CheckResult(label, "warn", f"WebRouter is pinned to '{backend}', which is not configured here", fix=f"Set the API key '{backend}' needs in .env, or remove 'provider' to route automatically")
+                        if route == "parallel":
+                            return CheckResult(label, "ok", "WebRouter ('max': each page goes to every configured fetch backend in parallel)")
+                        if route == "pinned":
+                            return CheckResult(label, "ok", f"WebRouter (pinned to '{backend}', no fallback)")
                     var, reads_config = free_provider_keys.get(provider, (None, False))
                     sources = [_config_source(tool, "api_key")] if reads_config else []
                     if var:

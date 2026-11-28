@@ -20,6 +20,8 @@ case touches the network.
 
 from __future__ import annotations
 
+import json
+import ssl
 import threading
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -43,6 +45,7 @@ from deerflow.community.lightrag import tools as lightrag_tools
 from deerflow.community.ragflow import tools as ragflow_tools
 from deerflow.community.searxng import tools as searxng_tools
 from deerflow.community.tavily import tools as tavily_tools
+from deerflow.community.webrouter import tools as webrouter_tools
 
 pytestmark = pytest.mark.asyncio
 
@@ -135,6 +138,8 @@ _CASES = [
     pytest.param(tavily_tools, _call(tavily_tools.web_search_tool, query="q"), 1, id="tavily-web_search"),
     pytest.param(tavily_tools, _call(tavily_tools.web_fetch_tool, url=_HOSTED_URL), 1, id="tavily-web_fetch"),
     pytest.param(searxng_tools, _call(searxng_tools.web_search_tool, query="q"), 1, id="searxng-web_search"),
+    pytest.param(webrouter_tools, _call(webrouter_tools.web_search_tool, query="q"), 1, id="webrouter-web_search"),
+    pytest.param(webrouter_tools, _call(webrouter_tools.web_fetch_tool, url=_HOSTED_URL), 1, id="webrouter-web_fetch"),
     pytest.param(firecrawl_tools, _call(firecrawl_tools.web_search_tool, query="q"), 1, id="firecrawl-web_search"),
     pytest.param(firecrawl_tools, _call(firecrawl_tools.web_fetch_tool, url=_URL), 1, id="firecrawl-web_fetch"),
     pytest.param(infoquest_tools, _call(infoquest_tools.web_search_tool, query="q"), 1, id="infoquest-web_search"),
@@ -183,6 +188,31 @@ async def test_async_community_tool_resolves_config_off_the_loop(module: ModuleT
 
     assert len(reads.threads) == expected_reads
     assert threading.get_ident() not in reads.threads
+
+
+async def test_mode_qualified_webrouter_fetch_builds_tls_offloop(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = "extract:linkup:linkup-pro"
+    contexts: list[int] = []
+    create_context = ssl.create_default_context
+
+    def record_context(*args: Any, **kwargs: Any) -> ssl.SSLContext:
+        contexts.append(threading.get_ident())
+        return create_context(*args, **kwargs)
+
+    async def linkup_response(self, request: httpx.Request, **_kwargs: Any) -> httpx.Response:
+        assert json.loads(request.content)["mode"] == "pro"
+        return httpx.Response(200, json={"markdown": "Page body"}, request=request)
+
+    monkeypatch.setenv("LINKUP_API_KEY", "test-linkup-key")
+    monkeypatch.setattr(webrouter_tools, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda _name: SimpleNamespace(model_extra={"provider": provider})))
+    monkeypatch.setattr(ssl, "create_default_context", record_context)
+    monkeypatch.setattr(httpx.AsyncClient, "send", linkup_response)
+
+    result = await webrouter_tools.web_fetch_tool.ainvoke({"url": _HOSTED_URL})
+
+    assert result == f"# {_HOSTED_URL}\n\nPage body"
+    assert len(contexts) == 1
+    assert threading.get_ident() not in contexts
 
 
 async def test_blocking_probe_inline_config_read_actually_trips_the_gate(monkeypatch: pytest.MonkeyPatch) -> None:

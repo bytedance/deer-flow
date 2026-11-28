@@ -127,7 +127,7 @@ Community tools connect the agent to external services. Each `tools:` entry in `
 
 ### Web search
 
-<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
+<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "WebRouter", "You.com"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -253,6 +253,20 @@ Results carry a snippet and a source URL, and a direct answer when the sources a
 tools:
   - name: web_search
     group: web
+    use: deerflow.community.webrouter.tools:web_search_tool
+    max_results: 5
+    # provider: auto # or one backend, e.g. nimble, tavily, exa, brave
+```
+[WebRouter](https://github.com/Nimbleway/webrouter) puts one interface in front of many search backends and falls back between them. No API key is needed: without one, queries go to keyless tiers (Nimble, Tavily, You.com, Exa, Parallel, Keenable). WebRouter also uses every backend key in the process environment (`TAVILY_API_KEY`, `EXA_API_KEY`, `BRAVE_SEARCH_API_KEY`, `NIMBLE_API_KEY`, ...), including keys set for other tools; those backends are tried first and bill their own accounts. Set `provider` to one backend to use only that one. Also supports `web_fetch`.
+
+Install: `cd backend && uv sync --extra webrouter` (Docker: `UV_EXTRAS=webrouter`)
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_search
+    group: web
     use: deerflow.community.youcom.tools:web_search_tool
     # api_key: $YDC_API_KEY # optional; omit to use the keyless free tier
 ```
@@ -270,7 +284,7 @@ No extra dependency required.
 
 ### Web fetch (page content extraction)
 
-<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Unbrowse"]}>
+<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Unbrowse", "WebRouter"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -359,6 +373,19 @@ tools:
     # render: auto # auto | never (plain HTTP only) | always (cloud browser)
 ```
 Returns the page as markdown, fetching over plain HTTP when that is enough and rendering JavaScript-heavy pages in a hosted browser. Requires an [Unbrowse](https://unbrowse.ai) API key.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_fetch
+    group: web
+    use: deerflow.community.webrouter.tools:web_fetch_tool
+    # provider: auto # or one backend, e.g. nimble, tavily, jina, firecrawl
+```
+Returns the page as Markdown (or plain text for backends such as Exa) from a hosted reader, falling back between backends. No API key is needed: without one, pages are read by keyless tiers (Nimble, Tavily, Jina, Firecrawl, Keenable). Backend keys in the environment are used as for `web_search`. `provider: max` sends each page to every configured backend at once and keeps the first answer, so one fetch reaches several services, and each backend with a key bills for its fetch.
+
+Install: `cd backend && uv sync --extra webrouter` (Docker: `UV_EXTRAS=webrouter`)
+
   </Tabs.Tab>
 </Tabs>
 

@@ -575,6 +575,54 @@ class TestCheckWebSearch:
         assert result.status == "ok"
         assert "DuckDuckGo" in result.detail
 
+    def test_webrouter_always_ok(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.webrouter.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "WebRouter" in result.detail
+
+    @pytest.mark.parametrize(("pinned", "env", "status"), [("brave", None, "warn"), ("brave", "BRAVE_SEARCH_API_KEY", "ok"), ("auto", None, "ok")])
+    def test_webrouter_pinned_backend_needs_its_key(self, tmp_path, monkeypatch, pinned, env, status):
+        monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+        if env:
+            monkeypatch.setenv(env, "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(f"config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.webrouter.tools:web_search_tool\n    provider: {pinned}\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == status
+        if status == "warn":
+            assert result.detail == "WebRouter is pinned to 'brave', which is not configured here"
+
+    @pytest.mark.parametrize("pinned", ["EXA", "exa:exa-instant", "search:exa:exa-instant"])
+    def test_webrouter_pinned_backend_accepts_webrouter_ids(self, tmp_path, monkeypatch, pinned):
+        monkeypatch.setenv("EXA_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(f"config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.webrouter.tools:web_search_tool\n    provider: '{pinned}'\n")
+        result = doctor.check_web_search(cfg)
+        assert (result.status, result.detail) == ("ok", "WebRouter (pinned to 'exa', no fallback)")
+
+    @pytest.mark.parametrize(
+        ("pinned", "reason"),
+        [("exa:exa-instnat", "has no mode part 'exa-instnat'"), ("exaa", "Unknown provider 'exaa'"), ("extract:exa", "names 'extract'")],
+    )
+    def test_webrouter_invalid_id_warns(self, tmp_path, monkeypatch, pinned, reason):
+        monkeypatch.setenv("EXA_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(f"config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.webrouter.tools:web_search_tool\n    provider: '{pinned}'\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.detail.startswith(f"WebRouter provider '{pinned}' is not valid: ")
+        assert reason in result.detail
+
+    def test_webrouter_without_the_extra_warns(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(doctor, "find_spec", lambda name: None)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.webrouter.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.fix == "cd backend && uv sync --extra webrouter"
+
     def test_commented_out_tools_block_warns_without_traceback(self, tmp_path):
         # config.example.yaml ships a `tools:` key whose entries can all be
         # commented out, so it parses as None rather than an empty list.
@@ -868,6 +916,28 @@ class TestCheckWebFetch:
         result = doctor.check_web_fetch(cfg)
         assert result.status == "ok"
         assert "Jina AI" in result.detail
+
+    def test_webrouter_always_ok(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.webrouter.tools:web_fetch_tool\n")
+        result = doctor.check_web_fetch(cfg)
+        assert result.status == "ok"
+        assert "WebRouter" in result.detail
+
+    @pytest.mark.parametrize("provider", ["max", "MAX"])
+    def test_webrouter_max_is_reported_as_parallel(self, tmp_path, provider):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(f"config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.webrouter.tools:web_fetch_tool\n    provider: {provider}\n")
+        result = doctor.check_web_fetch(cfg)
+        assert (result.status, result.detail) == ("ok", "WebRouter ('max': each page goes to every configured fetch backend in parallel)")
+
+    def test_webrouter_pinned_fetch_backend_without_its_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.webrouter.tools:web_fetch_tool\n    provider: firecrawl\n")
+        result = doctor.check_web_fetch(cfg)
+        assert result.status == "warn"
+        assert result.detail == "WebRouter is pinned to 'firecrawl', which is not configured here"
 
     @pytest.mark.usefixtures("delegated_backend_dns")
     def test_browserless_fetch_explicit_token_wins_over_the_environment(self, tmp_path, monkeypatch):
