@@ -11,6 +11,12 @@ from typing import Any, Literal
 
 ModelScope = Literal["task", "turn", "conversation"]
 
+# Determiners that may sit in front of a catalog spelling without changing which
+# model the user named; the rest of the phrase must still match verbatim.
+_DETERMINERS = r"a|an|the|this|that|my|our|your|his|her|its|their"
+_LEADING_DETERMINER = re.compile(rf"^(?:{_DETERMINERS})\s+")
+_QUOTE_PAIRS = (('"', '"'), ("'", "'"), ("`", "`"), ("“", "”"), ("‘", "’"))
+
 _PATTERNS = (
     ("conversation", r"^(?:请)?(?:以后|今后|接下来)(?:这个对话|这段对话|这里)?(?:都|一直|默认)?(?:用|使用|改用|换成)\s*(.+?)(?:模型)?(?:[，。：:]|$)"),
     ("conversation", r"^(?:please\s+)?from now on\s+use\s+(.+?)(?:[,:]|$)"),
@@ -20,8 +26,54 @@ _PATTERNS = (
     ("turn", r"^(?:请)?(?:这次|本次|这一轮)(?:请)?(?:用|使用|改用|换成)\s*(.+?)(?:\s*(?:模型)?(?P<action>帮我|来|去|处理|计算|回答|分析|生成|写|做|[，：:])|$)"),
     ("turn", r"^(?:please\s+)?use\s+(.+?)\s+for this\s+(?:turn|task)\b"),
     (None, r"^(?:请)?(?:用|使用|改用|换成)\s*(.+?)(?:\s*(?:模型)?(?P<action>帮我|来|去|处理|计算|回答|分析|生成|写|做|[，：:])|$)"),
-    (None, r"^(?:please\s+)?use\s+(.+?)\s+to\s+"),
+    (None, r"^(?:please\s+)?use\s+(?P<task_model>.+?)\s+to\s+"),
 )
+
+
+def _unquote_once(text: str) -> str | None:
+    """Strip one balanced pair of enclosing quotes or backticks."""
+    if len(text) < 2:
+        return None
+    for open_q, close_q in _QUOTE_PAIRS:
+        if text[0] == open_q and text[-1] == close_q:
+            inner = " ".join(text[1:-1].split())
+            if inner and open_q not in inner and close_q not in inner:
+                return inner
+            return None
+    return None
+
+
+def _wrapper_candidates(phrase: str) -> set[str]:
+    """Expand one normalized phrase across determiners, trailing 'model', and enclosing quotes."""
+    candidates = {phrase}
+    # A determiner in front of a spelling still names that model: the rest must
+    # match the catalog verbatim, so a catalog name ending in "model" matches
+    # here while "regression model" or "data model" do not.
+    if det_stripped := _LEADING_DETERMINER.sub("", phrase):
+        candidates.add(det_stripped)
+    # Grammatical wrappers never establish intent: the entire remaining name
+    # must be in the catalog. Check the suffix-only form before removing a
+    # leading determiner so literal names like "my model" stay candidates.
+    if phrase.endswith(" model"):
+        without_suffix = phrase.removesuffix(" model")
+        if without_suffix:
+            candidates.add(without_suffix)
+            if det_without_suffix := _LEADING_DETERMINER.sub("", without_suffix):
+                candidates.add(det_without_suffix)
+    for candidate in list(candidates):
+        if unquoted := _unquote_once(candidate):
+            candidates.add(unquoted)
+    return candidates
+
+
+def _matches_task_model(query: str, model: Any) -> bool:
+    """Require a complete catalog spelling in the broad English task form."""
+    normalized = " ".join(query.casefold().split())
+    spellings = {" ".join(value.casefold().split()) for value in _spellings(model)}
+    candidates = _wrapper_candidates(normalized)
+    if unquoted := _unquote_once(normalized):
+        candidates |= _wrapper_candidates(unquoted)
+    return bool(candidates & spellings)
 
 
 def _tokens(value: str) -> list[str]:
@@ -65,15 +117,19 @@ def resolve_model_control(text: str, models: list[Any], *, model_name: str | Non
             break
     else:
         return result
+    task_form = "task_model" in match.groupdict()
     if model_name is not None:
         candidates = [model for model in models if model.name == model_name]
         if not candidates:
             candidates = [model for model in models if _matches(model_name, model)]
+    elif task_form:
+        candidates = [model for model in models if _matches_task_model(query, model)]
     else:
         candidates = [model for model in models if _matches(query, model)]
-    # "Use Python to ..." is an ordinary task. Unknown versioned or explicitly
-    # named models, however, must not fall through to a misleading model reply.
-    if not candidates and model_name is None and not re.search(r"\bv\d|模型|\bmodel\b", query, re.IGNORECASE):
+    # "Use ... to ..." also introduces ordinary methods and tools. Only a
+    # catalog match or a structured user choice makes it a model control.
+    # Keep the existing unavailable-name handling for the other control forms.
+    if not candidates and model_name is None and scope is None and (task_form or not re.search(r"\bv\d|模型|\bmodel\b", query, re.IGNORECASE)):
         return result
     offset = len(text) - len(text.lstrip()) + match.end()
     if match.groupdict().get("action") in {"处理", "计算", "回答", "分析", "生成", "写", "做"}:
