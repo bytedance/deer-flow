@@ -41,9 +41,13 @@ _SYNTHETIC_TOOL_CALL_ID_PREFIX = "deerflow_synthetic_tool_call_"
 
 # Middleware producers spell an absent provider ID differently: "" is the canonical
 # spelling, but ``str(tool_call.get("id", ""))`` yields "None" once the key is present
-# with a null value, and the artifact/deferred/knowledge middlewares fall back to
-# "missing_tool_call_id". They all answer the same call, so pairing treats them alike.
-_ABSENT_TOOL_CALL_ID_SPELLINGS = frozenset({"None", "missing_tool_call_id"})
+# with a null value, and producers fall back to their own sentinel otherwise:
+# "missing_tool_call_id" (artifact/deferred/knowledge/tool-error), "missing_id"
+# (sandbox-audit, guardrail), "missing-tool-call-id" (read-before-write) and
+# "missing-id" (harness-guard). They all answer the same call, so pairing treats them
+# alike. tests/test_null_tool_result_pairing.py scans producers so a new spelling
+# cannot drift out of this set unnoticed.
+_ABSENT_TOOL_CALL_ID_SPELLINGS = frozenset({"None", "missing_tool_call_id", "missing_id", "missing-tool-call-id", "missing-id"})
 
 
 def _canonical_tool_call_id(tool_call_id: object) -> object:
@@ -122,13 +126,42 @@ def _relabel_tool_call_ids(tool_calls: list, msg_index: int, source: str) -> tup
     return relabeled, assigned, changed
 
 
-def _turn_malformed_result_count(messages: list, start: int) -> int:
-    """Count the unpaired results issued by the turn opened at ``start``."""
+def _explicit_sentinel_ids(tool_calls: list[dict]) -> list[dict]:
+    """List a turn's *explicit* call ids that happen to read as a producer sentinel.
+
+    A provider may legitimately issue an opaque id such as ``"missing_id"``. A result
+    carrying that exact id answers that call, so it must be reserved for it before the
+    sentinel is read as "this call had no id" and offered to a null-id sibling. Each
+    entry keeps the call's name so a result naming a different tool is not reserved.
+    """
+    return [{"id": tc_id, "name": _tool_call_name(tc)} for tc in tool_calls if _valid_tool_call_id(tc_id := tc.get("id")) and _absent_tool_call_id(tc_id)]
+
+
+def _claim_explicit_id(explicit_ids: list[dict], result: ToolMessage) -> bool:
+    """Consume one exact explicit-id match for ``result``; True when it had one.
+
+    The match must also be name-compatible: a null-id call's result carries the same
+    sentinel string, and only its name tells it apart from the explicit call's result.
+    """
+    for position, entry in enumerate(explicit_ids):
+        if entry["id"] == result.tool_call_id and _names_can_pair(entry["name"], result.name):
+            del explicit_ids[position]
+            return True
+    return False
+
+
+def _turn_malformed_result_count(messages: list, start: int, explicit_ids: list[dict]) -> int:
+    """Count the unpaired results issued by the turn opened at ``start``.
+
+    Results claimed by an exact explicit-id match are already paired, so they do not
+    count towards the malformed calls' positional tie-break.
+    """
+    remaining = list(explicit_ids)
     count = 0
     for msg in messages[start + 1 :]:
         if getattr(msg, "type", None) == "ai":
             break
-        if isinstance(msg, ToolMessage) and _absent_tool_call_id(msg.tool_call_id):
+        if isinstance(msg, ToolMessage) and _absent_tool_call_id(msg.tool_call_id) and not _claim_explicit_id(remaining, msg):
             count += 1
     return count
 
@@ -422,6 +455,9 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         # Whether this turn's results line up 1:1 with its malformed calls, which is what
         # lets position break a tie between otherwise indistinguishable siblings.
         positional = False
+        # Explicit call ids in the current turn that share a sentinel's spelling, with
+        # how many exact-match results each may still claim.
+        explicit_ids: list[dict] = []
 
         for index, msg in enumerate(messages):
             if getattr(msg, "type", None) == "ai":
@@ -452,7 +488,8 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                     update[field] = {**additional_kwargs, "tool_calls": relabeled} if field == "additional_kwargs" else relabeled
 
                 open_calls = assigned
-                positional = _turn_malformed_result_count(messages, index) == len(assigned)
+                explicit_ids = _explicit_sentinel_ids(DanglingToolCallMiddleware._message_tool_calls(msg))
+                positional = _turn_malformed_result_count(messages, index, explicit_ids) == len(assigned)
                 if update:
                     rewritten[index] = msg.model_copy(update=update)
                 continue
@@ -461,6 +498,10 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
             # below keeps it instead of dropping it as an orphan. Results carrying a
             # producer sentinel are still unpaired — the sentinel is not the call's id.
             if not isinstance(msg, ToolMessage) or not _absent_tool_call_id(msg.tool_call_id):
+                continue
+            # An exact match against an explicit call id in this turn wins over the
+            # fallback reading: the result already pairs with that call as-is.
+            if _claim_explicit_id(explicit_ids, msg):
                 continue
             synthetic = _claim_synthetic_id(open_calls, msg, positional)
             if synthetic is not None:
