@@ -301,7 +301,204 @@ class TestWebSearchTool:
         finally:
             patcher.stop()
 
-        assert "unexpected response format" in parsed["error"]
+        assert parsed == {"error": "You.com returned an unexpected response format", "query": "test"}
+
+    @pytest.mark.parametrize(
+        ("payload", "leaked_value"),
+        [
+            ({"results": "upstream maintenance secret-marker"}, "secret-marker"),
+            ({"results": ["secret-list-item"]}, "secret-list-item"),
+            ({"results": 42}, None),
+            ({"results": {"web": 123}}, None),
+            ({"results": {"news": True}}, None),
+            ({"results": {"web": "upstream error page secret-web"}}, "secret-web"),
+            ({"results": {"news": {"error": "secret-quota"}}}, "secret-quota"),
+            ({"results": {"web": ["secret-junk", 123]}}, "secret-junk"),
+            ({"results": {"web": [], "news": ["secret-news-junk"]}}, "secret-news-junk"),
+            ({"results": [_web()]}, None),
+            ({"results": {"web": [_web()], "news": "secret-news-err"}}, "secret-news-err"),
+            ({"results": {"web": [_web()], "news": ["secret-news-bad"]}}, "secret-news-bad"),
+            ({"detail": "secret-quota-exceeded"}, "secret-quota-exceeded"),
+            ({"error": {"code": "rate_limit", "message": "secret-rate-err"}}, "secret-rate-err"),
+            ({"errors": ["secret-upstream-err"]}, "secret-upstream-err"),
+            ({"error_code": "secret-bad-gateway"}, "secret-bad-gateway"),
+            ({"message": "secret-service-err"}, "secret-service-err"),
+            ({"detail": "secret-null-results-err", "results": None}, "secret-null-results-err"),
+            ({"detail": "secret-empty-dict-err", "results": {}}, "secret-empty-dict-err"),
+            ({"detail": "secret-empty-web-err", "results": {"web": []}}, "secret-empty-web-err"),
+            ({"error": "secret-empty-both-err", "results": {"web": [], "news": []}}, "secret-empty-both-err"),
+            ({"message": "secret-null-sections-err", "results": {"web": None, "news": None}}, "secret-null-sections-err"),
+        ],
+        ids=[
+            "results-str",
+            "results-list",
+            "results-int",
+            "web-int-non-iterable",
+            "news-bool-non-iterable",
+            "web-str",
+            "news-dict",
+            "web-no-objects",
+            "news-no-objects-with-empty-web",
+            "results-list-of-objects",
+            "valid-web-malformed-news-str",
+            "valid-web-news-no-objects",
+            "error-envelope-detail",
+            "error-envelope-error",
+            "error-envelope-errors",
+            "error-envelope-error-code",
+            "error-envelope-message",
+            "error-envelope-detail-with-null-results",
+            "error-envelope-detail-with-empty-results-dict",
+            "error-envelope-detail-with-empty-web",
+            "error-envelope-error-with-empty-sections",
+            "error-envelope-message-with-null-sections",
+        ],
+    )
+    async def test_malformed_containers_return_format_error_without_leaking_payload(
+        self,
+        payload,
+        leaked_value,
+        mock_config_with_key,
+        caplog,
+    ):
+        patcher, _ = _patch_get(_make_response(payload))
+        try:
+            from deerflow.community.youcom.tools import web_search_tool
+
+            with caplog.at_level(logging.ERROR, logger="deerflow.community.youcom.tools"):
+                raw = await web_search_tool.ainvoke({"query": "test"})
+        finally:
+            patcher.stop()
+
+        parsed = json.loads(raw)
+        assert parsed == {"error": "You.com returned an unexpected response format", "query": "test"}
+        assert any(record.levelno >= logging.ERROR for record in caplog.records)
+        if leaked_value is not None:
+            assert leaked_value not in caplog.text
+            assert leaked_value not in raw
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"metadata": {"latency": 0.1}},
+            {"results": None},
+            {"error": None, "results": None},
+            {"detail": "", "results": {"web": []}},
+            {"error": None, "results": {}},
+            {"results": {}},
+            {"results": {"web": None, "news": None}},
+        ],
+        ids=[
+            "metadata-only",
+            "results-null",
+            "falsy-error-and-results-null",
+            "falsy-detail-and-empty-web",
+            "falsy-error-and-empty-results-dict",
+            "results-empty-dict",
+            "sections-null",
+        ],
+    )
+    async def test_null_or_empty_containers_remain_empty_search(self, payload, mock_config_with_key):
+        patcher, _ = _patch_get(_make_response(payload))
+        try:
+            from deerflow.community.youcom.tools import web_search_tool
+
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
+        finally:
+            patcher.stop()
+
+        assert parsed == {"error": "No results found", "query": "test"}
+
+    async def test_valid_results_with_top_level_message_still_return_results(self, mock_config_with_key):
+        payload = {"message": "ok", "results": {"web": [_web(url="https://ex.com/w1", title="W1")]}}
+        patcher, _ = _patch_get(_make_response(payload))
+        try:
+            from deerflow.community.youcom.tools import web_search_tool
+
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
+        finally:
+            patcher.stop()
+
+        assert [r["title"] for r in parsed] == ["W1"]
+
+    async def test_mixed_section_entries_preserve_valid_objects_and_warn(self, mock_config_with_key, caplog):
+        payload = {
+            "results": {
+                "web": [_web(url="https://ex.com/w1", title="W1"), "secret-skipped-web"],
+                "news": [123, {"url": "https://ex.com/n1", "title": "N1", "description": "news-d"}],
+            }
+        }
+        patcher, _ = _patch_get(_make_response(payload))
+        try:
+            from deerflow.community.youcom.tools import web_search_tool
+
+            with caplog.at_level(logging.WARNING, logger="deerflow.community.youcom.tools"):
+                raw = await web_search_tool.ainvoke({"query": "test"})
+        finally:
+            patcher.stop()
+
+        parsed = json.loads(raw)
+        assert [r["title"] for r in parsed] == ["W1", "N1"]
+        assert "results.web[1]" in caplog.text
+        assert "results.news[0]" in caplog.text
+        assert "secret-skipped-web" not in caplog.text
+        assert "secret-skipped-web" not in raw
+
+    @pytest.mark.parametrize(
+        ("body_bytes", "content_type"),
+        [
+            (b"<html>secret-proxy-body</html>", "text/html; charset=utf-8"),
+            ("<html>café secret-proxy-body</html>".encode("iso-8859-1"), "text/html; charset=iso-8859-1"),
+            (b'{"results":{"web":[]},"count":' + b"9" * 5000 + b"}", "application/json"),
+        ],
+        ids=["utf-8-html", "iso-8859-1-html", "int-digit-limit-json"],
+    )
+    async def test_non_json_200_response_returns_format_error_without_leaking_body(
+        self,
+        body_bytes,
+        content_type,
+        mock_config_with_key,
+        caplog,
+    ):
+        real_async_client = httpx.AsyncClient
+        transport = httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                content=body_bytes,
+                headers={"content-type": content_type},
+            )
+        )
+        with patch(
+            "deerflow.community.youcom.tools.httpx.AsyncClient",
+            side_effect=lambda **kwargs: real_async_client(transport=transport, **kwargs),
+        ):
+            from deerflow.community.youcom.tools import web_search_tool
+
+            with caplog.at_level(logging.ERROR, logger="deerflow.community.youcom.tools"):
+                raw = await web_search_tool.ainvoke({"query": "test"})
+
+        parsed = json.loads(raw)
+        assert parsed == {"error": "You.com returned an unexpected response format", "query": "test"}
+        assert any(record.levelno >= logging.ERROR for record in caplog.records)
+        assert "secret-proxy-body" not in caplog.text
+        assert "secret-proxy-body" not in raw
+        assert "Expecting value" not in raw
+        assert "codec" not in raw
+        assert "codec" not in caplog.text
+        assert "Exceeds the limit" not in raw
+        assert "Exceeds the limit" not in caplog.text
+
+    async def test_request_value_error_stays_on_generic_error_path(self, mock_config_with_key):
+        patcher, mock_client_cls = _patch_get(MagicMock())
+        mock_client_cls.return_value.__aenter__.return_value.get.side_effect = ValueError("invalid proxy URL")
+        try:
+            from deerflow.community.youcom.tools import web_search_tool
+
+            parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
+        finally:
+            patcher.stop()
+
+        assert parsed == {"error": "invalid proxy URL", "query": "test"}
 
     async def test_partial_fields_default_to_empty_string(self, mock_config_with_key):
         patcher, _ = _patch_get(_make_response({"results": {"web": [{}]}}))
