@@ -81,6 +81,12 @@ Cases marked for real Compose run only when a `docker` CLI is installed.
   process-local, so launchers keep `WEB_CONCURRENCY` unset or `1`.
 - **The multi-instance dev harness keeps IM channels disabled** unless asked.
   Credentials saved through the UI could otherwise connect a real bot later.
+- **`wait-for-port.sh` does not contain a `coproc` command.** Bash parses the
+  whole file, and macOS `/bin/bash` 3.2 has no `coproc`. Bash 4 and newer source
+  `wait-for-port-bash4.sh`. Older bash waits on each probe and arms a sleeper
+  for the whole seconds still left. It signals the probe's process group only
+  when that group is the probe's own and not the parent's, on the deadline and
+  on exit, INT, or TERM. The sleeper is killed by pid.
 
 ## Checks and analysis
 

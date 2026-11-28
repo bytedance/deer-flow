@@ -75,6 +75,9 @@ _SCRIPT_REFERENCE = re.compile(r"\S*[\w.-]+\.sh\b")
 # A script name inside a usage string or hint is prose, not an invocation.
 _MESSAGE_COMMAND = re.compile(r"\b(echo|printf|cat)\b")
 _SERVE_MODE_FLAG = re.compile(r"--(?:dev|prod|daemon)\b")
+# `source` and `.` read the file in the current shell. They need read
+# permission, not the executable bit that `bash script.sh` is there to avoid.
+_SOURCE_COMMAND = re.compile(r"(?:^|[;&|]\s*)(?:source|\.)\s+[\"']?$")
 
 
 def test_start_daemon_wrapper_uses_production_mode() -> None:
@@ -114,6 +117,8 @@ def _sibling_script_invocations() -> list[tuple[str, int, str]]:
                 if reference.endswith(script.name):  # usage string / log prefix
                     continue
                 if _MESSAGE_COMMAND.search(before):  # a hint printed to the user
+                    continue
+                if _SOURCE_COMMAND.search(before):
                     continue
                 if not re.search(r"\bbash\s+$", before):
                     found.append((script.name, number, line))
