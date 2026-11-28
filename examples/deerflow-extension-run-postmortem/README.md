@@ -58,6 +58,20 @@ holds no credentials and no network code of its own. A run the caller does not
 own answers `{"not_found": true}` rather than an error, and the action route's
 principal binding is the same one the HTTP routes use.
 
+
+### Compare two runs
+
+A **base run ID** next to the head run makes the page a run-over-run view: the
+same verdict-shaped comparison as `GET /comparisons/{thread_id}?base_run_id=…&head_run_id=…`
+(and its `/markdown` form). It reports status and stop-reason changes, anomaly
+codes added or resolved, counter deltas (messages, tool results, tool failures,
+subagents, events) and event types that appeared or disappeared. Both runs are
+owner-checked; a comparison over someone else's run answers `404`.
+
+The Markdown form is the document to attach when asking "what changed between
+the last two scheduled runs?". Comparing a run with itself reads it once and
+returns a zero-delta report.
+
 ## Install and configure
 
 From the DeerFlow checkout root:

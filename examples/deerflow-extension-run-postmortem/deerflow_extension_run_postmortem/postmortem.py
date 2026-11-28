@@ -411,3 +411,156 @@ def render_markdown(postmortem: Postmortem) -> str:
     lines.extend(f"- {caveat}" for caveat in postmortem.caveats)
     lines.extend(["", f"_snapshot `{postmortem.snapshot_ref}` · revision `{postmortem.evidence_revision}`_", ""])
     return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class MetricDelta:
+    """One counter compared between two runs."""
+
+    name: str
+    base: int
+    head: int
+
+    @property
+    def delta(self) -> int:
+        return self.head - self.base
+
+
+@dataclass(frozen=True)
+class RunComparison:
+    """Two runs of the same thread, compared on the evidence they retain."""
+
+    thread_id: str
+    base: Postmortem
+    head: Postmortem
+    anomalies_added: tuple[str, ...] = ()
+    anomalies_removed: tuple[str, ...] = ()
+    new_event_types: tuple[str, ...] = ()
+    gone_event_types: tuple[str, ...] = ()
+    metrics: tuple[MetricDelta, ...] = ()
+
+    @property
+    def status_changed(self) -> bool:
+        return self.base.status != self.head.status
+
+    @property
+    def stop_reason_changed(self) -> bool:
+        return self.base.stop_reason != self.head.stop_reason
+
+    @property
+    def delivery_changed(self) -> bool:
+        return self.base.delivery.satisfied != self.head.delivery.satisfied
+
+    @property
+    def verdict(self) -> str:
+        """One line an operator can read before the tables."""
+        parts = [f"{self.base.run_id} ({self.base.status or 'unknown'}) → {self.head.run_id} ({self.head.status or 'unknown'})"]
+        if self.status_changed:
+            parts.append(f"status {self.base.status or 'unknown'} → {self.head.status or 'unknown'}")
+        if self.anomalies_added:
+            parts.append(f"new anomalies: {', '.join(self.anomalies_added)}")
+        if self.anomalies_removed:
+            parts.append(f"resolved anomalies: {', '.join(self.anomalies_removed)}")
+        changed = [metric for metric in self.metrics if metric.delta]
+        if changed:
+            parts.append("counter changes: " + ", ".join(f"{metric.name} {metric.delta:+d}" for metric in changed))
+        return "; ".join(parts) + "."
+
+
+def compare_postmortems(base: Postmortem, head: Postmortem) -> RunComparison:
+    """Compare two reports from the same thread.
+
+    Only what both reports retain is compared: anomaly codes, event types and
+    counters. The evidence caveats of both runs stay attached so a difference
+    caused by a bounded or partial read is not mistaken for a regression.
+    """
+    if base.thread_id != head.thread_id:
+        raise ValueError("Runs from different threads cannot be compared")
+    base_codes = {anomaly.code for anomaly in base.anomalies}
+    head_codes = {anomaly.code for anomaly in head.anomalies}
+    base_types = set(base.counts_by_type)
+    head_types = set(head.counts_by_type)
+    return RunComparison(
+        thread_id=base.thread_id,
+        base=base,
+        head=head,
+        anomalies_added=tuple(sorted(head_codes - base_codes)),
+        anomalies_removed=tuple(sorted(base_codes - head_codes)),
+        new_event_types=tuple(sorted(head_types - base_types)),
+        gone_event_types=tuple(sorted(base_types - head_types)),
+        metrics=(
+            MetricDelta("events", base.events_read, head.events_read),
+            MetricDelta("user_messages", base.message_counts.get("user", 0), head.message_counts.get("user", 0)),
+            MetricDelta("assistant_messages", base.message_counts.get("assistant", 0), head.message_counts.get("assistant", 0)),
+            MetricDelta("tool_results", base.message_counts.get("tool_results", 0), head.message_counts.get("tool_results", 0)),
+            MetricDelta("tool_failures", base.tool_failures, head.tool_failures),
+            MetricDelta("subagents_started", base.subagents_started, head.subagents_started),
+            MetricDelta("subagents_ended", base.subagents_ended, head.subagents_ended),
+        ),
+    )
+
+
+def comparison_to_dict(comparison: RunComparison) -> dict[str, Any]:
+    """JSON-safe projection for the HTTP surface."""
+    return {
+        "thread_id": comparison.thread_id,
+        "base_run_id": comparison.base.run_id,
+        "head_run_id": comparison.head.run_id,
+        "base_status": comparison.base.status,
+        "head_status": comparison.head.status,
+        "base_stop_reason": comparison.base.stop_reason,
+        "head_stop_reason": comparison.head.stop_reason,
+        "status_changed": comparison.status_changed,
+        "stop_reason_changed": comparison.stop_reason_changed,
+        "delivery_changed": comparison.delivery_changed,
+        "verdict": comparison.verdict,
+        "anomalies_added": list(comparison.anomalies_added),
+        "anomalies_removed": list(comparison.anomalies_removed),
+        "new_event_types": list(comparison.new_event_types),
+        "gone_event_types": list(comparison.gone_event_types),
+        "metrics": [{"name": metric.name, "base": metric.base, "head": metric.head, "delta": metric.delta} for metric in comparison.metrics],
+        "caveats": sorted({*comparison.base.caveats, *comparison.head.caveats}),
+    }
+
+
+def render_comparison_markdown(comparison: RunComparison) -> str:
+    """Render the comparison as a shareable Markdown document."""
+    base, head = comparison.base, comparison.head
+    lines = [
+        f"# Run comparison — `{comparison.thread_id}`",
+        "",
+        comparison.verdict,
+        "",
+        "## Overview",
+        "",
+        "| Field | Base | Head |",
+        "| --- | --- | --- |",
+        f"| Run | `{base.run_id}` | `{head.run_id}` |",
+        f"| Status | {base.status or '-'} | {head.status or '-'} |",
+        f"| Stop reason | {base.stop_reason or '-'} | {head.stop_reason or '-'} |",
+        f"| Evidence | {base.seal_state or '-'} ({base.events_read}/{base.events_total}) | {head.seal_state or '-'} ({head.events_read}/{head.events_total}) |",
+        f"| Delivery | {base.delivery.satisfied if base.delivery.satisfied is not None else '-'} | {head.delivery.satisfied if head.delivery.satisfied is not None else '-'} |",
+        "",
+        "## Anomalies",
+        "",
+    ]
+    if comparison.anomalies_added:
+        lines.extend(f"- added: **{code}**" for code in comparison.anomalies_added)
+    if comparison.anomalies_removed:
+        lines.extend(f"- resolved: {code}" for code in comparison.anomalies_removed)
+    if not comparison.anomalies_added and not comparison.anomalies_removed:
+        lines.append("No anomaly-code changes between the two runs.")
+    lines.extend(["", "## Counters", "", "| Counter | Base | Head | Δ |", "| --- | --- | --- | --- |"])
+    for metric in comparison.metrics:
+        lines.append(f"| {metric.name} | {metric.base} | {metric.head} | {metric.delta:+d} |")
+    lines.extend(["", "## Event types", ""])
+    if comparison.new_event_types:
+        lines.append("- new: " + ", ".join(f"`{event_type}`" for event_type in comparison.new_event_types))
+    if comparison.gone_event_types:
+        lines.append("- gone: " + ", ".join(f"`{event_type}`" for event_type in comparison.gone_event_types))
+    if not comparison.new_event_types and not comparison.gone_event_types:
+        lines.append("The two runs recorded the same event types.")
+    lines.extend(["", "## Evidence caveats", ""])
+    lines.extend(f"- {caveat}" for caveat in sorted({*base.caveats, *head.caveats}))
+    lines.extend(["", f"_base `{base.snapshot_ref}` · head `{head.snapshot_ref}`_", ""])
+    return "\n".join(lines)

@@ -21,6 +21,10 @@
         {
           "title": "先看异常再读时间线",
           "description": "anomalies 汇总部分封存、错误事件、护栏触发、交付未完成、工具失败与证据截断；timeline 则是按事件序号展开的执行轨迹。"
+        },
+        {
+          "title": "对比两次运行",
+          "description": "在页面填入基线运行与当前运行 ID 后对比：状态、异常增删、计数变化与新出现的事件类型。"
         }
       ],
       "requirements": [
@@ -47,6 +51,10 @@
         {
           "title": "Read anomalies before the timeline",
           "description": "anomalies summarizes partial sealing, error events, guardrail hits, incomplete delivery, tool failures and truncated evidence; timeline expands the run by event sequence."
+        },
+        {
+          "title": "Compare two runs",
+          "description": "Enter a base run and a head run on the page to compare status, added and resolved anomalies, counter changes and new event types."
         }
       ],
       "requirements": [

@@ -25,7 +25,16 @@ from deerflow_extension_api.plugins import ActionContext, BackendAction
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 
-from deerflow_extension_run_postmortem.postmortem import Postmortem, build_postmortem, render_markdown, to_dict
+from deerflow_extension_run_postmortem.postmortem import (
+    Postmortem,
+    RunComparison,
+    build_postmortem,
+    compare_postmortems,
+    comparison_to_dict,
+    render_comparison_markdown,
+    render_markdown,
+    to_dict,
+)
 
 DEFAULT_MAX_EVENTS = 200
 MAX_EVENTS = 2000
@@ -77,6 +86,17 @@ class PostmortemService:
         limits = EvidenceLimits(max_events=max_events)
         snapshot = await evidence.get_snapshot(thread_id=thread_id, run_id=run_id, limits=limits)
         return build_postmortem(snapshot, await self._read_events(evidence, snapshot, limits), max_events=max_events)
+
+    async def comparison(self, *, thread_id: str, base_run_id: str, head_run_id: str, max_events: int = DEFAULT_MAX_EVENTS) -> RunComparison:
+        """Compare two runs of one thread from their own reports.
+
+        The same run id on both sides reuses one report: evidence revisions move
+        as a run completes, so reading it twice can report a status change for a
+        run that did not change.
+        """
+        base = await self.postmortem(thread_id=thread_id, run_id=base_run_id, max_events=max_events)
+        head = base if head_run_id == base_run_id else await self.postmortem(thread_id=thread_id, run_id=head_run_id, max_events=max_events)
+        return compare_postmortems(base, head)
 
     async def latest_run(self, *, thread_id: str, user_id: str, candidate_limit: int = 20, page_limit: int = 3) -> dict[str, Any]:
         """Latest run this caller owns on the thread, from the changed-run feed.
@@ -190,6 +210,24 @@ def build_router(service: PostmortemService):
     async def health() -> dict[str, Any]:
         return {"ready": service.ready, "max_events": MAX_EVENTS}
 
+    async def _comparison(request: Request, thread_id: str, base_run_id: str, head_run_id: str, max_events: int) -> RunComparison:
+        principal = _principal(request)
+        await _require_visible_run(request, thread_id, base_run_id)
+        await _require_visible_run(request, thread_id, head_run_id)
+        comparison = await service.comparison(thread_id=thread_id, base_run_id=base_run_id, head_run_id=head_run_id, max_events=max_events)
+        if comparison.base.owner_id != principal.user_id or comparison.head.owner_id != principal.user_id:
+            raise PostmortemError("NOT_FOUND", "one of the runs is not visible to this caller")
+        return comparison
+
+    @router.get("/comparisons/{thread_id}")
+    async def compare(request: Request, thread_id: str, base_run_id: str, head_run_id: str, max_events: int = Query(DEFAULT_MAX_EVENTS, ge=1, le=MAX_EVENTS)) -> dict[str, Any]:
+        return comparison_to_dict(await _guard(_comparison(request, thread_id, base_run_id, head_run_id, max_events)))
+
+    @router.get("/comparisons/{thread_id}/markdown", response_class=PlainTextResponse)
+    async def compare_markdown(request: Request, thread_id: str, base_run_id: str, head_run_id: str, max_events: int = Query(DEFAULT_MAX_EVENTS, ge=1, le=MAX_EVENTS)) -> PlainTextResponse:
+        comparison = await _guard(_comparison(request, thread_id, base_run_id, head_run_id, max_events))
+        return PlainTextResponse(render_comparison_markdown(comparison), media_type="text/markdown")
+
     @router.get("/runs/{thread_id}/{run_id}")
     async def report(request: Request, thread_id: str, run_id: str, max_events: int = Query(DEFAULT_MAX_EVENTS, ge=1, le=MAX_EVENTS)) -> dict[str, Any]:
         return to_dict(await _guard(_report(request, thread_id, run_id, max_events)))
@@ -252,7 +290,23 @@ def build_actions(service: PostmortemService) -> tuple[BackendAction, ...]:
             return {"not_found": True}
         return {"markdown": render_markdown(postmortem), "filename": f"postmortem-{postmortem.run_id}.md"}
 
-    return (BackendAction("latest", latest), BackendAction("report", report), BackendAction("markdown", markdown))
+    async def compare(payload: Mapping[str, Any], context: ActionContext) -> dict[str, Any]:
+        try:
+            comparison = await service.comparison(
+                thread_id=_text_field(payload, "thread_id"),
+                base_run_id=_text_field(payload, "base_run_id"),
+                head_run_id=_text_field(payload, "head_run_id"),
+                max_events=_max_events_field(payload),
+            )
+        except HostCapabilityError as exc:
+            if exc.code in {"NOT_FOUND", "NOT_FOUND_OR_FORBIDDEN"}:
+                return {"not_found": True}
+            raise
+        if comparison.base.owner_id != context.principal.user_id or comparison.head.owner_id != context.principal.user_id:
+            return {"not_found": True}
+        return comparison_to_dict(comparison)
+
+    return (BackendAction("latest", latest), BackendAction("report", report), BackendAction("markdown", markdown), BackendAction("compare", compare))
 
 
 __all__ = ["DEFAULT_MAX_EVENTS", "MAX_EVENTS", "PostmortemError", "PostmortemService", "build_actions", "build_router"]

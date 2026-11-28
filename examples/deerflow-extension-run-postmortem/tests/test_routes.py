@@ -141,3 +141,28 @@ def test_a_visible_run_proceeds_through_the_reader_branch():
 
     assert response.status_code == 200
     assert evidence.snapshot_calls == 1
+
+
+def test_compare_route_returns_the_delta():
+    response = client_for(FakeEvidence()).get("/api/extension-run-postmortem/comparisons/t1?base_run_id=r1&head_run_id=r2")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["base_run_id"] == "r1"
+    assert body["head_run_id"] == "r2"
+    assert body["metrics"]
+    assert body["verdict"]
+
+
+def test_compare_markdown_route_returns_a_document():
+    response = client_for(FakeEvidence()).get("/api/extension-run-postmortem/comparisons/t1/markdown?base_run_id=r1&head_run_id=r2")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/markdown")
+    assert response.text.startswith("# Run comparison — `t1`")
+
+
+def test_compare_route_refuses_another_owners_runs():
+    response = client_for(FakeEvidence(owner="bob")).get("/api/extension-run-postmortem/comparisons/t1?base_run_id=r1&head_run_id=r2")
+
+    assert response.status_code == 404
