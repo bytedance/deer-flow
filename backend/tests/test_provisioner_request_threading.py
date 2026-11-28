@@ -272,6 +272,93 @@ def test_bash_capacity_already_exists_race_reads_winning_pod(monkeypatch, provis
     assert core.created_pods == []
 
 
+def test_lost_pod_race_rollback_keeps_the_winning_pod(monkeypatch, provisioner_module):
+    """Pod-409 plus Service-non-409 is a lost race, not a failed create.
+
+    The Pod belongs to the replica that won the race and may already be serving
+    commands, so this request's rollback must leave it alone (#8699).
+    """
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    # The concurrent creator's Pod is already registered in the cluster.
+    core.pod_shell_capacities["sandbox-race"] = 10
+    deleted_pods: list[str] = []
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: None)
+    monkeypatch.setattr(core, "create_namespaced_pod", MagicMock(side_effect=ApiException(status=409)))
+    monkeypatch.setattr(
+        core,
+        "create_namespaced_service",
+        MagicMock(side_effect=ApiException(status=503, reason="admission webhook timeout")),
+    )
+    monkeypatch.setattr(core, "delete_namespaced_pod", lambda name, _namespace: deleted_pods.append(name))
+
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-race"))
+
+    assert error.value.status_code == 500
+    assert "Service creation failed" in error.value.detail
+    assert deleted_pods == []
+    assert core.pod_shell_capacities["sandbox-race"] == 10
+
+
+def test_service_failure_rolls_back_the_pod_this_request_created(monkeypatch, provisioner_module):
+    """A Pod this request created is still rolled back when the Service fails."""
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    deleted_pods: list[str] = []
+    real_delete = core.delete_namespaced_pod
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        core,
+        "create_namespaced_service",
+        MagicMock(side_effect=ApiException(status=503, reason="quota exceeded")),
+    )
+
+    def delete_pod(name: str, namespace: str, body=None) -> None:
+        deleted_pods.append(name)
+        real_delete(name, namespace, body)
+
+    monkeypatch.setattr(core, "delete_namespaced_pod", delete_pod)
+
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-orphan"))
+
+    assert error.value.status_code == 500
+    assert deleted_pods == ["sandbox-sandbox-orphan"]
+    # The delete must carry the UID of the Pod this request created, otherwise a
+    # replacement Pod swapped in under the same name dies with it.
+    assert core.pod_delete_bodies[0].preconditions.uid == "uid-sandbox-orphan-1"
+    assert "sandbox-orphan" not in core.pod_shell_capacities
+    assert "sandbox-orphan" not in core.service_sandboxes
+
+
+def test_service_commit_after_error_keeps_the_created_pod(monkeypatch, provisioner_module):
+    """A 503 can arrive after the Service write committed.
+
+    The Service is then readable and the Pod is still its backend, so cleanup
+    must leave the pair alone for the next request to adopt instead of deleting
+    a Pod that is already serving.
+    """
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    core.service_sandboxes.add("sandbox-half")
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "_sandbox_access_url", lambda *_a, **_kw: None)
+    monkeypatch.setattr(
+        core,
+        "create_namespaced_service",
+        MagicMock(side_effect=ApiException(status=503, reason="admission webhook timeout")),
+    )
+
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-half"))
+
+    assert error.value.status_code == 500
+    assert "Service creation failed" in error.value.detail
+    assert core.created_pods == ["sandbox-half"]
+    assert core.pod_delete_bodies == []
+    assert core.pod_shell_capacities["sandbox-half"] == 10
+
+
 def test_broker_request_without_image_cannot_mount_credentials(monkeypatch, provisioner_module):
     core = _RecordingCoreV1(event_loop_thread_id=-1)
     monkeypatch.setattr(provisioner_module, "core_v1", core)
@@ -600,6 +687,7 @@ class _RecordingCoreV1:
         self.created_pods: list[str] = []
         self.created_pod_specs: dict[str, object] = {}
         self.created_services: list[str] = []
+        self.pod_delete_bodies: list[object] = []
 
     def _record_k8s_call(self) -> None:
         thread_id = threading.get_ident()
@@ -646,13 +734,16 @@ class _RecordingCoreV1:
             ),
         )
 
-    def create_namespaced_pod(self, _namespace: str, pod) -> None:
+    def create_namespaced_pod(self, _namespace: str, pod):
         self._record_k8s_call()
         sandbox_id = pod.metadata.labels["sandbox-id"]
         self.created_pods.append(sandbox_id)
         self.created_pod_specs[sandbox_id] = pod
         env = {item.name: item.value for item in (pod.spec.containers[0].env or [])}
         self.pod_shell_capacities[sandbox_id] = int(env.get("MAX_SHELL_SESSIONS", "10"))
+        # Mirrors the real API: the create response carries the UID a rollback
+        # must match, which the name alone cannot provide.
+        return SimpleNamespace(metadata=SimpleNamespace(uid=f"uid-{sandbox_id}-{len(self.created_pods)}"))
 
     def create_namespaced_service(self, _namespace: str, service) -> None:
         self._record_k8s_call()
@@ -664,8 +755,9 @@ class _RecordingCoreV1:
         self._record_k8s_call()
         self.service_sandboxes.discard(_sandbox_id_from_service_name(_name))
 
-    def delete_namespaced_pod(self, _name: str, _namespace: str) -> None:
+    def delete_namespaced_pod(self, _name: str, _namespace: str, body=None) -> None:
         self._record_k8s_call()
+        self.pod_delete_bodies.append(body)
         self.pod_shell_capacities.pop(_name[len("sandbox-") :], None)
 
     def list_namespaced_service(self, _namespace: str, *, label_selector: str):
