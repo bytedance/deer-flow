@@ -2635,7 +2635,14 @@ export function useThreadStream({
         completedRunIdsRef.current.add(run.run_id);
       }
       settleActiveRunRejoin();
-      listeners.current.onFinish?.(state.values);
+      // The SDK calls this inside its stream `try`: a throw from the page's
+      // listener would report the finished run as a stream error and skip
+      // the bookkeeping below.
+      try {
+        listeners.current.onFinish?.(state.values);
+      } catch (error) {
+        console.error("Thread onFinish listener failed:", error);
+      }
       pendingPreparedReplayRef.current = null;
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current

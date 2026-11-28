@@ -6,13 +6,21 @@ type NotificationInstance = {
   close: () => void;
 };
 
+// Chrome for Android's message for `new Notification()`.
+const ANDROID_CONSTRUCTOR_ERROR =
+  "Failed to construct 'Notification': Illegal constructor. Use ServiceWorkerRegistration.showNotification() instead.";
+
 async function loadNotificationHook({
   browserPermission = "granted",
   hookPermission = "granted",
+  failingConstructions = 0,
 }: {
   browserPermission?: NotificationPermission;
   hookPermission?: NotificationPermission;
+  /** How many constructions throw before one succeeds. */
+  failingConstructions?: number;
 } = {}) {
+  let remainingFailures = failingConstructions;
   const notifications: Array<{
     title: string;
     options: NotificationOptions | undefined;
@@ -31,6 +39,10 @@ async function loadNotificationHook({
     close = rs.fn();
 
     constructor(title: string, options?: NotificationOptions) {
+      if (remainingFailures > 0) {
+        remainingFailures -= 1;
+        throw new TypeError(ANDROID_CONSTRUCTOR_ERROR);
+      }
       notifications.push({ title, options, instance: this });
     }
   }
@@ -77,6 +89,7 @@ async function loadNotificationHook({
 }
 
 afterEach(() => {
+  rs.restoreAllMocks();
   rs.doUnmock("react");
   rs.doUnmock("@/core/settings");
   rs.unstubAllGlobals();
@@ -104,6 +117,38 @@ describe("useNotification", () => {
 
     expect(notifications.map((notification) => notification.title)).toEqual([
       "First",
+    ]);
+  });
+
+  test("keeps a constructor failure inside the hook", async () => {
+    const { notifications, useNotification } = await loadNotificationHook({
+      failingConstructions: 1,
+    });
+    const warn = rs.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { showNotification } = useNotification();
+
+    expect(() => showNotification("Finished")).not.toThrow();
+
+    expect(notifications).toHaveLength(0);
+    expect(warn).toHaveBeenCalledWith(
+      "Notification could not be created:",
+      expect.objectContaining({ message: ANDROID_CONSTRUCTOR_ERROR }),
+    );
+  });
+
+  test("does not start the rate limit with a notification that was not created", async () => {
+    const { notifications, useNotification } = await loadNotificationHook({
+      failingConstructions: 1,
+    });
+    rs.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { showNotification } = useNotification();
+
+    showNotification("Failed");
+    showNotification("Created");
+    showNotification("Too soon");
+
+    expect(notifications.map((notification) => notification.title)).toEqual([
+      "Created",
     ]);
   });
 

@@ -39,6 +39,10 @@ pnpm test:e2e                    # Playwright, for anything that depends on a re
   switch.
 - **No timers during render.** Streamed tool updates re-render often. Schedule
   timers in an effect with cleanup.
+- **`onFinish` runs inside the SDK's stream `try`.** A throw from it reports
+  the finished run as a stream error, so `useThreadStream` contains its page
+  listener. Browser APIs such as `new Notification()` can throw even after
+  feature detection, so keep their failures inside the caller.
 - **Queue and Steer.** Release a rejected attempt only after an HTTP 409 with no
   recovered receipt. After an uncertain failure keep its run, request ID and
   draft, because the server may have accepted the input.

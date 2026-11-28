@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { mockLangGraphAPI } from "./utils/mock-api";
+import { MOCK_THREAD_ID, mockLangGraphAPI } from "./utils/mock-api";
 
 declare global {
   interface Window {
@@ -44,6 +44,24 @@ async function installNotificationMock(
       value: MockNotification,
     });
   }, initialPermission);
+}
+
+// Chrome for Android exposes the API and grants permission, but its
+// constructor throws: only a service worker can create a notification there.
+async function refuseNotificationConstruction(page: Page) {
+  await page.addInitScript(() => {
+    function RefusingNotification(): never {
+      throw new TypeError(
+        "Failed to construct 'Notification': Illegal constructor. Use ServiceWorkerRegistration.showNotification() instead.",
+      );
+    }
+    // Keep the installed mock's permission and requestPermission.
+    Object.setPrototypeOf(RefusingNotification, window.Notification);
+    Object.defineProperty(window, "Notification", {
+      configurable: true,
+      value: RefusingNotification,
+    });
+  });
 }
 
 async function openNotificationSettings(page: Page) {
@@ -111,5 +129,41 @@ test.describe("Notification settings", () => {
           body: "Hello from DeerFlow!",
         },
       ]);
+  });
+
+  test("keeps a chat finished when the browser cannot create the notification", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [{ thread_id: MOCK_THREAD_ID, title: "Settled chat" }],
+    });
+    await installNotificationMock(page, "granted");
+    await refuseNotificationConstruction(page);
+    await page.addInitScript(() => {
+      Document.prototype.hasFocus = () => false;
+    });
+    const warnings: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "warning") warnings.push(message.text());
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+    await textarea.fill("Run a one minute task");
+    await textarea.press("Enter");
+
+    // The hook reports the refused notification instead of throwing into
+    // the run's completion callback, which would show a stream error.
+    await expect
+      .poll(() =>
+        warnings.some((warning) =>
+          warning.startsWith("Notification could not be created:"),
+        ),
+      )
+      .toBe(true);
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible();
+    await expect(page.locator("[data-sonner-toast]")).toHaveCount(0);
   });
 });
