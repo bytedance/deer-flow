@@ -1,6 +1,5 @@
 import base64
 import errno
-import fnmatch
 import json
 import logging
 import math
@@ -19,7 +18,7 @@ from deerflow.sandbox.command_scope import COMMAND_OWNER_ENV, CommandScopeCancel
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
 from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.read_file_contract import slice_file_lines
-from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
+from deerflow.sandbox.remote_list_dir import parse_remote_find_output, parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import (
     GrepMatch,
@@ -50,45 +49,18 @@ _BASH_EXEC_UNSUPPORTED_ERROR = (
     "e.g. pin the tag `1.11.0`) and recreate the sandbox container, then try again."
 )
 
-_GLOB_METACHARACTERS = frozenset("*?[]{}")
 
+def _pattern_name_glob(pattern: str) -> str:
+    """Return the basename of a glob pattern for a server-side ``find -name``.
 
-def _pattern_file_types(pattern: str) -> list[str] | None:
-    """Return a server-side extension filter for a glob pattern, if it has one.
-
-    The listing endpoint takes no pattern, so the 404 fallback for images
-    without ``/v1/file/glob`` walks the whole search root. When the basename
-    pattern ends in a literal ``.<extension>`` and cannot match a name made
-    only of dots followed by that extension, every match is reported with the
-    extension, so ``file_types`` can be pushed and unrelated files stay in the
-    sandbox. Files that share the extension, and every directory entry, still
-    transfer: the endpoint has no result limit. Wildcard extensions (``*.*``,
-    ``*.[jt]s``) are not derivable and return ``None``; the caller then falls
-    back to the full listing.
-
-    A name made only of dots and the extension (``.csv``) is the case that
-    breaks that assumption: the listing endpoint reports it with no extension,
-    while ``path_matches`` accepts it for ``*.csv``. Pushing the extension down
-    would drop it without any truncation signal, so a pattern whose stem can
-    match a run of dots keeps the full listing too.
+    ``find -name`` tests only the basename, so it is always a superset of the
+    anchored :func:`path_matches` semantics — it never drops a path the local
+    walk would keep. Brace alternation (``*.{log,txt}``) is NOT expanded by
+    ``find`` nor by ``path_matches``, so both agree. The client re-applies
+    ``path_matches`` on every returned entry, so this coarse filter only decides
+    what transfers, never what matches.
     """
-    segment = pattern.rstrip("/").rsplit("/", 1)[-1]
-    before, dot, extension = segment.rpartition(".")
-    if not before or not dot or not extension:
-        return None
-    if any(character in _GLOB_METACHARACTERS for character in extension):
-        return None
-    stem = segment[: len(segment) - len(extension) - 1]
-    # A run of dots in front of the extension is the reachable part of the
-    # extension-less class. The candidates are matched with ``fnmatchcase``
-    # because the client matcher goes through pathlib, which normalizes a bare
-    # ``.`` candidate to nothing; these are ordinary names here. The
-    # search stops at the stem length: a minimal all-dots match spends at
-    # least one character per fixed-length token, while ``*`` can consume
-    # nothing, so a longer run is never the only match.
-    if any(fnmatch.fnmatchcase("." * dots, stem) for dots in range(1, len(stem) + 1)):
-        return None
-    return [f".{extension}"]
+    return pattern.rstrip("/").rsplit("/", 1)[-1] or pattern
 
 
 @dataclass
@@ -1470,14 +1442,13 @@ class AioSandbox(Sandbox):
         user_data = is_user_data_path(root_path)
         hard_limit = max(max_results * 4, max_results + 50)
         if include_dirs:
-            return self._glob_matches(
-                self._list_path_entries(path, pattern=pattern),
-                root_path=root_path,
-                pattern=pattern,
-                user_data=user_data,
-                include_dirs=True,
-                max_results=max_results,
-            )
+            # ``/v1/file/list`` has no pattern parameter and silently truncates
+            # at 10,000 entries BEFORE DeerFlow's ignore rules run, so a search
+            # whose match sits behind a large ignored tree (node_modules) came
+            # back empty with truncated=false. The in-sandbox ``find`` applies
+            # the basename coarse filter and the ignore prune during the walk,
+            # so the cap only ever counts real candidates.
+            return self._glob_via_find(path, root_path=root_path, pattern=pattern, user_data=user_data, include_dirs=True, max_results=max_results)
 
         try:
             result = self._client.file.glob_files(
@@ -1492,19 +1463,12 @@ class AioSandbox(Sandbox):
             if error.status_code != 404:
                 raise
             # Images that predate /v1/file/glob still serve the typed listing
-            # endpoint, so the same client-side filter can decide file types.
-            # That listing walks the whole tree, costlier than a server-side
-            # glob; the default frozen image pays it because it has no glob
-            # endpoint. A literal extension in the pattern is pushed down as
-            # ``file_types`` so unrelated files stay inside the sandbox.
-            return self._glob_matches(
-                self._list_path_entries(path, pattern=pattern),
-                root_path=root_path,
-                pattern=pattern,
-                user_data=user_data,
-                include_dirs=False,
-                max_results=max_results,
-            )
+            # endpoint, but that listing has the same silent 10,000-entry cap
+            # and no pattern parameter, so it cannot be trusted for a search.
+            # Run the search inside the sandbox instead: ``find`` walks with
+            # the basename coarse filter and the ignore prune, transfers only
+            # candidate files, and reports truncation honestly via head+SIGPIPE.
+            return self._glob_via_find(path, root_path=root_path, pattern=pattern, user_data=user_data, include_dirs=False, max_results=max_results)
 
         entries = result.data.files if result.data and result.data.files else []
         matches, truncated = self._glob_matches(
@@ -1519,22 +1483,115 @@ class AioSandbox(Sandbox):
         # is conservative evidence of an incomplete result on its own.
         return matches, truncated or bool(result.data and result.data.truncated)
 
-    def _list_path_entries(self, path: str, *, pattern: str | None = None) -> list:
-        # show_hidden stays on: hidden names are ordinary user files unless an
-        # ignore rule rejects them, and the ignore filter runs here, not in the
-        # file API. A hidden directory (``.cache``) must not hide its children.
-        kwargs = {"path": path, "recursive": True, "show_hidden": True}
-        file_types = _pattern_file_types(pattern) if pattern else None
-        if file_types:
-            # The listing endpoint has no pattern parameter, so a whole-tree
-            # walk is the only fallback for images without /v1/file/glob. When
-            # the helper can prove that every match carries one extension, it
-            # sends that as the endpoint's only filter, so files with other
-            # extensions stay inside the sandbox; directories are still
-            # returned and filtered here.
-            kwargs["file_types"] = file_types
-        result = self._client.file.list_path(**kwargs)
-        return result.data.files if result.data and result.data.files else []
+    def _glob_via_find(
+        self,
+        path: str,
+        *,
+        root_path: str,
+        pattern: str,
+        user_data: bool,
+        include_dirs: bool,
+        max_results: int,
+    ) -> tuple[list[str], bool]:
+        """Search inside the sandbox with ``find`` and filter client-side.
+
+        Used for the ``include_dirs`` listing and for images whose
+        ``/v1/file/glob`` is absent (404). ``find`` applies the basename coarse
+        filter and the ignore prune during the walk, so unrelated files and
+        whole ignored trees never reach the client and never consume the cap.
+        The client still re-applies :func:`path_matches` and the ignore rules,
+        so the result matches the local walk exactly. Truncation is detected by
+        asking ``head`` for one line past the candidate budget, never silently
+        dropped.
+
+        Newline-in-filename limitation: ``find -print`` is newline-delimited, so
+        a file whose name contains ``\\n`` is split into fragments the client
+        matcher rejects, and every fragment consumes a line of the candidate
+        budget — a tree dense with such names can therefore push ordinary
+        matches past the budget and report the search truncated. This is the
+        same line-delimited channel that ``list_dir`` and the remote ``grep``
+        use; the transport cannot carry NUL on this path (the HTTP shell strips
+        it), so the limitation is shared and documented rather than patched with
+        an encoding layer whose own quoting would be a new failure mode. Results
+        are never silently wrong: an affected search reports ``truncated=True``.
+        """
+        timeout = self._LIST_DIR_TIMEOUT_SECONDS
+        # The candidate budget absorbs the entries the client will reject after
+        # the basename coarse filter (directories on the way to a match, names
+        # the anchored pattern excludes), matching the server-side glob_files
+        # hard_limit. ``head`` asks for one line past it so the parser can tell
+        # an exact fit from a truncated search without relying on SIGPIPE.
+        candidate_budget = max(max_results * 4, max_results + 50)
+        head_lines = candidate_budget + 1
+        with self._lock:
+            client = self._client
+            session_id: str | None = None
+            try:
+                session_id = self._ensure_default_shell_session_id(client)
+                command = remote_list_dir_command(
+                    path,
+                    None,
+                    limit=head_lines,
+                    user_data=user_data,
+                    name_glob=_pattern_name_glob(pattern),
+                    files_only=not include_dirs,
+                    glob=pattern,
+                )
+                kwargs = {
+                    "command": command,
+                    "no_change_timeout": self._effective_no_change_timeout(timeout),
+                    "hard_timeout": timeout,
+                    "request_options": self._command_request_options(timeout),
+                }
+                if session_id is not None:
+                    kwargs["id"] = session_id
+                result = client.shell.exec_command(**kwargs)
+            except httpx.TransportError as exc:
+                self._default_shell_corrupted = True
+                if session_id is not None:
+                    self._recovery_session_id = None
+                    self._cleanup_session_best_effort(client, session_id, context="glob after transport failure", request_options=self._bounded_cleanup_request_options())
+                logger.error(f"Failed to glob in sandbox: {exc}")
+                reason = "request timed out" if isinstance(exc, httpx.TimeoutException) else "transport failed"
+                raise OSError(f"Failed to glob '{path}': {reason}; result is unknown") from exc
+            except ApiError as exc:
+                if self._is_missing_shell_session_error(exc):
+                    self._default_shell_corrupted = True
+                    self._recovery_session_id = None
+                logger.error(f"Failed to glob in sandbox: {exc}")
+                raise OSError(f"Failed to glob '{path}' in sandbox: {exc}") from exc
+            except Exception as e:
+                logger.error(f"Failed to glob in sandbox: {e}")
+                raise OSError(f"Failed to glob '{path}' in sandbox: {e}") from e
+
+            data = result.data if result else None
+            if data is None:
+                raise OSError(f"Failed to glob '{path}' in sandbox: empty response")
+            status = getattr(data, "status", None)
+            if status == "hard_timeout":
+                raise TimeoutError(f"Failed to glob '{path}': find timed out after {timeout:g} seconds; result may be incomplete")
+            if self._is_session_invalidating_shell_status(status):
+                self._default_shell_corrupted = True
+                if session_id is not None:
+                    self._recovery_session_id = None
+                    self._cleanup_session_best_effort(client, session_id, context=f"glob after ambiguous status {status}", request_options=self._bounded_cleanup_request_options())
+                raise OSError(f"Failed to glob '{path}' in sandbox: command status '{status}'; result is unknown")
+
+            entries, find_truncated = parse_remote_find_output(
+                data.output or "",
+                path,
+                limit=head_lines,
+                pipeline_exit_code=getattr(data, "exit_code", None),
+            )
+        matches, match_truncated = self._glob_matches(
+            entries,
+            root_path=root_path,
+            pattern=pattern,
+            user_data=user_data,
+            include_dirs=include_dirs,
+            max_results=max_results,
+        )
+        return matches, find_truncated or match_truncated
 
     def _glob_matches(
         self,

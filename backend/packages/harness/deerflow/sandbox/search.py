@@ -128,9 +128,20 @@ def _names_user_data(pattern: str) -> bool:
     return any(fnmatch.fnmatchcase(part, candidate) for part in pattern.split("/") for candidate in USER_DATA_PATTERNS)
 
 
+def search_uses_content_rules(*, glob: str | None, user_data: bool) -> bool:
+    """Whether a search treats data-looking names (``*.log``, ``logs/``) as content.
+
+    A ``user_data`` root always does; so does an explicit glob that names user
+    data, because asking for ``*.log`` is a request for logs even in a checkout.
+    The in-sandbox ``find`` prune list must make the same choice, or the walk
+    would prune away a name the caller asked for.
+    """
+    return user_data or (glob is not None and _names_user_data(glob))
+
+
 def _rules_for_search(*, glob: str | None, user_data: bool) -> IgnoreRules:
     """The one place the user-data / explicit-glob rule split is decided."""
-    if user_data or (glob is not None and _names_user_data(glob)):
+    if search_uses_content_rules(glob=glob, user_data=user_data):
         return _CONTENT_RULES
     return _REPOSITORY_RULES
 
