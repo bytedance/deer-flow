@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.uploads.companions import register_companion
 from deerflow.utils.file_outline import MAX_OUTLINE_ENTRIES, extract_outline, extract_outline_for_file
 
@@ -517,3 +518,64 @@ def test_exact_fit_preview_stops_before_following_content(tmp_path: Path) -> Non
     # budget stops the preview, just like reaching its five-line limit.
     assert extract_outline_for_file(document) == ([], ["Z" * 2000])
     assert document.read_text(encoding="utf-8") == original
+
+
+# Outline line numbers agree with `LocalSandbox.read_file` line numbering (#8737).
+# A lone CR is content because `read_file` ends lines only at LF.
+ROOMS_MD = b"# Cedar\nCapacity: 24\rNotes: art classes.\rNotes: staff reset furniture.\n# Maple\nCapacity: 18\n# Birch\nCapacity: 30\n# Willow\nCapacity: 8\n"
+
+
+def test_outline_line_numbers_use_lf_like_read_file(tmp_path: Path) -> None:
+    document = tmp_path / "rooms.md"
+    document.write_bytes(ROOMS_MD)
+
+    assert extract_outline(document) == [
+        {"title": "Cedar", "line": 1},
+        {"title": "Maple", "line": 3},
+        {"title": "Birch", "line": 5},
+        {"title": "Willow", "line": 7},
+    ]
+
+
+def test_maple_outline_range_reads_maple_section(tmp_path: Path) -> None:
+    document = tmp_path / "rooms.md"
+    document.write_bytes(ROOMS_MD)
+    outline = extract_outline(document)
+    index = next(i for i, entry in enumerate(outline) if entry["title"] == "Maple")
+
+    section = LocalSandbox("t").read_file(
+        str(document),
+        start_line=outline[index]["line"],
+        end_line=outline[index + 1]["line"] - 1,
+    )
+
+    assert section == "# Maple\nCapacity: 18"
+
+
+# A fence closed by a lone CR still closes (CommonMark line ending), so the
+# prose after the CR is body text and the headings after it are kept (#8743).
+GUIDE_MD = b"# Overview\n```python\nprint(1)\n```\rTrailing prose\n# Getting started\n"
+
+
+def test_cr_terminated_fence_close_keeps_later_heading(tmp_path: Path) -> None:
+    document = tmp_path / "guide.md"
+    document.write_bytes(GUIDE_MD)
+
+    assert extract_outline(document) == [
+        {"title": "Overview", "line": 1},
+        {"title": "Getting started", "line": 5},
+    ]
+
+
+def test_getting_started_outline_range_reads_heading(tmp_path: Path) -> None:
+    document = tmp_path / "guide.md"
+    document.write_bytes(GUIDE_MD)
+    outline = extract_outline(document)
+
+    section = LocalSandbox("t").read_file(
+        str(document),
+        start_line=outline[-1]["line"],
+        end_line=outline[-1]["line"],
+    )
+
+    assert section == "# Getting started"

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
 from deerflow.uploads.companions import resolve_companion
@@ -57,6 +58,30 @@ _ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+(.*))?$")
 # Root-level indented code starts at four columns, including
 # a tab after up to three spaces. Do not strip it into a heading.
 _INDENTED_CODE_RE = re.compile(r"^( {4}| {0,3}\t)")
+
+
+# A Markdown line ends at "\n", "\r\n" or a lone "\r" (CommonMark line
+# endings). The outline iterator below splits on all three.
+_LINE_END_RE = re.compile(r"\r\n|\r|\n")
+
+
+def _iter_markdown_lines(text: str) -> Iterator[tuple[int, str]]:
+    """Yield ``(lf_lineno, segment)`` for each Markdown line in *text*.
+
+    The segment is one Markdown line (split on ``\\n``, ``\\r\\n`` or a lone
+    ``\\r``), while ``lf_lineno`` is the ``LocalSandbox.read_file`` coordinate:
+    it advances only on ``\\n``, so segments split by a lone ``\\r`` share one
+    LF line number and outline ranges still read back the same text.
+    """
+    lineno = 1
+    start = 0
+    for match in _LINE_END_RE.finditer(text):
+        yield lineno, text[start : match.start()]
+        if "\n" in match.group():
+            lineno += 1
+        start = match.end()
+    if start < len(text):
+        yield lineno, text[start:]
 
 
 def _strip_atx_closing_hashes(raw: str) -> str:
@@ -133,61 +158,67 @@ def extract_outline(md_path: Path) -> list[dict]:
     fence_length = 0
     in_html_comment = False
     try:
-        with md_path.open(encoding="utf-8-sig") as f:
-            for lineno, line in enumerate(f, 1):
-                if in_html_comment:
-                    in_html_comment = "-->" not in line
-                    continue
+        # Number lines the way LocalSandbox.read_file does: only "\n" ends a
+        # line, so a lone "\r" stays inside its line and outline ranges read
+        # back the same text. Markdown parsing still treats a lone "\r" as a
+        # line boundary (CommonMark), so a fence closed by "```\r..." does not
+        # swallow the headings after it.
+        with md_path.open(encoding="utf-8-sig", newline="") as f:
+            text = f.read()
+        for lineno, line in _iter_markdown_lines(text):
+            if in_html_comment:
+                in_html_comment = "-->" not in line
+                continue
 
-                fence = _CODE_FENCE_RE.match(line.rstrip("\r\n"))
-                if fence_char:
-                    if fence:
-                        marker, suffix = fence.groups()
-                        if marker[0] == fence_char and len(marker) >= fence_length and not suffix.strip(" \t"):
-                            fence_char = ""
-                    continue
-                if _HTML_COMMENT_START_RE.match(line):
-                    in_html_comment = "-->" not in line
-                    continue
+            fence = _CODE_FENCE_RE.match(line.rstrip("\r\n"))
+            if fence_char:
                 if fence:
-                    marker, info = fence.groups()
-                    # Backtick info strings cannot contain backticks; tilde
-                    # info strings have no such restriction.
-                    if marker[0] == "~" or "`" not in info:
-                        fence_char = marker[0]
-                        fence_length = len(marker)
-                        continue
-
-                if _INDENTED_CODE_RE.match(line):
+                    marker, suffix = fence.groups()
+                    if marker[0] == fence_char and len(marker) >= fence_length and not suffix.strip(" \t"):
+                        fence_char = ""
+                continue
+            if _HTML_COMMENT_START_RE.match(line):
+                in_html_comment = "-->" not in line
+                continue
+            if fence:
+                marker, info = fence.groups()
+                # Backtick info strings cannot contain backticks; tilde
+                # info strings have no such restriction.
+                if marker[0] == "~" or "`" not in info:
+                    fence_char = marker[0]
+                    fence_length = len(marker)
                     continue
 
-                stripped = line.strip()
-                if not stripped:
-                    continue
+            if _INDENTED_CODE_RE.match(line):
+                continue
 
-                # Style 1: standard Markdown heading
-                if m := _ATX_HEADING_RE.fullmatch(line.rstrip("\r\n")):
-                    title = _clean_bold_title(_strip_atx_closing_hashes(m.group(1) or "").strip())
-                    if title:
-                        outline.append({"title": _truncate_outline_text(title, _OUTLINE_TITLE_MAX_CHARS), "line": lineno})
+            stripped = line.strip()
+            if not stripped:
+                continue
 
-                # Style 2: single bold block with SEC structural keyword
-                elif m := _BOLD_HEADING_RE.match(stripped):
-                    title = m.group(1).strip()
-                    if title:
-                        outline.append({"title": _truncate_outline_text(title, _OUTLINE_TITLE_MAX_CHARS), "line": lineno})
+            # Style 1: standard Markdown heading
+            if m := _ATX_HEADING_RE.fullmatch(line.rstrip("\r\n")):
+                title = _clean_bold_title(_strip_atx_closing_hashes(m.group(1) or "").strip())
+                if title:
+                    outline.append({"title": _truncate_outline_text(title, _OUTLINE_TITLE_MAX_CHARS), "line": lineno})
 
-                # Style 3: split-bold heading — **<num>** **<title>**
-                # Regex enforces max 4 blocks and rejects numeric columns after the number.
-                elif _SPLIT_BOLD_HEADING_RE.match(stripped):
-                    title = " ".join(re.findall(r"\*\*([^*]+)\*\*", stripped))
-                    if title:
-                        outline.append({"title": _truncate_outline_text(title, _OUTLINE_TITLE_MAX_CHARS), "line": lineno})
+            # Style 2: single bold block with SEC structural keyword
+            elif m := _BOLD_HEADING_RE.match(stripped):
+                title = m.group(1).strip()
+                if title:
+                    outline.append({"title": _truncate_outline_text(title, _OUTLINE_TITLE_MAX_CHARS), "line": lineno})
 
-                if len(outline) > MAX_OUTLINE_ENTRIES:
-                    outline.pop()
-                    outline.append({"truncated": True})
-                    break
+            # Style 3: split-bold heading — **<num>** **<title>**
+            # Regex enforces max 4 blocks and rejects numeric columns after the number.
+            elif _SPLIT_BOLD_HEADING_RE.match(stripped):
+                title = " ".join(re.findall(r"\*\*([^*]+)\*\*", stripped))
+                if title:
+                    outline.append({"title": _truncate_outline_text(title, _OUTLINE_TITLE_MAX_CHARS), "line": lineno})
+
+            if len(outline) > MAX_OUTLINE_ENTRIES:
+                outline.pop()
+                outline.append({"truncated": True})
+                break
     except Exception:
         return []
 
