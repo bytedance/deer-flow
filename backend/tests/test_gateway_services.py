@@ -819,6 +819,8 @@ def test_normalize_input_preserves_trusted_internal_delegation_verdict():
         [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": 3}],
         [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "steering"}],
         [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "completed", "run_id": ["unhashable"]}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "completed", "dispatch_message_id": ["msg-1"]}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "completed", "dispatch_message_id": 0}],
         [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "completed", "result_brief": 3}],
         [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "completed", "stop_reason": "nope"}],
     ],
@@ -833,6 +835,8 @@ def test_normalize_input_preserves_trusted_internal_delegation_verdict():
         "non-string-status",
         "unknown-status",
         "unhashable-run-id",
+        "unhashable-dispatch-message-id",
+        "numeric-dispatch-message-id",
         "non-string-result-brief",
         "unknown-stop-reason",
     ],
@@ -858,19 +862,23 @@ def test_external_delegations_rejected_at_both_boundaries(delegations):
 def test_external_delegations_accept_the_runtime_shapes():
     from app.gateway.services import normalize_input, strip_server_owned_state_metadata
 
-    entry = {
+    minimal = {
         "id": "call-1",
         "description": "write report",
         "subagent_type": "general",
         "status": "in_progress",
+    }
+    entry = {
+        **minimal,
         "created_at": "1970-01-01T00:00:00+00:00",
         "run_id": "run-1",
+        "dispatch_message_id": "msg-1",
         "result_brief": "partial",
         "stop_reason": "token_capped",
     }
-
-    assert normalize_input({"delegations": [entry]})["delegations"] == [entry]
-    assert strip_server_owned_state_metadata({"delegations": [entry]}) == {"delegations": [entry]}
+    entries = [minimal, {**minimal, "run_id": None, "dispatch_message_id": None}, entry]
+    assert normalize_input({"delegations": entries})["delegations"] == entries
+    assert strip_server_owned_state_metadata({"delegations": entries}) == {"delegations": entries}
 
 
 def test_normalize_input_preserves_trusted_internal_original_user_content():

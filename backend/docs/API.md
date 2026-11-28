@@ -284,6 +284,11 @@ external boundaries. Ordinary `type`/`value` fields remain compatible.
 `goal: null` retains its existing semantics: it clears a state update's goal,
 but does not replace a goal through run input.
 
+For each `delegations` entry, run input and thread state updates accept a string,
+`null`, or an omitted field for both `run_id` and `dispatch_message_id`.
+Other types return HTTP 400. When a thread continues from an older checkpoint,
+the ledger skips entries with an invalid ID or status and keeps the valid entries.
+
 A state update's optional `as_node` names the graph node recorded as the
 writer, and defaults to `manual_state_update`. It must be a name LangGraph can
 register as a node: `__start__`, `__end__`, LangGraph's other reserved names and
