@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 
 from .diagnostics import SkillLoadDiagnostic, yaml_load_diagnostic
-from .frontmatter import _FRONTMATTER_RE
+from .frontmatter import _FRONTMATTER_RE, load_skill_frontmatter
 from .types import SKILL_MD_FILE, SecretRequirement, Skill, SkillCategory
 
 logger = logging.getLogger(__name__)
@@ -235,7 +235,7 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
             return None
         front_matter_text = front_matter_match.group(1)
         try:
-            metadata = yaml.safe_load(front_matter_text)
+            metadata = load_skill_frontmatter(front_matter_text)
         except yaml.YAMLError as exc:
             if diagnostics is not None:
                 diagnostics.append(yaml_load_diagnostic((relative_path or Path(skill_file.parent.name)).as_posix(), exc, front_matter_text, content.count("\n", 0, front_matter_match.start(1))))

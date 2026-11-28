@@ -46,9 +46,18 @@ def _construct_unique_mapping(
 ) -> dict[Any, Any]:
     """Construct a mapping only when every explicit key is unique."""
     seen: set[Any] = set()
+    merge_seen = False
     for key_node, _ in node.value:
         if key_node.tag == _YAML_MERGE_TAG:
             # SafeLoader expands merge keys after this constructor runs.
+            if merge_seen:
+                raise yaml.constructor.ConstructorError(
+                    "while constructing a mapping",
+                    node.start_mark,
+                    "found duplicate key '<<'",
+                    key_node.start_mark,
+                )
+            merge_seen = True
             continue
         key = loader.construct_object(key_node, deep=deep)
         try:
@@ -73,6 +82,14 @@ _UniqueKeySafeLoader.add_constructor(
 )
 
 
+def load_skill_frontmatter(frontmatter_text: str) -> Any:
+    """Load SKILL.md YAML with deterministic duplicate-key rejection."""
+    return yaml.load(  # noqa: S506 - fixed safe loader subclass
+        frontmatter_text,
+        Loader=_UniqueKeySafeLoader,
+    )
+
+
 @dataclass(frozen=True)
 class SkillMarkdownParts:
     """Parsed pieces of a SKILL.md document."""
@@ -95,10 +112,7 @@ def split_skill_markdown(content: str) -> tuple[SkillMarkdownParts | None, str |
 
     frontmatter_text = match.group(1)
     try:
-        metadata = yaml.load(  # noqa: S506 - fixed safe loader subclass
-            frontmatter_text,
-            Loader=_UniqueKeySafeLoader,
-        )
+        metadata = load_skill_frontmatter(frontmatter_text)
     except (yaml.YAMLError, ValueError) as exc:
         return None, f"Invalid YAML in frontmatter: {exc}"
     except AttributeError:

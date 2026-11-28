@@ -366,6 +366,14 @@ class TestSplitSkillMarkdownDuplicateKeys:
             "tier": "basic",
         }
 
+    def test_duplicate_yaml_merge_keys_are_rejected(self):
+        parts, error = split_skill_markdown(
+            "---\nname: my-skill\ndescription: A valid skill\nmetadata:\n  first: &first\n    owner: team\n  second: &second\n    tier: basic\n  merged:\n    <<: *first\n    <<: *second\n---\n",
+        )
+
+        assert parts is None
+        assert "found duplicate key '<<'" in error
+
     def test_control_document_without_bom_is_parsed_identically(self):
         parts, error = split_skill_markdown("---\nname: my-skill\ndescription: A valid skill\n---\nBody\n")
 
